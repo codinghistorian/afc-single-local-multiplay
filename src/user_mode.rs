@@ -18,9 +18,7 @@ use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
 };
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/Desert_Teeth_intro_non_commercial.mp3";
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 const USER_MODE_BATTLE_MUSIC_PATH: &str = "music/bgm/arena_arcade_battle_song.mp3";
 const USER_MODE_MENU_MUSIC_START_SECS: f32 = 16.3;
 const USER_MODE_PREVIEW_TEXTURE_SIZE: u32 = 384;
@@ -2006,12 +2004,6 @@ fn start_user_mode_menu_music_at(
     asset_server: &AssetServer,
     start_secs: f32,
 ) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (commands, asset_server, start_secs);
-    }
-
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     commands.spawn((
         UserModeMusic,
         AudioPlayer::new(asset_server.load(USER_MODE_MENU_MUSIC_PATH)),
@@ -2020,12 +2012,6 @@ fn start_user_mode_menu_music_at(
 }
 
 fn start_user_mode_battle_music(commands: &mut Commands, asset_server: &AssetServer) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (commands, asset_server);
-    }
-
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     commands.spawn((
         UserModeMusic,
         UserModeBattleMusic,

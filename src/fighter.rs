@@ -999,13 +999,47 @@ fn dash_finisher_for_input(
     loadout: LoadoutContext,
     character_catalog: &CharacterMoveCatalog,
 ) -> Option<TechniqueId> {
-    if input.heavy {
+    if input.raw_heavy_pressed || input.heavy {
         character_catalog.slot_technique(loadout.character, CharacterMoveSlot::DashHeavy)
     } else if input.light {
         character_catalog.slot_technique(loadout.character, CharacterMoveSlot::DashLight)
     } else {
         None
     }
+}
+
+fn start_dash_finisher_from_dash(
+    motor: &mut FighterMotor,
+    action: &mut FighterActionState,
+    input: &FighterInput,
+    loadout: LoadoutContext,
+    character_catalog: &CharacterMoveCatalog,
+) -> bool {
+    let Some(next) = dash_finisher_for_input(input, loadout, character_catalog) else {
+        return false;
+    };
+    if loadout.character == CharacterKind::Penguin
+        && matches!(
+            next,
+            TechniqueId::PenguinDashAttack | TechniqueId::PenguinDashHeavy
+        )
+    {
+        if let Some(direction) = movement_input_direction(input.movement) {
+            motor.facing = direction;
+        }
+    }
+    if !(loadout.character == CharacterKind::Penguin && next == TechniqueId::PenguinDashAttack) {
+        let extra_impulse = dash_finisher_extra_impulse(next, loadout);
+        if extra_impulse == 0.0 {
+            motor.velocity.x = 0.0;
+            motor.velocity.z = 0.0;
+        } else {
+            motor.velocity.x += motor.facing.x * extra_impulse;
+            motor.velocity.z += motor.facing.z * extra_impulse;
+        }
+    }
+    start_technique_by_id(action, next, loadout, character_catalog);
+    true
 }
 
 fn try_start_penguin_dash_ultimate(
@@ -1759,7 +1793,11 @@ pub fn update_fighter_state(
                     ) {
                         stats.invulnerability = 0.0;
                     }
-                    set_action(&mut action, FighterAction::Idle);
+                    if should_return_to_dashing_on_dash_completion(&action) {
+                        set_action(&mut action, FighterAction::Dashing);
+                    } else {
+                        set_action(&mut action, FighterAction::Idle);
+                    }
                 }
             }
             continue;
@@ -1805,16 +1843,13 @@ pub fn update_fighter_state(
             ) {
                 continue;
             }
-            if let Some(next) = dash_finisher_for_input(&input, loadout, &character_catalog) {
-                let extra_impulse = dash_finisher_extra_impulse(next, loadout);
-                if extra_impulse == 0.0 {
-                    motor.velocity.x = 0.0;
-                    motor.velocity.z = 0.0;
-                } else {
-                    motor.velocity.x += motor.facing.x * extra_impulse;
-                    motor.velocity.z += motor.facing.z * extra_impulse;
-                }
-                start_technique_by_id(&mut action, next, loadout, &character_catalog);
+            if start_dash_finisher_from_dash(
+                &mut motor,
+                &mut action,
+                &input,
+                loadout,
+                &character_catalog,
+            ) {
                 continue;
             }
             if input.jump && can_start_ground_jump(&motor) {
@@ -3071,6 +3106,14 @@ fn update_bee_air_dash_facing(
     if let Some(direction) = movement_input_direction(input_movement) {
         motor.facing = direction;
     }
+}
+
+fn should_return_to_dashing_on_dash_completion(action: &FighterActionState) -> bool {
+    action.action == FighterAction::DashAttack
+        && matches!(
+            action.technique_id,
+            Some(TechniqueId::PenguinDashAttack | TechniqueId::PenguinDashHeavy)
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -7684,6 +7727,17 @@ mod tests {
         assert_eq!(
             dash_finisher_for_input(
                 &FighterInput {
+                    raw_heavy_pressed: true,
+                    ..default()
+                },
+                loadout,
+                &catalog
+            ),
+            Some(TechniqueId::CatHeavy2)
+        );
+        assert_eq!(
+            dash_finisher_for_input(
+                &FighterInput {
                     heavy: true,
                     ..default()
                 },
@@ -7738,6 +7792,74 @@ mod tests {
         assert_eq!(action.technique_id, Some(TechniqueId::PenguinUltimateRush));
         assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
         assert!(motor.velocity.z >= DASH_ATTACK_EXTRA_IMPULSE);
+    }
+
+    #[test]
+    fn penguin_dash_c_shoots_snowflake_shot_in_current_dash_direction() {
+        let catalog = CharacterMoveCatalog::default();
+        let penguin = LoadoutContext::for_character(
+            CharacterKind::Penguin,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut motor = FighterMotor {
+            facing: Vec3::Z,
+            velocity: Vec3::new(2.5, 0.0, 5.0),
+            ..default()
+        };
+        let velocity_before = motor.velocity;
+        let mut action = FighterActionState {
+            action: FighterAction::Dashing,
+            ..default()
+        };
+
+        assert!(start_dash_finisher_from_dash(
+            &mut motor,
+            &mut action,
+            &FighterInput {
+                light: true,
+                movement: Vec2::new(1.0, 0.0),
+                ..default()
+            },
+            penguin,
+            &catalog,
+        ));
+        assert_eq!(action.action, FighterAction::DashAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::PenguinDashAttack));
+        assert_eq!(motor.facing, Vec3::X);
+        assert_eq!(motor.velocity, velocity_before);
+    }
+
+    #[test]
+    fn penguin_dash_snowflake_shots_recover_to_dashing_instead_of_idle() {
+        let catalog = CharacterMoveCatalog::default();
+        let feel = CombatFeelTuning::from_overrides(crate::feel::CombatFeelFile::default());
+        let penguin = LoadoutContext::for_character(
+            CharacterKind::Penguin,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+
+        for (technique_id, expected_duration) in [
+            (TechniqueId::PenguinDashAttack, 0.16),
+            (TechniqueId::PenguinDashHeavy, 0.18),
+        ] {
+            let mut action = FighterActionState {
+                action: FighterAction::DashAttack,
+                technique_id: Some(technique_id),
+                ..default()
+            };
+            action.elapsed = attack_duration_for_state(&action, penguin, &feel, &catalog);
+            assert_eq!(action.elapsed, expected_duration);
+            if should_return_to_dashing_on_dash_completion(&action) {
+                set_action(&mut action, FighterAction::Dashing);
+            } else {
+                set_action(&mut action, FighterAction::Idle);
+            }
+
+            assert_eq!(action.action, FighterAction::Dashing);
+            assert!(action.technique_id.is_none());
+        }
     }
 
     #[test]

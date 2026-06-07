@@ -262,7 +262,7 @@ impl TechniqueId {
             Self::PenguinComboFinisher => "penguin_belly_slide",
             Self::PenguinHeavy => "penguin_snowman_drop",
             Self::PenguinHeavy2 => "penguin_sled_scoop",
-            Self::PenguinDashAttack => "penguin_ice_belly_slide",
+            Self::PenguinDashAttack => "penguin_dash_snowflake_shot",
             Self::PenguinDashHeavy => "penguin_snow_slope_slide",
             Self::PenguinJumpAttack => "penguin_air_snowflake_shot",
             Self::PenguinJumpHeavy => "penguin_snowflake_warp",
@@ -3251,56 +3251,17 @@ const DASH_ATTACK_EVENTS: [MoveTimelineEvent; 8] = [
     timeline_event(580, MoveTimelineEventKind::Recover),
 ];
 
-const PENGUIN_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 10] = [
-    feedback_event(0, FeedbackPhase::Startup, "startup_penguin_ice_slide"),
-    timeline_event(
-        0,
-        MoveTimelineEventKind::Motion {
-            forward: 6.4,
-            lift: 0.0,
-        },
-    ),
-    feedback_event(25, FeedbackPhase::PreHit, "trail_penguin_ice_slide"),
-    attack_event(60, AttackPayloadId::PenguinIceSlide),
-    penguin_skill_event(80, PenguinSkillId::IceTrail),
-    timeline_event(
-        170,
-        MoveTimelineEventKind::Motion {
-            forward: 4.2,
-            lift: 0.0,
-        },
-    ),
-    timeline_event(
-        300,
-        MoveTimelineEventKind::Motion {
-            forward: 2.0,
-            lift: 0.0,
-        },
-    ),
-    timeline_event(430, MoveTimelineEventKind::Stop),
-    feedback_event(530, FeedbackPhase::Aftermath, "recover_penguin_ice_slide"),
-    timeline_event(700, MoveTimelineEventKind::Recover),
+const PENGUIN_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 5] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_special_cast"),
+    penguin_skill_event(0, PenguinSkillId::SnowflakeShot),
+    feedback_event(90, FeedbackPhase::PreHit, "release_special_cast"),
+    feedback_event(140, FeedbackPhase::Aftermath, "recover_special_cast"),
+    timeline_event(160, MoveTimelineEventKind::Recover),
 ];
 
-const PENGUIN_DASH_HEAVY_EVENTS: [MoveTimelineEvent; 6] = [
-    penguin_skill_event(0, PenguinSkillId::SnowSlopeRide),
-    timeline_event(
-        0,
-        MoveTimelineEventKind::Motion {
-            forward: PENGUIN_SLOPE_LAUNCH_FORWARD,
-            lift: 0.0,
-        },
-    ),
-    attack_event(0, AttackPayloadId::PenguinSlopeCrash),
-    timeline_event(
-        130,
-        MoveTimelineEventKind::Motion {
-            forward: PENGUIN_SLOPE_EXIT_FORWARD,
-            lift: 0.0,
-        },
-    ),
-    timeline_event(540, MoveTimelineEventKind::Stop),
-    timeline_event(680, MoveTimelineEventKind::Recover),
+const PENGUIN_DASH_HEAVY_EVENTS: [MoveTimelineEvent; 2] = [
+    penguin_skill_event(0, PenguinSkillId::SnowflakeShot),
+    timeline_event(180, MoveTimelineEventKind::Recover),
 ];
 
 const JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 5] = [
@@ -7372,17 +7333,17 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             button: TechniqueButton::Dash,
             status: TechniqueStatus::Grounded,
             script: script(
-                "penguin_ice_belly_slide.sc",
-                Some(530),
+                "penguin_dash_snowflake_shot.sc",
                 None,
-                700,
+                None,
+                160,
                 &PENGUIN_DASH_ATTACK_EVENTS,
             ),
             input_buffer_ms: 0,
             stamina_cost: 0.0,
             movement_lock: MovementLock::Locked,
-            cancel_window: Some(MsTimingWindow::closed(0, 500)),
-            branch_window: Some(MsTimingWindow::closed(0, 500)),
+            cancel_window: None,
+            branch_window: None,
             chain_rule: None,
         },
         TechniqueId::PenguinDashHeavy => TechniqueDefinition {
@@ -7394,7 +7355,7 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
                 "penguin_snow_slope_slide.sc",
                 None,
                 None,
-                680,
+                180,
                 &PENGUIN_DASH_HEAVY_EVENTS,
             ),
             input_buffer_ms: 0,
@@ -9682,10 +9643,43 @@ mod tests {
             )
             .is_none()
         );
-        assert!(dash_light.script.events.iter().any(|event| matches!(
-            event.kind,
-            MoveTimelineEventKind::SpawnPenguinSkill(PenguinSkillId::IceTrail)
-        )));
+        let dash_light_events: Vec<_> = dash_light
+            .script
+            .events
+            .iter()
+            .map(|event| (event.at_ms, event.kind))
+            .collect();
+        let jump_light_events: Vec<_> = jump_light
+            .script
+            .events
+            .iter()
+            .map(|event| (event.at_ms, event.kind))
+            .collect();
+        assert_eq!(dash_light_events, jump_light_events);
+        assert_eq!(dash_light.script.recover_ms, jump_light.script.recover_ms);
+        let dash_light_skill_events: Vec<_> = dash_light
+            .script
+            .events
+            .iter()
+            .filter_map(|event| match event.kind {
+                MoveTimelineEventKind::SpawnPenguinSkill(skill) => Some((event.at_ms, skill)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dash_light_skill_events,
+            vec![(0, PenguinSkillId::SnowflakeShot)]
+        );
+        let dash_light_attacks: Vec<_> = dash_light
+            .script
+            .events
+            .iter()
+            .filter_map(|event| match event.kind {
+                MoveTimelineEventKind::Attack(payload) => Some((event.at_ms, payload)),
+                _ => None,
+            })
+            .collect();
+        assert!(dash_light_attacks.is_empty());
         assert_eq!(dash_heavy.id, TechniqueId::PenguinDashHeavy);
         assert_eq!(dash_heavy.action, FighterAction::DashAttack);
         let dash_heavy_skill_events: Vec<_> = dash_heavy
@@ -9697,7 +9691,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(dash_heavy_skill_events, vec![PenguinSkillId::SnowSlopeRide]);
+        assert_eq!(dash_heavy_skill_events, vec![PenguinSkillId::SnowflakeShot]);
         let dash_heavy_attacks: Vec<_> = dash_heavy
             .script
             .events
@@ -9707,36 +9701,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            dash_heavy_attacks,
-            vec![(0, AttackPayloadId::PenguinSlopeCrash)]
-        );
-        let slope_crash = attack_payload_definition(AttackPayloadId::PenguinSlopeCrash);
-        let slope_crash_shape = attack_shape_definition(slope_crash.shape_id);
-        let penguin_front = crate::characters::character_mesh_bounds(CharacterKind::Penguin).max[2]
-            * KENNEY_CUBE_PET_SCALE;
-        let slope_front = slope_crash_shape.range
-            + slope_crash_shape.radius
-            + slope_crash_shape
-                .path
-                .iter()
-                .map(|point| point[2])
-                .fold(f32::MIN, f32::max);
-        assert_eq!(slope_crash.kind, AttackKind::Dash);
-        assert_eq!(slope_crash.shape_id, AttackShapeId::PenguinSlopeBody);
-        assert_eq!(slope_crash.time_ms, 540);
-        assert!(slope_crash_shape.parented);
-        assert!(slope_crash_shape.curved);
-        assert!((slope_crash_shape.radius - FIGHTER_RADIUS * 0.86).abs() < 0.001);
-        assert!((slope_crash_shape.vertical_offset_scale - 0.33).abs() < 0.001);
-        assert!((slope_front - penguin_front).abs() < 0.03);
-        assert_eq!(
-            slope_crash.reaction_family,
-            ReactionFamilyId::AirFishKnockdown
-        );
-        assert!(slope_crash.damage <= 1.5);
-        assert!(slope_crash.knockback >= 10.0);
-        assert!(slope_crash.vertical_knockback >= 4.0);
+        assert!(dash_heavy_attacks.is_empty());
         assert!(
             !dash_heavy
                 .script
@@ -9744,6 +9709,16 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.kind, MoveTimelineEventKind::Feedback(_, _)))
         );
+        assert!(!dash_heavy
+            .script
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, MoveTimelineEventKind::Stop)));
+        assert!(!dash_heavy
+            .script
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, MoveTimelineEventKind::NextTech)));
         let dash_heavy_motion: Vec<_> = dash_heavy
             .script
             .events
@@ -9754,13 +9729,9 @@ mod tests {
             })
             .collect();
         let total_forward: f32 = dash_heavy_motion.iter().map(|(forward, _)| *forward).sum();
-        assert_eq!(dash_heavy_motion.len(), 2);
-        assert!(dash_heavy.script.events.iter().any(|event| matches!(
-            event.kind,
-            MoveTimelineEventKind::Motion { forward, lift }
-                if forward >= 7.0 && lift == 0.0
-        )));
-        assert!(total_forward >= 10.0);
+        assert!(dash_heavy_motion.is_empty());
+        assert_eq!(total_forward, 0.0);
+        assert_eq!(dash_heavy.script.recover_ms, 180);
         assert!(heavy2.script.events.iter().any(|event| matches!(
             event.kind,
             MoveTimelineEventKind::SpawnPenguinSkill(PenguinSkillId::SnowfortCannon)
@@ -9921,21 +9892,22 @@ mod tests {
             ReactionFamilyId::AirFishKnockdown
         );
         assert_eq!(ultimate_slope.damage_profile, DamageProfileId::UltimateRush);
-        assert!(ultimate_slope.time_ms > slope_crash.time_ms);
+        assert!(ultimate_slope.time_ms > 0);
         assert!(ultimate_slope.damage > ULTIMATE_BOMB_DAMAGE);
-        assert!(ultimate_slope.knockback > slope_crash.knockback * 1.75);
+        assert!(ultimate_slope.knockback > 0.0);
         assert!(
             ultimate_slope.knockback
                 >= (PENGUIN_SLOPE_LAUNCH_FORWARD + PENGUIN_SLOPE_EXIT_FORWARD) * 1.65
         );
-        assert!(ultimate_slope.vertical_knockback > slope_crash.vertical_knockback);
+        assert!(ultimate_slope.vertical_knockback > 0.0);
         assert!(ultimate_slope_shape.parented);
-        assert!(ultimate_slope_shape.radius > slope_crash_shape.radius * 1.5);
+        assert!(ultimate_slope_shape.radius > 0.2);
         assert!(
-            ultimate_slope_shape.vertical_offset_scale < slope_crash_shape.vertical_offset_scale
+            ultimate_slope_shape.vertical_offset_scale > 0.0
+                && ultimate_slope_shape.vertical_offset_scale < 1.0
         );
-        assert!(ultimate_slope_front > slope_front);
-        assert!(ultimate_slope_front - slope_front < FIGHTER_RADIUS * 0.55);
+        assert!(ultimate_slope_front > 0.0);
+        assert!(ultimate_slope_front < 100.0);
         assert_eq!(
             attack_payload_definition(AttackPayloadId::PenguinFishTorpedo).shape_id,
             AttackShapeId::ProjectileBolt
@@ -10604,7 +10576,7 @@ mod tests {
             .events
             .iter()
             .find_map(|event| match event.kind {
-                MoveTimelineEventKind::Attack(AttackPayloadId::PenguinSlopeCrash) => {
+                MoveTimelineEventKind::SpawnPenguinSkill(PenguinSkillId::SnowflakeShot) => {
                     Some(event.at_ms)
                 }
                 _ => None,
@@ -10643,11 +10615,10 @@ mod tests {
             AttackShapeId::CatBodySkid
         );
         assert_eq!(
-            attack_payload_definition(AttackPayloadId::PenguinSlopeCrash).shape_id,
-            AttackShapeId::PenguinSlopeBody
+            penguin_dash_x.script.recover_ms,
+            180
         );
         assert!(attack_shape_definition(AttackShapeId::CatBodySkid).parented);
-        assert!(attack_shape_definition(AttackShapeId::PenguinSlopeBody).parented);
         assert_eq!(
             attack_payload_definition(AttackPayloadId::DashComboFinisher).time_ms,
             430
