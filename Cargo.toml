@@ -1,0 +1,18 @@
+[package]
+name = "ffc-prototype"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["native"]
+native = ["bevy/file_watcher"]
+web = []
+
+[dependencies]
+bevy = { version = "0.18", features = ["mp3", "wav"] }
+ron = "0.10"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"

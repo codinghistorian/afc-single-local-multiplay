@@ -1,0 +1,327 @@
+mod arena;
+mod arena_defs;
+mod bee_skills;
+mod body_collision;
+mod bot;
+mod camera;
+mod characters;
+mod combat;
+mod combat_sfx;
+mod components;
+mod constants;
+mod effects;
+mod equipment;
+mod feel;
+mod fighter;
+mod game_state;
+mod hud;
+mod items;
+mod map_editor;
+mod penguin_skills;
+mod reactions;
+mod specials;
+mod styles;
+mod techniques;
+mod user_mode;
+
+#[cfg(target_arch = "wasm32")]
+use bevy::asset::{AssetMetaCheck, AssetPlugin};
+use bevy::prelude::*;
+use bevy::window::{PresentMode, WindowResolution};
+
+use crate::constants::{WINDOW_HEIGHT, WINDOW_WIDTH};
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+enum GameSet {
+    Global,
+    Input,
+    Action,
+    Movement,
+    Combat,
+    Items,
+    Respawn,
+    Presentation,
+}
+
+fn primary_window_config() -> Window {
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    {
+        return Window {
+            title: "Animal Fighter Club".to_string(),
+            resolution: WindowResolution::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+            present_mode: PresentMode::AutoVsync,
+            ..default()
+        };
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut window = Window {
+            title: "Animal Fighter Club".to_string(),
+            resolution: WindowResolution::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+            present_mode: PresentMode::AutoVsync,
+            ..default()
+        };
+
+        window.canvas = Some("#bevy-canvas".to_string());
+        window.fit_canvas_to_parent = true;
+        window.prevent_default_event_handling = true;
+
+        window
+    }
+}
+
+fn main() {
+    let default_plugins = DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(primary_window_config()),
+        ..default()
+    });
+
+    #[cfg(target_arch = "wasm32")]
+    let default_plugins = default_plugins.set(AssetPlugin {
+        meta_check: AssetMetaCheck::Never,
+        ..default()
+    });
+
+    App::new()
+        .add_plugins(default_plugins)
+        .insert_resource(ClearColor(Color::srgb(0.006, 0.006, 0.012)))
+        .insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.85, 0.78, 0.68),
+            brightness: 430.0,
+            ..default()
+        })
+        .init_resource::<game_state::MatchState>()
+        .init_resource::<game_state::LocalSetup>()
+        .init_resource::<game_state::MatchTelemetry>()
+        .init_resource::<game_state::Hitstop>()
+        .init_resource::<game_state::MatchAnnouncements>()
+        .init_resource::<combat::HitEffects>()
+        .init_resource::<camera::CameraActionEffects>()
+        .init_resource::<components::PlayerKeyBindings>()
+        .init_resource::<user_mode::UserModeState>()
+        .init_resource::<user_mode::UserModeGameplayScene>()
+        .configure_sets(
+            Update,
+            (
+                GameSet::Global,
+                GameSet::Input,
+                GameSet::Action,
+                GameSet::Movement,
+                GameSet::Combat,
+                GameSet::Items,
+                GameSet::Respawn,
+                GameSet::Presentation,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Startup,
+            (
+                effects::setup_effect_assets,
+                combat::setup_combat_visual_assets,
+                bee_skills::setup_bee_skill_assets,
+                penguin_skills::setup_penguin_skill_assets,
+                combat_sfx::setup_combat_sfx_assets,
+                characters::setup_character_move_catalog,
+                feel::setup_combat_feel_tuning,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                bot::setup_bot_action_control,
+                #[cfg(target_arch = "wasm32")]
+                map_editor::setup_map_overlay,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::setup_map_editor,
+                specials::setup_special_assets,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                arena::setup_arena,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                items::setup_items,
+                camera::setup_camera,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                fighter::spawn_fighters,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                hud::setup_hud,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::setup_map_editor_ui,
+                user_mode::setup_user_mode_ui,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::toggle_map_editor,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::map_editor_input,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                characters::reload_character_move_catalog,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                feel::reload_combat_feel_tuning,
+                user_mode::handle_user_mode_input,
+                user_mode::sync_user_mode_controllers,
+                game_state::handle_global_input,
+                user_mode::sync_user_mode_battle_bot,
+                user_mode::sync_user_mode_battle_result,
+                user_mode::sync_user_mode_battle_music,
+                user_mode::sync_user_mode_preview_scene,
+                game_state::sync_setup_character_scene_models,
+                game_state::tick_hitstop,
+                game_state::tick_match_timer,
+                game_state::tick_announcements,
+            )
+                .chain()
+                .in_set(GameSet::Global),
+        )
+        .add_systems(
+            Update,
+            (
+                arena::setup_arena,
+                items::setup_items,
+                fighter::spawn_fighters,
+                hud::setup_hud,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::setup_map_editor_ui,
+                user_mode::mark_web_gameplay_scene_loaded,
+            )
+                .chain()
+                .run_if(user_mode::should_spawn_web_gameplay_scene)
+                .in_set(GameSet::Global),
+        )
+        .add_systems(
+            Update,
+            (
+                fighter::collect_player_input,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                bot::bot_action_control_input,
+                bot::bot_input,
+            )
+                .chain()
+                .in_set(GameSet::Input)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (
+                fighter::apply_aim_assist,
+                items::handle_item_inputs,
+                specials::handle_special_inputs,
+                specials::tick_special_cooldowns,
+                equipment::tick_equipment_cooldowns,
+                fighter::update_fighter_state,
+                fighter::update_grab_holds,
+                fighter::update_ultimate_locks,
+                combat::spawn_attack_hitboxes,
+                items::spawn_item_hitboxes,
+                combat::resolve_hitboxes,
+            )
+                .chain()
+                .in_set(GameSet::Action)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (fighter::apply_fighter_movement, fighter::separate_fighters)
+                .chain()
+                .in_set(GameSet::Movement)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (
+                combat::update_hitboxes,
+                specials::update_specials,
+                bee_skills::update_bee_skills,
+                penguin_skills::update_penguin_skills,
+                penguin_skills::update_penguin_surfaces,
+                arena::update_arena_hazards,
+            )
+                .chain()
+                .in_set(GameSet::Combat)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (
+                items::drop_items_from_disabled_fighters,
+                items::update_items,
+                items::update_moving_items,
+            )
+                .chain()
+                .in_set(GameSet::Items)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (
+                fighter::ringout_and_respawn,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                fighter::refill_depleted_practice_health,
+            )
+                .in_set(GameSet::Respawn)
+                .run_if(game_state::match_accepts_gameplay),
+        )
+        .add_systems(
+            Update,
+            (
+                fighter::sync_fighter_visuals.run_if(user_mode::gameplay_scene_loaded),
+                fighter::sync_light_punch_corner_cues.run_if(user_mode::gameplay_scene_loaded),
+                fighter::sync_fighter_tint_visuals.run_if(user_mode::gameplay_scene_loaded),
+                fighter::sync_guard_shield_visuals.run_if(user_mode::gameplay_scene_loaded),
+                fighter::sync_loadout_visuals.run_if(user_mode::gameplay_scene_loaded),
+                items::sync_item_visuals.run_if(user_mode::gameplay_scene_loaded),
+                effects::update_effects,
+                arena::sync_arena_visuals.run_if(user_mode::gameplay_scene_loaded),
+                map_editor::sync_map_overlay_visuals.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::sync_map_editor_preview.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::draw_map_editor_gizmos.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                combat::draw_debug_gizmos.run_if(user_mode::gameplay_scene_loaded),
+                combat::tick_feedback_cues.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                (
+                    camera::update_gameplay_camera_controls,
+                    camera::toggle_single_player_camera_follow_hotkey,
+                    camera::load_single_player_camera_preset_hotkey,
+                    camera::save_single_player_camera_preset_hotkey,
+                    camera::toggle_camera_action_effects,
+                )
+                    .chain(),
+                camera::follow_camera.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::update_map_editor_camera,
+                hud::update_hud.run_if(user_mode::gameplay_scene_loaded),
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                map_editor::update_map_editor_ui.run_if(user_mode::gameplay_scene_loaded),
+                user_mode::rotate_user_mode_preview,
+                user_mode::update_user_mode_ui,
+            )
+                .chain()
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            user_mode::update_user_mode_controls_ui.in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            user_mode::sync_user_mode_ui_camera.in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            combat_sfx::play_combat_sfx
+                .run_if(user_mode::gameplay_scene_loaded)
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            user_mode::sync_web_battle_status.in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            camera::update_screen_look_transition.in_set(GameSet::Presentation),
+        )
+        .run();
+}
