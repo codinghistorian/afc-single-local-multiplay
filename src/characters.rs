@@ -551,14 +551,7 @@ fn default_character_move_catalog_file() -> CharacterMoveCatalogFile {
             CharacterMoveSetDef {
                 id: "bee_cube".to_string(),
                 order: bee_technique_order().to_vec(),
-                slots: character_move_slots(
-                    TechniqueId::BeeLight1,
-                    TechniqueId::BeeHeavy2,
-                    TechniqueId::BeeJumpAttack,
-                    TechniqueId::BeeJumpHeavy,
-                    TechniqueId::BeeUltimateStartup,
-                    TechniqueId::BeeUltimateRush,
-                ),
+                slots: bee_move_slots().to_vec(),
             },
             CharacterMoveSetDef {
                 id: "penguin_cube".to_string(),
@@ -677,6 +670,31 @@ fn default_cat_move_slots() -> &'static [CharacterMoveSlotDef] {
     ]
 }
 
+fn bee_move_slots() -> &'static [CharacterMoveSlotDef] {
+    &[
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::DashLight,
+            technique: TechniqueId::BeeLight1,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::DashHeavy,
+            technique: TechniqueId::BeeHeavy2,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::JumpLight,
+            technique: TechniqueId::BeeJumpAttack,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::JumpHeavy,
+            technique: TechniqueId::BeeJumpHeavy,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::UltimateStartup,
+            technique: TechniqueId::BeeUltimateStartup,
+        },
+    ]
+}
+
 fn dog_technique_order() -> &'static [TechniqueId] {
     &[
         TechniqueId::DogLight2,
@@ -785,7 +803,6 @@ fn bee_technique_order() -> &'static [TechniqueId] {
         TechniqueId::BeeLight1,
         TechniqueId::BeeHeavy2,
         TechniqueId::BeeUltimateStartup,
-        TechniqueId::BeeUltimateRush,
         TechniqueId::Grab,
         TechniqueId::BeeDashAttack,
         TechniqueId::BeeJumpHeavy,

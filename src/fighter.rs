@@ -2652,6 +2652,70 @@ mod ultimate_mp_tests {
 
         assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
     }
+
+    #[test]
+    fn bee_ultimate_drains_half_max_mp() {
+        let mut motor = FighterMotor::default();
+        let mut stats = FighterStats::default();
+        let mut action = FighterActionState::default();
+        let technique = technique_definition_by_id(TechniqueId::BeeUltimateStartup).unwrap();
+
+        start_ultimate(&mut motor, &mut stats, &mut action, technique);
+
+        assert_eq!(stats.stamina, MAX_STAMINA * 0.5);
+        assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
+        assert_eq!(action.technique_id, Some(TechniqueId::BeeUltimateStartup));
+    }
+
+    #[test]
+    fn roster_ultimate_inputs_spend_half_max_mp() {
+        let catalog = CharacterMoveCatalog::default();
+        for character in [
+            CharacterKind::Cat,
+            CharacterKind::Pig,
+            CharacterKind::Dog,
+            CharacterKind::Fox,
+            CharacterKind::Panda,
+            CharacterKind::Bee,
+            CharacterKind::Penguin,
+        ] {
+            let loadout = LoadoutContext::for_character(
+                character,
+                FighterStyleKind::Anchor,
+                EquipmentKind::CounterCell,
+            );
+            let expected =
+                technique_slot_for_loadout(CharacterMoveSlot::UltimateStartup, loadout, &catalog)
+                    .unwrap_or_else(|| panic!("{character:?} should have an ultimate startup"));
+            let mut motor = FighterMotor {
+                grounded: true,
+                ..default()
+            };
+            let mut stats = FighterStats::default();
+            let mut action = FighterActionState::default();
+
+            assert_eq!(expected.stamina_cost, ULTIMATE_STAMINA_COST);
+            assert!(try_start_ultimate_from_input(
+                &mut motor,
+                &mut stats,
+                &mut action,
+                &FighterInput {
+                    ultimate: true,
+                    ..default()
+                },
+                loadout,
+                &catalog,
+            ));
+
+            assert_eq!(stats.stamina, MAX_STAMINA * 0.5, "{character:?}");
+            assert_eq!(
+                stats.stamina,
+                MAX_STAMINA - ULTIMATE_STAMINA_COST,
+                "{character:?}"
+            );
+            assert_eq!(action.technique_id, Some(expected.id), "{character:?}");
+        }
+    }
 }
 
 fn start_technique_by_id(
@@ -4987,7 +5051,9 @@ fn technique_visual_pose(action: &FighterActionState) -> Option<FighterVisualPos
         TechniqueId::CatHeavy2 => launcher_pose(action.elapsed),
         TechniqueId::CatUltimateStartup => ultimate_startup_pose(action.elapsed),
         TechniqueId::CatUltimateRush => ultimate_rush_pose(action.elapsed),
-        TechniqueId::BeeUltimateStartup | TechniqueId::BeeUltimateRush => {
+        TechniqueId::BeeUltimateStartup
+        | TechniqueId::BeeLegacyUltimateStartup
+        | TechniqueId::BeeLegacyUltimateRush => {
             bee_ultimate_swarm_pose(action.elapsed)
         }
         TechniqueId::CatDashAttack => FighterVisualPose {

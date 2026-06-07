@@ -262,7 +262,8 @@ pub fn feedback_package_for_timeline_cue(
         | "recover_pig_ultimate_whiff"
         | "recover_pig_ultimate_bomb"
         | "recover_bee_ultimate_whiff"
-        | "recover_bee_ultimate_bomb" => FeedbackPackageId::UltimateRecover,
+        | "recover_bee_ultimate_bomb"
+        | "recover_bee_ultimate_swarm" => FeedbackPackageId::UltimateRecover,
         "startup_dash_attack" => FeedbackPackageId::DashStartup,
         "trail_dash_attack" => FeedbackPackageId::DashTrail,
         "dash_attack_brake" => FeedbackPackageId::DashBrake,

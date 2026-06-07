@@ -1124,7 +1124,8 @@ pub fn spawn_attack_hitboxes(
 
             match event.kind {
                 MoveTimelineEventKind::SpawnBeeSkill(skill_id) => {
-                    let bee_skill_spawn_mode = if technique.id == TechniqueId::BeeUltimateStartup {
+                    let bee_skill_spawn_mode = if technique.id == TechniqueId::BeeLegacyUltimateStartup
+                    {
                         BeeSkillSpawnMode::AreaSwarm
                     } else {
                         BeeSkillSpawnMode::Standard

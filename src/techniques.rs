@@ -71,7 +71,8 @@ pub enum TechniqueId {
     BeeJumpAttack,
     BeeJumpHeavy,
     BeeUltimateStartup,
-    BeeUltimateRush,
+    BeeLegacyUltimateStartup,
+    BeeLegacyUltimateRush,
     PenguinLight1,
     PenguinLight2,
     PenguinComboFinisher,
@@ -160,7 +161,8 @@ impl TechniqueId {
             | Self::BeeJumpAttack
             | Self::BeeJumpHeavy
             | Self::BeeUltimateStartup
-            | Self::BeeUltimateRush => Some(CharacterKind::Bee),
+            | Self::BeeLegacyUltimateStartup
+            | Self::BeeLegacyUltimateRush => Some(CharacterKind::Bee),
             Self::PenguinLight1
             | Self::PenguinLight2
             | Self::PenguinComboFinisher
@@ -253,7 +255,8 @@ impl TechniqueId {
             Self::BeeJumpAttack => "bee_air_dash",
             Self::BeeJumpHeavy => "bee_hive_dive",
             Self::BeeUltimateStartup => "bee_ultimate_startup",
-            Self::BeeUltimateRush => "bee_ultimate_rush",
+            Self::BeeLegacyUltimateStartup => "bee_legacy_ultimate_startup",
+            Self::BeeLegacyUltimateRush => "bee_legacy_ultimate_rush",
             Self::PenguinLight1 => "penguin_snowflake_shot",
             Self::PenguinLight2 => "penguin_snowflake_followup",
             Self::PenguinComboFinisher => "penguin_belly_slide",
@@ -299,6 +302,7 @@ pub enum BeeSkillId {
     WorkerSwarm,
     HoneyGlob,
     HomingSting,
+    UltimateSwarm,
 }
 
 #[allow(dead_code)]
@@ -535,6 +539,7 @@ pub enum AttackPayloadId {
     BeeUltimateScratchLight,
     BeeUltimateScratchHeavy,
     BeeUltimateBomb,
+    BeeUltimateSwarmTick,
     PenguinUltimateCatch,
     PenguinUltimateScratchLight,
     PenguinUltimateScratchHeavy,
@@ -2794,7 +2799,14 @@ const FOX_ULTIMATE_RUSH_EVENTS: [MoveTimelineEvent; 15] = [
     timeline_event(1040, MoveTimelineEventKind::Recover),
 ];
 
-const BEE_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 12] = [
+const BEE_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 4] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_bee_ultimate_swarm"),
+    bee_skill_event(120, BeeSkillId::UltimateSwarm),
+    feedback_event(360, FeedbackPhase::Aftermath, "recover_bee_ultimate_swarm"),
+    timeline_event(620, MoveTimelineEventKind::Recover),
+];
+
+const BEE_LEGACY_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 12] = [
     feedback_event(0, FeedbackPhase::Startup, "startup_bee_ultimate_swarm"),
     timeline_event(
         80,
@@ -2815,7 +2827,7 @@ const BEE_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 12] = [
     timeline_event(1040, MoveTimelineEventKind::Recover),
 ];
 
-const BEE_ULTIMATE_RUSH_EVENTS: [MoveTimelineEvent; 15] = [
+const BEE_LEGACY_ULTIMATE_RUSH_EVENTS: [MoveTimelineEvent; 15] = [
     feedback_event(0, FeedbackPhase::Startup, "bee_ultimate_lock_start"),
     timeline_event(
         30,
@@ -3503,7 +3515,8 @@ const AUTHORED_TECHNIQUE_ORDER: &[TechniqueId] = &[
     TechniqueId::BeeHeavy2,
     TechniqueId::BeeHeavy,
     TechniqueId::BeeUltimateStartup,
-    TechniqueId::BeeUltimateRush,
+    TechniqueId::BeeLegacyUltimateStartup,
+    TechniqueId::BeeLegacyUltimateRush,
     TechniqueId::BeeDashAttack,
     TechniqueId::BeeJumpHeavy,
     TechniqueId::BeeJumpAttack,
@@ -4699,6 +4712,25 @@ pub fn attack_payload_definition(id: AttackPayloadId) -> AttackPayloadDef {
             hitstop_scale: 1.32,
             shake_scale: 1.36,
             feedback_priority_bonus: 15,
+        },
+        AttackPayloadId::BeeUltimateSwarmTick => AttackPayloadDef {
+            id,
+            kind: AttackKind::Ultimate,
+            shape_id: AttackShapeId::HazardField,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::Direct,
+            element: DamageElement::Wind,
+            power: 6.5,
+            str_scale: 0.45,
+            time_ms: 90,
+            damage: 10.0,
+            knockback: 0.9,
+            vertical_knockback: 0.0,
+            guardable: true,
+            impact_cue: "impact_bee_ultimate_swarm",
+            hitstop_scale: 0.46,
+            shake_scale: 0.38,
+            feedback_priority_bonus: 4,
         },
         AttackPayloadId::PenguinUltimateCatch => AttackPayloadDef {
             id,
@@ -7172,10 +7204,10 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             button: TechniqueButton::Ultimate,
             status: TechniqueStatus::Grounded,
             script: script(
-                "bee_ultimate_startup.sc",
-                Some(860),
+                "bee_ultimate_swarm.sc",
+                Some(360),
                 None,
-                1040,
+                620,
                 &BEE_ULTIMATE_STARTUP_EVENTS,
             ),
             input_buffer_ms: 0,
@@ -7185,17 +7217,36 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             branch_window: None,
             chain_rule: None,
         },
-        TechniqueId::BeeUltimateRush => TechniqueDefinition {
+        TechniqueId::BeeLegacyUltimateStartup => TechniqueDefinition {
+            id,
+            action: FighterAction::UltimateStartup,
+            button: TechniqueButton::Ultimate,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "bee_legacy_ultimate_startup.sc",
+                Some(860),
+                None,
+                1040,
+                &BEE_LEGACY_ULTIMATE_STARTUP_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: ULTIMATE_STAMINA_COST,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::BeeLegacyUltimateRush => TechniqueDefinition {
             id,
             action: FighterAction::UltimateRush,
             button: TechniqueButton::Ultimate,
             status: TechniqueStatus::Grounded,
             script: script(
-                "bee_ultimate_rush.sc",
+                "bee_legacy_ultimate_rush.sc",
                 Some(930),
                 None,
                 1180,
-                &BEE_ULTIMATE_RUSH_EVENTS,
+                &BEE_LEGACY_ULTIMATE_RUSH_EVENTS,
             ),
             input_buffer_ms: 0,
             stamina_cost: 0.0,
@@ -8807,6 +8858,7 @@ mod tests {
                 .id,
             TechniqueId::BeeUltimateStartup
         );
+        assert!(technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, bee, &catalog).is_none());
         assert_eq!(
             technique_slot_for_loadout(CharacterMoveSlot::JumpLight, penguin, &catalog)
                 .unwrap()
@@ -9063,7 +9115,6 @@ mod tests {
                     TechniqueId::BeeJumpAttack,
                     TechniqueId::BeeJumpHeavy,
                     TechniqueId::BeeUltimateStartup,
-                    TechniqueId::BeeUltimateRush,
                 ],
             ),
             (
@@ -9922,7 +9973,7 @@ mod tests {
     }
 
     #[test]
-    fn bee_ultimate_is_area_swarm_without_catch_confirm() {
+    fn bee_ultimate_summons_area_swarm_without_catch_confirm() {
         let ultimate = technique_definition_by_id(TechniqueId::BeeUltimateStartup).unwrap();
         let skill_events: Vec<_> = ultimate
             .script
@@ -9947,8 +9998,62 @@ mod tests {
         assert_eq!(ultimate.button, TechniqueButton::Ultimate);
         assert_eq!(ultimate.status, TechniqueStatus::Grounded);
         assert_eq!(ultimate.stamina_cost, ULTIMATE_STAMINA_COST);
+        assert_eq!(ultimate.stamina_cost, MAX_STAMINA * 0.5);
+        assert_eq!(skill_events, vec![(120, BeeSkillId::UltimateSwarm)]);
+        assert!(attack_events.is_empty());
         assert_eq!(
-            skill_events,
+            attack_payload_definition(AttackPayloadId::BeeUltimateSwarmTick).damage,
+            10.0
+        );
+        assert!(!ultimate.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(AttackPayloadId::BeeUltimateCatch)
+        )));
+        assert!(!ultimate.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(AttackPayloadId::BeeUltimateBomb)
+        )));
+    }
+
+    #[test]
+    fn bee_legacy_ultimate_ids_preserve_archived_sequence() {
+        let catalog = CharacterMoveCatalog::default();
+        let bee = LoadoutContext::for_character(
+            CharacterKind::Bee,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let legacy_startup =
+            technique_definition_by_id(TechniqueId::BeeLegacyUltimateStartup).unwrap();
+        let legacy_rush = technique_definition_by_id(TechniqueId::BeeLegacyUltimateRush).unwrap();
+        let startup_skill_events: Vec<_> = legacy_startup
+            .script
+            .events
+            .iter()
+            .filter_map(|event| match event.kind {
+                MoveTimelineEventKind::SpawnBeeSkill(skill) => Some((event.at_ms, skill)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!catalog.allows_technique(
+            CharacterKind::Bee,
+            TechniqueId::BeeLegacyUltimateStartup
+        ));
+        assert!(!catalog.allows_technique(
+            CharacterKind::Bee,
+            TechniqueId::BeeLegacyUltimateRush
+        ));
+        assert!(technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::BeeLegacyUltimateStartup,
+            bee,
+            &catalog
+        )
+        .is_none());
+        assert_eq!(legacy_startup.action, FighterAction::UltimateStartup);
+        assert_eq!(legacy_rush.action, FighterAction::UltimateRush);
+        assert_eq!(
+            startup_skill_events,
             vec![
                 (110, BeeSkillId::WorkerSwarm),
                 (220, BeeSkillId::HomingSting),
@@ -9957,10 +10062,13 @@ mod tests {
                 (620, BeeSkillId::HomingSting),
             ]
         );
-        assert_eq!(attack_events, vec![(720, AttackPayloadId::BeeUltimateBomb)]);
-        assert!(!ultimate.script.events.iter().any(|event| matches!(
+        assert!(legacy_startup.script.events.iter().any(|event| matches!(
             event.kind,
-            MoveTimelineEventKind::Attack(AttackPayloadId::BeeUltimateCatch)
+            MoveTimelineEventKind::Attack(AttackPayloadId::BeeUltimateBomb)
+        )));
+        assert!(legacy_rush.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(AttackPayloadId::BeeUltimateScratchLight)
         )));
     }
 

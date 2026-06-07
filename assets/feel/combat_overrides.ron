@@ -101,10 +101,10 @@
         (character: Bee, technique: BeeJumpAttack, payload: BeeAirSting, effect: GenericHeavy),
         (character: Bee, technique: BeeJumpHeavy, payload: BeeHoneyGlob, effect: GenericHeavy),
         (character: Bee, technique: BeeJumpHeavy, payload: BeeHoneyPuddle, effect: GroundBounceOrange),
-        (character: Bee, technique: BeeUltimateStartup, payload: BeeUltimateBomb, effect: UltimateBombRed),
-        (character: Bee, technique: BeeUltimateRush, payload: BeeUltimateScratchLight, effect: UltimateSlashRed),
-        (character: Bee, technique: BeeUltimateRush, payload: BeeUltimateScratchHeavy, effect: UltimateSlashRed),
-        (character: Bee, technique: BeeUltimateRush, payload: BeeUltimateBomb, effect: UltimateBombRed),
+        (character: Bee, technique: BeeLegacyUltimateStartup, payload: BeeUltimateBomb, effect: UltimateBombRed),
+        (character: Bee, technique: BeeLegacyUltimateRush, payload: BeeUltimateScratchLight, effect: UltimateSlashRed),
+        (character: Bee, technique: BeeLegacyUltimateRush, payload: BeeUltimateScratchHeavy, effect: UltimateSlashRed),
+        (character: Bee, technique: BeeLegacyUltimateRush, payload: BeeUltimateBomb, effect: UltimateBombRed),
     ],
     techniques: [
         (
@@ -386,7 +386,7 @@
             ],
         ),
         (
-            id: BeeUltimateStartup,
+            id: BeeLegacyUltimateStartup,
             animation_recovery_ms: Some(820),
             recover_ms: Some(1000),
             events: [
@@ -395,7 +395,7 @@
             ],
         ),
         (
-            id: BeeUltimateRush,
+            id: BeeLegacyUltimateRush,
             animation_recovery_ms: Some(780),
             recover_ms: Some(1020),
             events: [
