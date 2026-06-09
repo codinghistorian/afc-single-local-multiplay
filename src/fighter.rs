@@ -70,6 +70,13 @@ const CHICK_JUMP_C_FORWARD_SPEED: f32 = 3.2;
 const CHICK_JUMP_C_MIN_UP_SPEED: f32 = 4.2;
 const CHICK_FRESH_EGG_RIDE_FORWARD_SPEED: f32 = 8.8;
 const CHICK_FRESH_EGG_RIDE_LIFT_SPEED: f32 = 0.9;
+const CHICK_DASH_BACKSTEP_DURATION: f32 = 0.18;
+const CHICK_DASH_C_BACKSTEP_DISTANCE: f32 = FIGHTER_RADIUS * 2.0 * 3.0;
+const CHICK_DASH_X_BACKSTEP_DISTANCE: f32 = FIGHTER_RADIUS * 2.0 * 6.0;
+const CHICK_DASH_C_BACKSTEP_SPEED: f32 =
+    CHICK_DASH_C_BACKSTEP_DISTANCE / CHICK_DASH_BACKSTEP_DURATION;
+const CHICK_DASH_X_BACKSTEP_SPEED: f32 =
+    CHICK_DASH_X_BACKSTEP_DISTANCE / CHICK_DASH_BACKSTEP_DURATION;
 
 #[derive(Component)]
 pub(crate) struct FighterStyleAccent {
@@ -1033,7 +1040,21 @@ fn start_dash_finisher_from_dash(
             motor.facing = direction;
         }
     }
-    if !(loadout.character == CharacterKind::Penguin && next == TechniqueId::PenguinDashAttack) {
+    if matches!(
+        next,
+        TechniqueId::ChickDashAttack | TechniqueId::ChickDashHeavy
+    ) {
+        let facing = motor.facing.normalize_or_zero();
+        let backstep = -Vec2::new(facing.x, facing.z)
+            * match next {
+                TechniqueId::ChickDashAttack => CHICK_DASH_C_BACKSTEP_SPEED,
+                TechniqueId::ChickDashHeavy => CHICK_DASH_X_BACKSTEP_SPEED,
+                _ => unreachable!(),
+            };
+        set_planar_velocity(motor, backstep);
+    } else if !(loadout.character == CharacterKind::Penguin
+        && next == TechniqueId::PenguinDashAttack)
+    {
         let extra_impulse = dash_finisher_extra_impulse(next, loadout);
         if extra_impulse == 0.0 {
             motor.velocity.x = 0.0;
@@ -1045,6 +1066,31 @@ fn start_dash_finisher_from_dash(
     }
     start_technique_by_id(action, next, loadout, character_catalog);
     true
+}
+
+fn start_chick_dash_finisher_from_light_attack(
+    motor: &mut FighterMotor,
+    action: &mut FighterActionState,
+    input: &FighterInput,
+    loadout: LoadoutContext,
+    character_catalog: &CharacterMoveCatalog,
+) -> bool {
+    if loadout.character != CharacterKind::Chick
+        || action.technique_id != Some(TechniqueId::ChickLight1)
+        || !motor.grounded
+        || !input.dash
+    {
+        return false;
+    }
+
+    let dash_input = FighterInput {
+        movement: input.movement,
+        light: input.light || input.light_held || input.raw_light_pressed,
+        heavy: input.heavy || input.heavy_held,
+        raw_heavy_pressed: input.raw_heavy_pressed,
+        ..default()
+    };
+    start_dash_finisher_from_dash(motor, action, &dash_input, loadout, character_catalog)
 }
 
 fn try_start_penguin_dash_ultimate(
@@ -1675,6 +1721,15 @@ pub fn update_fighter_state(
         ) {
             action.elapsed += dt;
             refresh_technique_runtime(&mut action, loadout, &feel, &character_catalog);
+            if start_chick_dash_finisher_from_light_attack(
+                &mut motor,
+                &mut action,
+                &input,
+                loadout,
+                &character_catalog,
+            ) {
+                continue;
+            }
             if chick_light_recall_interrupt_requested(
                 entity,
                 &action,
@@ -3789,6 +3844,18 @@ fn character_body_motion_profile_for_state(
         profile.stop_friction = 0.12;
         profile.gravity_scale *= 0.34;
         profile.fall_gravity_scale *= 0.58;
+        profile.landing_input_scale = 0.0;
+        profile.stop_snap_speed = 0.01;
+    } else if matches!(
+        action.technique_id,
+        Some(TechniqueId::ChickDashAttack | TechniqueId::ChickDashHeavy)
+    ) {
+        profile.input_scale = 0.0;
+        profile.max_speed_bonus = CHICK_DASH_X_BACKSTEP_SPEED;
+        profile.ground_friction = 0.0;
+        profile.air_friction = 0.0;
+        profile.stop_friction = 0.0;
+        profile.turn_brake = 0.0;
         profile.landing_input_scale = 0.0;
         profile.stop_snap_speed = 0.01;
     } else if (motor.bee_air_dash_motion_active
@@ -8429,6 +8496,11 @@ mod tests {
             FighterStyleKind::Anchor,
             crate::equipment::EquipmentKind::CounterCell,
         );
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            crate::equipment::EquipmentKind::CounterCell,
+        );
         assert_eq!(
             dash_finisher_for_input(
                 &FighterInput {
@@ -8480,6 +8552,28 @@ mod tests {
         assert_eq!(
             dash_finisher_extra_impulse(TechniqueId::CatDashComboFinisher, loadout),
             DASH_ATTACK_EXTRA_IMPULSE
+        );
+        assert_eq!(
+            dash_finisher_for_input(
+                &FighterInput {
+                    light: true,
+                    ..default()
+                },
+                chick,
+                &catalog
+            ),
+            Some(TechniqueId::ChickDashAttack)
+        );
+        assert_eq!(
+            dash_finisher_for_input(
+                &FighterInput {
+                    heavy: true,
+                    ..default()
+                },
+                chick,
+                &catalog
+            ),
+            Some(TechniqueId::ChickDashHeavy)
         );
     }
 
@@ -8555,6 +8649,251 @@ mod tests {
         assert_eq!(action.technique_id, Some(TechniqueId::PenguinDashAttack));
         assert_eq!(motor.facing, Vec3::X);
         assert_eq!(motor.velocity, velocity_before);
+    }
+
+    #[test]
+    fn chick_dash_finishers_backstep_without_turning() {
+        let catalog = CharacterMoveCatalog::default();
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+
+        let mut dash_c_motor = FighterMotor {
+            facing: Vec3::Z,
+            velocity: Vec3::new(3.0, 1.25, 2.0),
+            grounded: true,
+            ..default()
+        };
+        let mut dash_c_action = FighterActionState {
+            action: FighterAction::Dashing,
+            ..default()
+        };
+
+        assert!(start_dash_finisher_from_dash(
+            &mut dash_c_motor,
+            &mut dash_c_action,
+            &FighterInput {
+                light: true,
+                movement: Vec2::X,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(dash_c_action.action, FighterAction::DashAttack);
+        assert_eq!(
+            dash_c_action.technique_id,
+            Some(TechniqueId::ChickDashAttack)
+        );
+        assert_eq!(dash_c_motor.facing, Vec3::Z);
+        assert_vec3_close(
+            dash_c_motor.velocity,
+            Vec3::new(0.0, 1.25, -CHICK_DASH_C_BACKSTEP_SPEED),
+            0.001,
+        );
+
+        let mut dash_x_motor = FighterMotor {
+            facing: Vec3::X,
+            velocity: Vec3::new(2.0, -0.5, 3.0),
+            grounded: true,
+            ..default()
+        };
+        let mut dash_x_action = FighterActionState {
+            action: FighterAction::Dashing,
+            ..default()
+        };
+
+        assert!(start_dash_finisher_from_dash(
+            &mut dash_x_motor,
+            &mut dash_x_action,
+            &FighterInput {
+                heavy: true,
+                movement: -Vec2::Y,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(dash_x_action.action, FighterAction::DashAttack);
+        assert_eq!(
+            dash_x_action.technique_id,
+            Some(TechniqueId::ChickDashHeavy)
+        );
+        assert_eq!(dash_x_motor.facing, Vec3::X);
+        assert_vec3_close(
+            dash_x_motor.velocity,
+            Vec3::new(-CHICK_DASH_X_BACKSTEP_SPEED, -0.5, 0.0),
+            0.001,
+        );
+        assert!((CHICK_DASH_X_BACKSTEP_SPEED - CHICK_DASH_C_BACKSTEP_SPEED * 2.0).abs() < 0.001);
+        assert!(
+            (CHICK_DASH_X_BACKSTEP_DISTANCE - CHICK_DASH_C_BACKSTEP_DISTANCE * 2.0).abs() < 0.001
+        );
+    }
+
+    #[test]
+    fn chick_orbit_egg_c_can_interrupt_to_dash_finishers() {
+        let catalog = CharacterMoveCatalog::default();
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+
+        let mut dash_c_motor = FighterMotor {
+            facing: Vec3::Z,
+            velocity: Vec3::new(4.0, 0.0, 1.0),
+            grounded: true,
+            ..default()
+        };
+        let mut dash_c_action = FighterActionState {
+            action: FighterAction::LightAttack1,
+            technique_id: Some(TechniqueId::ChickLight1),
+            ..default()
+        };
+
+        assert!(start_chick_dash_finisher_from_light_attack(
+            &mut dash_c_motor,
+            &mut dash_c_action,
+            &FighterInput {
+                dash: true,
+                light_held: true,
+                movement: Vec2::X,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(dash_c_action.action, FighterAction::DashAttack);
+        assert_eq!(
+            dash_c_action.technique_id,
+            Some(TechniqueId::ChickDashAttack)
+        );
+        assert_eq!(dash_c_motor.facing, Vec3::Z);
+        assert_vec3_close(
+            dash_c_motor.velocity,
+            Vec3::new(0.0, 0.0, -CHICK_DASH_C_BACKSTEP_SPEED),
+            0.001,
+        );
+
+        let mut dash_x_motor = FighterMotor {
+            facing: Vec3::X,
+            velocity: Vec3::new(1.0, 0.0, 4.0),
+            grounded: true,
+            ..default()
+        };
+        let mut dash_x_action = FighterActionState {
+            action: FighterAction::LightAttack1,
+            technique_id: Some(TechniqueId::ChickLight1),
+            ..default()
+        };
+
+        assert!(start_chick_dash_finisher_from_light_attack(
+            &mut dash_x_motor,
+            &mut dash_x_action,
+            &FighterInput {
+                dash: true,
+                light_held: true,
+                heavy_held: true,
+                movement: -Vec2::Y,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(dash_x_action.action, FighterAction::DashAttack);
+        assert_eq!(
+            dash_x_action.technique_id,
+            Some(TechniqueId::ChickDashHeavy)
+        );
+        assert_eq!(dash_x_motor.facing, Vec3::X);
+        assert_vec3_close(
+            dash_x_motor.velocity,
+            Vec3::new(-CHICK_DASH_X_BACKSTEP_SPEED, 0.0, 0.0),
+            0.001,
+        );
+    }
+
+    #[test]
+    fn chick_orbit_egg_dash_interrupt_requires_dash_and_chick_c() {
+        let catalog = CharacterMoveCatalog::default();
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut motor = FighterMotor {
+            facing: Vec3::Z,
+            grounded: true,
+            ..default()
+        };
+        let mut action = FighterActionState {
+            action: FighterAction::LightAttack1,
+            technique_id: Some(TechniqueId::ChickLight1),
+            ..default()
+        };
+
+        assert!(!start_chick_dash_finisher_from_light_attack(
+            &mut motor,
+            &mut action,
+            &FighterInput {
+                light_held: true,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickLight1));
+
+        action.technique_id = Some(TechniqueId::ChickLight2);
+        assert!(!start_chick_dash_finisher_from_light_attack(
+            &mut motor,
+            &mut action,
+            &FighterInput {
+                dash: true,
+                light_held: true,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickLight2));
+    }
+
+    #[test]
+    fn chick_dash_backstep_profile_preserves_authored_speed_until_stop() {
+        let catalog = CharacterMoveCatalog::default();
+        let body = catalog.body(CharacterKind::Chick);
+        let motor = FighterMotor {
+            grounded: true,
+            ..default()
+        };
+
+        for (technique_id, expected_speed) in [
+            (TechniqueId::ChickDashAttack, CHICK_DASH_C_BACKSTEP_SPEED),
+            (TechniqueId::ChickDashHeavy, CHICK_DASH_X_BACKSTEP_SPEED),
+        ] {
+            let action = FighterActionState {
+                action: FighterAction::DashAttack,
+                technique_id: Some(technique_id),
+                ..default()
+            };
+            let profile = character_body_motion_profile_for_state(
+                &action,
+                &motor,
+                FighterStyleKind::Anchor,
+                body,
+            );
+            let speed_limit = planar_speed_limit(&motor, true, body.ground_speed, profile);
+
+            assert_eq!(profile.input_scale, 0.0);
+            assert_eq!(profile.ground_friction, 0.0);
+            assert_eq!(profile.stop_friction, 0.0);
+            assert!(speed_limit > expected_speed);
+            assert!(speed_limit > CHICK_DASH_X_BACKSTEP_SPEED);
+        }
     }
 
     #[test]

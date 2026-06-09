@@ -290,19 +290,6 @@ pub fn spawn_chick_skill(
                 size_scale,
             );
         }
-        ChickSkillId::ShellScoot => {
-            spawn_shell_chip_fan(
-                commands,
-                assets,
-                effect_assets,
-                owner,
-                owner_id,
-                owner_style,
-                origin + (Vec3::Y * 0.42 + facing * 0.62) * size_scale,
-                facing,
-                size_scale,
-            );
-        }
         ChickSkillId::FreshEggDrop => {
             let spawn = origin + (Vec3::Y * 0.28 + facing * 0.24) * size_scale;
             spawn_fresh_egg_drop(

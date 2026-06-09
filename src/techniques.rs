@@ -90,6 +90,7 @@ pub enum TechniqueId {
     ChickHeavy,
     ChickHeavy2,
     ChickDashAttack,
+    ChickDashHeavy,
     ChickJumpAttack,
     ChickJumpHeavy,
     ChickUltimateStartup,
@@ -189,6 +190,7 @@ impl TechniqueId {
             | Self::ChickHeavy
             | Self::ChickHeavy2
             | Self::ChickDashAttack
+            | Self::ChickDashHeavy
             | Self::ChickJumpAttack
             | Self::ChickJumpHeavy
             | Self::ChickUltimateStartup => Some(CharacterKind::Chick),
@@ -291,7 +293,8 @@ impl TechniqueId {
             Self::ChickComboFinisher => "chick_shell_scramble",
             Self::ChickHeavy => "chick_orbit_egg",
             Self::ChickHeavy2 => "chick_eggplant_impostor",
-            Self::ChickDashAttack => "chick_shell_scoot",
+            Self::ChickDashAttack => "chick_dash_backstep_c",
+            Self::ChickDashHeavy => "chick_dash_backstep_x",
             Self::ChickJumpAttack => "chick_updraft_glide",
             Self::ChickJumpHeavy => "chick_fresh_egg_ride",
             Self::ChickUltimateStartup => "chick_breakfast_barrage",
@@ -361,7 +364,6 @@ pub enum ChickSkillId {
     OrbitEgg,
     OrbitEggLaunch,
     EggplantRoll,
-    ShellScoot,
     FreshEggDrop,
     FreshEggRide,
     SunnySideSplash,
@@ -3493,21 +3495,35 @@ const CHICK_HEAVY2_EVENTS: [MoveTimelineEvent; 6] = [
     timeline_event(900, MoveTimelineEventKind::Recover),
 ];
 
-const CHICK_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 8] = [
-    feedback_event(0, FeedbackPhase::Startup, "startup_chick_shell_scoot"),
-    timeline_event(
-        40,
-        MoveTimelineEventKind::Motion {
-            forward: 5.8,
-            lift: 0.0,
-        },
+const CHICK_DASH_BACKSTEP_STOP_MS: u32 = 180;
+const CHICK_DASH_BACKSTEP_RECOVER_MS: u32 = 300;
+
+const CHICK_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 4] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_dash_backstep_c"),
+    timeline_event(CHICK_DASH_BACKSTEP_STOP_MS, MoveTimelineEventKind::Stop),
+    feedback_event(
+        220,
+        FeedbackPhase::Aftermath,
+        "recover_chick_dash_backstep_c",
     ),
-    feedback_event(75, FeedbackPhase::PreHit, "trail_chick_shell_scoot"),
-    chick_skill_event(85, ChickSkillId::ShellScoot),
-    attack_event(105, AttackPayloadId::ChickShellScoot),
-    timeline_event(240, MoveTimelineEventKind::Stop),
-    feedback_event(300, FeedbackPhase::Aftermath, "recover_chick_shell_scoot"),
-    timeline_event(500, MoveTimelineEventKind::Recover),
+    timeline_event(
+        CHICK_DASH_BACKSTEP_RECOVER_MS,
+        MoveTimelineEventKind::Recover,
+    ),
+];
+
+const CHICK_DASH_HEAVY_EVENTS: [MoveTimelineEvent; 4] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_dash_backstep_x"),
+    timeline_event(CHICK_DASH_BACKSTEP_STOP_MS, MoveTimelineEventKind::Stop),
+    feedback_event(
+        220,
+        FeedbackPhase::Aftermath,
+        "recover_chick_dash_backstep_x",
+    ),
+    timeline_event(
+        CHICK_DASH_BACKSTEP_RECOVER_MS,
+        MoveTimelineEventKind::Recover,
+    ),
 ];
 
 const CHICK_JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 4] = [
@@ -3687,6 +3703,7 @@ const AUTHORED_TECHNIQUE_ORDER: &[TechniqueId] = &[
     TechniqueId::ChickHeavy,
     TechniqueId::ChickUltimateStartup,
     TechniqueId::ChickDashAttack,
+    TechniqueId::ChickDashHeavy,
     TechniqueId::ChickJumpHeavy,
     TechniqueId::ChickJumpAttack,
     TechniqueId::ChickComboFinisher,
@@ -7976,11 +7993,30 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             button: TechniqueButton::Dash,
             status: TechniqueStatus::Grounded,
             script: script(
-                "chick_shell_scoot.sc",
-                Some(300),
+                "chick_dash_backstep_c.sc",
+                Some(220),
                 None,
-                500,
+                CHICK_DASH_BACKSTEP_RECOVER_MS,
                 &CHICK_DASH_ATTACK_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::ChickDashHeavy => TechniqueDefinition {
+            id,
+            action: FighterAction::DashAttack,
+            button: TechniqueButton::Dash,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_dash_backstep_x.sc",
+                Some(220),
+                None,
+                CHICK_DASH_BACKSTEP_RECOVER_MS,
+                &CHICK_DASH_HEAVY_EVENTS,
             ),
             input_buffer_ms: 0,
             stamina_cost: 0.0,
@@ -9535,7 +9571,7 @@ mod tests {
             technique_slot_for_loadout(CharacterMoveSlot::DashHeavy, chick, &catalog)
                 .unwrap()
                 .id,
-            TechniqueId::ChickHeavy2
+            TechniqueId::ChickDashHeavy
         );
         assert_eq!(
             technique_slot_for_loadout(CharacterMoveSlot::JumpLight, chick, &catalog)
@@ -9827,6 +9863,7 @@ mod tests {
                     TechniqueId::ChickHeavy,
                     TechniqueId::ChickHeavy2,
                     TechniqueId::ChickDashAttack,
+                    TechniqueId::ChickDashHeavy,
                     TechniqueId::ChickJumpAttack,
                     TechniqueId::ChickJumpHeavy,
                     TechniqueId::ChickUltimateStartup,
@@ -10702,6 +10739,11 @@ mod tests {
         );
         assert_eq!(TechniqueId::ChickLight1.label(), "chick_orbit_egg_launch");
         assert_eq!(TechniqueId::ChickHeavy.label(), "chick_orbit_egg");
+        assert_eq!(
+            TechniqueId::ChickDashAttack.label(),
+            "chick_dash_backstep_c"
+        );
+        assert_eq!(TechniqueId::ChickDashHeavy.label(), "chick_dash_backstep_x");
         assert_eq!(TechniqueId::ChickJumpAttack.label(), "chick_updraft_glide");
         assert_eq!(TechniqueId::ChickJumpHeavy.label(), "chick_fresh_egg_ride");
 
@@ -10735,6 +10777,10 @@ mod tests {
             &catalog,
         )
         .unwrap();
+        let dash_light =
+            technique_slot_for_loadout(CharacterMoveSlot::DashLight, chick, &catalog).unwrap();
+        let dash_heavy =
+            technique_slot_for_loadout(CharacterMoveSlot::DashHeavy, chick, &catalog).unwrap();
         let jump_light =
             technique_slot_for_loadout(CharacterMoveSlot::JumpLight, chick, &catalog).unwrap();
         let jump_heavy =
@@ -10787,6 +10833,34 @@ mod tests {
         assert!(heavy2.script.events.iter().any(|event| matches!(
             event.kind,
             MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::EggplantRoll)
+        )));
+        assert_eq!(dash_light.id, TechniqueId::ChickDashAttack);
+        assert_eq!(dash_light.script.id, "chick_dash_backstep_c.sc");
+        assert_eq!(dash_light.script.recover_ms, CHICK_DASH_BACKSTEP_RECOVER_MS);
+        assert!(dash_light.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Stop
+        ) && event.at_ms
+            == CHICK_DASH_BACKSTEP_STOP_MS));
+        assert!(!dash_light.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(_)
+                | MoveTimelineEventKind::SpawnChickSkill(_)
+                | MoveTimelineEventKind::Motion { .. }
+        )));
+        assert_eq!(dash_heavy.id, TechniqueId::ChickDashHeavy);
+        assert_eq!(dash_heavy.script.id, "chick_dash_backstep_x.sc");
+        assert_eq!(dash_heavy.script.recover_ms, CHICK_DASH_BACKSTEP_RECOVER_MS);
+        assert!(dash_heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Stop
+        ) && event.at_ms
+            == CHICK_DASH_BACKSTEP_STOP_MS));
+        assert!(!dash_heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(_)
+                | MoveTimelineEventKind::SpawnChickSkill(_)
+                | MoveTimelineEventKind::Motion { .. }
         )));
         assert_eq!(jump_light.script.id, "chick_updraft_glide.sc");
         assert_eq!(jump_light.script.recover_ms, 620);

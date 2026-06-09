@@ -375,6 +375,7 @@
                 ChickUltimateStartup,
                 Grab,
                 ChickDashAttack,
+                ChickDashHeavy,
                 ChickJumpHeavy,
                 ChickJumpAttack,
                 GuardCounter,
@@ -391,7 +392,7 @@
             ],
             slots: [
                 (slot: DashLight, technique: ChickDashAttack),
-                (slot: DashHeavy, technique: ChickHeavy2),
+                (slot: DashHeavy, technique: ChickDashHeavy),
                 (slot: JumpLight, technique: ChickJumpAttack),
                 (slot: JumpHeavy, technique: ChickJumpHeavy),
                 (slot: UltimateStartup, technique: ChickUltimateStartup),

@@ -888,6 +888,7 @@ fn chick_technique_order() -> &'static [TechniqueId] {
         TechniqueId::ChickUltimateStartup,
         TechniqueId::Grab,
         TechniqueId::ChickDashAttack,
+        TechniqueId::ChickDashHeavy,
         TechniqueId::ChickJumpHeavy,
         TechniqueId::ChickJumpAttack,
         TechniqueId::GuardCounter,
@@ -912,7 +913,7 @@ fn chick_move_slots() -> &'static [CharacterMoveSlotDef] {
         },
         CharacterMoveSlotDef {
             slot: CharacterMoveSlot::DashHeavy,
-            technique: TechniqueId::ChickHeavy2,
+            technique: TechniqueId::ChickDashHeavy,
         },
         CharacterMoveSlotDef {
             slot: CharacterMoveSlot::JumpLight,
@@ -1030,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             catalog.slot_technique(CharacterKind::Chick, CharacterMoveSlot::DashHeavy),
-            Some(TechniqueId::ChickHeavy2)
+            Some(TechniqueId::ChickDashHeavy)
         );
         assert_eq!(
             catalog.slot_technique(CharacterKind::Chick, CharacterMoveSlot::UltimateRush),
