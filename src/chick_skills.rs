@@ -51,7 +51,7 @@ const CHICK_ORBIT_EGG_HEIGHT: f32 = 1.0;
 const CHICK_ORBIT_EGG_ANGULAR_SPEED: f32 = TAU * 0.85;
 const CHICK_ORBIT_EGG_VISUAL_SCALE: f32 = 5.0;
 pub const CHICK_ULTIMATE_EGG_COUNT: usize = 16;
-pub const CHICK_ULTIMATE_EGG_LIFETIME: f32 = 3.0;
+pub const CHICK_ULTIMATE_EGG_LIFETIME: f32 = 4.0;
 const CHICK_ULTIMATE_EGG_SPAWN_RADIUS: f32 = 0.72;
 const CHICK_FRESH_EGG_FORWARD_SPEED: f32 = 1.7;
 const CHICK_FRESH_EGG_INITIAL_FALL_SPEED: f32 = 0.4;
@@ -2198,13 +2198,13 @@ mod tests {
     }
 
     #[test]
-    fn ultimate_orbit_eggs_use_three_second_launched_egg_control_profile() {
+    fn ultimate_orbit_eggs_use_four_second_launched_egg_control_profile() {
         let skill = ultimate_orbit_egg_skill(entity(1), 0, FighterStyleKind::Anchor, Vec3::X, 1.0);
 
         assert_eq!(skill.kind, ChickSkillKind::OrbitEggLaunch);
         assert_eq!(skill.payload_id, Some(AttackPayloadId::ChickOrbitEgg));
         assert_eq!(skill.lifetime, CHICK_ULTIMATE_EGG_LIFETIME);
-        assert_eq!(CHICK_ULTIMATE_EGG_LIFETIME, 3.0);
+        assert_eq!(CHICK_ULTIMATE_EGG_LIFETIME, 4.0);
         assert_eq!(skill.velocity, Vec3::X * CHICK_ORBIT_EGG_LAUNCH_SPEED);
     }
 
