@@ -292,7 +292,7 @@ impl TechniqueId {
             Self::ChickHeavy => "chick_orbit_egg",
             Self::ChickHeavy2 => "chick_eggplant_impostor",
             Self::ChickDashAttack => "chick_shell_scoot",
-            Self::ChickJumpAttack => "chick_fresh_egg_drop",
+            Self::ChickJumpAttack => "chick_updraft_glide",
             Self::ChickJumpHeavy => "chick_fresh_egg_ride",
             Self::ChickUltimateStartup => "chick_breakfast_barrage",
             Self::Grab => "grab",
@@ -3510,16 +3510,11 @@ const CHICK_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 8] = [
     timeline_event(500, MoveTimelineEventKind::Recover),
 ];
 
-const CHICK_JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 5] = [
-    feedback_event(0, FeedbackPhase::Startup, "startup_chick_fresh_egg_drop"),
-    chick_skill_event(0, ChickSkillId::FreshEggDrop),
-    feedback_event(60, FeedbackPhase::PreHit, "release_chick_fresh_egg_drop"),
-    feedback_event(
-        210,
-        FeedbackPhase::Aftermath,
-        "recover_chick_fresh_egg_drop",
-    ),
-    timeline_event(380, MoveTimelineEventKind::Recover),
+const CHICK_JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 4] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_updraft_glide"),
+    feedback_event(120, FeedbackPhase::PreHit, "lift_chick_updraft_glide"),
+    feedback_event(430, FeedbackPhase::Aftermath, "recover_chick_updraft_glide"),
+    timeline_event(620, MoveTimelineEventKind::Recover),
 ];
 
 const CHICK_JUMP_HEAVY_EVENTS: [MoveTimelineEvent; 5] = [
@@ -8000,10 +7995,10 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             button: TechniqueButton::A,
             status: TechniqueStatus::Airborne,
             script: script(
-                "chick_fresh_egg_drop.sc",
-                Some(210),
+                "chick_updraft_glide.sc",
+                Some(430),
                 None,
-                380,
+                620,
                 &CHICK_JUMP_ATTACK_EVENTS,
             ),
             input_buffer_ms: 0,
@@ -10707,7 +10702,7 @@ mod tests {
         );
         assert_eq!(TechniqueId::ChickLight1.label(), "chick_orbit_egg_launch");
         assert_eq!(TechniqueId::ChickHeavy.label(), "chick_orbit_egg");
-        assert_eq!(TechniqueId::ChickJumpAttack.label(), "chick_fresh_egg_drop");
+        assert_eq!(TechniqueId::ChickJumpAttack.label(), "chick_updraft_glide");
         assert_eq!(TechniqueId::ChickJumpHeavy.label(), "chick_fresh_egg_ride");
 
         let light1 = technique_definition_for_loadout_id_in_catalog(
@@ -10793,14 +10788,26 @@ mod tests {
             event.kind,
             MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::EggplantRoll)
         )));
-        assert!(jump_light.script.events.iter().any(|event| matches!(
-            event.kind,
-            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::FreshEggDrop)
-        )));
+        assert_eq!(jump_light.script.id, "chick_updraft_glide.sc");
+        assert_eq!(jump_light.script.recover_ms, 620);
+        assert!(
+            jump_light
+                .script
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, MoveTimelineEventKind::Feedback(_, _)))
+        );
+        assert!(
+            jump_light
+                .script
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, MoveTimelineEventKind::Recover)
+                    && event.at_ms == 620)
+        );
         assert!(!jump_light.script.events.iter().any(|event| matches!(
             event.kind,
-            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::FreshEggRide)
-                | MoveTimelineEventKind::Attack(_)
+            MoveTimelineEventKind::SpawnChickSkill(_) | MoveTimelineEventKind::Attack(_)
         )));
         assert!(jump_heavy.script.events.iter().any(|event| matches!(
             event.kind,

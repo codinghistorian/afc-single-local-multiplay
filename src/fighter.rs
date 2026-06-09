@@ -66,9 +66,8 @@ const PENGUIN_HARD_ICE_SLIDE_MAX_SPEED: f32 =
     DASH_HOLD_SPEED * PENGUIN_HARD_ICE_ENTRY_SPEED_MULTIPLIER;
 const PENGUIN_HARD_ICE_ENTRY_SPEED_THRESHOLD: f32 = 0.22;
 const PENGUIN_JUMP_SNOWFLAKE_MIN_FALL_SPEED: f32 = -0.8;
-const CHICK_JUMP_C_FORWARD_SPEED: f32 = 5.6;
-const CHICK_JUMP_C_MIN_UP_SPEED: f32 = 7.8;
-const CHICK_JUMP_C_UPWARD_BOOST: f32 = 2.6;
+const CHICK_JUMP_C_FORWARD_SPEED: f32 = 3.2;
+const CHICK_JUMP_C_MIN_UP_SPEED: f32 = 4.2;
 const CHICK_FRESH_EGG_RIDE_FORWARD_SPEED: f32 = 8.8;
 const CHICK_FRESH_EGG_RIDE_LIFT_SPEED: f32 = 0.9;
 
@@ -1775,7 +1774,7 @@ pub fn update_fighter_state(
             ) {
                 continue;
             }
-            if try_start_chick_ride_jump_c_cancel(
+            if try_start_chick_air_attack_cancel(
                 &mut motor,
                 &mut action,
                 &input,
@@ -1807,16 +1806,11 @@ pub fn update_fighter_state(
             }
             let duration = attack_duration_for_state(&action, loadout, &feel, &character_catalog);
             if action.elapsed >= duration {
-                if action.action == FighterAction::JumpAttack && !motor.grounded {
-                    if matches!(
-                        action.technique_id,
-                        Some(TechniqueId::BeeJumpAttack | TechniqueId::PenguinJumpAttack)
-                    ) {
-                        set_action(&mut action, FighterAction::Jumping);
-                    }
-                    continue;
-                } else if action.action == FighterAction::JumpHeavyAttack && !motor.grounded {
+                if !motor.grounded && should_return_to_jumping_on_air_attack_completion(&action) {
                     set_action(&mut action, FighterAction::Jumping);
+                    continue;
+                } else if action.action == FighterAction::JumpAttack && !motor.grounded {
+                    continue;
                 } else {
                     if matches!(
                         action.action,
@@ -3119,6 +3113,21 @@ fn attack_duration_for_state(
     duration
 }
 
+fn should_return_to_jumping_on_air_attack_completion(action: &FighterActionState) -> bool {
+    match action.action {
+        FighterAction::JumpHeavyAttack => true,
+        FighterAction::JumpAttack => matches!(
+            action.technique_id,
+            Some(
+                TechniqueId::BeeJumpAttack
+                    | TechniqueId::PenguinJumpAttack
+                    | TechniqueId::ChickJumpAttack
+            )
+        ),
+        _ => false,
+    }
+}
+
 fn refresh_technique_runtime(
     action: &mut FighterActionState,
     loadout: LoadoutContext,
@@ -3324,9 +3333,8 @@ fn start_jump_attack(
     } else if technique.id == TechniqueId::ChickJumpAttack {
         motor.velocity.x = facing.x * CHICK_JUMP_C_FORWARD_SPEED;
         motor.velocity.z = facing.z * CHICK_JUMP_C_FORWARD_SPEED;
-        motor.velocity.y =
-            (motor.velocity.y + CHICK_JUMP_C_UPWARD_BOOST).max(CHICK_JUMP_C_MIN_UP_SPEED);
-        motor.jump_attack_landing_recovery = true;
+        motor.velocity.y = motor.velocity.y.max(CHICK_JUMP_C_MIN_UP_SPEED);
+        motor.jump_attack_landing_recovery = false;
         clear_bee_air_dash_state(motor);
     } else {
         motor.velocity.x = facing.x * JUMP_ATTACK_DIVE_FORWARD_SPEED;
@@ -3387,23 +3395,32 @@ fn start_jump_heavy_attack(
     set_technique_action(action, technique);
 }
 
-fn try_start_chick_ride_jump_c_cancel(
+fn try_start_chick_air_attack_cancel(
     motor: &mut FighterMotor,
     action: &mut FighterActionState,
     input: &FighterInput,
     loadout: LoadoutContext,
     character_catalog: &CharacterMoveCatalog,
 ) -> bool {
-    if motor.grounded
-        || action.technique_id != Some(TechniqueId::ChickJumpHeavy)
-        || action.action != FighterAction::JumpHeavyAttack
-        || !input.raw_light_pressed
-    {
+    if motor.grounded {
         return false;
     }
 
-    start_jump_attack(motor, action, loadout, character_catalog);
-    true
+    match (action.action, action.technique_id) {
+        (FighterAction::JumpAttack, Some(TechniqueId::ChickJumpAttack))
+            if input.raw_heavy_pressed =>
+        {
+            start_jump_heavy_attack(motor, action, loadout, character_catalog);
+            true
+        }
+        (FighterAction::JumpHeavyAttack, Some(TechniqueId::ChickJumpHeavy))
+            if input.raw_light_pressed =>
+        {
+            start_jump_attack(motor, action, loadout, character_catalog);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn try_start_bee_air_dash_x_shot(
@@ -3763,6 +3780,15 @@ fn character_body_motion_profile_for_state(
         profile.stop_friction = 0.08;
         profile.gravity_scale *= 0.38;
         profile.fall_gravity_scale *= 0.66;
+        profile.landing_input_scale = 0.0;
+        profile.stop_snap_speed = 0.01;
+    } else if action.technique_id == Some(TechniqueId::ChickJumpAttack) {
+        profile.input_scale = 0.0;
+        profile.max_speed_bonus = CHICK_JUMP_C_FORWARD_SPEED;
+        profile.air_friction = 0.12;
+        profile.stop_friction = 0.12;
+        profile.gravity_scale *= 0.34;
+        profile.fall_gravity_scale *= 0.58;
         profile.landing_input_scale = 0.0;
         profile.stop_snap_speed = 0.01;
     } else if (motor.bee_air_dash_motion_active
@@ -7798,14 +7824,14 @@ mod tests {
     }
 
     #[test]
-    fn chick_jump_c_launches_upward_fresh_egg_drop_flight() {
+    fn chick_jump_c_starts_updraft_glide_and_preserves_rising_speed() {
         let catalog = CharacterMoveCatalog::default();
         let loadout = LoadoutContext::for_character(
             CharacterKind::Chick,
             FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
         );
-        let starting_up_speed = JUMP_SPEED * crate::characters::chick_body_profile().jump_impulse;
+        let starting_up_speed = CHICK_JUMP_C_MIN_UP_SPEED + 1.6;
         let mut action = FighterActionState {
             action: FighterAction::Jumping,
             ..default()
@@ -7827,18 +7853,49 @@ mod tests {
         assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpAttack));
         assert!(!motor.grounded);
         assert!(motor.air_attack_used);
-        assert!(motor.jump_attack_landing_recovery);
+        assert!(!motor.jump_attack_landing_recovery);
         assert!(!motor.bee_air_dash_motion_active);
         assert_eq!(motor.dash_jump_carry_timer, 0.0);
         assert_eq!(motor.dash_jump_carry_speed_limit, 0.0);
         assert_eq!(motor.velocity.x, 0.0);
         assert_eq!(motor.velocity.z, CHICK_JUMP_C_FORWARD_SPEED);
-        assert_eq!(
-            motor.velocity.y,
-            starting_up_speed + CHICK_JUMP_C_UPWARD_BOOST
+        assert_eq!(motor.velocity.y, starting_up_speed);
+        assert!(motor.velocity.y > CHICK_JUMP_C_MIN_UP_SPEED);
+    }
+
+    #[test]
+    fn chick_jump_c_from_fall_raises_to_hover_climb_speed() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
         );
-        assert!(motor.velocity.y > starting_up_speed);
-        assert!(motor.velocity.y > BEE_JUMP_ATTACK_UP_SPEED);
+        let mut action = FighterActionState {
+            action: FighterAction::Jumping,
+            ..default()
+        };
+        let mut motor = FighterMotor {
+            grounded: false,
+            facing: Vec3::X,
+            velocity: Vec3::new(0.5, -3.0, 2.0),
+            dash_jump_carry_timer: 0.2,
+            dash_jump_carry_speed_limit: 6.0,
+            jump_attack_landing_recovery: true,
+            ..default()
+        };
+
+        start_jump_attack(&mut motor, &mut action, loadout, &catalog);
+
+        assert_eq!(action.action, FighterAction::JumpAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpAttack));
+        assert!(motor.air_attack_used);
+        assert!(!motor.jump_attack_landing_recovery);
+        assert_eq!(motor.dash_jump_carry_timer, 0.0);
+        assert_eq!(motor.dash_jump_carry_speed_limit, 0.0);
+        assert_eq!(motor.velocity.x, CHICK_JUMP_C_FORWARD_SPEED);
+        assert_eq!(motor.velocity.z, 0.0);
+        assert_eq!(motor.velocity.y, CHICK_JUMP_C_MIN_UP_SPEED);
     }
 
     #[test]
@@ -7979,7 +8036,7 @@ mod tests {
             ..default()
         };
 
-        assert!(try_start_chick_ride_jump_c_cancel(
+        assert!(try_start_chick_air_attack_cancel(
             &mut motor,
             &mut action,
             &input,
@@ -7990,11 +8047,156 @@ mod tests {
         assert_eq!(action.action, FighterAction::JumpAttack);
         assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpAttack));
         assert!(motor.air_attack_used);
-        assert!(motor.jump_attack_landing_recovery);
+        assert!(!motor.jump_attack_landing_recovery);
         assert_eq!(motor.velocity.x, 0.0);
         assert_eq!(motor.velocity.z, CHICK_JUMP_C_FORWARD_SPEED);
         assert_eq!(motor.velocity.y, CHICK_JUMP_C_MIN_UP_SPEED);
         assert!(motor.velocity.y > CHICK_FRESH_EGG_RIDE_LIFT_SPEED);
+    }
+
+    #[test]
+    fn chick_jump_c_can_cancel_to_jump_x_ride() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut action = FighterActionState {
+            action: FighterAction::JumpAttack,
+            technique_id: Some(TechniqueId::ChickJumpAttack),
+            ..default()
+        };
+        let mut motor = FighterMotor {
+            grounded: false,
+            facing: Vec3::X,
+            velocity: Vec3::new(CHICK_JUMP_C_FORWARD_SPEED, CHICK_JUMP_C_MIN_UP_SPEED, 0.0),
+            air_attack_used: true,
+            ..default()
+        };
+        let input = FighterInput {
+            raw_heavy_pressed: true,
+            light_held: true,
+            ..default()
+        };
+
+        assert!(try_start_chick_air_attack_cancel(
+            &mut motor,
+            &mut action,
+            &input,
+            loadout,
+            &catalog,
+        ));
+
+        assert_eq!(action.action, FighterAction::JumpHeavyAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpHeavy));
+        assert!(motor.air_attack_used);
+        assert!(!motor.jump_attack_landing_recovery);
+        assert_eq!(motor.velocity.x, CHICK_FRESH_EGG_RIDE_FORWARD_SPEED);
+        assert_eq!(motor.velocity.z, 0.0);
+        assert_eq!(motor.velocity.y, CHICK_FRESH_EGG_RIDE_LIFT_SPEED);
+    }
+
+    #[test]
+    fn chick_air_attack_cancel_requires_raw_opposite_press() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut jump_c_action = FighterActionState {
+            action: FighterAction::JumpAttack,
+            technique_id: Some(TechniqueId::ChickJumpAttack),
+            ..default()
+        };
+        let mut jump_c_motor = FighterMotor {
+            grounded: false,
+            air_attack_used: true,
+            ..default()
+        };
+        let held_heavy = FighterInput {
+            heavy_held: true,
+            ..default()
+        };
+
+        assert!(!try_start_chick_air_attack_cancel(
+            &mut jump_c_motor,
+            &mut jump_c_action,
+            &held_heavy,
+            loadout,
+            &catalog,
+        ));
+        assert_eq!(
+            jump_c_action.technique_id,
+            Some(TechniqueId::ChickJumpAttack)
+        );
+
+        let mut jump_x_action = FighterActionState {
+            action: FighterAction::JumpHeavyAttack,
+            technique_id: Some(TechniqueId::ChickJumpHeavy),
+            ..default()
+        };
+        let mut jump_x_motor = FighterMotor {
+            grounded: false,
+            air_attack_used: true,
+            ..default()
+        };
+        let held_light = FighterInput {
+            light_held: true,
+            ..default()
+        };
+
+        assert!(!try_start_chick_air_attack_cancel(
+            &mut jump_x_motor,
+            &mut jump_x_action,
+            &held_light,
+            loadout,
+            &catalog,
+        ));
+        assert_eq!(
+            jump_x_action.technique_id,
+            Some(TechniqueId::ChickJumpHeavy)
+        );
+    }
+
+    #[test]
+    fn chick_jump_c_motion_profile_hover_glides_and_recovers_airborne() {
+        let action = FighterActionState {
+            action: FighterAction::JumpAttack,
+            technique_id: Some(TechniqueId::ChickJumpAttack),
+            ..default()
+        };
+        let body = crate::characters::chick_body_profile();
+        let mut motor = FighterMotor {
+            grounded: false,
+            velocity: Vec3::new(CHICK_JUMP_C_FORWARD_SPEED, CHICK_JUMP_C_MIN_UP_SPEED, 0.0),
+            ..default()
+        };
+        let profile = character_body_motion_profile_for_state(
+            &action,
+            &motor,
+            FighterStyleKind::Anchor,
+            body,
+        );
+        let base_profile = character_body_motion_profile(
+            FighterAction::JumpAttack,
+            FighterStyleKind::Anchor,
+            body,
+        );
+        let speed_limit = planar_speed_limit(&motor, false, body.air_speed, profile);
+        let before_speed = planar_velocity(&motor).length();
+        let damp = (1.0 - profile.stop_friction * 0.016).clamp(0.0, 1.0);
+        motor.velocity.x *= damp;
+
+        assert!(speed_limit > CHICK_JUMP_C_FORWARD_SPEED);
+        assert_eq!(profile.input_scale, 0.0);
+        assert!(profile.air_friction < base_profile.air_friction);
+        assert!(profile.stop_friction < base_profile.stop_friction);
+        assert!(profile.gravity_scale < base_profile.gravity_scale);
+        assert!(profile.fall_gravity_scale < base_profile.fall_gravity_scale);
+        assert!(before_speed - planar_velocity(&motor).length() < 0.02);
+        assert!(should_return_to_jumping_on_air_attack_completion(&action));
     }
 
     #[test]
