@@ -66,6 +66,7 @@ const HUD_CAT_PORTRAIT_PATH: &str = "ui/hud/animal-cat.png";
 const HUD_PIG_PORTRAIT_PATH: &str = "ui/hud/animal-pig.png";
 const HUD_BEE_PORTRAIT_PATH: &str = "ui/hud/animal-bee.png";
 const HUD_PENGUIN_PORTRAIT_PATH: &str = "ui/hud/animal-penguin.png";
+const HUD_CHICK_PORTRAIT_PATH: &str = "ui/hud/animal-chick.png";
 
 pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
     let portrait_images = [
@@ -73,6 +74,7 @@ pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
         asset_server.load(HUD_PIG_PORTRAIT_PATH),
         asset_server.load(HUD_BEE_PORTRAIT_PATH),
         asset_server.load(HUD_PENGUIN_PORTRAIT_PATH),
+        asset_server.load(HUD_CHICK_PORTRAIT_PATH),
     ];
 
     commands.spawn((
@@ -109,6 +111,7 @@ pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
                 portrait_images[1].clone(),
                 portrait_images[2].clone(),
                 portrait_images[3].clone(),
+                portrait_images[4].clone(),
             ));
             parent.spawn(result_overlay());
         });
@@ -406,6 +409,7 @@ fn bottom_plate_row(
     right_portrait: Handle<Image>,
     bee_portrait: Handle<Image>,
     penguin_portrait: Handle<Image>,
+    chick_portrait: Handle<Image>,
 ) -> impl Bundle {
     (
         GameplayHudPanel,
@@ -426,7 +430,8 @@ fn bottom_plate_row(
                 left_portrait.clone(),
                 right_portrait.clone(),
                 bee_portrait.clone(),
-                penguin_portrait.clone()
+                penguin_portrait.clone(),
+                chick_portrait.clone()
             ),
             fighter_plate(
                 1,
@@ -434,7 +439,8 @@ fn bottom_plate_row(
                 left_portrait,
                 right_portrait,
                 bee_portrait,
-                penguin_portrait
+                penguin_portrait,
+                chick_portrait
             ),
         ],
     )
@@ -447,6 +453,7 @@ fn fighter_plate(
     pig_portrait: Handle<Image>,
     bee_portrait: Handle<Image>,
     penguin_portrait: Handle<Image>,
+    chick_portrait: Handle<Image>,
 ) -> impl Bundle {
     (
         Node {
@@ -478,6 +485,7 @@ fn fighter_plate(
                     hud_portrait_image(id, CharacterKind::Pig, pig_portrait),
                     hud_portrait_image(id, CharacterKind::Bee, bee_portrait),
                     hud_portrait_image(id, CharacterKind::Penguin, penguin_portrait),
+                    hud_portrait_image(id, CharacterKind::Chick, chick_portrait),
                 ]
             ),
             (
@@ -563,6 +571,7 @@ fn hud_portrait_character(character: CharacterKind) -> CharacterKind {
         CharacterKind::Pig => CharacterKind::Pig,
         CharacterKind::Bee => CharacterKind::Bee,
         CharacterKind::Penguin => CharacterKind::Penguin,
+        CharacterKind::Chick => CharacterKind::Chick,
         _ => CharacterKind::Cat,
     }
 }
@@ -1281,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn hud_portrait_selection_supports_cat_pig_bee_and_penguin() {
+    fn hud_portrait_selection_supports_cat_pig_bee_penguin_and_chick() {
         assert_eq!(
             hud_portrait_character(CharacterKind::Cat),
             CharacterKind::Cat
@@ -1297,6 +1306,10 @@ mod tests {
         assert_eq!(
             hud_portrait_character(CharacterKind::Penguin),
             CharacterKind::Penguin
+        );
+        assert_eq!(
+            hud_portrait_character(CharacterKind::Chick),
+            CharacterKind::Chick
         );
     }
 

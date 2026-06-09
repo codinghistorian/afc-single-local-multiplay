@@ -13,6 +13,7 @@ use crate::characters::{
     CharacterBodyDef, CharacterKind, CharacterMoveCatalog, CharacterMoveSlot, FighterCharacter,
     character_for_fighter_id, character_mesh_bounds, character_scene_model,
 };
+use crate::chick_skills::{ActiveChickSkill, ChickSkillKind};
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     apply_impact, impact_profile,
@@ -65,6 +66,11 @@ const PENGUIN_HARD_ICE_SLIDE_MAX_SPEED: f32 =
     DASH_HOLD_SPEED * PENGUIN_HARD_ICE_ENTRY_SPEED_MULTIPLIER;
 const PENGUIN_HARD_ICE_ENTRY_SPEED_THRESHOLD: f32 = 0.22;
 const PENGUIN_JUMP_SNOWFLAKE_MIN_FALL_SPEED: f32 = -0.8;
+const CHICK_JUMP_C_FORWARD_SPEED: f32 = 5.6;
+const CHICK_JUMP_C_MIN_UP_SPEED: f32 = 7.8;
+const CHICK_JUMP_C_UPWARD_BOOST: f32 = 2.6;
+const CHICK_FRESH_EGG_RIDE_FORWARD_SPEED: f32 = 8.8;
+const CHICK_FRESH_EGG_RIDE_LIFT_SPEED: f32 = 0.9;
 
 #[derive(Component)]
 pub(crate) struct FighterStyleAccent {
@@ -1426,7 +1432,9 @@ pub fn update_fighter_state(
     feel: Res<CombatFeelTuning>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
+    active_chick_skills: Query<&ActiveChickSkill>,
     mut fighters: Query<(
+        Entity,
         &mut FighterStats,
         &mut FighterMotor,
         &mut FighterInput,
@@ -1438,7 +1446,7 @@ pub fn update_fighter_state(
     )>,
 ) {
     if hitstop.active() {
-        for (_, mut motor, input, mut action, character, style, equipment, _) in &mut fighters {
+        for (_, _, mut motor, input, mut action, character, style, equipment, _) in &mut fighters {
             if motor.guard_counter_window_timer > 0.0 && guard_counter_trigger_pressed(&input) {
                 motor.guard_counter_buffered = true;
             }
@@ -1450,7 +1458,7 @@ pub fn update_fighter_state(
 
     let dt = time.delta_secs();
 
-    for (mut stats, mut motor, input, mut action, character, style, equipment, transform) in
+    for (entity, mut stats, mut motor, input, mut action, character, style, equipment, transform) in
         &mut fighters
     {
         let tuning = style_tuning(style.kind);
@@ -1668,6 +1676,22 @@ pub fn update_fighter_state(
         ) {
             action.elapsed += dt;
             refresh_technique_runtime(&mut action, loadout, &feel, &character_catalog);
+            if chick_light_recall_interrupt_requested(
+                entity,
+                &action,
+                &input,
+                active_chick_skills
+                    .iter()
+                    .map(|skill| (skill.owner, skill.kind)),
+            ) {
+                start_technique_by_id(
+                    &mut action,
+                    TechniqueId::ChickLight1,
+                    loadout,
+                    &character_catalog,
+                );
+                continue;
+            }
             queue_chained_followup(
                 &mut action,
                 &input,
@@ -1746,6 +1770,15 @@ pub fn update_fighter_state(
                 &mut action,
                 &input,
                 input.movement,
+                loadout,
+                &character_catalog,
+            ) {
+                continue;
+            }
+            if try_start_chick_ride_jump_c_cancel(
+                &mut motor,
+                &mut action,
+                &input,
                 loadout,
                 &character_catalog,
             ) {
@@ -2002,12 +2035,23 @@ pub fn update_fighter_state(
                 start_ultimate(&mut motor, &mut stats, &mut action, technique);
                 continue;
             }
+            if !raw_technique_special_requirement_met(
+                entity,
+                technique,
+                active_chick_skills
+                    .iter()
+                    .map(|skill| (skill.owner, skill.kind)),
+            ) {
+                continue;
+            }
+            if !try_start_raw_technique(&mut stats, &mut action, technique) {
+                continue;
+            }
             if technique.id == TechniqueId::CatHeavy
                 && let Some(armor) = loadout_heavy_armor(loadout)
             {
                 stats.invulnerability = stats.invulnerability.max(armor.invulnerability);
             }
-            set_technique_action(&mut action, technique);
             continue;
         }
 
@@ -2660,6 +2704,67 @@ fn start_ultimate(
     set_technique_action(action, technique);
 }
 
+fn try_start_raw_technique(
+    stats: &mut FighterStats,
+    action: &mut FighterActionState,
+    technique: TechniqueDefinition,
+) -> bool {
+    if technique.action == FighterAction::UltimateStartup {
+        return false;
+    }
+
+    let stamina_cost = technique.stamina_cost.max(0.0);
+    if stamina_cost > f32::EPSILON && stats.stamina < stamina_cost {
+        return false;
+    }
+
+    if stamina_cost > f32::EPSILON {
+        stats.stamina -= stamina_cost;
+    }
+    set_technique_action(action, technique);
+    true
+}
+
+fn raw_technique_special_requirement_met<I>(
+    owner: Entity,
+    technique: TechniqueDefinition,
+    active_chick_skills: I,
+) -> bool
+where
+    I: IntoIterator<Item = (Entity, ChickSkillKind)>,
+{
+    if technique.id != TechniqueId::ChickLight1 {
+        return true;
+    }
+
+    active_chick_skills
+        .into_iter()
+        .any(|(skill_owner, kind)| skill_owner == owner && chick_c_can_start_from_skill(kind))
+}
+
+fn chick_c_can_start_from_skill(kind: ChickSkillKind) -> bool {
+    matches!(
+        kind,
+        ChickSkillKind::OrbitEgg | ChickSkillKind::OrbitEggLaunch
+    )
+}
+
+fn chick_light_recall_interrupt_requested<I>(
+    owner: Entity,
+    action: &FighterActionState,
+    input: &FighterInput,
+    active_chick_skills: I,
+) -> bool
+where
+    I: IntoIterator<Item = (Entity, ChickSkillKind)>,
+{
+    action.technique_id == Some(TechniqueId::ChickLight1)
+        && input.raw_light_pressed
+        && active_chick_skills.into_iter().any(|(skill_owner, kind)| {
+            skill_owner == owner && kind == ChickSkillKind::OrbitEggLaunch
+        })
+}
+
 #[cfg(test)]
 mod ultimate_mp_tests {
     use super::*;
@@ -2713,6 +2818,7 @@ mod ultimate_mp_tests {
             CharacterKind::Panda,
             CharacterKind::Bee,
             CharacterKind::Penguin,
+            CharacterKind::Chick,
         ] {
             let loadout = LoadoutContext::for_character(
                 character,
@@ -2750,6 +2856,215 @@ mod ultimate_mp_tests {
             );
             assert_eq!(action.technique_id, Some(expected.id), "{character:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_technique_mp_tests {
+    use super::*;
+
+    fn loadout(character: CharacterKind) -> LoadoutContext {
+        LoadoutContext::for_character(
+            character,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        )
+    }
+
+    fn entity(index: u32) -> Entity {
+        Entity::from_raw_u32(index).expect("test entity index should be valid")
+    }
+
+    #[test]
+    fn chick_grounded_x_starts_and_drains_fifteen_percent_mp() {
+        let catalog = CharacterMoveCatalog::default();
+        let technique = raw_technique_for_loadout_in_catalog(
+            TechniqueButton::B,
+            true,
+            loadout(CharacterKind::Chick),
+            &catalog,
+        )
+        .unwrap();
+        let mut stats = FighterStats::default();
+        let mut action = FighterActionState::default();
+
+        assert_eq!(technique.id, TechniqueId::ChickHeavy);
+        assert_eq!(technique.stamina_cost, CHICK_X_STAMINA_COST);
+        assert!(try_start_raw_technique(&mut stats, &mut action, technique));
+
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickHeavy));
+        assert_eq!(stats.stamina, MAX_STAMINA - CHICK_X_STAMINA_COST);
+    }
+
+    #[test]
+    fn chick_grounded_x_does_not_start_below_cost() {
+        let catalog = CharacterMoveCatalog::default();
+        let technique = raw_technique_for_loadout_in_catalog(
+            TechniqueButton::B,
+            true,
+            loadout(CharacterKind::Chick),
+            &catalog,
+        )
+        .unwrap();
+        let mut stats = FighterStats {
+            stamina: CHICK_X_STAMINA_COST - 0.1,
+            ..default()
+        };
+        let mut action = FighterActionState::default();
+
+        assert!(!try_start_raw_technique(&mut stats, &mut action, technique));
+        assert_eq!(action.technique_id, None);
+        assert_eq!(action.action, FighterAction::Idle);
+        assert_eq!(stats.stamina, CHICK_X_STAMINA_COST - 0.1);
+    }
+
+    #[test]
+    fn other_grounded_heavy_attacks_remain_free() {
+        let catalog = CharacterMoveCatalog::default();
+        let technique = raw_technique_for_loadout_in_catalog(
+            TechniqueButton::B,
+            true,
+            loadout(CharacterKind::Cat),
+            &catalog,
+        )
+        .unwrap();
+        let mut stats = FighterStats::default();
+        let mut action = FighterActionState::default();
+
+        assert_eq!(technique.id, TechniqueId::CatHeavy);
+        assert_eq!(technique.stamina_cost, 0.0);
+        assert!(try_start_raw_technique(&mut stats, &mut action, technique));
+
+        assert_eq!(action.technique_id, Some(TechniqueId::CatHeavy));
+        assert_eq!(stats.stamina, MAX_STAMINA);
+    }
+
+    #[test]
+    fn chick_grounded_c_requires_owned_controllable_egg() {
+        let catalog = CharacterMoveCatalog::default();
+        let technique = raw_technique_for_loadout_in_catalog(
+            TechniqueButton::A,
+            true,
+            loadout(CharacterKind::Chick),
+            &catalog,
+        )
+        .unwrap();
+        let owner = entity(1);
+        let other_owner = entity(2);
+
+        assert_eq!(technique.id, TechniqueId::ChickLight1);
+        assert!(!raw_technique_special_requirement_met(owner, technique, []));
+        assert!(!raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(other_owner, ChickSkillKind::OrbitEgg)]
+        ));
+        assert!(!raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(owner, ChickSkillKind::ShellChip)]
+        ));
+        assert!(raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(owner, ChickSkillKind::OrbitEgg)]
+        ));
+        assert!(raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
+        assert!(!raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(owner, ChickSkillKind::OrbitEggReturn)]
+        ));
+        assert!(!raw_technique_special_requirement_met(
+            owner,
+            technique,
+            [(other_owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
+    }
+
+    #[test]
+    fn other_grounded_light_attacks_do_not_require_orbit_egg() {
+        let catalog = CharacterMoveCatalog::default();
+        let technique = raw_technique_for_loadout_in_catalog(
+            TechniqueButton::A,
+            true,
+            loadout(CharacterKind::Cat),
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(technique.id, TechniqueId::CatLight1);
+        assert!(raw_technique_special_requirement_met(
+            entity(1),
+            technique,
+            []
+        ));
+    }
+
+    #[test]
+    fn chick_c_recall_interrupt_restarts_only_from_owned_launch() {
+        let owner = entity(1);
+        let other_owner = entity(2);
+        let chick_action = FighterActionState {
+            action: FighterAction::LightAttack1,
+            technique_id: Some(TechniqueId::ChickLight1),
+            ..default()
+        };
+        let input = FighterInput {
+            raw_light_pressed: true,
+            ..default()
+        };
+
+        assert!(chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &input,
+            [(owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &input,
+            []
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &input,
+            [(other_owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &input,
+            [(owner, ChickSkillKind::OrbitEgg)]
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &input,
+            [(owner, ChickSkillKind::OrbitEggReturn)]
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &FighterActionState {
+                action: FighterAction::LightAttack1,
+                technique_id: Some(TechniqueId::CatLight1),
+                ..default()
+            },
+            &input,
+            [(owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
+        assert!(!chick_light_recall_interrupt_requested(
+            owner,
+            &chick_action,
+            &FighterInput::default(),
+            [(owner, ChickSkillKind::OrbitEggLaunch)]
+        ));
     }
 }
 
@@ -3006,6 +3321,13 @@ fn start_jump_attack(
         motor.velocity.y = motor.velocity.y.max(PENGUIN_JUMP_SNOWFLAKE_MIN_FALL_SPEED);
         motor.jump_attack_landing_recovery = false;
         clear_bee_air_dash_state(motor);
+    } else if technique.id == TechniqueId::ChickJumpAttack {
+        motor.velocity.x = facing.x * CHICK_JUMP_C_FORWARD_SPEED;
+        motor.velocity.z = facing.z * CHICK_JUMP_C_FORWARD_SPEED;
+        motor.velocity.y =
+            (motor.velocity.y + CHICK_JUMP_C_UPWARD_BOOST).max(CHICK_JUMP_C_MIN_UP_SPEED);
+        motor.jump_attack_landing_recovery = true;
+        clear_bee_air_dash_state(motor);
     } else {
         motor.velocity.x = facing.x * JUMP_ATTACK_DIVE_FORWARD_SPEED;
         motor.velocity.z = facing.z * JUMP_ATTACK_DIVE_FORWARD_SPEED;
@@ -3042,6 +3364,12 @@ fn start_jump_heavy_attack(
     } else if technique.id == TechniqueId::PenguinJumpHeavy {
         motor.velocity.y = motor.velocity.y.max(PENGUIN_JUMP_SNOWFLAKE_MIN_FALL_SPEED);
         motor.jump_attack_landing_recovery = false;
+    } else if technique.id == TechniqueId::ChickJumpHeavy {
+        let facing = motor.facing.normalize_or_zero();
+        motor.velocity.x = facing.x * CHICK_FRESH_EGG_RIDE_FORWARD_SPEED;
+        motor.velocity.z = facing.z * CHICK_FRESH_EGG_RIDE_FORWARD_SPEED;
+        motor.velocity.y = CHICK_FRESH_EGG_RIDE_LIFT_SPEED;
+        motor.jump_attack_landing_recovery = false;
     } else {
         motor.velocity.x *= JUMP_HEAVY_AIR_STALL_PLANAR_SCALE;
         motor.velocity.z *= JUMP_HEAVY_AIR_STALL_PLANAR_SCALE;
@@ -3057,6 +3385,25 @@ fn start_jump_heavy_attack(
     motor.air_attack_used = true;
     clear_bee_air_dash_state(motor);
     set_technique_action(action, technique);
+}
+
+fn try_start_chick_ride_jump_c_cancel(
+    motor: &mut FighterMotor,
+    action: &mut FighterActionState,
+    input: &FighterInput,
+    loadout: LoadoutContext,
+    character_catalog: &CharacterMoveCatalog,
+) -> bool {
+    if motor.grounded
+        || action.technique_id != Some(TechniqueId::ChickJumpHeavy)
+        || action.action != FighterAction::JumpHeavyAttack
+        || !input.raw_light_pressed
+    {
+        return false;
+    }
+
+    start_jump_attack(motor, action, loadout, character_catalog);
+    true
 }
 
 fn try_start_bee_air_dash_x_shot(
@@ -3407,6 +3754,15 @@ fn character_body_motion_profile_for_state(
         profile.turn_brake = 0.1;
         profile.gravity_scale *= 0.86;
         profile.fall_gravity_scale *= 1.08;
+        profile.landing_input_scale = 0.0;
+        profile.stop_snap_speed = 0.01;
+    } else if action.technique_id == Some(TechniqueId::ChickJumpHeavy) {
+        profile.input_scale = 0.0;
+        profile.max_speed_bonus = CHICK_FRESH_EGG_RIDE_FORWARD_SPEED;
+        profile.air_friction = 0.08;
+        profile.stop_friction = 0.08;
+        profile.gravity_scale *= 0.38;
+        profile.fall_gravity_scale *= 0.66;
         profile.landing_input_scale = 0.0;
         profile.stop_snap_speed = 0.01;
     } else if (motor.bee_air_dash_motion_active
@@ -5096,9 +5452,7 @@ fn technique_visual_pose(action: &FighterActionState) -> Option<FighterVisualPos
         TechniqueId::CatUltimateRush => ultimate_rush_pose(action.elapsed),
         TechniqueId::BeeUltimateStartup
         | TechniqueId::BeeLegacyUltimateStartup
-        | TechniqueId::BeeLegacyUltimateRush => {
-            bee_ultimate_swarm_pose(action.elapsed)
-        }
+        | TechniqueId::BeeLegacyUltimateRush => bee_ultimate_swarm_pose(action.elapsed),
         TechniqueId::CatDashAttack => FighterVisualPose {
             pitch: -0.34,
             yaw: 0.0,
@@ -7444,6 +7798,50 @@ mod tests {
     }
 
     #[test]
+    fn chick_jump_c_launches_upward_fresh_egg_drop_flight() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let starting_up_speed = JUMP_SPEED * crate::characters::chick_body_profile().jump_impulse;
+        let mut action = FighterActionState {
+            action: FighterAction::Jumping,
+            ..default()
+        };
+        let mut motor = FighterMotor {
+            grounded: false,
+            facing: Vec3::Z,
+            velocity: Vec3::new(2.0, starting_up_speed, 0.5),
+            dash_jump_carry_timer: 0.2,
+            dash_jump_carry_speed_limit: 6.0,
+            jump_attack_landing_recovery: true,
+            bee_air_dash_motion_active: true,
+            ..default()
+        };
+
+        start_jump_attack(&mut motor, &mut action, loadout, &catalog);
+
+        assert_eq!(action.action, FighterAction::JumpAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpAttack));
+        assert!(!motor.grounded);
+        assert!(motor.air_attack_used);
+        assert!(motor.jump_attack_landing_recovery);
+        assert!(!motor.bee_air_dash_motion_active);
+        assert_eq!(motor.dash_jump_carry_timer, 0.0);
+        assert_eq!(motor.dash_jump_carry_speed_limit, 0.0);
+        assert_eq!(motor.velocity.x, 0.0);
+        assert_eq!(motor.velocity.z, CHICK_JUMP_C_FORWARD_SPEED);
+        assert_eq!(
+            motor.velocity.y,
+            starting_up_speed + CHICK_JUMP_C_UPWARD_BOOST
+        );
+        assert!(motor.velocity.y > starting_up_speed);
+        assert!(motor.velocity.y > BEE_JUMP_ATTACK_UP_SPEED);
+    }
+
+    #[test]
     fn penguin_jump_heavy_prepares_snowflake_teleport_without_dive() {
         let catalog = CharacterMoveCatalog::default();
         let loadout = LoadoutContext::for_character(
@@ -7511,6 +7909,133 @@ mod tests {
             profile.gravity_scale < body_motion_profile(FighterAction::JumpAttack).gravity_scale
         );
         assert!(before_speed - planar_velocity(&motor).length() < 0.03);
+    }
+
+    #[test]
+    fn chick_jump_x_starts_fresh_egg_ride_flight() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut action = FighterActionState {
+            action: FighterAction::Jumping,
+            ..default()
+        };
+        let mut motor = FighterMotor {
+            grounded: false,
+            facing: Vec3::X,
+            velocity: Vec3::new(1.0, -4.0, 2.0),
+            dash_jump_carry_timer: 0.2,
+            dash_jump_carry_speed_limit: 6.0,
+            jump_attack_landing_recovery: true,
+            bee_air_dash_motion_active: true,
+            ..default()
+        };
+
+        start_jump_heavy_attack(&mut motor, &mut action, loadout, &catalog);
+
+        assert_eq!(action.action, FighterAction::JumpHeavyAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpHeavy));
+        assert!(!motor.grounded);
+        assert!(motor.air_attack_used);
+        assert!(!motor.jump_attack_landing_recovery);
+        assert!(!motor.bee_air_dash_motion_active);
+        assert_eq!(motor.dash_jump_carry_timer, 0.0);
+        assert_eq!(motor.dash_jump_carry_speed_limit, 0.0);
+        assert_eq!(motor.velocity.x, CHICK_FRESH_EGG_RIDE_FORWARD_SPEED);
+        assert_eq!(motor.velocity.z, 0.0);
+        assert_eq!(motor.velocity.y, CHICK_FRESH_EGG_RIDE_LIFT_SPEED);
+    }
+
+    #[test]
+    fn chick_jump_x_can_cancel_to_jump_c_climb() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut action = FighterActionState {
+            action: FighterAction::JumpHeavyAttack,
+            technique_id: Some(TechniqueId::ChickJumpHeavy),
+            ..default()
+        };
+        let mut motor = FighterMotor {
+            grounded: false,
+            facing: Vec3::Z,
+            velocity: Vec3::new(
+                0.0,
+                CHICK_FRESH_EGG_RIDE_LIFT_SPEED,
+                CHICK_FRESH_EGG_RIDE_FORWARD_SPEED,
+            ),
+            air_attack_used: true,
+            ..default()
+        };
+        let input = FighterInput {
+            raw_light_pressed: true,
+            heavy_held: true,
+            ..default()
+        };
+
+        assert!(try_start_chick_ride_jump_c_cancel(
+            &mut motor,
+            &mut action,
+            &input,
+            loadout,
+            &catalog,
+        ));
+
+        assert_eq!(action.action, FighterAction::JumpAttack);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickJumpAttack));
+        assert!(motor.air_attack_used);
+        assert!(motor.jump_attack_landing_recovery);
+        assert_eq!(motor.velocity.x, 0.0);
+        assert_eq!(motor.velocity.z, CHICK_JUMP_C_FORWARD_SPEED);
+        assert_eq!(motor.velocity.y, CHICK_JUMP_C_MIN_UP_SPEED);
+        assert!(motor.velocity.y > CHICK_FRESH_EGG_RIDE_LIFT_SPEED);
+    }
+
+    #[test]
+    fn chick_jump_x_motion_profile_preserves_fresh_egg_ride_flight() {
+        let action = FighterActionState {
+            action: FighterAction::JumpHeavyAttack,
+            technique_id: Some(TechniqueId::ChickJumpHeavy),
+            ..default()
+        };
+        let body = crate::characters::chick_body_profile();
+        let mut motor = FighterMotor {
+            grounded: false,
+            velocity: Vec3::new(
+                CHICK_FRESH_EGG_RIDE_FORWARD_SPEED,
+                CHICK_FRESH_EGG_RIDE_LIFT_SPEED,
+                0.0,
+            ),
+            ..default()
+        };
+        let profile = character_body_motion_profile_for_state(
+            &action,
+            &motor,
+            FighterStyleKind::Anchor,
+            body,
+        );
+        let base_profile = character_body_motion_profile(
+            FighterAction::JumpHeavyAttack,
+            FighterStyleKind::Anchor,
+            body,
+        );
+        let speed_limit = planar_speed_limit(&motor, false, body.air_speed, profile);
+        let before_speed = planar_velocity(&motor).length();
+        let damp = (1.0 - profile.stop_friction * 0.016).clamp(0.0, 1.0);
+        motor.velocity.x *= damp;
+
+        assert!(speed_limit > CHICK_FRESH_EGG_RIDE_FORWARD_SPEED);
+        assert_eq!(profile.input_scale, 0.0);
+        assert!(profile.stop_friction < base_profile.stop_friction);
+        assert!(profile.gravity_scale < base_profile.gravity_scale);
+        assert!(profile.fall_gravity_scale < base_profile.fall_gravity_scale);
+        assert!(before_speed - planar_velocity(&motor).length() < 0.02);
     }
 
     #[test]

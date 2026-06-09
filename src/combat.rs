@@ -7,6 +7,10 @@ use crate::bee_skills::{
 };
 use crate::body_collision::{FighterBodyBox, fighter_body_box, sphere_body_box_contact};
 use crate::characters::{CharacterKind, CharacterMoveCatalog, CharacterMoveSlot, FighterCharacter};
+use crate::chick_skills::{
+    ActiveChickSkill, ActiveChickSkillSnapshot, CHICK_EGG_HALF_ASSET, ChickSkillAssets,
+    spawn_chick_skill,
+};
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, combat_sfx_kind_for_impact};
 use crate::components::{
     AttackKind, Fighter, FighterAction, FighterActionState, FighterGrabState, FighterInput,
@@ -27,8 +31,8 @@ use crate::feel::CombatFeelTuning;
 use crate::game_state::{Hitstop, MatchState, MatchTelemetry, RulePreset};
 use crate::penguin_skills::{
     ActivePenguinSkill, PENGUIN_FISH_BONES_ASSET, PENGUIN_POPSICLE_ASSET, PENGUIN_SNOW_PILE_ASSET,
-    PENGUIN_SNOWFLAKE_ASSET, PENGUIN_SPRING_ASSET, PenguinSkillAssets, spawn_penguin_skill,
-    penguin_snowflake_swap_target,
+    PENGUIN_SNOWFLAKE_ASSET, PENGUIN_SPRING_ASSET, PenguinSkillAssets,
+    penguin_snowflake_swap_target, spawn_penguin_skill,
 };
 use crate::reactions::{
     QueuedAftermath, ReactionFamilyId, ReactionKind, ReactionProfile, reaction_profile_for_family,
@@ -194,6 +198,10 @@ pub fn setup_combat_visual_assets(mut commands: Commands, asset_server: Res<Asse
             (
                 PENGUIN_SNOWFLAKE_ASSET,
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset(PENGUIN_SNOWFLAKE_ASSET)),
+            ),
+            (
+                CHICK_EGG_HALF_ASSET,
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset(CHICK_EGG_HALF_ASSET)),
             ),
         ],
     });
@@ -784,6 +792,16 @@ fn hitbox_scene_for_payload(payload_id: AttackPayloadId) -> Option<HitboxSceneDe
             lift: 0.18,
             orientation: HitboxSceneOrientation::Facing,
         }),
+        AttackPayloadId::ChickShellScoot | AttackPayloadId::ChickShellScramble => {
+            Some(HitboxSceneDef {
+                asset_path: CHICK_EGG_HALF_ASSET,
+                scale: 2.6,
+                yaw_offset: std::f32::consts::FRAC_PI_2,
+                pitch: -0.16,
+                lift: 0.02,
+                orientation: HitboxSceneOrientation::Facing,
+            })
+        }
         payload_id if payload_is_jump_fish(payload_id) => Some(HitboxSceneDef {
             asset_path: FOOD_FISH_ASSET,
             scale: FOOD_FISH_SCALE,
@@ -908,6 +926,7 @@ pub fn spawn_attack_hitboxes(
     mut commands: Commands,
     visual_assets: Res<CombatVisualAssets>,
     bee_skill_assets: Res<BeeSkillAssets>,
+    chick_skill_assets: Res<ChickSkillAssets>,
     penguin_skill_assets: Res<PenguinSkillAssets>,
     effect_assets: Res<EffectAssets>,
     hitstop: Res<Hitstop>,
@@ -916,6 +935,7 @@ pub fn spawn_attack_hitboxes(
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
     active_penguin_skills: Query<(Entity, &ActivePenguinSkill, &Transform), Without<Fighter>>,
+    active_chick_skills: Query<(Entity, &ActiveChickSkill, &Transform), Without<Fighter>>,
     mut fighters: ParamSet<(
         Query<(Entity, &Fighter, &Transform), With<Fighter>>,
         Query<
@@ -960,6 +980,17 @@ pub fn spawn_attack_hitboxes(
             skill_transform.translation,
         ));
     }
+    let active_chick_skill_snapshots: Vec<_> = active_chick_skills
+        .iter()
+        .map(
+            |(skill_entity, skill, skill_transform)| ActiveChickSkillSnapshot {
+                entity: skill_entity,
+                owner: skill.owner,
+                kind: skill.kind,
+                position: skill_transform.translation,
+            },
+        )
+        .collect();
 
     for (
         entity,
@@ -1124,12 +1155,12 @@ pub fn spawn_attack_hitboxes(
 
             match event.kind {
                 MoveTimelineEventKind::SpawnBeeSkill(skill_id) => {
-                    let bee_skill_spawn_mode = if technique.id == TechniqueId::BeeLegacyUltimateStartup
-                    {
-                        BeeSkillSpawnMode::AreaSwarm
-                    } else {
-                        BeeSkillSpawnMode::Standard
-                    };
+                    let bee_skill_spawn_mode =
+                        if technique.id == TechniqueId::BeeLegacyUltimateStartup {
+                            BeeSkillSpawnMode::AreaSwarm
+                        } else {
+                            BeeSkillSpawnMode::Standard
+                        };
                     spawn_bee_skill(
                         &mut commands,
                         &bee_skill_assets,
@@ -1200,6 +1231,30 @@ pub fn spawn_attack_hitboxes(
                         );
                         stats.hud_flash = stats.hud_flash.max(0.12);
                     }
+                }
+                MoveTimelineEventKind::SpawnChickSkill(skill_id) => {
+                    spawn_chick_skill(
+                        &mut commands,
+                        &chick_skill_assets,
+                        &effect_assets,
+                        &state,
+                        entity,
+                        fighter.id,
+                        style.kind,
+                        transform.translation,
+                        motor.facing,
+                        input.aim,
+                        stats.item_size_multiplier(),
+                        skill_id,
+                        &skill_targets,
+                        &active_chick_skill_snapshots,
+                    );
+                    feedback.push_feedback_cue(
+                        "release_special_projectile",
+                        ImpactSource::Projectile,
+                        24,
+                    );
+                    stats.hud_flash = stats.hud_flash.max(0.12);
                 }
                 MoveTimelineEventKind::Feedback(phase, cue) => {
                     let phase_profile = timeline_feedback_profile(phase, cue);
@@ -1379,7 +1434,9 @@ fn penguin_slope_ultimate_attacker_recoil_direction(
 
     owner_position
         .zip(contact_point)
-        .and_then(|(owner_position, contact_point)| planar_direction(contact_point - owner_position))
+        .and_then(|(owner_position, contact_point)| {
+            planar_direction(contact_point - owner_position)
+        })
         .or_else(|| planar_direction(fallback_facing))
 }
 
@@ -3171,8 +3228,14 @@ mod tests {
             light_fire_punch_visual_side(TechniqueId::PigLight2),
             Some(1.0)
         );
-        assert_eq!(light_fire_punch_visual_side(TechniqueId::PenguinLight1), None);
-        assert_eq!(light_fire_punch_visual_side(TechniqueId::PenguinLight2), None);
+        assert_eq!(
+            light_fire_punch_visual_side(TechniqueId::PenguinLight1),
+            None
+        );
+        assert_eq!(
+            light_fire_punch_visual_side(TechniqueId::PenguinLight2),
+            None
+        );
         assert_eq!(light_fire_punch_visual_side(TechniqueId::CatHeavy), None);
     }
 
@@ -4767,6 +4830,8 @@ mod tests {
             hitbox_scene_for_payload(AttackPayloadId::PenguinPopsiclePeck).unwrap();
         let penguin_snowflake =
             hitbox_scene_for_payload(AttackPayloadId::PenguinUltimateBomb).unwrap();
+        let chick_scoot = hitbox_scene_for_payload(AttackPayloadId::ChickShellScoot).unwrap();
+        let chick_scramble = hitbox_scene_for_payload(AttackPayloadId::ChickShellScramble).unwrap();
 
         assert_eq!(heavy_step.asset_path, FOOD_FISH_ASSET);
         assert_eq!(beat1.asset_path, FOOD_FISH_ASSET);
@@ -4786,6 +4851,10 @@ mod tests {
         assert_eq!(penguin_sled.asset_path, HOLIDAY_SLED_ASSET);
         assert_eq!(penguin_popsicle.asset_path, PENGUIN_SPRING_ASSET);
         assert_eq!(penguin_snowflake.asset_path, PENGUIN_SNOWFLAKE_ASSET);
+        assert_eq!(chick_scoot.asset_path, CHICK_EGG_HALF_ASSET);
+        assert_eq!(chick_scramble.asset_path, CHICK_EGG_HALF_ASSET);
+        assert_eq!(chick_scoot.orientation, HitboxSceneOrientation::Facing);
+        assert!(chick_scramble.scale > 2.0);
         assert_eq!(
             pig_swing.orientation,
             HitboxSceneOrientation::HamMeatOutwardHalfCircle
@@ -4816,6 +4885,7 @@ mod tests {
         assert!(std::path::Path::new("assets/holiday/kenney_holiday_kit/sled.glb").exists());
         assert!(std::path::Path::new("assets/holiday/kenney_holiday_kit/snowflake-a.glb").exists());
         assert!(std::path::Path::new("assets/holiday/kenney_holiday_kit/snow-pile.glb").exists());
+        assert!(std::path::Path::new("assets/food/kenney_food_kit/egg-half.glb").exists());
         assert!(hitbox_scene_for_payload(AttackPayloadId::AsBeat1).is_none());
     }
 

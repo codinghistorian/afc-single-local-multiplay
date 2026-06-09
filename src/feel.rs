@@ -592,9 +592,9 @@ fn timeline_event_key(
     Some(match event.kind {
         MoveTimelineEventKind::Attack(payload) => TimelineEventKey::Attack(payload),
         MoveTimelineEventKind::ChargedAttack { full, .. } => TimelineEventKey::Attack(full),
-        MoveTimelineEventKind::SpawnBeeSkill(_) | MoveTimelineEventKind::SpawnPenguinSkill(_) => {
-            return None;
-        }
+        MoveTimelineEventKind::SpawnBeeSkill(_)
+        | MoveTimelineEventKind::SpawnPenguinSkill(_)
+        | MoveTimelineEventKind::SpawnChickSkill(_) => return None,
         MoveTimelineEventKind::Feedback(phase, _) => TimelineEventKey::Feedback(phase),
         MoveTimelineEventKind::Motion { .. } => {
             TimelineEventKey::Motion(motion_event_index(technique, event_index)?)

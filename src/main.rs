@@ -5,6 +5,7 @@ mod body_collision;
 mod bot;
 mod camera;
 mod characters;
+mod chick_skills;
 mod combat;
 mod combat_sfx;
 mod components;
@@ -121,6 +122,7 @@ fn main() {
                 effects::setup_effect_assets,
                 combat::setup_combat_visual_assets,
                 bee_skills::setup_bee_skill_assets,
+                chick_skills::setup_chick_skill_assets,
                 penguin_skills::setup_penguin_skill_assets,
                 combat_sfx::setup_combat_sfx_assets,
                 characters::setup_character_move_catalog,
@@ -232,6 +234,7 @@ fn main() {
                 combat::update_hitboxes,
                 specials::update_specials,
                 bee_skills::update_bee_skills,
+                chick_skills::update_chick_skills,
                 penguin_skills::update_penguin_skills,
                 penguin_skills::update_penguin_surfaces,
                 arena::update_arena_hazards,

@@ -34,11 +34,12 @@ const USER_MODE_RESULT_MENU_DELAY_SECS: f32 = 1.65;
 const USER_MODE_FILTER_RESET_SECS: f32 = 0.45;
 const USER_MODE_RESULT_SFX_PRIORITY: u8 = 120;
 const USER_MODE_CHOICE_FONT_SIZE: f32 = 23.8;
-const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 4] = [
+const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
     CharacterKind::Cat,
     CharacterKind::Pig,
     CharacterKind::Bee,
     CharacterKind::Penguin,
+    CharacterKind::Chick,
 ];
 const USER_MODE_KEY_ROW_FONT_SIZE: f32 = 18.0;
 const USER_MODE_KEY_ROW_HEIGHT: f32 = 34.0;
@@ -283,6 +284,7 @@ fn parse_web_character(value: Option<&str>) -> Option<CharacterKind> {
         "pig" => Some(CharacterKind::Pig),
         "bee" => Some(CharacterKind::Bee),
         "penguin" => Some(CharacterKind::Penguin),
+        "chick" => Some(CharacterKind::Chick),
         _ => None,
     }
 }
@@ -2121,6 +2123,7 @@ fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
         CharacterKind::Pig => CharacterKind::Cat,
         CharacterKind::Bee => CharacterKind::Pig,
         CharacterKind::Penguin => CharacterKind::Pig,
+        CharacterKind::Chick => CharacterKind::Pig,
         _ => CharacterKind::Pig,
     }
 }
@@ -2149,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_cycles_cat_pig_bee_and_penguin() {
+    fn selection_cycles_cat_pig_bee_penguin_and_chick() {
         let mut user_mode = UserModeState::default();
         assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
 
@@ -2163,13 +2166,16 @@ mod tests {
         assert_eq!(user_mode.selected_character(), CharacterKind::Penguin);
 
         user_mode.select_next();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
+
+        user_mode.select_next();
         assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
 
         user_mode.select_previous();
-        assert_eq!(user_mode.selected_character(), CharacterKind::Penguin);
+        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
 
         user_mode.select_previous();
-        assert_eq!(user_mode.selected_character(), CharacterKind::Bee);
+        assert_eq!(user_mode.selected_character(), CharacterKind::Penguin);
     }
 
     #[test]
@@ -2481,6 +2487,10 @@ mod tests {
         );
         assert_eq!(
             opposite_user_mode_character(CharacterKind::Penguin),
+            CharacterKind::Pig
+        );
+        assert_eq!(
+            opposite_user_mode_character(CharacterKind::Chick),
             CharacterKind::Pig
         );
     }

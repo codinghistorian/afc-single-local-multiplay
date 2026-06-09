@@ -84,6 +84,15 @@ pub enum TechniqueId {
     PenguinJumpHeavy,
     PenguinUltimateStartup,
     PenguinUltimateRush,
+    ChickLight1,
+    ChickLight2,
+    ChickComboFinisher,
+    ChickHeavy,
+    ChickHeavy2,
+    ChickDashAttack,
+    ChickJumpAttack,
+    ChickJumpHeavy,
+    ChickUltimateStartup,
     Grab,
     Throw,
     GuardCounter,
@@ -174,6 +183,15 @@ impl TechniqueId {
             | Self::PenguinJumpHeavy
             | Self::PenguinUltimateStartup
             | Self::PenguinUltimateRush => Some(CharacterKind::Penguin),
+            Self::ChickLight1
+            | Self::ChickLight2
+            | Self::ChickComboFinisher
+            | Self::ChickHeavy
+            | Self::ChickHeavy2
+            | Self::ChickDashAttack
+            | Self::ChickJumpAttack
+            | Self::ChickJumpHeavy
+            | Self::ChickUltimateStartup => Some(CharacterKind::Chick),
             Self::Grab
             | Self::Throw
             | Self::GuardCounter
@@ -268,6 +286,15 @@ impl TechniqueId {
             Self::PenguinJumpHeavy => "penguin_snowflake_warp",
             Self::PenguinUltimateStartup => "penguin_ultimate_startup",
             Self::PenguinUltimateRush => "penguin_ultimate_rush",
+            Self::ChickLight1 => "chick_orbit_egg_launch",
+            Self::ChickLight2 => "chick_sunny_flip",
+            Self::ChickComboFinisher => "chick_shell_scramble",
+            Self::ChickHeavy => "chick_orbit_egg",
+            Self::ChickHeavy2 => "chick_eggplant_impostor",
+            Self::ChickDashAttack => "chick_shell_scoot",
+            Self::ChickJumpAttack => "chick_fresh_egg_drop",
+            Self::ChickJumpHeavy => "chick_fresh_egg_ride",
+            Self::ChickUltimateStartup => "chick_breakfast_barrage",
             Self::Grab => "grab",
             Self::Throw => "throw",
             Self::GuardCounter => "guard_counter",
@@ -323,6 +350,22 @@ pub enum PenguinSkillId {
     SnowflakeShot,
     SnowflakeSwapShot,
     SnowflakeBurst,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChickSkillId {
+    ShellPeck,
+    SunnyFlip,
+    ShellScramble,
+    EggCupMortar,
+    OrbitEgg,
+    OrbitEggLaunch,
+    EggplantRoll,
+    ShellScoot,
+    FreshEggDrop,
+    FreshEggRide,
+    SunnySideSplash,
+    OmeletField,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -501,6 +544,17 @@ pub enum AttackPayloadId {
     PenguinSnowBoulder,
     PenguinSnowmanDrop,
     PenguinBodySlamShockwave,
+    ChickShellChip,
+    ChickFriedEggDisc,
+    ChickEggCupMortar,
+    ChickOrbitEgg,
+    ChickOrbitEggLaunch,
+    ChickFreshEggDrop,
+    ChickEggplantRoll,
+    ChickSunnySplash,
+    ChickOmeletField,
+    ChickShellScoot,
+    ChickShellScramble,
     GrabCatch,
     DashStrike,
     DashShoulderBeat,
@@ -823,6 +877,7 @@ pub enum MoveTimelineEventKind {
     },
     SpawnBeeSkill(BeeSkillId),
     SpawnPenguinSkill(PenguinSkillId),
+    SpawnChickSkill(ChickSkillId),
     Feedback(FeedbackPhase, &'static str),
     Motion {
         forward: f32,
@@ -1048,6 +1103,9 @@ const BEE_A_S_PREV: &[TechniqueId] = &[TechniqueId::BeeLight1];
 const BEE_A_SS_PREV: &[TechniqueId] = &[TechniqueId::BeeLight2];
 const PENGUIN_A_S_PREV: &[TechniqueId] = &[TechniqueId::PenguinLight1];
 const PENGUIN_X_STEP_PREV: &[TechniqueId] = &[];
+const CHICK_A_S_PREV: &[TechniqueId] = &[TechniqueId::ChickLight1];
+const CHICK_A_SS_PREV: &[TechniqueId] = &[TechniqueId::ChickLight2];
+const CHICK_X_STEP_PREV: &[TechniqueId] = &[TechniqueId::ChickHeavy];
 const NO_TECHNIQUE_PREDICATES: &[TechniquePredicate] = &[];
 const A_CHAIN_ALL_PREDICATES: &[TechniquePredicate] = &[
     TechniquePredicate::Button(TechniqueButton::A),
@@ -2885,6 +2943,28 @@ const PENGUIN_ULTIMATE_SLOPE_EVENTS: [MoveTimelineEvent; 6] = [
     timeline_event(680, MoveTimelineEventKind::Recover),
 ];
 
+const CHICK_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 11] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_breakfast_barrage"),
+    chick_skill_event(80, ChickSkillId::OmeletField),
+    feedback_event(
+        130,
+        FeedbackPhase::PreHit,
+        "release_chick_breakfast_barrage",
+    ),
+    chick_skill_event(190, ChickSkillId::ShellPeck),
+    chick_skill_event(310, ChickSkillId::EggCupMortar),
+    chick_skill_event(430, ChickSkillId::FreshEggDrop),
+    chick_skill_event(560, ChickSkillId::SunnySideSplash),
+    chick_skill_event(700, ChickSkillId::ShellScramble),
+    chick_skill_event(840, ChickSkillId::EggplantRoll),
+    feedback_event(
+        980,
+        FeedbackPhase::Aftermath,
+        "recover_chick_breakfast_barrage",
+    ),
+    timeline_event(1180, MoveTimelineEventKind::Recover),
+];
+
 const PANDA_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 6] = [
     feedback_event(0, FeedbackPhase::Startup, "startup_panda_ultimate_beast"),
     feedback_event(260, FeedbackPhase::PreHit, "trail_panda_ultimate_catch"),
@@ -3341,6 +3421,119 @@ const PENGUIN_JUMP_HEAVY_EVENTS: [MoveTimelineEvent; 5] = [
     timeline_event(140, MoveTimelineEventKind::Recover),
 ];
 
+const CHICK_LIGHT1_EVENTS: [MoveTimelineEvent; 5] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_special_cast"),
+    chick_skill_event(0, ChickSkillId::OrbitEggLaunch),
+    feedback_event(70, FeedbackPhase::PreHit, "release_special_cast"),
+    feedback_event(170, FeedbackPhase::Aftermath, "recover_special_cast"),
+    timeline_event(260, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_LIGHT2_EVENTS: [MoveTimelineEvent; 6] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_sunny_flip"),
+    feedback_event(110, FeedbackPhase::PreHit, "trail_chick_sunny_flip"),
+    chick_skill_event(145, ChickSkillId::SunnyFlip),
+    feedback_event(315, FeedbackPhase::Aftermath, "recover_chick_sunny_flip"),
+    timeline_event(350, MoveTimelineEventKind::NextTech),
+    timeline_event(460, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_COMBO_FINISHER_EVENTS: [MoveTimelineEvent; 10] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_shell_scramble"),
+    timeline_event(
+        80,
+        MoveTimelineEventKind::Motion {
+            forward: 5.2,
+            lift: 0.0,
+        },
+    ),
+    feedback_event(120, FeedbackPhase::PreHit, "trail_chick_shell_scramble"),
+    chick_skill_event(145, ChickSkillId::ShellScramble),
+    attack_event(165, AttackPayloadId::ChickShellScramble),
+    timeline_event(
+        245,
+        MoveTimelineEventKind::Motion {
+            forward: 2.6,
+            lift: 0.0,
+        },
+    ),
+    timeline_event(360, MoveTimelineEventKind::Stop),
+    feedback_event(
+        430,
+        FeedbackPhase::Aftermath,
+        "recover_chick_shell_scramble",
+    ),
+    timeline_event(610, MoveTimelineEventKind::NextTech),
+    timeline_event(760, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_HEAVY_EVENTS: [MoveTimelineEvent; 6] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_special_cast"),
+    feedback_event(150, FeedbackPhase::PreHit, "release_special_cast"),
+    chick_skill_event(180, ChickSkillId::OrbitEgg),
+    feedback_event(420, FeedbackPhase::Aftermath, "recover_special_cast"),
+    timeline_event(520, MoveTimelineEventKind::NextTech),
+    timeline_event(720, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_HEAVY2_EVENTS: [MoveTimelineEvent; 6] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_eggplant_impostor"),
+    feedback_event(
+        230,
+        FeedbackPhase::PreHit,
+        "release_chick_eggplant_impostor",
+    ),
+    chick_skill_event(280, ChickSkillId::EggplantRoll),
+    timeline_event(360, MoveTimelineEventKind::Stop),
+    feedback_event(
+        610,
+        FeedbackPhase::Aftermath,
+        "recover_chick_eggplant_impostor",
+    ),
+    timeline_event(900, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_DASH_ATTACK_EVENTS: [MoveTimelineEvent; 8] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_shell_scoot"),
+    timeline_event(
+        40,
+        MoveTimelineEventKind::Motion {
+            forward: 5.8,
+            lift: 0.0,
+        },
+    ),
+    feedback_event(75, FeedbackPhase::PreHit, "trail_chick_shell_scoot"),
+    chick_skill_event(85, ChickSkillId::ShellScoot),
+    attack_event(105, AttackPayloadId::ChickShellScoot),
+    timeline_event(240, MoveTimelineEventKind::Stop),
+    feedback_event(300, FeedbackPhase::Aftermath, "recover_chick_shell_scoot"),
+    timeline_event(500, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 5] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_fresh_egg_drop"),
+    chick_skill_event(0, ChickSkillId::FreshEggDrop),
+    feedback_event(60, FeedbackPhase::PreHit, "release_chick_fresh_egg_drop"),
+    feedback_event(
+        210,
+        FeedbackPhase::Aftermath,
+        "recover_chick_fresh_egg_drop",
+    ),
+    timeline_event(380, MoveTimelineEventKind::Recover),
+];
+
+const CHICK_JUMP_HEAVY_EVENTS: [MoveTimelineEvent; 5] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_fresh_egg_drop"),
+    chick_skill_event(0, ChickSkillId::FreshEggRide),
+    feedback_event(75, FeedbackPhase::PreHit, "release_chick_fresh_egg_drop"),
+    feedback_event(
+        260,
+        FeedbackPhase::Aftermath,
+        "recover_chick_fresh_egg_drop",
+    ),
+    timeline_event(560, MoveTimelineEventKind::Recover),
+];
+
 const PANDA_JUMP_ATTACK_EVENTS: [MoveTimelineEvent; 5] = [
     feedback_event(0, FeedbackPhase::Startup, "startup_panda_jump_drop"),
     attack_event(0, AttackPayloadId::PandaJumpDrop),
@@ -3493,6 +3686,15 @@ const AUTHORED_TECHNIQUE_ORDER: &[TechniqueId] = &[
     TechniqueId::PenguinJumpHeavy,
     TechniqueId::PenguinJumpAttack,
     TechniqueId::PenguinComboFinisher,
+    TechniqueId::ChickLight2,
+    TechniqueId::ChickLight1,
+    TechniqueId::ChickHeavy2,
+    TechniqueId::ChickHeavy,
+    TechniqueId::ChickUltimateStartup,
+    TechniqueId::ChickDashAttack,
+    TechniqueId::ChickJumpHeavy,
+    TechniqueId::ChickJumpAttack,
+    TechniqueId::ChickComboFinisher,
     TechniqueId::SpecialCast,
     TechniqueId::ItemPickup,
     TechniqueId::ItemSwing,
@@ -3538,6 +3740,10 @@ pub const fn bee_skill_event(at_ms: u32, skill_id: BeeSkillId) -> MoveTimelineEv
 
 pub const fn penguin_skill_event(at_ms: u32, skill_id: PenguinSkillId) -> MoveTimelineEvent {
     timeline_event(at_ms, MoveTimelineEventKind::SpawnPenguinSkill(skill_id))
+}
+
+pub const fn chick_skill_event(at_ms: u32, skill_id: ChickSkillId) -> MoveTimelineEvent {
+    timeline_event(at_ms, MoveTimelineEventKind::SpawnChickSkill(skill_id))
 }
 
 pub const fn feedback_event(
@@ -5719,6 +5925,215 @@ pub fn attack_payload_definition(id: AttackPayloadId) -> AttackPayloadDef {
             shake_scale: 1.22,
             feedback_priority_bonus: 8,
         },
+        AttackPayloadId::ChickShellChip => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::BasicStrike,
+            element: DamageElement::Strike,
+            power: 5.0,
+            str_scale: 0.35,
+            time_ms: 75,
+            damage: 2.8,
+            knockback: 2.9,
+            vertical_knockback: 0.0,
+            guardable: true,
+            impact_cue: "impact_chick_shell_chip",
+            hitstop_scale: 0.62,
+            shake_scale: 0.46,
+            feedback_priority_bonus: 1,
+        },
+        AttackPayloadId::ChickFriedEggDisc => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::BasicStrike,
+            element: DamageElement::Strike,
+            power: 7.0,
+            str_scale: 0.48,
+            time_ms: 100,
+            damage: 4.8,
+            knockback: 3.7,
+            vertical_knockback: 0.4,
+            guardable: true,
+            impact_cue: "impact_chick_fried_egg_disc",
+            hitstop_scale: 0.78,
+            shake_scale: 0.64,
+            feedback_priority_bonus: 2,
+        },
+        AttackPayloadId::ChickEggCupMortar => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::LightAirPop,
+            damage_profile: DamageProfileId::LauncherCommit,
+            element: DamageElement::Launch,
+            power: 9.0,
+            str_scale: 0.55,
+            time_ms: 120,
+            damage: 6.4,
+            knockback: 4.1,
+            vertical_knockback: 3.2,
+            guardable: true,
+            impact_cue: "impact_chick_egg_cup_mortar",
+            hitstop_scale: 0.94,
+            shake_scale: 0.86,
+            feedback_priority_bonus: 4,
+        },
+        AttackPayloadId::ChickOrbitEgg => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::BasicStrike,
+            element: DamageElement::Strike,
+            power: 1.0,
+            str_scale: 0.0,
+            time_ms: 75,
+            damage: 0.75,
+            knockback: 0.6,
+            vertical_knockback: 0.0,
+            guardable: true,
+            impact_cue: "impact_special_projectile",
+            hitstop_scale: 0.42,
+            shake_scale: 0.28,
+            feedback_priority_bonus: 1,
+        },
+        AttackPayloadId::ChickOrbitEggLaunch => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::SlidingKnockdown,
+            damage_profile: DamageProfileId::DashBody,
+            element: DamageElement::Strike,
+            power: 12.0,
+            str_scale: 0.62,
+            time_ms: 130,
+            damage: 8.0,
+            knockback: 7.2,
+            vertical_knockback: 0.2,
+            guardable: true,
+            impact_cue: "impact_special_projectile",
+            hitstop_scale: 1.08,
+            shake_scale: 1.05,
+            feedback_priority_bonus: 6,
+        },
+        AttackPayloadId::ChickFreshEggDrop => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::LightAirPop,
+            damage_profile: DamageProfileId::BasicStrike,
+            element: DamageElement::Strike,
+            power: 7.0,
+            str_scale: 0.42,
+            time_ms: 105,
+            damage: 4.2,
+            knockback: 3.1,
+            vertical_knockback: 1.2,
+            guardable: true,
+            impact_cue: "impact_chick_fresh_egg_drop",
+            hitstop_scale: 0.78,
+            shake_scale: 0.7,
+            feedback_priority_bonus: 2,
+        },
+        AttackPayloadId::ChickEggplantRoll => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::ProjectileBolt,
+            reaction_family: ReactionFamilyId::SlidingKnockdown,
+            damage_profile: DamageProfileId::DashBody,
+            element: DamageElement::Earth,
+            power: 10.0,
+            str_scale: 0.58,
+            time_ms: 120,
+            damage: 7.2,
+            knockback: 5.9,
+            vertical_knockback: 0.2,
+            guardable: true,
+            impact_cue: "impact_chick_eggplant_roll",
+            hitstop_scale: 0.98,
+            shake_scale: 0.92,
+            feedback_priority_bonus: 5,
+        },
+        AttackPayloadId::ChickSunnySplash => AttackPayloadDef {
+            id,
+            kind: AttackKind::Special,
+            shape_id: AttackShapeId::HazardField,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::Direct,
+            element: DamageElement::Hazard,
+            power: 4.0,
+            str_scale: 0.28,
+            time_ms: 105,
+            damage: 2.4,
+            knockback: 1.2,
+            vertical_knockback: 0.5,
+            guardable: true,
+            impact_cue: "impact_chick_sunny_splash",
+            hitstop_scale: 0.45,
+            shake_scale: 0.34,
+            feedback_priority_bonus: 1,
+        },
+        AttackPayloadId::ChickOmeletField => AttackPayloadDef {
+            id,
+            kind: AttackKind::Ultimate,
+            shape_id: AttackShapeId::HazardField,
+            reaction_family: ReactionFamilyId::ShortStandingStagger,
+            damage_profile: DamageProfileId::Direct,
+            element: DamageElement::Hazard,
+            power: 6.0,
+            str_scale: 0.38,
+            time_ms: 110,
+            damage: 4.5,
+            knockback: 1.6,
+            vertical_knockback: 0.8,
+            guardable: true,
+            impact_cue: "impact_chick_omelet_field",
+            hitstop_scale: 0.52,
+            shake_scale: 0.44,
+            feedback_priority_bonus: 3,
+        },
+        AttackPayloadId::ChickShellScoot => AttackPayloadDef {
+            id,
+            kind: AttackKind::Dash,
+            shape_id: AttackShapeId::GroundSkid,
+            reaction_family: ReactionFamilyId::SlidingKnockdown,
+            damage_profile: DamageProfileId::DashBody,
+            element: DamageElement::Wind,
+            power: 10.0,
+            str_scale: 0.62,
+            time_ms: 150,
+            damage: DASH_ATTACK_DAMAGE * 0.72,
+            knockback: DASH_ATTACK_KNOCKBACK * 0.74,
+            vertical_knockback: 0.3,
+            guardable: true,
+            impact_cue: "impact_chick_shell_scoot",
+            hitstop_scale: 1.02,
+            shake_scale: 0.96,
+            feedback_priority_bonus: 5,
+        },
+        AttackPayloadId::ChickShellScramble => AttackPayloadDef {
+            id,
+            kind: AttackKind::ComboFinisher,
+            shape_id: AttackShapeId::CatBodySkid,
+            reaction_family: ReactionFamilyId::GroundBounceDown,
+            damage_profile: DamageProfileId::GroundBounce,
+            element: DamageElement::Earth,
+            power: 11.0,
+            str_scale: 0.62,
+            time_ms: 125,
+            damage: COMBO_FINISHER_DAMAGE * 0.74,
+            knockback: COMBO_FINISHER_KNOCKBACK * 0.78,
+            vertical_knockback: 3.2,
+            guardable: true,
+            impact_cue: "impact_chick_shell_scramble",
+            hitstop_scale: 1.08,
+            shake_scale: 1.0,
+            feedback_priority_bonus: 6,
+        },
         AttackPayloadId::PenguinFishSlap1 => AttackPayloadDef {
             id,
             kind: AttackKind::Light1,
@@ -7441,6 +7856,201 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             branch_window: None,
             chain_rule: None,
         },
+        TechniqueId::ChickLight1 => TechniqueDefinition {
+            id,
+            action: FighterAction::LightAttack1,
+            button: TechniqueButton::A,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_orbit_egg_launch.sc",
+                Some(170),
+                None,
+                260,
+                &CHICK_LIGHT1_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::ChickLight2 => TechniqueDefinition {
+            id,
+            action: FighterAction::LightAttack2,
+            button: TechniqueButton::A,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_sunny_flip.sc",
+                Some(315),
+                Some(350),
+                460,
+                &CHICK_LIGHT2_EVENTS,
+            ),
+            input_buffer_ms: 180,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: Some(MsTimingWindow::closed(130, 350)),
+            branch_window: Some(MsTimingWindow::closed(130, 350)),
+            chain_rule: Some(TechniqueChainRule {
+                previous: PrevTechExpr {
+                    any_of: CHICK_A_S_PREV,
+                    command: Some(TechniqueButton::A),
+                    conditions: A_CHAIN_CONDITIONS,
+                },
+                window: MsTimingWindow::closed(90, 250),
+                same_button_required: true,
+            }),
+        },
+        TechniqueId::ChickComboFinisher => TechniqueDefinition {
+            id,
+            action: FighterAction::ComboFinisher,
+            button: TechniqueButton::A,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_shell_scramble.sc",
+                Some(430),
+                Some(610),
+                760,
+                &CHICK_COMBO_FINISHER_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: Some(TechniqueChainRule {
+                previous: PrevTechExpr {
+                    any_of: CHICK_A_SS_PREV,
+                    command: Some(TechniqueButton::A),
+                    conditions: A_FINISHER_CONDITIONS,
+                },
+                window: MsTimingWindow::closed(130, 350),
+                same_button_required: true,
+            }),
+        },
+        TechniqueId::ChickHeavy => TechniqueDefinition {
+            id,
+            action: FighterAction::HeavyAttack,
+            button: TechniqueButton::B,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_orbit_egg.sc",
+                Some(420),
+                Some(520),
+                720,
+                &CHICK_HEAVY_EVENTS,
+            ),
+            input_buffer_ms: 220,
+            stamina_cost: CHICK_X_STAMINA_COST,
+            movement_lock: MovementLock::Locked,
+            cancel_window: Some(MsTimingWindow::closed(120, 520)),
+            branch_window: Some(MsTimingWindow::closed(120, 520)),
+            chain_rule: None,
+        },
+        TechniqueId::ChickHeavy2 => TechniqueDefinition {
+            id,
+            action: FighterAction::HeavyAttack2,
+            button: TechniqueButton::B,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_eggplant_impostor.sc",
+                Some(610),
+                None,
+                900,
+                &CHICK_HEAVY2_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: Some(TechniqueChainRule {
+                previous: PrevTechExpr {
+                    any_of: CHICK_X_STEP_PREV,
+                    command: Some(TechniqueButton::B),
+                    conditions: X_CHAIN_CONDITIONS,
+                },
+                window: MsTimingWindow::closed(120, 520),
+                same_button_required: true,
+            }),
+        },
+        TechniqueId::ChickDashAttack => TechniqueDefinition {
+            id,
+            action: FighterAction::DashAttack,
+            button: TechniqueButton::Dash,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_shell_scoot.sc",
+                Some(300),
+                None,
+                500,
+                &CHICK_DASH_ATTACK_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::ChickJumpAttack => TechniqueDefinition {
+            id,
+            action: FighterAction::JumpAttack,
+            button: TechniqueButton::A,
+            status: TechniqueStatus::Airborne,
+            script: script(
+                "chick_fresh_egg_drop.sc",
+                Some(210),
+                None,
+                380,
+                &CHICK_JUMP_ATTACK_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::ChickJumpHeavy => TechniqueDefinition {
+            id,
+            action: FighterAction::JumpHeavyAttack,
+            button: TechniqueButton::B,
+            status: TechniqueStatus::Airborne,
+            script: script(
+                "chick_fresh_egg_ride.sc",
+                Some(260),
+                None,
+                560,
+                &CHICK_JUMP_HEAVY_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: 0.0,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
+        TechniqueId::ChickUltimateStartup => TechniqueDefinition {
+            id,
+            action: FighterAction::UltimateStartup,
+            button: TechniqueButton::Ultimate,
+            status: TechniqueStatus::Grounded,
+            script: script(
+                "chick_breakfast_barrage.sc",
+                Some(980),
+                None,
+                1180,
+                &CHICK_ULTIMATE_STARTUP_EVENTS,
+            ),
+            input_buffer_ms: 0,
+            stamina_cost: ULTIMATE_STAMINA_COST,
+            movement_lock: MovementLock::Locked,
+            cancel_window: None,
+            branch_window: None,
+            chain_rule: None,
+        },
         TechniqueId::PandaLight1 => TechniqueDefinition {
             id,
             action: FighterAction::LightAttack1,
@@ -8323,6 +8933,7 @@ mod tests {
             MoveTimelineEventKind::ChargedAttack { .. } => "charged_attack",
             MoveTimelineEventKind::SpawnBeeSkill(_) => "bee_skill",
             MoveTimelineEventKind::SpawnPenguinSkill(_) => "penguin_skill",
+            MoveTimelineEventKind::SpawnChickSkill(_) => "chick_skill",
             MoveTimelineEventKind::Feedback(phase, _) => match phase {
                 FeedbackPhase::Startup => "startup_feedback",
                 FeedbackPhase::PreHit => "prehit_feedback",
@@ -8489,6 +9100,13 @@ mod tests {
                         move_set: "cat_light".to_string(),
                         body: crate::characters::penguin_body_profile(),
                     },
+                    crate::characters::CharacterProfileDef {
+                        kind: CharacterKind::Chick,
+                        label: "Chick".to_string(),
+                        scene: "characters/kenney_cube_pets/animal-chick.glb".to_string(),
+                        move_set: "cat_light".to_string(),
+                        body: crate::characters::chick_body_profile(),
+                    },
                 ],
                 move_sets: vec![
                     crate::characters::CharacterMoveSetDef {
@@ -8525,6 +9143,11 @@ mod tests {
         );
         let penguin = LoadoutContext::for_character(
             CharacterKind::Penguin,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
             FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
         );
@@ -8566,6 +9189,10 @@ mod tests {
             raw_technique_for_loadout_in_catalog(TechniqueButton::A, true, penguin, &catalog)
                 .is_none()
         );
+        assert!(
+            raw_technique_for_loadout_in_catalog(TechniqueButton::A, true, chick, &catalog)
+                .is_none()
+        );
     }
 
     #[test]
@@ -8598,6 +9225,11 @@ mod tests {
         );
         let penguin = LoadoutContext::for_character(
             CharacterKind::Penguin,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
             FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
         );
@@ -8649,6 +9281,18 @@ mod tests {
                 .unwrap()
                 .id,
             TechniqueId::PenguinHeavy
+        );
+        assert_eq!(
+            raw_technique_for_loadout_in_catalog(TechniqueButton::A, true, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickLight1
+        );
+        assert_eq!(
+            raw_technique_for_loadout_in_catalog(TechniqueButton::B, true, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickHeavy
         );
 
         let dog_followup = chained_technique_for_context_in_catalog(
@@ -8705,6 +9349,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(penguin_followup.id, TechniqueId::PenguinLight2);
+        let chick_followup = chained_technique_for_context_in_catalog(
+            TechniqueMatchContext {
+                previous: Some(TechniqueId::ChickLight1),
+                button: TechniqueButton::A,
+                elapsed: 0.16,
+                style: FighterStyleKind::Anchor,
+                loadout: chick,
+                grounded: true,
+                confirmed_hit: true,
+                cancel_window_open: true,
+                branch_window_open: true,
+                current_action: FighterAction::LightAttack1,
+            },
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(chick_followup.id, TechniqueId::ChickLight2);
+        let chick_finisher = chained_technique_for_context_in_catalog(
+            TechniqueMatchContext {
+                previous: Some(TechniqueId::ChickLight2),
+                button: TechniqueButton::A,
+                elapsed: 0.24,
+                style: FighterStyleKind::Anchor,
+                loadout: chick,
+                grounded: true,
+                confirmed_hit: true,
+                cancel_window_open: true,
+                branch_window_open: true,
+                current_action: FighterAction::LightAttack2,
+            },
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(chick_finisher.id, TechniqueId::ChickComboFinisher);
         assert!(
             chained_technique_for_context_in_catalog(
                 TechniqueMatchContext {
@@ -8770,6 +9450,11 @@ mod tests {
             FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
         );
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
 
         assert_eq!(
             technique_slot_for_loadout(CharacterMoveSlot::JumpLight, dog, &catalog)
@@ -8819,7 +9504,9 @@ mod tests {
                 .id,
             TechniqueId::BeeUltimateStartup
         );
-        assert!(technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, bee, &catalog).is_none());
+        assert!(
+            technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, bee, &catalog).is_none()
+        );
         assert_eq!(
             technique_slot_for_loadout(CharacterMoveSlot::JumpLight, penguin, &catalog)
                 .unwrap()
@@ -8842,6 +9529,39 @@ mod tests {
             .unwrap()
             .id,
             TechniqueId::PenguinUltimateStartup
+        );
+        assert_eq!(
+            technique_slot_for_loadout(CharacterMoveSlot::DashLight, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickDashAttack
+        );
+        assert_eq!(
+            technique_slot_for_loadout(CharacterMoveSlot::DashHeavy, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickHeavy2
+        );
+        assert_eq!(
+            technique_slot_for_loadout(CharacterMoveSlot::JumpLight, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickJumpAttack
+        );
+        assert_eq!(
+            technique_slot_for_loadout(CharacterMoveSlot::JumpHeavy, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickJumpHeavy
+        );
+        assert_eq!(
+            raw_technique_for_loadout_in_catalog(TechniqueButton::Ultimate, true, chick, &catalog)
+                .unwrap()
+                .id,
+            TechniqueId::ChickUltimateStartup
+        );
+        assert!(
+            technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, chick, &catalog).is_none()
         );
         assert!(payload_is_ultimate_catch(AttackPayloadId::DogUltimateCatch));
         assert!(payload_is_ultimate_scratch(
@@ -8942,6 +9662,14 @@ mod tests {
                     TechniqueId::PenguinDashHeavy,
                 ],
             ),
+            (
+                CharacterKind::Chick,
+                &[
+                    TechniqueId::ChickLight2,
+                    TechniqueId::ChickComboFinisher,
+                    TechniqueId::ChickHeavy2,
+                ],
+            ),
         ];
 
         for (character, required) in cases {
@@ -8979,6 +9707,7 @@ mod tests {
             CharacterKind::Panda,
             CharacterKind::Bee,
             CharacterKind::Penguin,
+            CharacterKind::Chick,
         ] {
             for cat_attack in cat_attacks {
                 assert!(
@@ -9092,6 +9821,20 @@ mod tests {
                     TechniqueId::PenguinJumpHeavy,
                     TechniqueId::PenguinUltimateStartup,
                     TechniqueId::PenguinUltimateRush,
+                ],
+            ),
+            (
+                CharacterKind::Chick,
+                &[
+                    TechniqueId::ChickLight1,
+                    TechniqueId::ChickLight2,
+                    TechniqueId::ChickComboFinisher,
+                    TechniqueId::ChickHeavy,
+                    TechniqueId::ChickHeavy2,
+                    TechniqueId::ChickDashAttack,
+                    TechniqueId::ChickJumpAttack,
+                    TechniqueId::ChickJumpHeavy,
+                    TechniqueId::ChickUltimateStartup,
                 ],
             ),
         ];
@@ -9709,16 +10452,20 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.kind, MoveTimelineEventKind::Feedback(_, _)))
         );
-        assert!(!dash_heavy
-            .script
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, MoveTimelineEventKind::Stop)));
-        assert!(!dash_heavy
-            .script
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, MoveTimelineEventKind::NextTech)));
+        assert!(
+            !dash_heavy
+                .script
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, MoveTimelineEventKind::Stop))
+        );
+        assert!(
+            !dash_heavy
+                .script
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, MoveTimelineEventKind::NextTech))
+        );
         let dash_heavy_motion: Vec<_> = dash_heavy
             .script
             .events
@@ -9945,6 +10692,207 @@ mod tests {
     }
 
     #[test]
+    fn chick_routes_use_guardable_egg_projectile_kit() {
+        let catalog = CharacterMoveCatalog::default();
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+
+        assert_eq!(TechniqueId::ChickLight1.owner(), Some(CharacterKind::Chick));
+        assert_eq!(
+            TechniqueId::ChickUltimateStartup.label(),
+            "chick_breakfast_barrage"
+        );
+        assert_eq!(TechniqueId::ChickLight1.label(), "chick_orbit_egg_launch");
+        assert_eq!(TechniqueId::ChickHeavy.label(), "chick_orbit_egg");
+        assert_eq!(TechniqueId::ChickJumpAttack.label(), "chick_fresh_egg_drop");
+        assert_eq!(TechniqueId::ChickJumpHeavy.label(), "chick_fresh_egg_ride");
+
+        let light1 = technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::ChickLight1,
+            chick,
+            &catalog,
+        )
+        .unwrap();
+        let light2 = technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::ChickLight2,
+            chick,
+            &catalog,
+        )
+        .unwrap();
+        let finisher = technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::ChickComboFinisher,
+            chick,
+            &catalog,
+        )
+        .unwrap();
+        let heavy = technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::ChickHeavy,
+            chick,
+            &catalog,
+        )
+        .unwrap();
+        let heavy2 = technique_definition_for_loadout_id_in_catalog(
+            TechniqueId::ChickHeavy2,
+            chick,
+            &catalog,
+        )
+        .unwrap();
+        let jump_light =
+            technique_slot_for_loadout(CharacterMoveSlot::JumpLight, chick, &catalog).unwrap();
+        let jump_heavy =
+            technique_slot_for_loadout(CharacterMoveSlot::JumpHeavy, chick, &catalog).unwrap();
+        let ultimate =
+            technique_slot_for_loadout(CharacterMoveSlot::UltimateStartup, chick, &catalog)
+                .unwrap();
+
+        assert_eq!(light1.action, FighterAction::LightAttack1);
+        assert_eq!(
+            light2.chain_rule.unwrap().window,
+            MsTimingWindow::closed(90, 250)
+        );
+        assert_eq!(
+            finisher.chain_rule.unwrap().window,
+            MsTimingWindow::closed(130, 350)
+        );
+        assert_eq!(
+            heavy2.chain_rule.unwrap().window,
+            MsTimingWindow::closed(120, 520)
+        );
+        assert_eq!(heavy.action, FighterAction::HeavyAttack);
+        assert_eq!(heavy.stamina_cost, CHICK_X_STAMINA_COST);
+        assert_eq!(heavy.stamina_cost, MAX_STAMINA * 0.15);
+        assert!(light1.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::OrbitEggLaunch)
+        )));
+        assert!(!light1.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::ShellPeck)
+                | MoveTimelineEventKind::NextTech
+        )));
+        assert!(light2.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::SunnyFlip)
+        )));
+        assert!(finisher.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::Attack(AttackPayloadId::ChickShellScramble)
+        )));
+        assert!(heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::OrbitEgg)
+        )));
+        assert!(!heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::EggCupMortar)
+        )));
+        assert!(heavy2.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::EggplantRoll)
+        )));
+        assert!(jump_light.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::FreshEggDrop)
+        )));
+        assert!(!jump_light.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::FreshEggRide)
+                | MoveTimelineEventKind::Attack(_)
+        )));
+        assert!(jump_heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::FreshEggRide)
+        )));
+        assert!(!jump_heavy.script.events.iter().any(|event| matches!(
+            event.kind,
+            MoveTimelineEventKind::SpawnChickSkill(
+                ChickSkillId::FreshEggDrop | ChickSkillId::SunnySideSplash
+            ) | MoveTimelineEventKind::Attack(_)
+        )));
+
+        let ultimate_skills: Vec<_> = ultimate
+            .script
+            .events
+            .iter()
+            .filter_map(|event| match event.kind {
+                MoveTimelineEventKind::SpawnChickSkill(skill) => Some((event.at_ms, skill)),
+                _ => None,
+            })
+            .collect();
+        let ultimate_attacks: Vec<_> = ultimate
+            .script
+            .events
+            .iter()
+            .filter_map(|event| match event.kind {
+                MoveTimelineEventKind::Attack(payload) => Some(payload),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ultimate.action, FighterAction::UltimateStartup);
+        assert_eq!(ultimate.stamina_cost, ULTIMATE_STAMINA_COST);
+        assert_eq!(
+            ultimate_skills,
+            vec![
+                (80, ChickSkillId::OmeletField),
+                (190, ChickSkillId::ShellPeck),
+                (310, ChickSkillId::EggCupMortar),
+                (430, ChickSkillId::FreshEggDrop),
+                (560, ChickSkillId::SunnySideSplash),
+                (700, ChickSkillId::ShellScramble),
+                (840, ChickSkillId::EggplantRoll),
+            ]
+        );
+        assert!(ultimate_attacks.is_empty());
+        assert!(
+            technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, chick, &catalog).is_none()
+        );
+
+        let shell = attack_payload_definition(AttackPayloadId::ChickShellChip);
+        let disc = attack_payload_definition(AttackPayloadId::ChickFriedEggDisc);
+        let mortar = attack_payload_definition(AttackPayloadId::ChickEggCupMortar);
+        let orbit = attack_payload_definition(AttackPayloadId::ChickOrbitEgg);
+        let launch = attack_payload_definition(AttackPayloadId::ChickOrbitEggLaunch);
+        let eggplant = attack_payload_definition(AttackPayloadId::ChickEggplantRoll);
+        let splash = attack_payload_definition(AttackPayloadId::ChickSunnySplash);
+        let omelet = attack_payload_definition(AttackPayloadId::ChickOmeletField);
+        let scoot = attack_payload_definition(AttackPayloadId::ChickShellScoot);
+        let scramble = attack_payload_definition(AttackPayloadId::ChickShellScramble);
+
+        for payload in [
+            shell, disc, mortar, orbit, launch, eggplant, splash, omelet, scoot, scramble,
+        ] {
+            assert!(payload.guardable, "{:?} should stay guardable", payload.id);
+        }
+        assert_eq!(shell.shape_id, AttackShapeId::ProjectileBolt);
+        assert_eq!(disc.shape_id, AttackShapeId::ProjectileBolt);
+        assert_eq!(mortar.reaction_family, ReactionFamilyId::LightAirPop);
+        assert_eq!(orbit.shape_id, AttackShapeId::ProjectileBolt);
+        assert_eq!(
+            orbit.reaction_family,
+            ReactionFamilyId::ShortStandingStagger
+        );
+        assert_eq!(orbit.damage, 0.75);
+        assert_eq!(orbit.knockback, 0.6);
+        assert_eq!(orbit.vertical_knockback, 0.0);
+        assert_eq!(launch.shape_id, AttackShapeId::ProjectileBolt);
+        assert_eq!(launch.reaction_family, ReactionFamilyId::SlidingKnockdown);
+        assert_eq!(launch.damage_profile, DamageProfileId::DashBody);
+        assert_eq!(launch.damage, 8.0);
+        assert_eq!(launch.knockback, 7.2);
+        assert_eq!(splash.shape_id, AttackShapeId::HazardField);
+        assert_eq!(omelet.shape_id, AttackShapeId::HazardField);
+        assert_eq!(scramble.reaction_family, ReactionFamilyId::GroundBounceDown);
+        assert!(shell.damage < disc.damage);
+        assert!(eggplant.knockback > disc.knockback);
+        assert!(scramble.damage < COMBO_FINISHER_DAMAGE);
+        assert!(scoot.damage < DASH_ATTACK_DAMAGE);
+    }
+
+    #[test]
     fn bee_ultimate_summons_area_swarm_without_catch_confirm() {
         let ultimate = technique_definition_by_id(TechniqueId::BeeUltimateStartup).unwrap();
         let skill_events: Vec<_> = ultimate
@@ -10008,20 +10956,18 @@ mod tests {
             })
             .collect();
 
-        assert!(!catalog.allows_technique(
-            CharacterKind::Bee,
-            TechniqueId::BeeLegacyUltimateStartup
-        ));
-        assert!(!catalog.allows_technique(
-            CharacterKind::Bee,
-            TechniqueId::BeeLegacyUltimateRush
-        ));
-        assert!(technique_definition_for_loadout_id_in_catalog(
-            TechniqueId::BeeLegacyUltimateStartup,
-            bee,
-            &catalog
-        )
-        .is_none());
+        assert!(
+            !catalog.allows_technique(CharacterKind::Bee, TechniqueId::BeeLegacyUltimateStartup)
+        );
+        assert!(!catalog.allows_technique(CharacterKind::Bee, TechniqueId::BeeLegacyUltimateRush));
+        assert!(
+            technique_definition_for_loadout_id_in_catalog(
+                TechniqueId::BeeLegacyUltimateStartup,
+                bee,
+                &catalog
+            )
+            .is_none()
+        );
         assert_eq!(legacy_startup.action, FighterAction::UltimateStartup);
         assert_eq!(legacy_rush.action, FighterAction::UltimateRush);
         assert_eq!(
@@ -10614,10 +11560,7 @@ mod tests {
             attack_payload_definition(AttackPayloadId::DashComboFinisher).shape_id,
             AttackShapeId::CatBodySkid
         );
-        assert_eq!(
-            penguin_dash_x.script.recover_ms,
-            180
-        );
+        assert_eq!(penguin_dash_x.script.recover_ms, 180);
         assert!(attack_shape_definition(AttackShapeId::CatBodySkid).parented);
         assert_eq!(
             attack_payload_definition(AttackPayloadId::DashComboFinisher).time_ms,

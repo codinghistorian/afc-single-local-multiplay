@@ -13,13 +13,13 @@ use crate::components::{
     FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
     FighterStats,
 };
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::constants::{
     ARENA_RADIUS, COMBO_QUEUE_END, COMBO_QUEUE_START, ITEM_BREEZE_BUOY_STAMINA, ITEM_PICKUP_RANGE,
     ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER, SPECIAL_HAZARD_RADIUS,
     SPECIAL_PROJECTILE_RADIUS, SPECIAL_SHOCKWAVE_RADIUS, SPECIAL_TRAP_RADIUS,
 };
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::equipment::{EquipmentKind, FighterEquipment};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::game_state::MatchAnnouncements;
@@ -1102,7 +1102,11 @@ fn bot_tactical_movement(
 ) -> Vec2 {
     let movement = match plan {
         BotMovementPlan::Approach => {
-            let strafe_weight = if distance > range.max + 0.9 { 0.12 } else { 0.28 };
+            let strafe_weight = if distance > range.max + 0.9 {
+                0.12
+            } else {
+                0.28
+            };
             toward + strafe * strafe_weight
         }
         BotMovementPlan::Circle => {

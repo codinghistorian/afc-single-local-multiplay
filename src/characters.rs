@@ -23,9 +23,10 @@ pub enum CharacterKind {
     Panda,
     Bee,
     Penguin,
+    Chick,
 }
 
-pub const CHARACTER_KINDS: [CharacterKind; 7] = [
+pub const CHARACTER_KINDS: [CharacterKind; 8] = [
     CharacterKind::Cat,
     CharacterKind::Pig,
     CharacterKind::Dog,
@@ -33,6 +34,7 @@ pub const CHARACTER_KINDS: [CharacterKind; 7] = [
     CharacterKind::Panda,
     CharacterKind::Bee,
     CharacterKind::Penguin,
+    CharacterKind::Chick,
 ];
 
 pub const DEFAULT_FIGHTER_CHARACTERS: [CharacterKind; FIGHTER_COUNT] = [
@@ -325,6 +327,7 @@ pub fn character_label(kind: CharacterKind) -> &'static str {
         CharacterKind::Panda => "Panda",
         CharacterKind::Bee => "Bee",
         CharacterKind::Penguin => "Penguin",
+        CharacterKind::Chick => "Chick",
     }
 }
 
@@ -438,6 +441,10 @@ pub fn character_mesh_bounds(kind: CharacterKind) -> CharacterMeshBounds {
             min: [-0.625, -0.3, -0.625],
             max: [0.625, 1.34, 0.82],
         },
+        CharacterKind::Chick => CharacterMeshBounds {
+            min: [-0.625, -0.3, -0.625],
+            max: [0.625, 1.413, 0.725],
+        },
     }
 }
 
@@ -492,6 +499,13 @@ fn default_character_move_catalog_file() -> CharacterMoveCatalogFile {
                 scene: "characters/kenney_cube_pets/animal-penguin.glb".to_string(),
                 move_set: "penguin_cube".to_string(),
                 body: penguin_body_profile(),
+            },
+            CharacterProfileDef {
+                kind: CharacterKind::Chick,
+                label: "Chick".to_string(),
+                scene: "characters/kenney_cube_pets/animal-chick.glb".to_string(),
+                move_set: "chick_cube".to_string(),
+                body: chick_body_profile(),
             },
         ],
         move_sets: vec![
@@ -565,6 +579,11 @@ fn default_character_move_catalog_file() -> CharacterMoveCatalogFile {
                     TechniqueId::PenguinUltimateRush,
                 ),
             },
+            CharacterMoveSetDef {
+                id: "chick_cube".to_string(),
+                order: chick_technique_order().to_vec(),
+                slots: chick_move_slots().to_vec(),
+            },
         ],
     }
 }
@@ -611,6 +630,19 @@ pub fn penguin_body_profile() -> CharacterBodyDef {
         landing_stick: 1.1,
         dash_slide: 1.35,
         mesh_bounds: character_mesh_bounds(CharacterKind::Penguin),
+    }
+}
+
+pub fn chick_body_profile() -> CharacterBodyDef {
+    CharacterBodyDef {
+        ground_speed: 1.03,
+        air_speed: 1.10,
+        dash_impulse: 1.06,
+        jump_impulse: 1.04,
+        gravity: 0.98,
+        fall_gravity: 1.04,
+        mesh_bounds: character_mesh_bounds(CharacterKind::Chick),
+        ..default()
     }
 }
 
@@ -847,6 +879,56 @@ fn penguin_technique_order() -> &'static [TechniqueId] {
     ]
 }
 
+fn chick_technique_order() -> &'static [TechniqueId] {
+    &[
+        TechniqueId::ChickLight2,
+        TechniqueId::ChickLight1,
+        TechniqueId::ChickHeavy2,
+        TechniqueId::ChickHeavy,
+        TechniqueId::ChickUltimateStartup,
+        TechniqueId::Grab,
+        TechniqueId::ChickDashAttack,
+        TechniqueId::ChickJumpHeavy,
+        TechniqueId::ChickJumpAttack,
+        TechniqueId::GuardCounter,
+        TechniqueId::ChickComboFinisher,
+        TechniqueId::SpecialCast,
+        TechniqueId::ItemPickup,
+        TechniqueId::ItemSwing,
+        TechniqueId::ItemThrow,
+        TechniqueId::ItemDrop,
+        TechniqueId::GuardStep,
+        TechniqueId::QuickStand,
+        TechniqueId::RecoveryRoll,
+        TechniqueId::LandingRecovery,
+    ]
+}
+
+fn chick_move_slots() -> &'static [CharacterMoveSlotDef] {
+    &[
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::DashLight,
+            technique: TechniqueId::ChickDashAttack,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::DashHeavy,
+            technique: TechniqueId::ChickHeavy2,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::JumpLight,
+            technique: TechniqueId::ChickJumpAttack,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::JumpHeavy,
+            technique: TechniqueId::ChickJumpHeavy,
+        },
+        CharacterMoveSlotDef {
+            slot: CharacterMoveSlot::UltimateStartup,
+            technique: TechniqueId::ChickUltimateStartup,
+        },
+    ]
+}
+
 fn character_move_slots(
     dash_light: TechniqueId,
     dash_heavy: TechniqueId,
@@ -943,6 +1025,18 @@ mod tests {
             Some(TechniqueId::PenguinDashHeavy)
         );
         assert_eq!(
+            catalog.slot_technique(CharacterKind::Chick, CharacterMoveSlot::DashLight),
+            Some(TechniqueId::ChickDashAttack)
+        );
+        assert_eq!(
+            catalog.slot_technique(CharacterKind::Chick, CharacterMoveSlot::DashHeavy),
+            Some(TechniqueId::ChickHeavy2)
+        );
+        assert_eq!(
+            catalog.slot_technique(CharacterKind::Chick, CharacterMoveSlot::UltimateRush),
+            None
+        );
+        assert_eq!(
             catalog.scene_path(CharacterKind::Bee),
             Some("characters/kenney_cube_pets/animal-bee.glb")
         );
@@ -950,6 +1044,11 @@ mod tests {
             catalog.scene_path(CharacterKind::Penguin),
             Some("characters/kenney_cube_pets/animal-penguin.glb")
         );
+        assert_eq!(
+            catalog.scene_path(CharacterKind::Chick),
+            Some("characters/kenney_cube_pets/animal-chick.glb")
+        );
+        assert_eq!(character_label(CharacterKind::Chick), "Chick");
     }
 
     #[test]
@@ -1005,6 +1104,13 @@ mod tests {
                     move_set: "cat_cube".to_string(),
                     body: penguin_body_profile(),
                 },
+                CharacterProfileDef {
+                    kind: CharacterKind::Chick,
+                    label: "Chick".to_string(),
+                    scene: "characters/kenney_cube_pets/animal-chick.glb".to_string(),
+                    move_set: "cat_cube".to_string(),
+                    body: chick_body_profile(),
+                },
             ],
             move_sets: vec![
                 CharacterMoveSetDef {
@@ -1030,7 +1136,22 @@ mod tests {
         );
         assert!(!catalog.allows_technique(CharacterKind::Dog, TechniqueId::CatLight1));
         assert!(!catalog.allows_technique(CharacterKind::Pig, TechniqueId::CatLight1));
+        assert!(!catalog.allows_technique(CharacterKind::Chick, TechniqueId::CatLight1));
         assert!(catalog.allows_technique(CharacterKind::Cat, TechniqueId::CatLight1));
+    }
+
+    #[test]
+    fn chick_is_selectable_without_replacing_default_starting_fighters() {
+        assert!(CHARACTER_KINDS.contains(&CharacterKind::Chick));
+        assert_eq!(
+            DEFAULT_FIGHTER_CHARACTERS,
+            [
+                CharacterKind::Cat,
+                CharacterKind::Pig,
+                CharacterKind::Fox,
+                CharacterKind::Panda
+            ]
+        );
     }
 
     #[test]
@@ -1040,6 +1161,7 @@ mod tests {
         let pig = catalog.body(CharacterKind::Pig);
         let bee = catalog.body(CharacterKind::Bee);
         let penguin = catalog.body(CharacterKind::Penguin);
+        let chick = catalog.body(CharacterKind::Chick);
 
         assert_eq!(cat, CharacterBodyDef::default());
         assert!(pig.ground_speed < cat.ground_speed);
@@ -1054,6 +1176,10 @@ mod tests {
         assert!(penguin.dash_impulse > cat.dash_impulse);
         assert!(penguin.stop_friction < cat.stop_friction);
         assert!(penguin.dash_slide > cat.dash_slide);
+        assert!(chick.ground_speed > cat.ground_speed);
+        assert!(chick.air_speed > cat.air_speed);
+        assert!(chick.gravity < cat.gravity);
+        assert!(chick.fall_gravity > cat.fall_gravity);
     }
 
     #[test]
@@ -1064,10 +1190,13 @@ mod tests {
         let panda = catalog.body(CharacterKind::Panda).mesh_bounds;
         let bee = catalog.body(CharacterKind::Bee).mesh_bounds;
         let penguin = catalog.body(CharacterKind::Penguin).mesh_bounds;
+        let chick = catalog.body(CharacterKind::Chick).mesh_bounds;
 
         assert!(fox.max[2] - fox.min[2] > cat.max[2] - cat.min[2]);
         assert!(panda.max[0] - panda.min[0] > cat.max[0] - cat.min[0]);
         assert!(bee.max[2] - bee.min[2] > cat.max[2] - cat.min[2]);
         assert!(penguin.max[2] - penguin.min[2] > cat.max[2] - cat.min[2]);
+        assert_eq!(chick.min, [-0.625, -0.3, -0.625]);
+        assert_eq!(chick.max, [0.625, 1.413, 0.725]);
     }
 }
