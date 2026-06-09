@@ -1146,11 +1146,16 @@ fn try_start_ultimate_from_input(
 }
 
 fn ultimate_input_requested(input: &FighterInput, loadout: LoadoutContext) -> bool {
-    input.ultimate || penguin_ground_ultimate_shortcut(input, loadout)
+    input.ultimate || held_ground_ultimate_shortcut(input, loadout)
 }
 
-fn penguin_ground_ultimate_shortcut(input: &FighterInput, loadout: LoadoutContext) -> bool {
-    loadout.character == CharacterKind::Penguin && input.aim && input.light_held && input.heavy_held
+fn held_ground_ultimate_shortcut(input: &FighterInput, loadout: LoadoutContext) -> bool {
+    matches!(
+        loadout.character,
+        CharacterKind::Penguin | CharacterKind::Chick
+    ) && input.aim
+        && input.light_held
+        && input.heavy_held
 }
 
 fn penguin_dash_ultimate_shortcut(input: &FighterInput, loadout: LoadoutContext) -> bool {
@@ -8961,6 +8966,39 @@ mod tests {
             action.technique_id,
             Some(TechniqueId::PenguinUltimateStartup)
         );
+        assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
+    }
+
+    #[test]
+    fn chick_ground_ultimate_accepts_held_z_x_c_shortcut() {
+        let catalog = CharacterMoveCatalog::default();
+        let chick = LoadoutContext::for_character(
+            CharacterKind::Chick,
+            FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+        );
+        let mut motor = FighterMotor {
+            grounded: true,
+            ..default()
+        };
+        let mut stats = FighterStats::default();
+        let mut action = FighterActionState::default();
+
+        assert!(try_start_ultimate_from_input(
+            &mut motor,
+            &mut stats,
+            &mut action,
+            &FighterInput {
+                aim: true,
+                light_held: true,
+                heavy_held: true,
+                ..default()
+            },
+            chick,
+            &catalog,
+        ));
+        assert_eq!(action.action, FighterAction::UltimateStartup);
+        assert_eq!(action.technique_id, Some(TechniqueId::ChickUltimateStartup));
         assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
     }
 

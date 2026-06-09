@@ -297,7 +297,7 @@ impl TechniqueId {
             Self::ChickDashHeavy => "chick_dash_backstep_x",
             Self::ChickJumpAttack => "chick_updraft_glide",
             Self::ChickJumpHeavy => "chick_fresh_egg_ride",
-            Self::ChickUltimateStartup => "chick_breakfast_barrage",
+            Self::ChickUltimateStartup => "chick_egg_burst",
             Self::Grab => "grab",
             Self::Throw => "throw",
             Self::GuardCounter => "guard_counter",
@@ -357,16 +357,22 @@ pub enum PenguinSkillId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChickSkillId {
+    #[allow(dead_code)]
     ShellPeck,
     SunnyFlip,
     ShellScramble,
+    #[allow(dead_code)]
     EggCupMortar,
     OrbitEgg,
     OrbitEggLaunch,
+    UltimateEggBurst,
     EggplantRoll,
+    #[allow(dead_code)]
     FreshEggDrop,
     FreshEggRide,
+    #[allow(dead_code)]
     SunnySideSplash,
+    #[allow(dead_code)]
     OmeletField,
 }
 
@@ -2945,26 +2951,12 @@ const PENGUIN_ULTIMATE_SLOPE_EVENTS: [MoveTimelineEvent; 6] = [
     timeline_event(680, MoveTimelineEventKind::Recover),
 ];
 
-const CHICK_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 11] = [
-    feedback_event(0, FeedbackPhase::Startup, "startup_chick_breakfast_barrage"),
-    chick_skill_event(80, ChickSkillId::OmeletField),
-    feedback_event(
-        130,
-        FeedbackPhase::PreHit,
-        "release_chick_breakfast_barrage",
-    ),
-    chick_skill_event(190, ChickSkillId::ShellPeck),
-    chick_skill_event(310, ChickSkillId::EggCupMortar),
-    chick_skill_event(430, ChickSkillId::FreshEggDrop),
-    chick_skill_event(560, ChickSkillId::SunnySideSplash),
-    chick_skill_event(700, ChickSkillId::ShellScramble),
-    chick_skill_event(840, ChickSkillId::EggplantRoll),
-    feedback_event(
-        980,
-        FeedbackPhase::Aftermath,
-        "recover_chick_breakfast_barrage",
-    ),
-    timeline_event(1180, MoveTimelineEventKind::Recover),
+const CHICK_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 5] = [
+    feedback_event(0, FeedbackPhase::Startup, "startup_chick_egg_burst"),
+    feedback_event(80, FeedbackPhase::PreHit, "release_chick_egg_burst"),
+    chick_skill_event(100, ChickSkillId::UltimateEggBurst),
+    feedback_event(360, FeedbackPhase::Aftermath, "recover_chick_egg_burst"),
+    timeline_event(560, MoveTimelineEventKind::Recover),
 ];
 
 const PANDA_ULTIMATE_STARTUP_EVENTS: [MoveTimelineEvent; 6] = [
@@ -8069,10 +8061,10 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
             button: TechniqueButton::Ultimate,
             status: TechniqueStatus::Grounded,
             script: script(
-                "chick_breakfast_barrage.sc",
-                Some(980),
+                "chick_egg_burst.sc",
+                Some(360),
                 None,
-                1180,
+                560,
                 &CHICK_ULTIMATE_STARTUP_EVENTS,
             ),
             input_buffer_ms: 0,
@@ -10733,10 +10725,7 @@ mod tests {
         );
 
         assert_eq!(TechniqueId::ChickLight1.owner(), Some(CharacterKind::Chick));
-        assert_eq!(
-            TechniqueId::ChickUltimateStartup.label(),
-            "chick_breakfast_barrage"
-        );
+        assert_eq!(TechniqueId::ChickUltimateStartup.label(), "chick_egg_burst");
         assert_eq!(TechniqueId::ChickLight1.label(), "chick_orbit_egg_launch");
         assert_eq!(TechniqueId::ChickHeavy.label(), "chick_orbit_egg");
         assert_eq!(
@@ -10915,18 +10904,9 @@ mod tests {
 
         assert_eq!(ultimate.action, FighterAction::UltimateStartup);
         assert_eq!(ultimate.stamina_cost, ULTIMATE_STAMINA_COST);
-        assert_eq!(
-            ultimate_skills,
-            vec![
-                (80, ChickSkillId::OmeletField),
-                (190, ChickSkillId::ShellPeck),
-                (310, ChickSkillId::EggCupMortar),
-                (430, ChickSkillId::FreshEggDrop),
-                (560, ChickSkillId::SunnySideSplash),
-                (700, ChickSkillId::ShellScramble),
-                (840, ChickSkillId::EggplantRoll),
-            ]
-        );
+        assert_eq!(ultimate.script.id, "chick_egg_burst.sc");
+        assert_eq!(ultimate.script.recover_ms, 560);
+        assert_eq!(ultimate_skills, vec![(100, ChickSkillId::UltimateEggBurst)]);
         assert!(ultimate_attacks.is_empty());
         assert!(
             technique_slot_for_loadout(CharacterMoveSlot::UltimateRush, chick, &catalog).is_none()

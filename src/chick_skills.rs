@@ -50,6 +50,9 @@ const CHICK_ORBIT_EGG_ORBIT_RADIUS: f32 = 0.95;
 const CHICK_ORBIT_EGG_HEIGHT: f32 = 1.0;
 const CHICK_ORBIT_EGG_ANGULAR_SPEED: f32 = TAU * 0.85;
 const CHICK_ORBIT_EGG_VISUAL_SCALE: f32 = 5.0;
+pub const CHICK_ULTIMATE_EGG_COUNT: usize = 16;
+pub const CHICK_ULTIMATE_EGG_LIFETIME: f32 = 3.0;
+const CHICK_ULTIMATE_EGG_SPAWN_RADIUS: f32 = 0.72;
 const CHICK_FRESH_EGG_FORWARD_SPEED: f32 = 1.7;
 const CHICK_FRESH_EGG_INITIAL_FALL_SPEED: f32 = 0.4;
 const CHICK_FRESH_EGG_GRAVITY: f32 = 13.0;
@@ -259,22 +262,37 @@ pub fn spawn_chick_skill(
                     facing,
                     size_scale,
                 );
-            } else if let Some(launched_egg) =
-                owner_launched_orbit_egg_for_recall(owner, active_skills)
-            {
-                commands.entity(launched_egg.entity).despawn();
-                spawn_orbit_egg_return(
-                    commands,
-                    assets,
-                    effect_assets,
-                    owner,
-                    owner_id,
-                    owner_style,
-                    launched_egg.position,
-                    facing,
-                    size_scale,
-                );
+            } else {
+                let launched_eggs = owner_launched_orbit_eggs_for_recall(owner, active_skills);
+                for launched_egg in launched_eggs {
+                    commands.entity(launched_egg.entity).despawn();
+                    spawn_orbit_egg_return(
+                        commands,
+                        assets,
+                        effect_assets,
+                        owner,
+                        owner_id,
+                        owner_style,
+                        launched_egg.position,
+                        facing,
+                        size_scale,
+                    );
+                }
             }
+        }
+        ChickSkillId::UltimateEggBurst => {
+            replace_owner_orbit_eggs(commands, owner, active_skills);
+            spawn_ultimate_egg_burst(
+                commands,
+                assets,
+                effect_assets,
+                owner,
+                owner_id,
+                owner_style,
+                origin,
+                facing,
+                size_scale,
+            );
         }
         ChickSkillId::EggplantRoll => {
             let spawn = grounded_position(origin + facing * 0.58 * size_scale, 0.19 * size_scale);
@@ -580,14 +598,15 @@ fn owner_orbit_egg_for_launch(
         .copied()
 }
 
-fn owner_launched_orbit_egg_for_recall(
+fn owner_launched_orbit_eggs_for_recall(
     owner: Entity,
     active_skills: &[ActiveChickSkillSnapshot],
-) -> Option<ActiveChickSkillSnapshot> {
+) -> Vec<ActiveChickSkillSnapshot> {
     active_skills
         .iter()
-        .find(|skill| skill.owner == owner && skill.kind == ChickSkillKind::OrbitEggLaunch)
+        .filter(|skill| skill.owner == owner && skill.kind == ChickSkillKind::OrbitEggLaunch)
         .copied()
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -673,6 +692,98 @@ fn spawn_orbit_egg_launch(
         facing,
         FeedbackPackageId::SpecialProjectileStartup,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_ultimate_egg_burst(
+    commands: &mut Commands,
+    assets: &ChickSkillAssets,
+    effect_assets: &EffectAssets,
+    owner: Entity,
+    owner_id: usize,
+    owner_style: FighterStyleKind,
+    origin: Vec3,
+    facing: Vec3,
+    size_scale: f32,
+) {
+    let facing = normalized_or_forward(facing);
+    let origin = origin + Vec3::Y * CHICK_ORBIT_EGG_HEIGHT * size_scale;
+    for direction in ultimate_egg_burst_directions(facing) {
+        let spawn = origin + direction * CHICK_ULTIMATE_EGG_SPAWN_RADIUS * size_scale;
+        spawn_ultimate_orbit_egg_launch(
+            commands,
+            assets,
+            owner,
+            owner_id,
+            owner_style,
+            spawn,
+            direction,
+            size_scale,
+        );
+    }
+    spawn_feedback_package(
+        commands,
+        effect_assets,
+        origin,
+        facing,
+        FeedbackPackageId::SpecialProjectileStartup,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_ultimate_orbit_egg_launch(
+    commands: &mut Commands,
+    assets: &ChickSkillAssets,
+    owner: Entity,
+    owner_id: usize,
+    owner_style: FighterStyleKind,
+    position: Vec3,
+    direction: Vec3,
+    size_scale: f32,
+) {
+    let facing = normalized_or_forward(direction);
+    commands.spawn((
+        SceneRoot(assets.egg_scene.clone()),
+        Transform::from_translation(position)
+            .with_rotation(projectile_rotation(facing))
+            .with_scale(chick_skill_visual_scale(
+                ChickSkillKind::OrbitEggLaunch,
+                size_scale,
+                0.0,
+            )),
+        ultimate_orbit_egg_skill(owner, owner_id, owner_style, facing, size_scale),
+        Name::new("Chick ultimate orbit egg"),
+    ));
+}
+
+fn ultimate_orbit_egg_skill(
+    owner: Entity,
+    owner_id: usize,
+    owner_style: FighterStyleKind,
+    facing: Vec3,
+    size_scale: f32,
+) -> ActiveChickSkill {
+    let facing = normalized_or_forward(facing);
+    let mut skill = active_chick_skill(
+        ChickSkillKind::OrbitEggLaunch,
+        owner,
+        owner_id,
+        owner_style,
+        facing,
+        facing * CHICK_ORBIT_EGG_LAUNCH_SPEED,
+        size_scale,
+    );
+    skill.lifetime = CHICK_ULTIMATE_EGG_LIFETIME;
+    skill
+}
+
+fn ultimate_egg_burst_directions(facing: Vec3) -> [Vec3; CHICK_ULTIMATE_EGG_COUNT] {
+    let facing = normalized_or_forward(facing);
+    let base = facing.z.atan2(facing.x);
+    std::array::from_fn(|index| {
+        let angle = base + TAU * index as f32 / CHICK_ULTIMATE_EGG_COUNT as f32;
+        Vec3::new(angle.cos(), 0.0, angle.sin()).normalize_or_zero()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2031,10 +2142,11 @@ mod tests {
     }
 
     #[test]
-    fn orbit_egg_recall_uses_same_owner_launch_position() {
+    fn orbit_egg_recall_uses_all_same_owner_launch_positions() {
         let owner = entity(10);
         let other_owner = entity(11);
-        let owner_launch_position = Vec3::new(4.25, 1.1, -1.5);
+        let first_owner_launch_position = Vec3::new(4.25, 1.1, -1.5);
+        let second_owner_launch_position = Vec3::new(-1.25, 1.1, 2.0);
         let snapshots = [
             ActiveChickSkillSnapshot {
                 entity: entity(20),
@@ -2052,15 +2164,48 @@ mod tests {
                 entity: entity(22),
                 owner,
                 kind: ChickSkillKind::OrbitEggLaunch,
-                position: owner_launch_position,
+                position: first_owner_launch_position,
+            },
+            ActiveChickSkillSnapshot {
+                entity: entity(23),
+                owner,
+                kind: ChickSkillKind::OrbitEggLaunch,
+                position: second_owner_launch_position,
             },
         ];
 
-        let recall = owner_launched_orbit_egg_for_recall(owner, &snapshots).unwrap();
+        let recall = owner_launched_orbit_eggs_for_recall(owner, &snapshots);
 
-        assert_eq!(recall.entity, entity(22));
-        assert_eq!(recall.position, owner_launch_position);
-        assert!(owner_launched_orbit_egg_for_recall(entity(99), &snapshots).is_none());
+        assert_eq!(recall.len(), 2);
+        assert_eq!(recall[0].entity, entity(22));
+        assert_eq!(recall[0].position, first_owner_launch_position);
+        assert_eq!(recall[1].entity, entity(23));
+        assert_eq!(recall[1].position, second_owner_launch_position);
+        assert!(owner_launched_orbit_eggs_for_recall(entity(99), &snapshots).is_empty());
+    }
+
+    #[test]
+    fn ultimate_egg_burst_uses_sixteen_even_radial_directions() {
+        let directions = ultimate_egg_burst_directions(Vec3::Z);
+
+        assert_eq!(directions.len(), CHICK_ULTIMATE_EGG_COUNT);
+        assert_eq!(CHICK_ULTIMATE_EGG_COUNT, 16);
+        assert_vec3_close(directions[0], Vec3::Z);
+        assert_vec3_close(directions[8], -Vec3::Z);
+        assert_vec3_close(directions[4], -Vec3::X);
+        let adjacent_dot = directions[0].dot(directions[1]);
+        assert!((adjacent_dot - (TAU / CHICK_ULTIMATE_EGG_COUNT as f32).cos()).abs() < 0.001);
+    }
+
+    #[test]
+    fn ultimate_orbit_eggs_use_three_second_launched_egg_control_profile() {
+        let skill = ultimate_orbit_egg_skill(entity(1), 0, FighterStyleKind::Anchor, Vec3::X, 1.0);
+
+        assert_eq!(skill.kind, ChickSkillKind::OrbitEggLaunch);
+        assert_eq!(skill.payload_id, Some(AttackPayloadId::ChickOrbitEgg));
+        assert_eq!(skill.lifetime, CHICK_ULTIMATE_EGG_LIFETIME);
+        assert_eq!(CHICK_ULTIMATE_EGG_LIFETIME, 3.0);
+        assert_eq!(skill.velocity, Vec3::X * CHICK_ORBIT_EGG_LAUNCH_SPEED);
     }
 
     #[test]
