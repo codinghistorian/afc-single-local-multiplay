@@ -59,7 +59,7 @@ impl ArenaGroundShape {
 pub enum ArenaVisualTheme {
     Crown,
     Causeway,
-    Tide,
+    Terrace,
     Industrial,
     Reactor,
     Toybox,
@@ -132,11 +132,13 @@ const CROWN_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::circle(
 const SPLIT_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::rectangle(-4.7, 0.0, 3.0, 6.5, 0.0, ARENA_TOP_Y),
     ArenaGroundShape::rectangle(4.7, 0.0, 3.0, 6.5, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, 0.0, 1.75, 6.5, 0.0, ARENA_TOP_Y - 0.12),
     ArenaGroundShape::rectangle(0.0, 4.7, 2.0, 1.15, 0.0, ARENA_TOP_Y + 0.04),
     ArenaGroundShape::rectangle(0.0, -4.7, 2.0, 1.15, 0.0, ARENA_TOP_Y + 0.04),
 ];
 
-const LOW_TIDE_GROUND: &[ArenaGroundShape] = &[
+const SUNSTONE_GROUND: &[ArenaGroundShape] = &[
+    ArenaGroundShape::circle(0.0, 0.0, 8.15, ARENA_TOP_Y - 0.16),
     ArenaGroundShape::circle(0.0, 0.0, 3.25, ARENA_TOP_Y + 0.18),
     ArenaGroundShape::circle(-5.9, 3.8, 2.0, ARENA_TOP_Y + 0.08),
     ArenaGroundShape::circle(5.9, -3.8, 2.0, ARENA_TOP_Y + 0.08),
@@ -292,14 +294,14 @@ const SPLIT_ITEMS: &[ItemAnchor] = &[
     },
 ];
 
-const LOW_TIDE_PLATFORMS: &[PlatformDefinition] = &[
+const SUNSTONE_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, 0.0, 3.2, 2.4, ARENA_TOP_Y + 0.18),
     PlatformDefinition::new(-6.4, 3.8, 1.8, 1.2, ARENA_TOP_Y + 0.52),
     PlatformDefinition::new(6.4, -3.8, 1.8, 1.2, ARENA_TOP_Y + 0.52),
     PlatformDefinition::new(0.0, -8.6, 4.2, 1.0, ARENA_TOP_Y - 0.08),
 ];
 
-const LOW_TIDE_ITEMS: &[ItemAnchor] = &[
+const SUNSTONE_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::CupCoffee,
         position: Vec3::new(0.0, ARENA_TOP_Y + 0.68, 0.0),
@@ -595,7 +597,7 @@ const SPLIT_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
     phase: 0.0,
 }];
 
-const LOW_TIDE_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
+const SUNSTONE_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
     kind: ArenaHazardKind::SnareField,
     center: Vec3::new(0.0, ARENA_TOP_Y + 0.05, 1.8),
     radius: 1.8,
@@ -787,22 +789,22 @@ const ARENAS: &[ArenaDefinition] = &[
         visual_theme: ArenaVisualTheme::Causeway,
     },
     ArenaDefinition {
-        name: "Low Tide Steps",
+        name: "Sunstone Steps",
         spawn_points: [
             Vec3::new(-4.8, ARENA_TOP_Y, 4.0),
             Vec3::new(4.8, ARENA_TOP_Y, -4.0),
             Vec3::new(-4.8, ARENA_TOP_Y, -4.0),
             Vec3::new(4.8, ARENA_TOP_Y, 4.0),
         ],
-        item_anchors: LOW_TIDE_ITEMS,
-        ground_shapes: LOW_TIDE_GROUND,
-        platforms: LOW_TIDE_PLATFORMS,
+        item_anchors: SUNSTONE_ITEMS,
+        ground_shapes: SUNSTONE_GROUND,
+        platforms: SUNSTONE_PLATFORMS,
         ringout_radius: RINGOUT_RADIUS + 0.6,
         ringout_y: RINGOUT_Y - 0.25,
         camera_offset: Vec3::new(0.0, 13.6, 15.6),
-        hazards: LOW_TIDE_HAZARDS,
+        hazards: SUNSTONE_HAZARDS,
         background: ANIME_SKY_BACKGROUND,
-        visual_theme: ArenaVisualTheme::Tide,
+        visual_theme: ArenaVisualTheme::Terrace,
     },
     ArenaDefinition {
         name: "Crank Yard",
@@ -968,7 +970,7 @@ mod tests {
         assert!(!arenas[0].item_anchors.is_empty());
         assert!(!arenas[1].hazards.is_empty());
         assert!(arenas[1].platforms[2].top_y > ARENA_TOP_Y);
-        assert_eq!(arenas[2].name, "Low Tide Steps");
+        assert_eq!(arenas[2].name, "Sunstone Steps");
         assert_eq!(arenas[3].name, "Crank Yard");
         assert_eq!(arenas[4].name, "Vent Spiral");
         assert_eq!(arenas[5].name, "Bumper Alley");
@@ -1001,6 +1003,27 @@ mod tests {
         assert_eq!(arena_definition(0).name, "Crown Ring");
         assert_eq!(arena_definition(1).name, "Split Causeway");
         assert_eq!(arena_definition(usize::MAX).name, "Powder Keg Court");
+    }
+
+    #[test]
+    fn dry_redesigns_support_their_former_water_channels() {
+        let split = arena_definition(1);
+        for (x, z) in [(0.0, 0.0), (0.0, 2.5), (0.0, -2.5)] {
+            assert!(
+                crate::arena::ground_support_for_arena_with_radius(split, x, z, 0.0)
+                    .height()
+                    .is_some()
+            );
+        }
+
+        let sunstone = arena_definition(2);
+        for (x, z) in [(0.0, 5.5), (4.0, 2.5), (-4.0, -2.5)] {
+            assert!(
+                crate::arena::ground_support_for_arena_with_radius(sunstone, x, z, 0.0)
+                    .height()
+                    .is_some()
+            );
+        }
     }
 
     #[test]

@@ -310,7 +310,7 @@ fn spawn_arena_geometry(
 
     spawn_arena_ground_shapes(commands, meshes, primary.clone(), secondary.clone(), arena);
     spawn_platform_blocks(commands, meshes, secondary, arena.platforms);
-    spawn_arena_theme_accents(commands, meshes, materials, trim, arena.visual_theme);
+    spawn_arena_theme_accents(commands, meshes, trim, arena.visual_theme);
     spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
 }
@@ -329,11 +329,11 @@ fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
             trim: Color::srgb(0.86, 0.67, 0.24),
             hazard: Color::srgb(0.2, 0.76, 0.94),
         },
-        ArenaVisualTheme::Tide => ArenaThemePalette {
-            primary: Color::srgb(0.6, 0.67, 0.42),
-            secondary: Color::srgb(0.78, 0.65, 0.42),
-            trim: Color::srgb(0.2, 0.69, 0.76),
-            hazard: Color::srgb(0.15, 0.75, 0.92),
+        ArenaVisualTheme::Terrace => ArenaThemePalette {
+            primary: Color::srgb(0.58, 0.62, 0.36),
+            secondary: Color::srgb(0.76, 0.61, 0.35),
+            trim: Color::srgb(0.86, 0.42, 0.16),
+            hazard: Color::srgb(0.8, 0.24, 0.16),
         },
         ArenaVisualTheme::Industrial => ArenaThemePalette {
             primary: Color::srgb(0.31, 0.35, 0.38),
@@ -455,13 +455,12 @@ fn spawn_platform_blocks(
 fn spawn_arena_theme_accents(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     trim: Handle<StandardMaterial>,
     theme: ArenaVisualTheme,
 ) {
     let (positions, size) = match theme {
         ArenaVisualTheme::Causeway => (&[(-4.7, 0.0), (4.7, 0.0)][..], Vec2::new(0.16, 11.5)),
-        ArenaVisualTheme::Tide => (&[(-2.2, 1.45), (2.2, -1.45)][..], Vec2::new(3.6, 0.12)),
+        ArenaVisualTheme::Terrace => (&[(-2.2, 1.45), (2.2, -1.45)][..], Vec2::new(3.6, 0.12)),
         ArenaVisualTheme::Industrial => (&[(0.0, -1.8), (0.0, 1.8)][..], Vec2::new(13.0, 0.16)),
         ArenaVisualTheme::Reactor => (&[(0.0, 0.0)][..], Vec2::new(4.0, 0.14)),
         ArenaVisualTheme::Toybox => (&[(-2.8, 0.0), (2.8, 0.0)][..], Vec2::new(0.2, 15.2)),
@@ -477,23 +476,6 @@ fn spawn_arena_theme_accents(
             Mesh3d(meshes.add(Cuboid::new(size.x, 0.035, size.y))),
             MeshMaterial3d(trim.clone()),
             Transform::from_xyz(*x, ARENA_TOP_Y + 0.025, *z),
-            ArenaGeometry,
-        ));
-    }
-
-    if matches!(theme, ArenaVisualTheme::Causeway | ArenaVisualTheme::Tide) {
-        let water = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.08, 0.58, 0.8, 0.72),
-            metallic: 0.08,
-            perceptual_roughness: 0.28,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        });
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(22.0, 0.08, 20.0))),
-            MeshMaterial3d(water),
-            Transform::from_xyz(0.0, ARENA_TOP_Y - 0.72, 0.0),
-            Name::new("Arena water plane"),
             ArenaGeometry,
         ));
     }
@@ -990,7 +972,7 @@ fn arena_asset_props(arena_index: usize) -> &'static [ArenaAssetProp] {
     match arena_index {
         0 => CROWN_ASSET_PROPS,
         1 => SPLIT_ASSET_PROPS,
-        2 => LOW_TIDE_ASSET_PROPS,
+        2 => SUNSTONE_ASSET_PROPS,
         3 => CRANK_ASSET_PROPS,
         4 => VENT_SPIRAL_ASSET_PROPS,
         5 => BUMPER_ALLEY_ASSET_PROPS,
@@ -1052,8 +1034,8 @@ const CROWN_ASSET_PROPS: &[ArenaAssetProp] = &[
 
 const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Split north bridge",
-        file: "tower/tile-river-bridge.glb",
+        name: "Split north stone crossing",
+        file: "tower/tile-straight.glb",
         x: 0.0,
         y: ARENA_TOP_Y,
         z: 4.7,
@@ -1061,8 +1043,8 @@ const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 3.25,
     },
     ArenaAssetProp {
-        name: "Split south bridge",
-        file: "tower/tile-river-bridge.glb",
+        name: "Split south stone crossing",
+        file: "tower/tile-straight.glb",
         x: 0.0,
         y: ARENA_TOP_Y,
         z: -4.7,
@@ -1107,9 +1089,9 @@ const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
     },
 ];
 
-const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
+const SUNSTONE_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Low tide central reef",
+        name: "Sunstone central dais",
         file: "tower/tile-rock.glb",
         x: 0.0,
         y: ARENA_TOP_Y - 0.1,
@@ -1118,7 +1100,7 @@ const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 3.3,
     },
     ArenaAssetProp {
-        name: "Low tide west driftwood",
+        name: "Sunstone west timber lookout",
         file: "tower/wood-structure.glb",
         x: -6.0,
         y: ARENA_TOP_Y + 0.08,
@@ -1127,7 +1109,7 @@ const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 2.4,
     },
     ArenaAssetProp {
-        name: "Low tide east driftwood",
+        name: "Sunstone east timber lookout",
         file: "tower/wood-structure.glb",
         x: 6.0,
         y: ARENA_TOP_Y + 0.08,
@@ -1136,7 +1118,7 @@ const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 2.4,
     },
     ArenaAssetProp {
-        name: "Low tide west rocks",
+        name: "Sunstone west rocks",
         file: "tower/detail-rocks-large.glb",
         x: -6.0,
         y: ARENA_TOP_Y,
@@ -1145,7 +1127,7 @@ const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 2.2,
     },
     ArenaAssetProp {
-        name: "Low tide east rocks",
+        name: "Sunstone east rocks",
         file: "tower/detail-rocks-large.glb",
         x: 6.0,
         y: ARENA_TOP_Y,
@@ -1154,8 +1136,8 @@ const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 2.2,
     },
     ArenaAssetProp {
-        name: "Low tide rear waterfall",
-        file: "tower/tile-river-waterfall.glb",
+        name: "Sunstone rear rise",
+        file: "tower/tile-hill.glb",
         x: 0.0,
         y: ARENA_TOP_Y - 0.5,
         z: 8.4,
@@ -2176,6 +2158,17 @@ mod tests {
                     .join(arena_prop_asset_path(prop.file))
                     .is_file()
             }));
+        }
+    }
+
+    #[test]
+    fn dry_arena_props_do_not_use_river_assets() {
+        for index in [1, 2] {
+            assert!(
+                arena_asset_props(index)
+                    .iter()
+                    .all(|prop| !prop.file.contains("river"))
+            );
         }
     }
 

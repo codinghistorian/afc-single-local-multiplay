@@ -114,7 +114,7 @@ must be picked up with grab.
 
 ## Prototype Notes
 
-- The demo starts as one controlled fighter versus one bot. Crown Ring keeps its original authored layout, while nine additional arenas use distinct bridges, islands, crossways, spirals, lanes, market wings, garden petals, snow steps, and cannon-court footprints.
+- The demo starts as one controlled fighter versus one bot. Crown Ring keeps its original authored layout, while nine additional arenas use split terraces, layered stone steps, crossways, spirals, lanes, market wings, garden petals, snow steps, and cannon-court footprints.
 - Arena definitions provide ground shapes, visual themes, spawn points, item anchors, ring-out bounds, camera hints, platform blocks, and phased hazard data. All ten arenas can be selected in user mode or cycled in native dev setup.
 - The camera follows the center of living fighters from a high angled arcade view, while single-player user mode follows the controlled fighter with the saved single-player camera preset.
 - Movement uses simple acceleration, friction, gravity, jump, dash stamina cost, radius-aware platform support, ledge jump grace, side pushout, limited wall bounce, and manual ground checks.
