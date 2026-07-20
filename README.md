@@ -1,6 +1,6 @@
 # FFC Prototype
 
-Runnable Rust/Bevy prototype for an original low-poly 3D arcade arena brawler. It uses Bevy primitives only: no external art, no copied layouts, and no third-party physics crate.
+Runnable Rust/Bevy prototype for an original low-poly 3D arcade arena brawler. It combines custom Bevy geometry with a curated set of CC0 Kenney assets from `arts/`, without a third-party physics crate.
 
 ## Run
 
@@ -40,7 +40,8 @@ Setup:
 - 1: timed team score rules
 - 2: free-for-all score rules
 - 3: stock ring-out rules
-- A: cycle arena selection
+- A: cycle arena selection forward
+- Shift+A: cycle arena selection backward
 - Demo battle is locked to one player fighter and one bot fighter.
 - Z/X: cycle player/bot styles
 - T/Y: cycle player/bot equipment
@@ -58,6 +59,7 @@ Player:
 
 Native Dev Hotkeys:
 - Shift+U: enter user mode from the dev setup screen.
+- In user mode, choose mode, character, and arena before the controls briefing.
 - F2: toggle map editor while in setup.
 - H: toggle hitbox, hurtbox, item, special, impact-source, reaction, technique-window, and feedback-cue debug overlays.
 - Shift+Up/Down: pan the gameplay camera forward/back.
@@ -112,8 +114,8 @@ must be picked up with grab.
 
 ## Prototype Notes
 
-- The demo starts as one controlled fighter versus one bot in a circular stone arena with red target markings, side blocks, a rear primitive billboard, and a dark void.
-- Arena definitions now provide spawn points, item anchors, ring-out bounds, camera hints, platform blocks, and hazard marker data. Crown Ring, Split Causeway, Low Tide Steps, and Crank Yard can be selected from setup.
+- The demo starts as one controlled fighter versus one bot. Crown Ring keeps its original authored layout, while nine additional arenas use distinct bridges, islands, crossways, spirals, lanes, market wings, garden petals, snow steps, and cannon-court footprints.
+- Arena definitions provide ground shapes, visual themes, spawn points, item anchors, ring-out bounds, camera hints, platform blocks, and phased hazard data. All ten arenas can be selected in user mode or cycled in native dev setup.
 - The camera follows the center of living fighters from a high angled arcade view, while single-player user mode follows the controlled fighter with the saved single-player camera preset.
 - Movement uses simple acceleration, friction, gravity, jump, dash stamina cost, radius-aware platform support, ledge jump grace, side pushout, limited wall bounce, and manual ground checks.
 - Combat uses Rust-side technique definitions for startup, active, recovery, cancel/branch windows, stamina hooks, and impact payloads across the light chain, dash attack, jump attack, heavy attacks, guard counter, item actions, specials, and stateful grab/throw.
@@ -124,7 +126,7 @@ must be picked up with grab.
 - Primitive hit sparks, guard flashes, dash trails, dust puffs, respawn beams, and item effects make combat state easier to read without external assets.
 - Simple arena items add arcade match chaos: stamina recovery, a carried melee prop, and a carried short-fuse bomb.
 - Specials add a small projectile, trap, shockwave, and lingering hazard layer with stamina costs, cooldowns, owner grace, and reset cleanup.
-- Arena hazards now include launch pulses, slowing snare fields, and bumper nodes that apply neutral shared-impact pressure without awarding ring-out credit.
+- Arena hazards now include launch pulses, slowing snare fields, and bumper nodes with per-hazard phase offsets that apply neutral shared-impact pressure without awarding ring-out credit.
 - HUD rows tint and show EDGE danger when fighters drift near arena ring-out bounds or fall toward the lower blast plane.
 - Fighters use shared action rules with style tuning for movement, stamina economy, guard pressure, attack timing, throw pressure, and bot range preference. The current demo exposes one GetAmped-style player control layout against one bot.
 - Equipped modifiers each affect one move, show effect text/cooldown status in the fighter HUD row, flash on trigger, route a feedback cue, and add a small visual accent.
@@ -147,5 +149,5 @@ combat roadmap and planning backlog.
 
 - Continue platform collision tuning for walls, ramps, and ledges.
 - Continue tuning balance, readability, and setup polish from live playtests.
-- Add richer arena hazard patterns and bot avoidance.
+- Continue tuning moving arena devices, map-authored overlay dressing, and footprint-aware bot navigation.
 - Expand style and equipment identity so archetypes and modifiers change more than raw tuning.

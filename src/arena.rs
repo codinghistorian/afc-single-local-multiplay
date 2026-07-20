@@ -3,23 +3,25 @@ use bevy::math::EulerRot;
 use bevy::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::fs;
 
 use crate::arena_defs::{
-    ArenaBackgroundDefinition, ArenaDefinition, ArenaHazardDefinition, ArenaHazardKind,
-    PlatformDefinition,
-    active_arena_definition, active_arena_index, arena_definitions,
+    ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
+    ArenaHazardKind, ArenaVisualTheme, PlatformDefinition, active_arena_definition,
+    active_arena_index, arena_definitions,
 };
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
 };
 use crate::components::{Fighter, FighterActionState, FighterMotor, FighterStats};
+#[cfg(test)]
+use crate::constants::ARENA_RADIUS;
 use crate::constants::{
-    ARENA_HEIGHT, ARENA_RADIUS, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS,
-    LEDGE_SUPPORT_GRACE_MAX, LEDGE_SUPPORT_GRACE_SCALE,
+    ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, LEDGE_SUPPORT_GRACE_MAX,
+    LEDGE_SUPPORT_GRACE_SCALE,
 };
 use crate::effects::EffectAssets;
 use crate::equipment::FighterEquipment;
@@ -36,9 +38,9 @@ const ARENA_HAZARD_SNARE_KNOCKBACK: f32 = 2.2;
 const ARENA_HAZARD_BUMPER_DAMAGE: f32 = 9.0;
 const ARENA_HAZARD_BUMPER_KNOCKBACK: f32 = 7.6;
 const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
+const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
-const MINI_ARENA_FLOOR_RADIUS: f32 = ARENA_RADIUS - 0.65;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
 const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
@@ -47,6 +49,15 @@ const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+#[derive(Component)]
+pub struct ArenaHazardMarker {
+    kind: ArenaHazardKind,
+    pulse_seconds: f32,
+    phase: f32,
+    base_scale: f32,
+    base_y: f32,
+}
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -66,32 +77,17 @@ struct ArenaAssetProp {
     scale: f32,
 }
 
+#[derive(Clone, Copy)]
+struct ArenaThemePalette {
+    primary: Color,
+    secondary: Color,
+    trim: Color,
+    hazard: Color,
+}
+
 impl ArenaAssetProp {
     fn transform(self) -> Transform {
         Transform::from_xyz(self.x, self.y, self.z)
-            .with_rotation(Quat::from_rotation_y(self.yaw))
-            .with_scale(Vec3::splat(self.scale))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MiniArenaFloorAsset {
-    Floor,
-    FloorDetail,
-}
-
-#[derive(Clone, Copy)]
-struct MiniArenaFloorTile {
-    asset: MiniArenaFloorAsset,
-    x: f32,
-    z: f32,
-    yaw: f32,
-    scale: f32,
-}
-
-impl MiniArenaFloorTile {
-    fn transform(self) -> Transform {
-        Transform::from_xyz(self.x, mini_arena_floor_y(self.asset), self.z)
             .with_rotation(Quat::from_rotation_y(self.yaw))
             .with_scale(Vec3::splat(self.scale))
     }
@@ -266,53 +262,17 @@ fn spawn_arena_geometry(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let stone = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.66, 0.57, 0.42),
-        perceptual_roughness: 0.92,
-        ..default()
-    });
-    let stone_dark = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.34, 0.27, 0.19),
-        perceptual_roughness: 0.96,
-        ..default()
-    });
-    let stone_light = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.82, 0.76, 0.59),
-        perceptual_roughness: 0.86,
-        ..default()
-    });
-    let red = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.76, 0.08, 0.055),
-        perceptual_roughness: 0.78,
-        ..default()
-    });
-    let panel = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.09, 0.11, 0.18),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    let panel_trim = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.74, 0.57, 0.29),
-        metallic: 0.15,
-        perceptual_roughness: 0.55,
-        ..default()
-    });
-    let letter = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.96, 0.82, 0.24),
-        emissive: LinearRgba::rgb(0.08, 0.045, 0.0),
-        ..default()
-    });
-    let hazard_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.1, 0.8, 0.65, 0.28),
-        emissive: LinearRgba::rgb(0.0, 0.12, 0.08),
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
     let arena = active_arena_definition();
     spawn_arena_background(commands, asset_server, meshes, materials, arena.background);
 
     let arena_index = active_arena_index();
-    let _arena_count = arena_definitions().len();
+    let palette = arena_theme_palette(arena.visual_theme);
+    let hazard_material = materials.add(StandardMaterial {
+        base_color: palette.hazard.with_alpha(0.34),
+        emissive: LinearRgba::from(palette.hazard) * 0.16,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
 
     if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
         match spawn_champions_court_map(commands, asset_server) {
@@ -326,28 +286,217 @@ fn spawn_arena_geometry(
         }
     }
 
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(ARENA_RADIUS, ARENA_HEIGHT))),
-        MeshMaterial3d(stone.clone()),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        Name::new(arena.name),
-        ArenaGeometry,
-    ));
+    let primary = materials.add(StandardMaterial {
+        base_color: palette.primary,
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let secondary = materials.add(StandardMaterial {
+        base_color: palette.secondary,
+        perceptual_roughness: 0.84,
+        ..default()
+    });
+    let trim = materials.add(StandardMaterial {
+        base_color: palette.trim,
+        metallic: matches!(
+            arena.visual_theme,
+            ArenaVisualTheme::Industrial | ArenaVisualTheme::Reactor
+        )
+        .then_some(0.22)
+        .unwrap_or(0.02),
+        perceptual_roughness: 0.64,
+        ..default()
+    });
 
-    spawn_mini_arena_floor_tiles(commands, asset_server, arena_index);
-    spawn_floor_markings(commands, meshes, red.clone());
-    spawn_stone_lines(commands, meshes, stone_dark.clone());
-    spawn_side_blocks(
-        commands,
-        meshes,
-        stone.clone(),
-        stone_dark.clone(),
-        stone_light.clone(),
-        arena.platforms,
-    );
-    spawn_billboard(commands, meshes, panel, panel_trim, letter, stone_dark);
+    spawn_arena_ground_shapes(commands, meshes, primary.clone(), secondary.clone(), arena);
+    spawn_platform_blocks(commands, meshes, secondary, arena.platforms);
+    spawn_arena_theme_accents(commands, meshes, materials, trim, arena.visual_theme);
     spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
+}
+
+fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
+    match theme {
+        ArenaVisualTheme::Crown => ArenaThemePalette {
+            primary: Color::srgb(0.66, 0.57, 0.42),
+            secondary: Color::srgb(0.82, 0.76, 0.59),
+            trim: Color::srgb(0.76, 0.08, 0.055),
+            hazard: Color::srgb(0.1, 0.8, 0.65),
+        },
+        ArenaVisualTheme::Causeway => ArenaThemePalette {
+            primary: Color::srgb(0.36, 0.55, 0.34),
+            secondary: Color::srgb(0.48, 0.34, 0.2),
+            trim: Color::srgb(0.86, 0.67, 0.24),
+            hazard: Color::srgb(0.2, 0.76, 0.94),
+        },
+        ArenaVisualTheme::Tide => ArenaThemePalette {
+            primary: Color::srgb(0.6, 0.67, 0.42),
+            secondary: Color::srgb(0.78, 0.65, 0.42),
+            trim: Color::srgb(0.2, 0.69, 0.76),
+            hazard: Color::srgb(0.15, 0.75, 0.92),
+        },
+        ArenaVisualTheme::Industrial => ArenaThemePalette {
+            primary: Color::srgb(0.31, 0.35, 0.38),
+            secondary: Color::srgb(0.48, 0.52, 0.52),
+            trim: Color::srgb(0.96, 0.66, 0.12),
+            hazard: Color::srgb(0.98, 0.28, 0.12),
+        },
+        ArenaVisualTheme::Reactor => ArenaThemePalette {
+            primary: Color::srgb(0.2, 0.25, 0.34),
+            secondary: Color::srgb(0.34, 0.4, 0.46),
+            trim: Color::srgb(0.2, 0.9, 0.78),
+            hazard: Color::srgb(0.88, 0.25, 0.86),
+        },
+        ArenaVisualTheme::Toybox => ArenaThemePalette {
+            primary: Color::srgb(0.2, 0.55, 0.86),
+            secondary: Color::srgb(0.96, 0.38, 0.2),
+            trim: Color::srgb(1.0, 0.82, 0.18),
+            hazard: Color::srgb(1.0, 0.32, 0.52),
+        },
+        ArenaVisualTheme::Market => ArenaThemePalette {
+            primary: Color::srgb(0.72, 0.52, 0.3),
+            secondary: Color::srgb(0.4, 0.61, 0.38),
+            trim: Color::srgb(0.9, 0.18, 0.13),
+            hazard: Color::srgb(0.96, 0.64, 0.12),
+        },
+        ArenaVisualTheme::Garden => ArenaThemePalette {
+            primary: Color::srgb(0.34, 0.63, 0.3),
+            secondary: Color::srgb(0.55, 0.72, 0.4),
+            trim: Color::srgb(0.94, 0.48, 0.62),
+            hazard: Color::srgb(0.63, 0.24, 0.76),
+        },
+        ArenaVisualTheme::Snow => ArenaThemePalette {
+            primary: Color::srgb(0.84, 0.92, 0.94),
+            secondary: Color::srgb(0.49, 0.72, 0.79),
+            trim: Color::srgb(0.92, 0.24, 0.2),
+            hazard: Color::srgb(0.2, 0.72, 0.96),
+        },
+        ArenaVisualTheme::Powder => ArenaThemePalette {
+            primary: Color::srgb(0.43, 0.32, 0.23),
+            secondary: Color::srgb(0.24, 0.25, 0.25),
+            trim: Color::srgb(0.9, 0.55, 0.12),
+            hazard: Color::srgb(0.96, 0.2, 0.08),
+        },
+    }
+}
+
+fn spawn_arena_ground_shapes(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    primary: Handle<StandardMaterial>,
+    secondary: Handle<StandardMaterial>,
+    arena: &ArenaDefinition,
+) {
+    for (index, shape) in arena.ground_shapes.iter().enumerate() {
+        let material = if index % 2 == 0 {
+            primary.clone()
+        } else {
+            secondary.clone()
+        };
+        let (mesh, transform) = match *shape {
+            ArenaGroundShape::Circle {
+                center,
+                radius,
+                top_y,
+            } => (
+                meshes.add(Cylinder::new(radius, ARENA_HEIGHT)),
+                Transform::from_xyz(center.x, top_y - ARENA_HEIGHT * 0.5, center.y),
+            ),
+            ArenaGroundShape::Rectangle {
+                center,
+                half_extents,
+                yaw,
+                top_y,
+            } => (
+                meshes.add(Cuboid::new(
+                    half_extents.x * 2.0,
+                    ARENA_HEIGHT,
+                    half_extents.y * 2.0,
+                )),
+                Transform::from_xyz(center.x, top_y - ARENA_HEIGHT * 0.5, center.y)
+                    .with_rotation(Quat::from_rotation_y(yaw)),
+            ),
+        };
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            transform,
+            Name::new(format!("{} ground {index}", arena.name)),
+            ArenaGeometry,
+        ));
+    }
+}
+
+fn spawn_platform_blocks(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: Handle<StandardMaterial>,
+    platforms: &[PlatformDefinition],
+) {
+    for platform in platforms {
+        let height = ARENA_HEIGHT + (platform.top_y - ARENA_TOP_Y).max(0.0);
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(
+                platform.half_extents.x * 2.0,
+                height,
+                platform.half_extents.y * 2.0,
+            ))),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(
+                platform.center.x,
+                platform.top_y - height * 0.5,
+                platform.center.y,
+            ),
+            ArenaGeometry,
+        ));
+    }
+}
+
+fn spawn_arena_theme_accents(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    trim: Handle<StandardMaterial>,
+    theme: ArenaVisualTheme,
+) {
+    let (positions, size) = match theme {
+        ArenaVisualTheme::Causeway => (&[(-4.7, 0.0), (4.7, 0.0)][..], Vec2::new(0.16, 11.5)),
+        ArenaVisualTheme::Tide => (&[(-2.2, 1.45), (2.2, -1.45)][..], Vec2::new(3.6, 0.12)),
+        ArenaVisualTheme::Industrial => (&[(0.0, -1.8), (0.0, 1.8)][..], Vec2::new(13.0, 0.16)),
+        ArenaVisualTheme::Reactor => (&[(0.0, 0.0)][..], Vec2::new(4.0, 0.14)),
+        ArenaVisualTheme::Toybox => (&[(-2.8, 0.0), (2.8, 0.0)][..], Vec2::new(0.2, 15.2)),
+        ArenaVisualTheme::Market => (&[(0.0, 0.0)][..], Vec2::new(8.8, 0.18)),
+        ArenaVisualTheme::Garden => (&[(-3.4, 0.0), (3.4, 0.0)][..], Vec2::new(0.12, 2.8)),
+        ArenaVisualTheme::Snow => (&[(-2.9, -2.3), (2.9, 2.3)][..], Vec2::new(3.4, 0.14)),
+        ArenaVisualTheme::Powder => (&[(-3.8, 0.0), (3.8, 0.0)][..], Vec2::new(0.18, 12.0)),
+        ArenaVisualTheme::Crown => return,
+    };
+
+    for (x, z) in positions {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(size.x, 0.035, size.y))),
+            MeshMaterial3d(trim.clone()),
+            Transform::from_xyz(*x, ARENA_TOP_Y + 0.025, *z),
+            ArenaGeometry,
+        ));
+    }
+
+    if matches!(theme, ArenaVisualTheme::Causeway | ArenaVisualTheme::Tide) {
+        let water = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.08, 0.58, 0.8, 0.72),
+            metallic: 0.08,
+            perceptual_roughness: 0.28,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(22.0, 0.08, 20.0))),
+            MeshMaterial3d(water),
+            Transform::from_xyz(0.0, ARENA_TOP_Y - 0.72, 0.0),
+            Name::new("Arena water plane"),
+            ArenaGeometry,
+        ));
+    }
 }
 
 fn arena_background_wallpaper_size(background: ArenaBackgroundDefinition) -> Vec2 {
@@ -790,7 +939,7 @@ fn white_tuple3() -> (f32, f32, f32) {
 
 fn spawn_mini_arena_props(commands: &mut Commands, asset_server: &AssetServer, arena_index: usize) {
     for prop in arena_asset_props(arena_index) {
-        let asset_path = format!("{MINI_ARENA_ASSET_ROOT}/{}", prop.file);
+        let asset_path = arena_prop_asset_path(prop.file);
         commands.spawn((
             SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path))),
             prop.transform(),
@@ -800,75 +949,12 @@ fn spawn_mini_arena_props(commands: &mut Commands, asset_server: &AssetServer, a
     }
 }
 
-fn spawn_mini_arena_floor_tiles(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    arena_index: usize,
-) {
-    let floor_scene = mini_arena_scene(asset_server, "floor.glb");
-    let detail_scene = mini_arena_scene(asset_server, "floor-detail.glb");
-
-    for tile in mini_arena_floor_tiles(arena_index) {
-        let scene = match tile.asset {
-            MiniArenaFloorAsset::Floor => floor_scene.clone(),
-            MiniArenaFloorAsset::FloorDetail => detail_scene.clone(),
-        };
-        commands.spawn((
-            SceneRoot(scene),
-            tile.transform(),
-            ArenaGeometry,
-            Name::new(match tile.asset {
-                MiniArenaFloorAsset::Floor => "Mini arena floor tile",
-                MiniArenaFloorAsset::FloorDetail => "Mini arena floor detail",
-            }),
-        ));
+fn arena_prop_asset_path(file: &str) -> String {
+    if file.contains('/') {
+        format!("{ARENA_KIT_ASSET_ROOT}/{file}")
+    } else {
+        format!("{MINI_ARENA_ASSET_ROOT}/{file}")
     }
-}
-
-fn mini_arena_scene(asset_server: &AssetServer, file: &str) -> Handle<Scene> {
-    asset_server
-        .load(GltfAssetLabel::Scene(0).from_asset(format!("{MINI_ARENA_ASSET_ROOT}/{file}")))
-}
-
-fn mini_arena_floor_tiles(arena_index: usize) -> Vec<MiniArenaFloorTile> {
-    let mut tiles = Vec::new();
-    for x_index in -4_i32..=4 {
-        for z_index in -4_i32..=4 {
-            let x = x_index as f32 * MINI_ARENA_FLOOR_SPACING;
-            let z = z_index as f32 * MINI_ARENA_FLOOR_SPACING;
-            if Vec2::new(x, z).length() > MINI_ARENA_FLOOR_RADIUS {
-                continue;
-            }
-
-            let yaw = if (x_index + z_index) % 2 == 0 {
-                0.0
-            } else {
-                PI * 0.5
-            };
-            tiles.push(MiniArenaFloorTile {
-                asset: MiniArenaFloorAsset::Floor,
-                x,
-                z,
-                yaw,
-                scale: MINI_ARENA_FLOOR_SCALE,
-            });
-        }
-    }
-
-    tiles.extend(
-        mini_arena_floor_details(arena_index)
-            .iter()
-            .map(|(x, z, yaw)| MiniArenaFloorTile {
-                asset: MiniArenaFloorAsset::FloorDetail,
-                x: *x,
-                z: *z,
-                yaw: *yaw,
-                scale: 1.42,
-            }),
-    );
-
-    tiles.retain(|tile| floor_tile_is_firm_supported(arena_index, tile.x, tile.z));
-    tiles
 }
 
 fn floor_tile_is_firm_supported(arena_index: usize, x: f32, z: f32) -> bool {
@@ -880,14 +966,18 @@ fn floor_tile_is_firm_supported(arena_index: usize, x: f32, z: f32) -> bool {
 }
 
 fn arena_position_is_firm_supported(arena: &ArenaDefinition, x: f32, z: f32) -> bool {
-    if Vec2::new(x, z).length() <= ARENA_RADIUS {
-        return true;
-    }
-
     arena
-        .platforms
+        .ground_shapes
         .iter()
-        .any(|platform| platform_contains_firm_support(platform, x, z))
+        .any(|shape| ground_shape_contains_firm_support(shape, x, z))
+        || arena
+            .platforms
+            .iter()
+            .any(|platform| platform_contains_firm_support(platform, x, z))
+}
+
+fn ground_shape_contains_firm_support(shape: &ArenaGroundShape, x: f32, z: f32) -> bool {
+    ground_shape_support(shape, x, z, 0.0).is_some()
 }
 
 fn platform_contains_firm_support(platform: &PlatformDefinition, x: f32, z: f32) -> bool {
@@ -896,48 +986,19 @@ fn platform_contains_firm_support(platform: &PlatformDefinition, x: f32, z: f32)
     dx <= platform.half_extents.x && dz <= platform.half_extents.y
 }
 
-fn mini_arena_floor_y(asset: MiniArenaFloorAsset) -> f32 {
-    match asset {
-        MiniArenaFloorAsset::Floor => ARENA_TOP_Y + 0.018,
-        MiniArenaFloorAsset::FloorDetail => ARENA_TOP_Y + 0.036,
-    }
-}
-
-fn mini_arena_floor_details(arena_index: usize) -> &'static [(f32, f32, f32)] {
-    match arena_index {
-        0 => &[
-            (-3.2, 3.2, 0.0),
-            (3.2, -3.2, PI),
-            (0.0, 4.8, PI * 0.5),
-            (0.0, -4.8, -PI * 0.5),
-        ],
-        1 => &[
-            (-4.8, 0.0, 0.0),
-            (4.8, 0.0, PI),
-            (0.0, 3.2, PI * 0.5),
-            (0.0, -3.2, -PI * 0.5),
-        ],
-        2 => &[
-            (0.0, 0.0, PI * 0.25),
-            (-3.2, -4.8, -PI * 0.25),
-            (3.2, 4.8, PI * 0.75),
-            (4.8, -3.2, PI),
-        ],
-        _ => &[
-            (-3.2, 0.0, 0.0),
-            (3.2, 0.0, PI),
-            (0.0, -4.8, PI * 0.5),
-            (0.0, 4.8, -PI * 0.5),
-        ],
-    }
-}
-
 fn arena_asset_props(arena_index: usize) -> &'static [ArenaAssetProp] {
     match arena_index {
         0 => CROWN_ASSET_PROPS,
         1 => SPLIT_ASSET_PROPS,
         2 => LOW_TIDE_ASSET_PROPS,
-        _ => CRANK_ASSET_PROPS,
+        3 => CRANK_ASSET_PROPS,
+        4 => VENT_SPIRAL_ASSET_PROPS,
+        5 => BUMPER_ALLEY_ASSET_PROPS,
+        6 => FEAST_MARKET_ASSET_PROPS,
+        7 => SNARE_GARDEN_ASSET_PROPS,
+        8 => SKY_STEPS_ASSET_PROPS,
+        9 => POWDER_KEG_ASSET_PROPS,
+        _ => CROWN_ASSET_PROPS,
     }
 }
 
@@ -991,154 +1052,559 @@ const CROWN_ASSET_PROPS: &[ArenaAssetProp] = &[
 
 const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Split north gate",
-        file: "wall-gate.glb",
+        name: "Split north bridge",
+        file: "tower/tile-river-bridge.glb",
         x: 0.0,
         y: ARENA_TOP_Y,
-        z: 8.55,
-        yaw: PI,
-        scale: 1.95,
-    },
-    ArenaAssetProp {
-        name: "Split south gate",
-        file: "wall-gate.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y,
-        z: -8.55,
-        yaw: 0.0,
-        scale: 1.95,
-    },
-    ArenaAssetProp {
-        name: "Split west column",
-        file: "column.glb",
-        x: -8.2,
-        y: ARENA_TOP_Y,
-        z: 2.4,
-        yaw: -PI * 0.5,
-        scale: 1.75,
-    },
-    ArenaAssetProp {
-        name: "Split east column",
-        file: "column.glb",
-        x: 8.2,
-        y: ARENA_TOP_Y,
-        z: -2.4,
+        z: 4.7,
         yaw: PI * 0.5,
-        scale: 1.75,
+        scale: 3.25,
     },
     ArenaAssetProp {
-        name: "Split loose bricks",
-        file: "bricks.glb",
-        x: -1.7,
-        y: ARENA_TOP_Y + 0.02,
-        z: -5.25,
-        yaw: 0.35,
-        scale: 1.1,
+        name: "Split south bridge",
+        file: "tower/tile-river-bridge.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y,
+        z: -4.7,
+        yaw: PI * 0.5,
+        scale: 3.25,
+    },
+    ArenaAssetProp {
+        name: "Split west bridge frame",
+        file: "tower/wood-structure-high.glb",
+        x: -7.2,
+        y: ARENA_TOP_Y,
+        z: 0.0,
+        yaw: PI * 0.5,
+        scale: 2.4,
+    },
+    ArenaAssetProp {
+        name: "Split east bridge frame",
+        file: "tower/wood-structure-high.glb",
+        x: 7.2,
+        y: ARENA_TOP_Y,
+        z: 0.0,
+        yaw: PI * 0.5,
+        scale: 2.4,
+    },
+    ArenaAssetProp {
+        name: "Split west watch tree",
+        file: "tower/detail-tree-large.glb",
+        x: -8.4,
+        y: ARENA_TOP_Y - 0.15,
+        z: 5.6,
+        yaw: 0.25,
+        scale: 2.25,
+    },
+    ArenaAssetProp {
+        name: "Split east watch tree",
+        file: "tower/detail-tree-large.glb",
+        x: 8.4,
+        y: ARENA_TOP_Y - 0.15,
+        z: -5.6,
+        yaw: -0.35,
+        scale: 2.0,
     },
 ];
 
 const LOW_TIDE_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Low tide west tree",
-        file: "tree.glb",
-        x: -8.6,
-        y: ARENA_TOP_Y,
-        z: -1.8,
-        yaw: 0.2,
-        scale: 1.45,
-    },
-    ArenaAssetProp {
-        name: "Low tide east tree",
-        file: "tree.glb",
-        x: 8.6,
-        y: ARENA_TOP_Y,
-        z: 2.1,
-        yaw: -0.35,
-        scale: 1.35,
-    },
-    ArenaAssetProp {
-        name: "Low tide damaged column",
-        file: "column-damaged.glb",
-        x: -5.85,
-        y: ARENA_TOP_Y + 0.52,
-        z: 3.95,
-        yaw: 0.6,
-        scale: 1.25,
-    },
-    ArenaAssetProp {
-        name: "Low tide raised stairs",
-        file: "stairs.glb",
-        x: 5.95,
-        y: ARENA_TOP_Y + 0.52,
-        z: -4.05,
-        yaw: -PI * 0.25,
-        scale: 1.15,
-    },
-    ArenaAssetProp {
-        name: "Low tide wall remnant",
-        file: "wall-corner.glb",
+        name: "Low tide central reef",
+        file: "tower/tile-rock.glb",
         x: 0.0,
+        y: ARENA_TOP_Y - 0.1,
+        z: 0.0,
+        yaw: PI * 0.25,
+        scale: 3.3,
+    },
+    ArenaAssetProp {
+        name: "Low tide west driftwood",
+        file: "tower/wood-structure.glb",
+        x: -6.0,
+        y: ARENA_TOP_Y + 0.08,
+        z: 3.8,
+        yaw: -0.55,
+        scale: 2.4,
+    },
+    ArenaAssetProp {
+        name: "Low tide east driftwood",
+        file: "tower/wood-structure.glb",
+        x: 6.0,
+        y: ARENA_TOP_Y + 0.08,
+        z: -3.8,
+        yaw: -0.55,
+        scale: 2.4,
+    },
+    ArenaAssetProp {
+        name: "Low tide west rocks",
+        file: "tower/detail-rocks-large.glb",
+        x: -6.0,
         y: ARENA_TOP_Y,
-        z: -8.85,
+        z: -4.7,
+        yaw: 0.2,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Low tide east rocks",
+        file: "tower/detail-rocks-large.glb",
+        x: 6.0,
+        y: ARENA_TOP_Y,
+        z: 4.7,
+        yaw: -0.25,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Low tide rear waterfall",
+        file: "tower/tile-river-waterfall.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y - 0.5,
+        z: 8.4,
         yaw: PI,
-        scale: 1.6,
+        scale: 3.0,
     },
 ];
 
 const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Crank yard weapon rack",
-        file: "weapon-rack.glb",
-        x: -7.9,
-        y: ARENA_TOP_Y,
-        z: 5.2,
-        yaw: PI * 0.35,
-        scale: 1.55,
+        name: "Crank yard west conveyor",
+        file: "platformer/conveyor-belt.glb",
+        x: -3.15,
+        y: ARENA_TOP_Y + 0.01,
+        z: 0.0,
+        yaw: PI * 0.5,
+        scale: 2.4,
     },
     ArenaAssetProp {
-        name: "Crank yard spare spear",
-        file: "weapon-spear.glb",
-        x: -6.9,
-        y: ARENA_TOP_Y + 0.05,
-        z: 5.95,
-        yaw: -0.65,
-        scale: 1.55,
+        name: "Crank yard east conveyor",
+        file: "platformer/conveyor-belt.glb",
+        x: 3.15,
+        y: ARENA_TOP_Y + 0.01,
+        z: 0.0,
+        yaw: -PI * 0.5,
+        scale: 2.4,
     },
     ArenaAssetProp {
-        name: "Crank yard spare sword",
-        file: "weapon-sword.glb",
-        x: 7.25,
-        y: ARENA_TOP_Y + 0.55,
-        z: -5.9,
-        yaw: 0.8,
-        scale: 1.65,
-    },
-    ArenaAssetProp {
-        name: "Crank yard block stack",
-        file: "block.glb",
-        x: 7.7,
-        y: ARENA_TOP_Y,
-        z: -5.2,
-        yaw: -0.25,
-        scale: 1.1,
-    },
-    ArenaAssetProp {
-        name: "Crank yard back wall",
-        file: "wall.glb",
+        name: "Crank yard center saw",
+        file: "platformer/saw.glb",
         x: 0.0,
-        y: ARENA_TOP_Y,
-        z: -9.15,
+        y: ARENA_TOP_Y + 0.04,
+        z: 0.0,
         yaw: 0.0,
-        scale: 1.9,
+        scale: 2.5,
     },
     ArenaAssetProp {
-        name: "Crank yard banner",
-        file: "banner.glb",
+        name: "Crank yard north pipe",
+        file: "platformer/pipe.glb",
+        x: -1.7,
+        y: ARENA_TOP_Y,
+        z: 7.0,
+        yaw: PI,
+        scale: 2.0,
+    },
+    ArenaAssetProp {
+        name: "Crank yard south pipe",
+        file: "platformer/pipe.glb",
+        x: 1.7,
+        y: ARENA_TOP_Y,
+        z: -7.0,
+        yaw: 0.0,
+        scale: 2.0,
+    },
+    ArenaAssetProp {
+        name: "Crank yard control lever",
+        file: "platformer/lever.glb",
+        x: 6.7,
+        y: ARENA_TOP_Y,
+        z: 1.7,
+        yaw: -PI * 0.5,
+        scale: 2.0,
+    },
+    ArenaAssetProp {
+        name: "Crank yard crate stack",
+        file: "platformer/crate-strong.glb",
+        x: -6.2,
+        y: ARENA_TOP_Y,
+        z: -1.6,
+        yaw: 0.3,
+        scale: 1.7,
+    },
+];
+
+const VENT_SPIRAL_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Vent spiral reactor base",
+        file: "tower/tower-round-base.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.02,
+        z: 0.0,
+        yaw: 0.0,
+        scale: 3.1,
+    },
+    ArenaAssetProp {
+        name: "Vent spiral crystal core",
+        file: "tower/tower-round-crystals.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.08,
+        z: 0.0,
+        yaw: PI * 0.25,
+        scale: 2.35,
+    },
+    ArenaAssetProp {
+        name: "Vent spiral west crystal bank",
+        file: "tower/detail-crystal-large.glb",
+        x: -5.25,
+        y: ARENA_TOP_Y + 0.34,
+        z: 1.2,
+        yaw: 0.2,
+        scale: 2.6,
+    },
+    ArenaAssetProp {
+        name: "Vent spiral east crystal bank",
+        file: "tower/detail-crystal-large.glb",
+        x: 5.0,
+        y: ARENA_TOP_Y + 0.08,
+        z: 2.5,
+        yaw: -0.35,
+        scale: 2.6,
+    },
+    ArenaAssetProp {
+        name: "Vent spiral hovering ufo",
+        file: "tower/enemy-ufo-a.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 4.0,
+        z: -1.0,
+        yaw: 0.25,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Vent spiral ufo beam",
+        file: "tower/enemy-ufo-beam.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.12,
+        z: -1.0,
+        yaw: 0.0,
+        scale: 1.55,
+    },
+];
+
+const BUMPER_ALLEY_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Bumper alley north spring",
+        file: "platformer/spring.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.02,
+        z: 4.25,
+        yaw: 0.0,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley center spring",
+        file: "platformer/spring.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.02,
+        z: 0.0,
+        yaw: PI * 0.5,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley south spring",
+        file: "platformer/spring.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.02,
+        z: -4.25,
+        yaw: PI,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley west target",
+        file: "blaster/target-large.glb",
+        x: -4.15,
+        y: ARENA_TOP_Y + 0.03,
+        z: 7.6,
+        yaw: PI * 0.5,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley east target",
+        file: "blaster/target-large.glb",
+        x: 4.15,
+        y: ARENA_TOP_Y + 0.03,
+        z: -7.6,
+        yaw: -PI * 0.5,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley west crate",
+        file: "blaster/crate-wide.glb",
+        x: -4.0,
+        y: ARENA_TOP_Y,
+        z: -5.8,
+        yaw: 0.15,
+        scale: 2.0,
+    },
+    ArenaAssetProp {
+        name: "Bumper alley east crate",
+        file: "blaster/crate-medium.glb",
+        x: 4.0,
+        y: ARENA_TOP_Y,
+        z: 5.8,
+        yaw: -0.2,
+        scale: 2.0,
+    },
+];
+
+const FEAST_MARKET_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Feast market burger stall",
+        file: "food/burger-cheese-double.glb",
+        x: -5.8,
+        y: ARENA_TOP_Y + 0.02,
+        z: 3.4,
+        yaw: 0.25,
+        scale: 3.2,
+    },
+    ArenaAssetProp {
+        name: "Feast market cake stall",
+        file: "food/cake.glb",
+        x: 5.8,
+        y: ARENA_TOP_Y + 0.02,
+        z: -3.4,
+        yaw: -0.25,
+        scale: 3.3,
+    },
+    ArenaAssetProp {
+        name: "Feast market pizza sign",
+        file: "food/pizza.glb",
+        x: 3.0,
+        y: ARENA_TOP_Y + 0.05,
+        z: 6.2,
+        yaw: 0.1,
+        scale: 3.3,
+    },
+    ArenaAssetProp {
+        name: "Feast market watermelon stand",
+        file: "food/watermelon.glb",
+        x: -3.0,
+        y: ARENA_TOP_Y + 0.02,
+        z: -6.2,
+        yaw: -0.15,
+        scale: 3.0,
+    },
+    ArenaAssetProp {
+        name: "Feast market stew pot",
+        file: "food/pot-stew.glb",
+        x: 5.7,
+        y: ARENA_TOP_Y + 0.02,
+        z: 3.9,
+        yaw: 0.3,
+        scale: 3.0,
+    },
+    ArenaAssetProp {
+        name: "Feast market supply crate",
+        file: "platformer/crate.glb",
+        x: -5.9,
+        y: ARENA_TOP_Y,
+        z: -3.9,
+        yaw: 0.2,
+        scale: 1.8,
+    },
+];
+
+const SNARE_GARDEN_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Snare garden north hedge",
+        file: "platformer/hedge.glb",
         x: 0.0,
         y: ARENA_TOP_Y,
-        z: 9.05,
+        z: 7.0,
+        yaw: 0.0,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Snare garden south hedge",
+        file: "platformer/hedge.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y,
+        z: -7.0,
         yaw: PI,
-        scale: 1.55,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Snare garden west hedge corner",
+        file: "platformer/hedge-corner.glb",
+        x: -7.0,
+        y: ARENA_TOP_Y,
+        z: 0.0,
+        yaw: PI * 0.5,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Snare garden east hedge corner",
+        file: "platformer/hedge-corner.glb",
+        x: 7.0,
+        y: ARENA_TOP_Y,
+        z: 0.0,
+        yaw: -PI * 0.5,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Snare garden west flowers",
+        file: "platformer/flowers-tall.glb",
+        x: -5.1,
+        y: ARENA_TOP_Y + 0.02,
+        z: 1.7,
+        yaw: 0.35,
+        scale: 2.1,
+    },
+    ArenaAssetProp {
+        name: "Snare garden east flowers",
+        file: "platformer/flowers.glb",
+        x: 5.1,
+        y: ARENA_TOP_Y + 0.02,
+        z: -1.7,
+        yaw: -0.4,
+        scale: 2.2,
+    },
+    ArenaAssetProp {
+        name: "Snare garden old tree",
+        file: "platformer/tree.glb",
+        x: -7.8,
+        y: ARENA_TOP_Y - 0.08,
+        z: 6.8,
+        yaw: 0.2,
+        scale: 2.4,
+    },
+];
+
+const SKY_STEPS_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Sky steps west pine",
+        file: "platformer/tree-pine-snow.glb",
+        x: -8.0,
+        y: ARENA_TOP_Y - 0.18,
+        z: -6.4,
+        yaw: 0.1,
+        scale: 1.8,
+    },
+    ArenaAssetProp {
+        name: "Sky steps east pine",
+        file: "platformer/tree-pine-snow-small.glb",
+        x: 6.8,
+        y: ARENA_TOP_Y + 0.8,
+        z: 5.5,
+        yaw: -0.2,
+        scale: 2.4,
+    },
+    ArenaAssetProp {
+        name: "Sky steps snowman",
+        file: "holiday/snowman.glb",
+        x: -5.8,
+        y: ARENA_TOP_Y + 0.28,
+        z: 4.7,
+        yaw: 0.35,
+        scale: 2.0,
+    },
+    ArenaAssetProp {
+        name: "Sky steps signal lantern",
+        file: "holiday/lantern.glb",
+        x: 5.6,
+        y: ARENA_TOP_Y + 0.31,
+        z: -4.7,
+        yaw: 0.0,
+        scale: 1.8,
+    },
+    ArenaAssetProp {
+        name: "Sky steps timber shelter",
+        file: "tower/snow-wood-structure.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y + 0.38,
+        z: 0.0,
+        yaw: PI * 0.25,
+        scale: 1.8,
+    },
+    ArenaAssetProp {
+        name: "Sky steps west snow bank",
+        file: "holiday/snow-pile.glb",
+        x: -3.0,
+        y: ARENA_TOP_Y + 0.18,
+        z: -2.4,
+        yaw: 0.1,
+        scale: 2.6,
+    },
+    ArenaAssetProp {
+        name: "Sky steps east snow bank",
+        file: "tower/snow-detail-rocks-large.glb",
+        x: 3.0,
+        y: ARENA_TOP_Y + 0.58,
+        z: 2.4,
+        yaw: -0.15,
+        scale: 2.4,
+    },
+];
+
+const POWDER_KEG_ASSET_PROPS: &[ArenaAssetProp] = &[
+    ArenaAssetProp {
+        name: "Powder keg west cannon",
+        file: "tower/weapon-cannon.glb",
+        x: -6.7,
+        y: ARENA_TOP_Y,
+        z: 1.8,
+        yaw: PI * 0.5,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Powder keg east cannon",
+        file: "tower/weapon-cannon.glb",
+        x: 6.7,
+        y: ARENA_TOP_Y,
+        z: -1.8,
+        yaw: -PI * 0.75,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Powder keg catapult",
+        file: "tower/weapon-catapult.glb",
+        x: 0.0,
+        y: ARENA_TOP_Y,
+        z: 6.8,
+        yaw: PI,
+        scale: 2.3,
+    },
+    ArenaAssetProp {
+        name: "Powder keg bomb cache",
+        file: "platformer/bomb.glb",
+        x: -3.8,
+        y: ARENA_TOP_Y + 0.02,
+        z: -5.8,
+        yaw: 0.25,
+        scale: 2.3,
+    },
+    ArenaAssetProp {
+        name: "Powder keg barrel cache",
+        file: "platformer/barrel.glb",
+        x: 3.8,
+        y: ARENA_TOP_Y,
+        z: 5.8,
+        yaw: -0.25,
+        scale: 2.1,
+    },
+    ArenaAssetProp {
+        name: "Powder keg cannonballs",
+        file: "tower/weapon-ammo-cannonball.glb",
+        x: 5.4,
+        y: ARENA_TOP_Y + 0.02,
+        z: 5.6,
+        yaw: 0.0,
+        scale: 2.5,
+    },
+    ArenaAssetProp {
+        name: "Powder keg timber barricade",
+        file: "tower/wood-structure-high.glb",
+        x: -5.4,
+        y: ARENA_TOP_Y,
+        z: -5.6,
+        yaw: PI * 0.25,
+        scale: 2.1,
     },
 ];
 
@@ -1175,13 +1641,48 @@ fn spawn_arena_hazard_markers(
             ArenaHazardKind::SnareField => 0.018,
             ArenaHazardKind::BumperNode => 0.08,
         };
+        let base_scale = (hazard.pulse_seconds / 2.2).clamp(0.8, 1.3);
         commands.spawn((
             Mesh3d(meshes.add(Cylinder::new(hazard.radius, marker_height))),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(hazard.center)
-                .with_scale(Vec3::splat((hazard.pulse_seconds / 2.2).clamp(0.8, 1.3))),
+            Transform::from_translation(hazard.center).with_scale(Vec3::splat(base_scale)),
+            ArenaHazardMarker {
+                kind: hazard.kind,
+                pulse_seconds: hazard.pulse_seconds,
+                phase: hazard.phase,
+                base_scale,
+                base_y: hazard.center.y,
+            },
             ArenaGeometry,
         ));
+    }
+}
+
+pub fn update_arena_hazard_visuals(
+    state: Res<ArenaHazardState>,
+    mut markers: Query<(&ArenaHazardMarker, &mut Transform)>,
+) {
+    for (marker, mut transform) in &mut markers {
+        let wave = ((state.elapsed + marker.phase) / marker.pulse_seconds.max(0.1) * TAU).sin();
+        let scale = marker.base_scale * arena_hazard_marker_scale(marker.kind, wave);
+        transform.scale = Vec3::new(scale, marker.base_scale, scale);
+        transform.translation.y = marker.base_y
+            + if marker.kind == ArenaHazardKind::BumperNode {
+                wave.max(0.0) * 0.14
+            } else {
+                0.0
+            };
+        if marker.kind == ArenaHazardKind::SnareField {
+            transform.rotate_y(0.012 + wave.abs() * 0.008);
+        }
+    }
+}
+
+fn arena_hazard_marker_scale(kind: ArenaHazardKind, wave: f32) -> f32 {
+    match kind {
+        ArenaHazardKind::PulseVent => 1.0 + wave.max(0.0) * 0.28,
+        ArenaHazardKind::SnareField => 0.94 + (wave + 1.0) * 0.08,
+        ArenaHazardKind::BumperNode => 0.96 + wave.max(0.0) * 0.2,
     }
 }
 
@@ -1264,208 +1765,6 @@ pub fn update_arena_hazards(
     }
 }
 
-fn spawn_floor_markings(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    red: Handle<StandardMaterial>,
-) {
-    let pip_mesh = meshes.add(Cuboid::new(0.34, 0.018, 1.15));
-    for i in 0..16 {
-        let angle = i as f32 * PI * 2.0 / 16.0;
-        let radius = if i % 2 == 0 { 5.85 } else { 4.65 };
-        let pos = Vec3::new(
-            angle.cos() * radius,
-            ARENA_TOP_Y + 0.035,
-            angle.sin() * radius,
-        );
-        commands.spawn((
-            Mesh3d(pip_mesh.clone()),
-            MeshMaterial3d(red.clone()),
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(-angle)),
-            ArenaGeometry,
-        ));
-    }
-}
-
-fn spawn_stone_lines(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    material: Handle<StandardMaterial>,
-) {
-    let seam_mesh = meshes.add(Cuboid::new(0.055, 0.035, ARENA_RADIUS * 1.72));
-    for i in 0..20 {
-        let angle = i as f32 * PI / 20.0;
-        commands.spawn((
-            Mesh3d(seam_mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_xyz(0.0, ARENA_TOP_Y + 0.05, 0.0)
-                .with_rotation(Quat::from_rotation_y(angle)),
-            ArenaGeometry,
-        ));
-    }
-
-    // Keep the center open; full circular torus seams read as a raised donut from the game camera.
-}
-
-fn spawn_side_blocks(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    stone: Handle<StandardMaterial>,
-    dark: Handle<StandardMaterial>,
-    light: Handle<StandardMaterial>,
-    platforms: &[PlatformDefinition],
-) {
-    for platform in platforms {
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(
-                platform.half_extents.x * 2.0,
-                platform.top_y * 2.0 + 0.1,
-                platform.half_extents.y * 2.0,
-            ))),
-            MeshMaterial3d(stone.clone()),
-            Transform::from_xyz(
-                platform.center.x,
-                platform.top_y - (platform.top_y * 0.5),
-                platform.center.y,
-            ),
-            ArenaGeometry,
-        ));
-    }
-
-    let wall_mesh = meshes.add(Cuboid::new(2.2, 1.25, 0.58));
-    for i in 0..12 {
-        let angle = i as f32 * PI * 2.0 / 12.0;
-        let radius = ARENA_RADIUS + 0.62;
-        let pos = Vec3::new(
-            angle.cos() * radius,
-            ARENA_TOP_Y + 0.34,
-            angle.sin() * radius,
-        );
-        commands.spawn((
-            Mesh3d(wall_mesh.clone()),
-            MeshMaterial3d(if i % 2 == 0 {
-                light.clone()
-            } else {
-                dark.clone()
-            }),
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(-angle)),
-            ArenaGeometry,
-        ));
-    }
-
-    for (x, z, rot) in [
-        (0.0, 7.95, 0.0),
-        (0.0, -7.95, PI),
-        (-7.95, 0.0, PI * 0.5),
-        (7.95, 0.0, -PI * 0.5),
-    ] {
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(2.4, 0.28, 2.0))),
-            MeshMaterial3d(light.clone()),
-            Transform::from_xyz(x, ARENA_TOP_Y + 0.03, z)
-                .with_rotation(Quat::from_rotation_y(rot))
-                .with_scale(Vec3::new(1.0, 1.0, 0.72)),
-            ArenaGeometry,
-        ));
-    }
-}
-
-fn spawn_billboard(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    panel: Handle<StandardMaterial>,
-    trim: Handle<StandardMaterial>,
-    letter: Handle<StandardMaterial>,
-    pillar: Handle<StandardMaterial>,
-) {
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(13.8, 3.5, 0.28))),
-        MeshMaterial3d(panel),
-        Transform::from_xyz(0.0, 4.25, -11.2),
-        ArenaGeometry,
-    ));
-
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(14.4, 0.22, 0.36))),
-        MeshMaterial3d(trim.clone()),
-        Transform::from_xyz(0.0, 6.08, -11.05),
-        ArenaGeometry,
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(14.4, 0.22, 0.36))),
-        MeshMaterial3d(trim.clone()),
-        Transform::from_xyz(0.0, 2.42, -11.05),
-        ArenaGeometry,
-    ));
-
-    for x in [-7.5, 7.5] {
-        commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.42, 4.7))),
-            MeshMaterial3d(pillar.clone()),
-            Transform::from_xyz(x, 3.9, -10.95),
-            ArenaGeometry,
-        ));
-    }
-
-    spawn_block_text(
-        commands,
-        meshes,
-        letter,
-        "ANIMAL FIGHTER CLUB",
-        Vec3::new(-4.2, 4.38, -10.84),
-        0.22,
-    );
-}
-
-fn spawn_block_text(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    material: Handle<StandardMaterial>,
-    text: &str,
-    origin: Vec3,
-    cell: f32,
-) {
-    let cube = meshes.add(Cuboid::new(cell * 0.82, cell * 0.82, 0.08));
-    let mut cursor = 0.0;
-
-    for ch in text.chars() {
-        if ch == ' ' {
-            cursor += cell * 2.2;
-            continue;
-        }
-
-        if let Some(pattern) = letter_pattern(ch) {
-            for (row, line) in pattern.iter().enumerate() {
-                for (col, byte) in line.bytes().enumerate() {
-                    if byte == b'1' {
-                        let x = origin.x + cursor + col as f32 * cell;
-                        let y = origin.y + (6 - row) as f32 * cell;
-                        commands.spawn((
-                            Mesh3d(cube.clone()),
-                            MeshMaterial3d(material.clone()),
-                            Transform::from_xyz(x, y, origin.z),
-                            ArenaGeometry,
-                        ));
-                    }
-                }
-            }
-            cursor += cell * 4.3;
-        }
-    }
-}
-
-fn letter_pattern(ch: char) -> Option<[&'static str; 7]> {
-    match ch {
-        'A' => Some(["0110", "1001", "1001", "1111", "1001", "1001", "1001"]),
-        'C' => Some(["1111", "1000", "1000", "1000", "1000", "1000", "1111"]),
-        'E' => Some(["1111", "1000", "1000", "1110", "1000", "1000", "1111"]),
-        'F' => Some(["1111", "1000", "1000", "1110", "1000", "1000", "1000"]),
-        'N' => Some(["1001", "1101", "1101", "1011", "1011", "1001", "1001"]),
-        'R' => Some(["1110", "1001", "1001", "1110", "1010", "1001", "1001"]),
-        _ => None,
-    }
-}
-
 pub fn ground_height_at(x: f32, z: f32) -> Option<f32> {
     ground_height_at_with_radius(x, z, 0.0)
 }
@@ -1491,17 +1790,25 @@ pub fn ground_height_at_with_radius(x: f32, z: f32, support_radius: f32) -> Opti
 }
 
 pub fn ground_support_at_with_radius(x: f32, z: f32, support_radius: f32) -> GroundSupport {
-    let radius = Vec2::new(x, z).length();
     let arena = active_arena_definition();
+    ground_support_for_arena_with_radius(arena, x, z, support_radius)
+}
+
+pub fn ground_support_for_arena_with_radius(
+    arena: &ArenaDefinition,
+    x: f32,
+    z: f32,
+    support_radius: f32,
+) -> GroundSupport {
     let ledge_grace =
         (support_radius * LEDGE_SUPPORT_GRACE_SCALE).clamp(0.0, LEDGE_SUPPORT_GRACE_MAX);
-    let mut best = if radius <= ARENA_RADIUS {
-        Some(GroundSupport::Firm(ARENA_TOP_Y))
-    } else if radius <= ARENA_RADIUS + ledge_grace {
-        Some(GroundSupport::Grace(ARENA_TOP_Y))
-    } else {
-        None
-    };
+    let mut best = None;
+
+    for shape in arena.ground_shapes {
+        if let Some(support) = ground_shape_support(shape, x, z, ledge_grace) {
+            best = Some(prefer_ground_support(best, support));
+        }
+    }
 
     for platform in arena.platforms {
         let dx = (x - platform.center.x).abs();
@@ -1516,16 +1823,78 @@ pub fn ground_support_at_with_radius(x: f32, z: f32, support_radius: f32) -> Gro
             None
         };
         if let Some(support) = support {
-            best = Some(match best {
-                Some(current) if current.height().unwrap_or(f32::NEG_INFINITY) > platform.top_y => {
-                    current
-                }
-                _ => support,
-            });
+            best = Some(prefer_ground_support(best, support));
         }
     }
 
     best.unwrap_or(GroundSupport::Airborne)
+}
+
+fn ground_shape_support(
+    shape: &ArenaGroundShape,
+    x: f32,
+    z: f32,
+    ledge_grace: f32,
+) -> Option<GroundSupport> {
+    match *shape {
+        ArenaGroundShape::Circle {
+            center,
+            radius,
+            top_y,
+        } => {
+            let distance = Vec2::new(x - center.x, z - center.y).length();
+            if distance <= radius {
+                Some(GroundSupport::Firm(top_y))
+            } else if distance <= radius + ledge_grace {
+                Some(GroundSupport::Grace(top_y))
+            } else {
+                None
+            }
+        }
+        ArenaGroundShape::Rectangle {
+            center,
+            half_extents,
+            yaw,
+            top_y,
+        } => {
+            let offset = Vec2::new(x - center.x, z - center.y);
+            let cos = yaw.cos();
+            let sin = yaw.sin();
+            let local = Vec2::new(
+                cos * offset.x + sin * offset.y,
+                -sin * offset.x + cos * offset.y,
+            );
+            if local.x.abs() <= half_extents.x && local.y.abs() <= half_extents.y {
+                Some(GroundSupport::Firm(top_y))
+            } else if local.x.abs() <= half_extents.x + ledge_grace
+                && local.y.abs() <= half_extents.y + ledge_grace
+            {
+                Some(GroundSupport::Grace(top_y))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn prefer_ground_support(
+    current: Option<GroundSupport>,
+    candidate: GroundSupport,
+) -> GroundSupport {
+    let Some(current) = current else {
+        return candidate;
+    };
+    let current_height = current.height().unwrap_or(f32::NEG_INFINITY);
+    let candidate_height = candidate.height().unwrap_or(f32::NEG_INFINITY);
+    if candidate_height > current_height
+        || (candidate_height == current_height
+            && matches!(candidate, GroundSupport::Firm(_))
+            && matches!(current, GroundSupport::Grace(_)))
+    {
+        candidate
+    } else {
+        current
+    }
 }
 
 pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
@@ -1583,7 +1952,7 @@ pub fn arena_hazard_is_active(elapsed: f32, pulse_seconds: f32) -> bool {
 
 pub fn arena_hazard_is_active_for_kind(elapsed: f32, hazard: &ArenaHazardDefinition) -> bool {
     let cycle = hazard.pulse_seconds.max(0.1);
-    elapsed.rem_euclid(cycle) <= cycle * arena_hazard_active_fraction(hazard.kind)
+    (elapsed + hazard.phase).rem_euclid(cycle) <= cycle * arena_hazard_active_fraction(hazard.kind)
 }
 
 fn arena_hazard_active_fraction(kind: ArenaHazardKind) -> f32 {
@@ -1721,8 +2090,18 @@ mod tests {
             center: Vec3::ZERO,
             radius: 1.0,
             pulse_seconds: 2.0,
+            phase: 0.0,
         };
         assert!(arena_hazard_is_active_for_kind(1.2, &snare));
+
+        let phased_pulse = ArenaHazardDefinition {
+            kind: ArenaHazardKind::PulseVent,
+            center: Vec3::ZERO,
+            radius: 1.0,
+            pulse_seconds: 2.0,
+            phase: 1.6,
+        };
+        assert!(arena_hazard_is_active_for_kind(0.5, &phased_pulse));
     }
 
     #[test]
@@ -1732,6 +2111,7 @@ mod tests {
             center: Vec3::ZERO,
             radius: 1.0,
             pulse_seconds: 2.0,
+            phase: 0.0,
         };
         assert!(arena_hazard_overlaps(
             &hazard,
@@ -1757,6 +2137,22 @@ mod tests {
     }
 
     #[test]
+    fn arena_hazard_markers_telegraph_active_wave_peaks() {
+        assert!(
+            arena_hazard_marker_scale(ArenaHazardKind::PulseVent, 1.0)
+                > arena_hazard_marker_scale(ArenaHazardKind::PulseVent, -1.0)
+        );
+        assert!(
+            arena_hazard_marker_scale(ArenaHazardKind::BumperNode, 1.0)
+                > arena_hazard_marker_scale(ArenaHazardKind::BumperNode, 0.0)
+        );
+        assert!(
+            arena_hazard_marker_scale(ArenaHazardKind::SnareField, 1.0)
+                > arena_hazard_marker_scale(ArenaHazardKind::SnareField, -1.0)
+        );
+    }
+
+    #[test]
     fn arena_background_wallpaper_uses_anime_sky_aspect() {
         let background = arena_definitions()[0].background;
         assert_eq!(background.asset_path, "backgrounds/beautiful_sky_anime.png");
@@ -1773,36 +2169,61 @@ mod tests {
             assert!(props.len() >= 5);
             assert!(props.iter().all(|prop| prop.file.ends_with(".glb")));
             assert!(props.iter().all(|prop| prop.scale > 0.0));
-            assert!(props.iter().all(|prop| prop.y >= ARENA_TOP_Y));
+            assert!(props.iter().all(|prop| prop.y >= ARENA_TOP_Y - 0.6));
+            #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+            assert!(props.iter().all(|prop| {
+                std::path::Path::new("assets")
+                    .join(arena_prop_asset_path(prop.file))
+                    .is_file()
+            }));
         }
     }
 
     #[test]
-    fn mini_arena_floor_tiles_include_base_and_detail_layers() {
-        for index in 0..arena_definitions().len() {
-            let tiles = mini_arena_floor_tiles(index);
-            let floor_count = tiles
-                .iter()
-                .filter(|tile| tile.asset == MiniArenaFloorAsset::Floor)
-                .count();
-            let detail_count = tiles
-                .iter()
-                .filter(|tile| tile.asset == MiniArenaFloorAsset::FloorDetail)
-                .count();
-
-            assert!(floor_count >= 60);
-            assert!(detail_count >= 4);
-            assert!(
-                tiles
-                    .iter()
-                    .all(|tile| Vec2::new(tile.x, tile.z).length() <= MINI_ARENA_FLOOR_RADIUS)
-            );
-            assert!(
-                tiles
-                    .iter()
-                    .all(|tile| floor_tile_is_firm_supported(index, tile.x, tile.z))
-            );
+    fn arena_footprints_support_every_fighter_spawn() {
+        for arena in arena_definitions() {
+            assert!(!arena.ground_shapes.is_empty());
+            for spawn in arena.spawn_points {
+                assert!(
+                    arena_position_is_firm_supported(arena, spawn.x, spawn.z),
+                    "{} spawn {spawn:?} must be supported",
+                    arena.name
+                );
+            }
         }
+    }
+
+    #[test]
+    fn arena_footprints_support_items_and_hazards() {
+        for arena in arena_definitions() {
+            for anchor in arena.item_anchors {
+                assert!(
+                    arena_position_is_firm_supported(arena, anchor.position.x, anchor.position.z),
+                    "{} item at {:?} must be supported",
+                    arena.name,
+                    anchor.position
+                );
+            }
+            for hazard in arena.hazards {
+                assert!(
+                    arena_position_is_firm_supported(arena, hazard.center.x, hazard.center.z),
+                    "{} hazard at {:?} must be supported",
+                    arena.name,
+                    hazard.center
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_ground_rectangles_use_local_shape_axes() {
+        let shape = ArenaGroundShape::rectangle(0.0, 0.0, 3.0, 0.5, PI * 0.5, 1.2);
+
+        assert_eq!(
+            ground_shape_support(&shape, 0.0, 2.5, 0.0),
+            Some(GroundSupport::Firm(1.2))
+        );
+        assert_eq!(ground_shape_support(&shape, 2.5, 0.0, 0.0), None);
     }
 
     #[test]

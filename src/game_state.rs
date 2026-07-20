@@ -344,6 +344,12 @@ impl LocalSetup {
     }
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    pub fn cycle_arena_previous(&mut self, arena_count: usize) {
+        let arena_count = arena_count.max(1);
+        self.arena_index = (self.arena_index + arena_count - 1) % arena_count;
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     pub fn cycle_bot_count(&mut self) {
         if let Some(slot) = self.slot_mut(1) {
             slot.participant = ParticipantKind::Bot;
@@ -1172,8 +1178,21 @@ pub fn handle_global_input(
                 announcements.show("Player character: Pig", 0.9);
             }
             if keys.just_pressed(KeyCode::KeyA) {
-                setup.cycle_arena(arena_definitions().len());
+                let arena_count = arena_definitions().len();
+                if shift_pressed(&keys) {
+                    setup.cycle_arena_previous(arena_count);
+                } else {
+                    setup.cycle_arena(arena_count);
+                }
                 set_active_arena_index(setup.arena_index);
+                announcements.show(
+                    format!(
+                        "Arena: {}",
+                        arena_definitions()[setup.arena_index.min(arena_definitions().len() - 1)]
+                            .name
+                    ),
+                    0.9,
+                );
             }
             if keys.just_pressed(KeyCode::KeyB) {
                 setup.cycle_bot_count();
@@ -1734,6 +1753,8 @@ mod tests {
     fn local_setup_cycles_rule_arena_bots_styles_equipment_and_seed() {
         let mut setup = LocalSetup::default();
         setup.set_rule(2);
+        setup.cycle_arena(2);
+        setup.cycle_arena_previous(2);
         setup.cycle_arena(2);
         setup.cycle_bot_count();
         setup.cycle_style(0);

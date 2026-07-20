@@ -238,6 +238,7 @@ fn main() {
                 penguin_skills::update_penguin_skills,
                 penguin_skills::update_penguin_surfaces,
                 arena::update_arena_hazards,
+                arena::update_arena_hazard_visuals,
             )
                 .chain()
                 .in_set(GameSet::Combat)

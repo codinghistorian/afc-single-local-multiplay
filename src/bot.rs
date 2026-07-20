@@ -2,8 +2,12 @@ use bevy::prelude::*;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use bevy::window::PrimaryWindow;
 
-use crate::arena::{ArenaHazardState, arena_hazard_is_active_for_kind};
-use crate::arena_defs::{ArenaHazardDefinition, ArenaHazardKind, active_arena_definition};
+use crate::arena::{
+    ArenaHazardState, arena_hazard_is_active_for_kind, ground_support_for_arena_with_radius,
+};
+use crate::arena_defs::{
+    ArenaDefinition, ArenaHazardDefinition, ArenaHazardKind, active_arena_definition,
+};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::camera::ArenaCamera;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -13,13 +17,15 @@ use crate::components::{
     FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
     FighterStats,
 };
+#[cfg(test)]
+use crate::constants::ARENA_RADIUS;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::constants::{
-    ARENA_RADIUS, COMBO_QUEUE_END, COMBO_QUEUE_START, ITEM_BREEZE_BUOY_STAMINA, ITEM_PICKUP_RANGE,
+    COMBO_QUEUE_END, COMBO_QUEUE_START, ITEM_BREEZE_BUOY_STAMINA, ITEM_PICKUP_RANGE,
     ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER, SPECIAL_HAZARD_RADIUS,
     SPECIAL_PROJECTILE_RADIUS, SPECIAL_SHOCKWAVE_RADIUS, SPECIAL_TRAP_RADIUS,
 };
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::equipment::{EquipmentKind, FighterEquipment};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::game_state::MatchAnnouncements;
@@ -1049,6 +1055,31 @@ fn choose_bot_movement_plan(
     elapsed: f32,
     bot_id: usize,
 ) -> BotMovementPlan {
+    choose_bot_movement_plan_for_arena(
+        bot_position,
+        target_position,
+        distance,
+        range,
+        personality,
+        health,
+        elapsed,
+        bot_id,
+        active_arena_definition(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn choose_bot_movement_plan_for_arena(
+    bot_position: Vec3,
+    target_position: Vec3,
+    distance: f32,
+    range: BotRangeBand,
+    personality: BotPersonality,
+    health: f32,
+    elapsed: f32,
+    bot_id: usize,
+    arena: &ArenaDefinition,
+) -> BotMovementPlan {
     if bot_should_panic(health, personality) && distance < range.max + 0.9 {
         return BotMovementPlan::Retreat;
     }
@@ -1059,8 +1090,8 @@ fn choose_bot_movement_plan(
         return BotMovementPlan::Backstep;
     }
 
-    let bot_edge = edge_danger(bot_position);
-    let target_edge = edge_danger(target_position);
+    let bot_edge = edge_danger_for_arena(bot_position, arena);
+    let target_edge = edge_danger_for_arena(target_position, arena);
     if target_edge > 0.3 && bot_edge < target_edge {
         return BotMovementPlan::Pressure;
     }
@@ -1139,10 +1170,33 @@ fn bot_should_dash_for_movement(
     grounded: bool,
     dash_timer: f32,
 ) -> bool {
+    bot_should_dash_for_movement_for_arena(
+        plan,
+        bot_position,
+        movement,
+        distance,
+        range,
+        grounded,
+        dash_timer,
+        active_arena_definition(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bot_should_dash_for_movement_for_arena(
+    plan: BotMovementPlan,
+    bot_position: Vec3,
+    movement: Vec2,
+    distance: f32,
+    range: BotRangeBand,
+    grounded: bool,
+    dash_timer: f32,
+    arena: &ArenaDefinition,
+) -> bool {
     if !grounded
         || dash_timer > 0.0
         || movement.length_squared() <= 0.01
-        || movement_points_toward_edge(bot_position, movement)
+        || movement_points_toward_edge_for_arena(bot_position, movement, arena)
     {
         return false;
     }
@@ -1166,39 +1220,100 @@ fn bot_movement_dash_cooldown(plan: BotMovementPlan, bot_id: usize) -> f32 {
 }
 
 fn edge_danger(position: Vec3) -> f32 {
-    let radius = Vec2::new(position.x, position.z).length();
-    ((radius - (ARENA_RADIUS - BOT_EDGE_WARNING_DISTANCE)) / BOT_EDGE_WARNING_DISTANCE)
-        .clamp(0.0, 1.0)
+    edge_danger_for_arena(position, active_arena_definition())
 }
 
-fn edge_inward_direction(position: Vec3) -> Vec2 {
-    let flat = Vec2::new(position.x, position.z);
-    if flat.length_squared() > 0.001 {
-        -flat.normalize_or_zero()
+fn edge_danger_for_arena(position: Vec3, arena: &ArenaDefinition) -> f32 {
+    if !arena_point_supported(arena, position.x, position.z) {
+        return 1.0;
+    }
+
+    const PROBE_STEPS: usize = 6;
+    const PROBE_DIRECTIONS: usize = 16;
+    for step in 1..=PROBE_STEPS {
+        let distance = BOT_EDGE_WARNING_DISTANCE * step as f32 / PROBE_STEPS as f32;
+        for index in 0..PROBE_DIRECTIONS {
+            let angle = index as f32 * std::f32::consts::TAU / PROBE_DIRECTIONS as f32;
+            let probe =
+                Vec2::new(position.x, position.z) + Vec2::new(angle.cos(), angle.sin()) * distance;
+            if !arena_point_supported(arena, probe.x, probe.y) {
+                return 1.0 - (step.saturating_sub(1) as f32 / PROBE_STEPS as f32);
+            }
+        }
+    }
+
+    0.0
+}
+
+fn edge_inward_direction_for_arena(position: Vec3, arena: &ArenaDefinition) -> Vec2 {
+    const PROBE_DIRECTIONS: usize = 16;
+    let origin = Vec2::new(position.x, position.z);
+    let mut inward = Vec2::ZERO;
+    for index in 0..PROBE_DIRECTIONS {
+        let angle = index as f32 * std::f32::consts::TAU / PROBE_DIRECTIONS as f32;
+        let direction = Vec2::new(angle.cos(), angle.sin());
+        for (distance, weight) in [(0.65, 0.7), (1.25, 1.0), (1.9, 1.35)] {
+            let probe = origin + direction * distance;
+            if arena_point_supported(arena, probe.x, probe.y) {
+                inward += direction * weight;
+            }
+        }
+    }
+
+    if inward.length_squared() > 0.001 {
+        inward.normalize_or_zero()
     } else {
-        Vec2::ZERO
+        let arena_center = arena
+            .spawn_points
+            .iter()
+            .map(|point| Vec2::new(point.x, point.z))
+            .sum::<Vec2>()
+            / arena.spawn_points.len() as f32;
+        (arena_center - origin).normalize_or_zero()
     }
 }
 
-fn movement_points_toward_edge(position: Vec3, movement: Vec2) -> bool {
-    let flat = Vec2::new(position.x, position.z);
-    edge_danger(position) > 0.0
-        && flat.length_squared() > 0.001
-        && movement.normalize_or_zero().dot(flat.normalize_or_zero()) > 0.25
+fn movement_points_toward_edge_for_arena(
+    position: Vec3,
+    movement: Vec2,
+    arena: &ArenaDefinition,
+) -> bool {
+    let movement = movement.normalize_or_zero();
+    if movement.length_squared() <= 0.001 {
+        return false;
+    }
+    let probe = Vec2::new(position.x, position.z) + movement * BOT_EDGE_WARNING_DISTANCE;
+    !arena_point_supported(arena, probe.x, probe.y)
+        || (edge_danger_for_arena(position, arena) > 0.0
+            && movement.dot(edge_inward_direction_for_arena(position, arena)) < -0.25)
 }
 
 fn apply_edge_steering(position: Vec3, movement: Vec2) -> Vec2 {
-    let danger = edge_danger(position);
+    apply_edge_steering_for_arena(position, movement, active_arena_definition())
+}
+
+fn apply_edge_steering_for_arena(position: Vec3, movement: Vec2, arena: &ArenaDefinition) -> Vec2 {
     let movement = movement.normalize_or_zero();
+    let movement_probe = Vec2::new(position.x, position.z) + movement * BOT_EDGE_WARNING_DISTANCE;
+    let points_off_stage = movement.length_squared() > 0.001
+        && !arena_point_supported(arena, movement_probe.x, movement_probe.y);
+    let danger =
+        edge_danger_for_arena(position, arena).max(if points_off_stage { 0.85 } else { 0.0 });
     if danger <= 0.0 {
         return movement;
     }
 
-    let inward = edge_inward_direction(position);
+    let inward = edge_inward_direction_for_arena(position, arena);
     if movement.length_squared() <= 0.01 {
         return inward;
     }
     (movement * (1.0 - danger * 0.85) + inward * (0.75 + danger * 0.9)).normalize_or_zero()
+}
+
+fn arena_point_supported(arena: &ArenaDefinition, x: f32, z: f32) -> bool {
+    ground_support_for_arena_with_radius(arena, x, z, 0.0)
+        .height()
+        .is_some()
 }
 
 fn arena_hazard_avoidance(
@@ -1464,6 +1579,7 @@ mod tests {
             center: Vec3::new(0.0, ARENA_TOP_Y + 0.04, 0.0),
             radius: 1.0,
             pulse_seconds: 2.0,
+            phase: 0.0,
         }];
         let position = Vec3::new(0.5, ARENA_TOP_Y, 0.0);
 
@@ -1481,12 +1597,14 @@ mod tests {
             center: Vec3::ZERO,
             radius: 1.0,
             pulse_seconds: 2.0,
+            phase: 0.0,
         };
         let bumper = ArenaHazardDefinition {
             kind: ArenaHazardKind::BumperNode,
             center: Vec3::ZERO,
             radius: 1.0,
             pulse_seconds: 2.0,
+            phase: 0.0,
         };
 
         assert!(arena_hazard_avoid_radius(&bumper) > arena_hazard_avoid_radius(&pulse));
@@ -1516,6 +1634,7 @@ mod tests {
 
     #[test]
     fn bot_movement_plan_uses_range_and_edge_pressure() {
+        let arena = crate::arena_defs::arena_definition(0);
         let personality = bot_personality(
             crate::styles::FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
@@ -1523,7 +1642,7 @@ mod tests {
         let range = bot_range_band(1.25, personality);
 
         assert_eq!(
-            choose_bot_movement_plan(
+            choose_bot_movement_plan_for_arena(
                 Vec3::ZERO,
                 Vec3::X * 4.0,
                 range.max + 0.2,
@@ -1532,11 +1651,12 @@ mod tests {
                 100.0,
                 0.0,
                 1,
+                arena,
             ),
             BotMovementPlan::Approach
         );
         assert_eq!(
-            choose_bot_movement_plan(
+            choose_bot_movement_plan_for_arena(
                 Vec3::ZERO,
                 Vec3::X,
                 range.min - 0.1,
@@ -1545,19 +1665,21 @@ mod tests {
                 100.0,
                 0.0,
                 1,
+                arena,
             ),
             BotMovementPlan::Backstep
         );
         assert_eq!(
-            choose_bot_movement_plan(
-                Vec3::new(ARENA_RADIUS - 2.0, ARENA_TOP_Y, 0.0),
-                Vec3::new(ARENA_RADIUS - 0.15, ARENA_TOP_Y, 0.0),
+            choose_bot_movement_plan_for_arena(
+                Vec3::new(4.2, ARENA_TOP_Y, 4.2),
+                Vec3::new(5.55, ARENA_TOP_Y, 5.55),
                 range.ideal,
                 range,
                 personality,
                 100.0,
                 0.0,
                 1,
+                arena,
             ),
             BotMovementPlan::Pressure
         );
@@ -1565,22 +1687,26 @@ mod tests {
 
     #[test]
     fn edge_steering_pulls_outward_motion_back_inward() {
-        let position = Vec3::new(ARENA_RADIUS - 0.1, ARENA_TOP_Y, 0.0);
-        let steered = apply_edge_steering(position, Vec2::X);
+        let arena = crate::arena_defs::arena_definition(0);
+        let outward = Vec2::splat(std::f32::consts::FRAC_1_SQRT_2);
+        let edge = outward * (ARENA_RADIUS - 0.1);
+        let position = Vec3::new(edge.x, ARENA_TOP_Y, edge.y);
+        let steered = apply_edge_steering_for_arena(position, outward, arena);
 
-        assert!(edge_danger(position) > 0.8);
-        assert!(steered.dot(Vec2::X) < 0.0);
+        assert!(edge_danger_for_arena(position, arena) > 0.8);
+        assert!(steered.dot(outward) < 0.0);
     }
 
     #[test]
     fn dash_planning_rejects_edgeward_dashes() {
+        let arena = crate::arena_defs::arena_definition(0);
         let personality = bot_personality(
             crate::styles::FighterStyleKind::Vector,
             EquipmentKind::DashCoil,
         );
         let range = bot_range_band(1.55, personality);
 
-        assert!(bot_should_dash_for_movement(
+        assert!(bot_should_dash_for_movement_for_arena(
             BotMovementPlan::Approach,
             Vec3::ZERO,
             Vec2::X,
@@ -1588,15 +1714,19 @@ mod tests {
             range,
             true,
             0.0,
+            arena,
         ));
-        assert!(!bot_should_dash_for_movement(
+        let outward = Vec2::splat(std::f32::consts::FRAC_1_SQRT_2);
+        let edge = outward * (ARENA_RADIUS - 0.2);
+        assert!(!bot_should_dash_for_movement_for_arena(
             BotMovementPlan::Approach,
-            Vec3::new(ARENA_RADIUS - 0.2, ARENA_TOP_Y, 0.0),
-            Vec2::X,
+            Vec3::new(edge.x, ARENA_TOP_Y, edge.y),
+            outward,
             range.max + 1.0,
             range,
             true,
             0.0,
+            arena,
         ));
     }
 

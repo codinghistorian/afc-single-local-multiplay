@@ -1068,7 +1068,7 @@ fn setup_screen_message(setup: &LocalSetup) -> String {
         .collect::<Vec<_>>()
         .join("  ");
     format!(
-        "Local Setup\nChoose Player Character: < {} >\nBot Character: {}\nMode: {}\nArena: {} (available: {})\nBots: {} active\nCharacter Focus: {} P{}  |  Characters: {}\nStyles: {}\nEquipment: {}\nReplay seed: {:08X}\n\nQ/E player previous-next  |  P direct Pig  |  Enter start match\nV bot character  |  Tab focus player/bot  |  C player quick cycle\nZ/X player-bot styles  |  T/Y player-bot equipment\n1 Team  2 FFA  3 Life  |  A arena  |  R reroll seed",
+        "Local Setup\nChoose Player Character: < {} >\nBot Character: {}\nMode: {}\nArena: {} (available: {})\nBots: {} active\nCharacter Focus: {} P{}  |  Characters: {}\nStyles: {}\nEquipment: {}\nReplay seed: {:08X}\n\nQ/E player previous-next  |  P direct Pig  |  Enter start match\nV bot character  |  Tab focus player/bot  |  C player quick cycle\nZ/X player-bot styles  |  T/Y player-bot equipment\n1 Team  2 FFA  3 Life  |  A next arena  Shift+A previous  |  R reroll seed",
         character_label(player_character),
         character_label(bot_character),
         setup.active_rule_label(),
