@@ -224,11 +224,7 @@ fn setup_rule_hotkeys_active(phase: MatchPhase) -> bool {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-fn cycle_dev_arena(
-    setup: &mut LocalSetup,
-    state: &mut MatchState,
-    arena_count: usize,
-) -> usize {
+fn cycle_dev_arena(setup: &mut LocalSetup, state: &mut MatchState, arena_count: usize) -> usize {
     let arena_count = arena_count.max(1);
     setup.arena_index = state.arena_index.min(arena_count - 1);
     setup.cycle_arena(arena_count);

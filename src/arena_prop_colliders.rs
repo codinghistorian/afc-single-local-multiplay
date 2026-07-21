@@ -71,21 +71,29 @@ impl LocalPropBarrier {
     }
 
     pub fn to_world(self, position: Vec3, yaw: f32, scale: f32) -> WorldPropBarrier {
+        self.to_world_scaled(position, yaw, Vec3::splat(scale))
+    }
+
+    pub fn to_world_scaled(self, position: Vec3, yaw: f32, scale: Vec3) -> WorldPropBarrier {
         let scale = scale.abs();
-        let center = Vec2::new(position.x, position.z) + rotate(self.center * scale, yaw);
-        let top_y = position.y + self.top_y * scale;
+        let local_center = Vec2::new(self.center.x * scale.x, self.center.y * scale.z);
+        let center = Vec2::new(position.x, position.z) + rotate(local_center, yaw);
+        let top_y = position.y + self.top_y * scale.y;
         let definition = match self.footprint {
-            LocalPropFootprint::Circle { radius } => {
-                ArenaBarrierDefinition::circle(center.x, center.y, radius * scale, top_y)
-            }
+            LocalPropFootprint::Circle { radius } => ArenaBarrierDefinition::circle(
+                center.x,
+                center.y,
+                radius * scale.x.max(scale.z),
+                top_y,
+            ),
             LocalPropFootprint::Rectangle {
                 half_extents,
                 yaw: local_yaw,
             } => ArenaBarrierDefinition::rectangle(
                 center.x,
                 center.y,
-                half_extents.x * scale,
-                half_extents.y * scale,
+                half_extents.x * scale.x,
+                half_extents.y * scale.z,
                 yaw + local_yaw,
                 top_y,
             ),
@@ -104,8 +112,49 @@ fn rotate(point: Vec2, yaw: f32) -> Vec2 {
 }
 
 const NONE: &[LocalPropBarrier] = &[];
-const STATUE: &[LocalPropBarrier] = &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.28, 0.9)];
-const TROPHY: &[LocalPropBarrier] = &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.24, 0.55)];
+const STATUE: &[LocalPropBarrier] = &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.35, 1.336)];
+const TROPHY: &[LocalPropBarrier] = &[LocalPropBarrier::solid_rect(
+    0.0, 0.0, 0.285, 0.226, 0.0, 0.477,
+)];
+const COURT_BLOCK: &[LocalPropBarrier] =
+    &[LocalPropBarrier::solid_rect(0.0, 0.0, 0.5, 0.5, 0.0, 0.5)];
+const COURT_BRICKS: &[LocalPropBarrier] = &[LocalPropBarrier::solid_rect(
+    0.0, 0.0, 0.386, 0.423, 0.0, 0.412,
+)];
+const COURT_COLUMN: &[LocalPropBarrier] = &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.302, 1.0)];
+const COURT_DAMAGED_COLUMN: &[LocalPropBarrier] =
+    &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.3, 0.716)];
+const COURT_TREE_TRUNK: &[LocalPropBarrier] =
+    &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.12, 0.68)];
+const COURT_WALL: &[LocalPropBarrier] =
+    &[LocalPropBarrier::solid_rect(0.0, 0.0, 0.5, 0.3, 0.0, 1.0)];
+const COURT_WALL_CORNER: &[LocalPropBarrier] = &[
+    LocalPropBarrier::solid_rect(-0.1, 0.15, 0.4, 0.15, 0.0, 1.0),
+    LocalPropBarrier::solid_rect(0.15, -0.1, 0.15, 0.4, 0.0, 1.0),
+];
+const COURT_GATE: &[LocalPropBarrier] = &[
+    LocalPropBarrier::solid_rect(-0.43, 0.0, 0.07, 0.3, 0.0, 1.0),
+    LocalPropBarrier::solid_rect(0.43, 0.0, 0.07, 0.3, 0.0, 1.0),
+    LocalPropBarrier::top_rect(0.0, 0.0, 0.5, 0.3, 0.0, 1.0),
+];
+const COURT_STAIRS: &[LocalPropBarrier] = &[
+    LocalPropBarrier::top_rect(0.0, -0.375, 0.5, 0.125, 0.0, 0.125),
+    LocalPropBarrier::top_rect(0.0, -0.125, 0.5, 0.125, 0.0, 0.25),
+    LocalPropBarrier::top_rect(0.0, 0.125, 0.5, 0.125, 0.0, 0.375),
+    LocalPropBarrier::top_rect(0.0, 0.375, 0.5, 0.125, 0.0, 0.5),
+];
+const COURT_BORDER: &[LocalPropBarrier] =
+    &[LocalPropBarrier::solid_rect(0.0, 0.0, 0.5, 0.3, 0.0, 0.4)];
+const COURT_BORDER_CORNER: &[LocalPropBarrier] = &[
+    LocalPropBarrier::solid_rect(-0.1, 0.15, 0.4, 0.15, 0.0, 0.4),
+    LocalPropBarrier::solid_rect(0.15, -0.1, 0.15, 0.4, 0.0, 0.4),
+];
+const COURT_SOLDIER: &[LocalPropBarrier] = &[LocalPropBarrier::solid_rect(
+    0.0, -0.072, 0.39, 0.26, 0.0, 0.836,
+)];
+const COURT_WEAPON_RACK: &[LocalPropBarrier] = &[LocalPropBarrier::solid_rect(
+    -0.03, 0.075, 0.39, 0.225, 0.0, 0.467,
+)];
 const TREE_TRUNK: &[LocalPropBarrier] = &[LocalPropBarrier::solid_circle(0.0, 0.0, 0.14, 0.62)];
 const ROCKS: &[LocalPropBarrier] = &[LocalPropBarrier::solid_rect(
     0.0, 0.0, 0.43, 0.42, 0.0, 0.415,
@@ -187,6 +236,24 @@ pub fn prop_collision_profile(asset: &str) -> &'static [LocalPropBarrier] {
         "statue.glb" => STATUE,
         "banner.glb" => NONE,
         "trophy.glb" => TROPHY,
+        "block.glb" => COURT_BLOCK,
+        "bricks.glb" => COURT_BRICKS,
+        "column.glb" => COURT_COLUMN,
+        "column-damaged.glb" => COURT_DAMAGED_COLUMN,
+        "wall.glb" => COURT_WALL,
+        "wall-corner.glb" => COURT_WALL_CORNER,
+        "wall-gate.glb" => COURT_GATE,
+        "tree.glb" => COURT_TREE_TRUNK,
+        "stairs.glb" | "stairs-corner.glb" => COURT_STAIRS,
+        "border-straight.glb" => COURT_BORDER,
+        "border-corner.glb" => COURT_BORDER_CORNER,
+        "character-soldier.glb" => COURT_SOLDIER,
+        "weapon-rack.glb" => COURT_WEAPON_RACK,
+        "floor-detail.glb"
+        | "floor.glb"
+        | "stairs-corner-inner.glb"
+        | "weapon-spear.glb"
+        | "weapon-sword.glb" => NONE,
         "tower/wood-structure-high.glb" => WOOD_STRUCTURE_HIGH,
         "tower/detail-tree-large.glb" => TREE_TRUNK,
         "tower/wood-structure.glb" => WOOD_STRUCTURE,
@@ -255,6 +322,29 @@ mod tests {
                 .support_at(Vec2::new(0.3, 0.35), 0.0),
             Some(BarrierSupport::Firm)
         );
+    }
+
+    #[test]
+    fn nonuniform_prop_scale_changes_footprint_and_height_independently() {
+        let world = LocalPropBarrier::solid_rect(0.0, 0.0, 0.5, 0.25, 0.0, 0.5).to_world_scaled(
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+            Vec3::new(2.0, 0.5, 3.0),
+        );
+        assert_eq!(world.definition.half_extents, Vec2::new(1.0, 0.75));
+        assert!((world.definition.top_y - 2.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn substantial_court_decor_has_physical_profiles() {
+        for asset in [
+            "border-straight.glb",
+            "border-corner.glb",
+            "character-soldier.glb",
+            "weapon-rack.glb",
+        ] {
+            assert!(!prop_collision_profile(asset).is_empty());
+        }
     }
 
     #[test]

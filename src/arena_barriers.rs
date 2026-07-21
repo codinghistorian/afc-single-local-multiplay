@@ -3,8 +3,13 @@ use bevy::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BarrierFootprint {
     #[allow(dead_code)]
-    Circle { radius: f32 },
-    Rectangle { half_extents: Vec2, yaw: f32 },
+    Circle {
+        radius: f32,
+    },
+    Rectangle {
+        half_extents: Vec2,
+        yaw: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,14 +31,7 @@ impl ArenaBarrierDefinition {
         Self::rectangle(x, z, hx, hz, 0.0, top_y)
     }
 
-    pub const fn rectangle(
-        x: f32,
-        z: f32,
-        hx: f32,
-        hz: f32,
-        yaw: f32,
-        top_y: f32,
-    ) -> Self {
+    pub const fn rectangle(x: f32, z: f32, hx: f32, hz: f32, yaw: f32, top_y: f32) -> Self {
         let half_extents = Vec2::new(hx, hz);
         Self {
             center: Vec2::new(x, z),
@@ -69,12 +67,8 @@ impl ArenaBarrierDefinition {
             BarrierFootprint::Circle { .. } => 0.0,
             BarrierFootprint::Rectangle { yaw, .. } => yaw,
         };
-        Transform::from_xyz(
-            self.center.x,
-            self.top_y - height * 0.5,
-            self.center.y,
-        )
-        .with_rotation(Quat::from_rotation_y(yaw))
+        Transform::from_xyz(self.center.x, self.top_y - height * 0.5, self.center.y)
+            .with_rotation(Quat::from_rotation_y(yaw))
     }
 
     pub fn support_at(&self, point: Vec2, ledge_grace: f32) -> Option<BarrierSupport> {
@@ -186,7 +180,10 @@ mod tests {
     fn landing_height_clears_the_visible_side_wall() {
         let barrier = ArenaBarrierDefinition::new(0.0, 0.0, 1.0, 1.0, 0.65);
         let approach = Vec3::new(0.0, 0.0, -1.2);
-        assert_ne!(barrier.resolve_side_collision(approach, 0.4, 0.08), approach);
+        assert_ne!(
+            barrier.resolve_side_collision(approach, 0.4, 0.08),
+            approach
+        );
 
         let landing = Vec3::new(approach.x, barrier.top_y - 0.08, approach.z);
         assert_eq!(barrier.resolve_side_collision(landing, 0.4, 0.08), landing);

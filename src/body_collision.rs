@@ -115,11 +115,13 @@ fn body_boxes_overlap_xz(a: FighterBodyBox, b: FighterBodyBox) -> bool {
         body_axis_xz(b.forward),
     ];
     let center_delta = body_center_xz(a) - body_center_xz(b);
-    axes.into_iter().filter(|axis| axis.length_squared() > 0.0001).all(|axis| {
-        let axis = axis.normalize();
-        center_delta.dot(axis).abs()
-            < body_projection_radius(a, axis) + body_projection_radius(b, axis)
-    })
+    axes.into_iter()
+        .filter(|axis| axis.length_squared() > 0.0001)
+        .all(|axis| {
+            let axis = axis.normalize();
+            center_delta.dot(axis).abs()
+                < body_projection_radius(a, axis) + body_projection_radius(b, axis)
+        })
 }
 
 pub fn sphere_body_box_contact(

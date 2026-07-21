@@ -4407,15 +4407,15 @@ pub fn separate_fighters(
             if !fighter_body_blocks_overlap(action.action) {
                 continue;
             }
-            let correction = corrections.iter().filter(|(target, _)| *target == entity).fold(
-                Vec3::ZERO,
-                |mut acc, (_, delta)| {
+            let correction = corrections
+                .iter()
+                .filter(|(target, _)| *target == entity)
+                .fold(Vec3::ZERO, |mut acc, (_, delta)| {
                     acc.x += delta.x;
                     acc.z += delta.z;
                     acc.y = acc.y.max(delta.y);
                     acc
-                },
-            );
+                });
             if correction.length_squared() <= 0.000001 {
                 continue;
             }
@@ -4447,8 +4447,8 @@ fn fighter_body_snapshots(
     fighters
         .iter()
         .filter(|(_, _, _, _, _, action)| fighter_body_blocks_overlap(action.action))
-        .map(|(entity, transform, motor, character, stats, _)| {
-            FighterBodySnapshot {
+        .map(
+            |(entity, transform, motor, character, stats, _)| FighterBodySnapshot {
                 entity,
                 body: fighter_body_box(
                     transform.translation,
@@ -4457,8 +4457,8 @@ fn fighter_body_snapshots(
                     stats.item_size_multiplier(),
                 ),
                 velocity_y: motor.velocity.y,
-            }
-        })
+            },
+        )
         .collect()
 }
 

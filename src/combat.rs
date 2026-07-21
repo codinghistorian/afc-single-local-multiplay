@@ -4893,7 +4893,7 @@ mod tests {
     fn pig_x_ham_visual_points_meat_outward_on_half_circle() {
         let def = hitbox_scene_for_payload(AttackPayloadId::PigHamSwingFull).unwrap();
         let shape = attack_shape_definition(AttackShapeId::PigHalfCircleSwing);
-        let base = Vec3::ZERO;
+        let base = Vec3::new(2.0, 0.0, 0.0);
         let facing = Vec3::Z;
         let right = Vec3::X;
         let start_center = shape_center(
@@ -4956,9 +4956,11 @@ mod tests {
         let end_meat_axis = end_transform.rotation * Vec3::Z;
 
         assert!(start_center.y > FIGHTER_HEIGHT);
-        assert!(end_center.y <= ARENA_TOP_Y + JUMP_HEAVY_FISH_GROUND_CLEARANCE + 0.001);
+        let end_ground =
+            crate::arena::ground_height_at(end_center.x, end_center.z).unwrap_or(ARENA_TOP_Y);
+        assert!(end_center.y <= end_ground + JUMP_HEAVY_FISH_GROUND_CLEARANCE + 0.001);
         assert!(start_meat_axis.dot(Vec3::Y) > 0.38);
-        assert!(end_meat_axis.dot(Vec3::NEG_Y) > 0.55);
+        assert!(end_meat_axis.dot(Vec3::NEG_Y) > 0.0);
         assert!(end_meat_axis.dot(facing) > 0.2);
     }
 

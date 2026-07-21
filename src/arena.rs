@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::fs;
+use std::sync::OnceLock;
 
 use crate::arena_defs::{
     ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
@@ -1406,6 +1407,73 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     }
 }
 
+fn champions_court_collision_barriers() -> &'static [WorldPropBarrier] {
+    static BARRIERS: OnceLock<Vec<WorldPropBarrier>> = OnceLock::new();
+    BARRIERS.get_or_init(|| {
+        let map: ChampionsCourtRon = ron::from_str(include_str!("../arts/champions_court.ron"))
+            .expect("embedded Champion's Court RON should parse");
+        let mut barriers = Vec::new();
+
+        for object in &map.instances {
+            let transform = Transform::from_xyz(
+                object.position.0,
+                ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
+                object.position.2,
+            )
+            .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
+            .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
+            append_champions_object_barriers(&map.assets, object, transform, &mut barriers);
+        }
+
+        for prefab_instance in &map.prefab_instances {
+            let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
+                continue;
+            };
+            for object in objects {
+                append_champions_object_barriers(
+                    &map.assets,
+                    object,
+                    champions_prefab_object_transform(prefab_instance, object),
+                    &mut barriers,
+                );
+            }
+        }
+
+        barriers
+    })
+}
+
+fn append_champions_object_barriers(
+    assets: &HashMap<String, String>,
+    object: &ChampionsCourtObject,
+    transform: Transform,
+    barriers: &mut Vec<WorldPropBarrier>,
+) {
+    let Some(asset) = assets.get(&object.asset) else {
+        return;
+    };
+    let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    barriers.extend(
+        prop_collision_profile(asset)
+            .iter()
+            .copied()
+            .map(|barrier| barrier.to_world_scaled(transform.translation, yaw, transform.scale)),
+    );
+}
+
+fn arena_prop_barriers(arena: &ArenaDefinition) -> impl Iterator<Item = WorldPropBarrier> + '_ {
+    let rendered_props = arena_asset_props_for_definition(arena)
+        .iter()
+        .copied()
+        .flat_map(ArenaAssetProp::collision_barriers);
+    let court_barriers: &[WorldPropBarrier] = if arena.visual_theme == ArenaVisualTheme::Crown {
+        champions_court_collision_barriers()
+    } else {
+        &[]
+    };
+    rendered_props.chain(court_barriers.iter().copied())
+}
+
 const CROWN_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
         name: "Crown north statue",
@@ -1687,42 +1755,6 @@ const FEAST_MARKET_ASSET_PROPS: &[ArenaAssetProp] = &[
 ];
 
 const SNARE_GARDEN_ASSET_PROPS: &[ArenaAssetProp] = &[
-    ArenaAssetProp {
-        name: "Snare garden north hedge",
-        file: "platformer/hedge.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y,
-        z: 7.0,
-        yaw: 0.0,
-        scale: 2.5,
-    },
-    ArenaAssetProp {
-        name: "Snare garden south hedge",
-        file: "platformer/hedge.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y,
-        z: -7.0,
-        yaw: PI,
-        scale: 2.5,
-    },
-    ArenaAssetProp {
-        name: "Snare garden west hedge corner",
-        file: "platformer/hedge-corner.glb",
-        x: -7.0,
-        y: ARENA_TOP_Y,
-        z: 0.0,
-        yaw: PI * 0.5,
-        scale: 2.5,
-    },
-    ArenaAssetProp {
-        name: "Snare garden east hedge corner",
-        file: "platformer/hedge-corner.glb",
-        x: 7.0,
-        y: ARENA_TOP_Y,
-        z: 0.0,
-        yaw: -PI * 0.5,
-        scale: 2.5,
-    },
     ArenaAssetProp {
         name: "Snare garden west flowers",
         file: "platformer/flowers-tall.glb",
@@ -3311,20 +3343,18 @@ pub fn ground_support_for_arena_with_radius(
         }
     }
 
-    for prop in arena_asset_props_for_definition(arena) {
-        for collider in prop.collision_barriers() {
-            let support = match collider.definition.support_at(Vec2::new(x, z), ledge_grace) {
-                Some(crate::arena_barriers::BarrierSupport::Firm) => {
-                    Some(GroundSupport::Firm(collider.definition.top_y))
-                }
-                Some(crate::arena_barriers::BarrierSupport::Grace) => {
-                    Some(GroundSupport::Grace(collider.definition.top_y))
-                }
-                None => None,
-            };
-            if let Some(support) = support {
-                best = Some(prefer_ground_support(best, support));
+    for collider in arena_prop_barriers(arena) {
+        let support = match collider.definition.support_at(Vec2::new(x, z), ledge_grace) {
+            Some(crate::arena_barriers::BarrierSupport::Firm) => {
+                Some(GroundSupport::Firm(collider.definition.top_y))
             }
+            Some(crate::arena_barriers::BarrierSupport::Grace) => {
+                Some(GroundSupport::Grace(collider.definition.top_y))
+            }
+            None => None,
+        };
+        if let Some(support) = support {
+            best = Some(prefer_ground_support(best, support));
         }
     }
 
@@ -3467,19 +3497,17 @@ fn resolve_platform_side_collision_for_arena(
             );
         }
     }
-    for prop in arena_asset_props_for_definition(arena) {
-        for collider in prop.collision_barriers() {
-            if collider.behavior == PropBarrierBehavior::OneWayTop
-                || collider.definition.top_y <= PLATFORM_SIDE_COLLISION_MIN_TOP_Y
-            {
-                continue;
-            }
-            resolved = collider.definition.resolve_side_collision(
-                resolved,
-                radius,
-                crate::constants::LANDING_SNAP_TOLERANCE,
-            );
+    for collider in arena_prop_barriers(arena) {
+        if collider.behavior == PropBarrierBehavior::OneWayTop
+            || collider.definition.top_y <= PLATFORM_SIDE_COLLISION_MIN_TOP_Y
+        {
+            continue;
         }
+        resolved = collider.definition.resolve_side_collision(
+            resolved,
+            radius,
+            crate::constants::LANDING_SNAP_TOLERANCE,
+        );
     }
     resolved
 }
@@ -4221,6 +4249,7 @@ mod tests {
                 1 | 2 => 4,
                 CRANK_YARD_ARENA_INDEX => 4,
                 VENT_SPIRAL_ARENA_INDEX => 1,
+                7 => 3,
                 _ => 5,
             };
             assert!(props.len() >= expected_minimum);
@@ -4326,6 +4355,30 @@ mod tests {
                 let _ = prop_collision_profile(prop.file);
             }
         }
+    }
+
+    #[test]
+    fn snare_garden_has_no_hedge_or_bush_props() {
+        assert!(
+            SNARE_GARDEN_ASSET_PROPS
+                .iter()
+                .all(|prop| !prop.file.contains("hedge") && !prop.file.contains("bush"))
+        );
+    }
+
+    #[test]
+    fn champions_court_objects_generate_shared_prop_barriers() {
+        let barriers = champions_court_collision_barriers();
+        assert!(!barriers.is_empty());
+        assert!(barriers.iter().any(|barrier| {
+            barrier.definition.center.distance(Vec2::ZERO) < 0.01
+                && barrier.definition.top_y > ARENA_TOP_Y
+        }));
+        assert!(
+            barriers
+                .iter()
+                .any(|barrier| barrier.behavior == PropBarrierBehavior::OneWayTop)
+        );
     }
 
     #[test]

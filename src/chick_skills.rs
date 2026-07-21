@@ -2319,11 +2319,11 @@ mod tests {
 
         assert!(!fresh_egg_drop_touched_ground(
             &skill,
-            Vec3::new(0.0, ARENA_TOP_Y + 0.5, 0.0)
+            Vec3::new(2.0, ARENA_TOP_Y + 0.5, 0.0)
         ));
         assert!(fresh_egg_drop_touched_ground(
             &skill,
-            Vec3::new(0.0, ARENA_TOP_Y + 0.04, 0.0)
+            Vec3::new(2.0, ARENA_TOP_Y + 0.04, 0.0)
         ));
     }
 

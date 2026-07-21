@@ -519,9 +519,8 @@ pub fn setup_items(
         barrel_scene: food_scene(&asset_server, "barrel.glb"),
         cup_coffee_scene: food_scene(&asset_server, "cup-coffee.glb"),
         mushroom_scene: food_scene(&asset_server, "mushroom.glb"),
-        crate_scene: asset_server.load(
-            GltfAssetLabel::Scene(0).from_asset("arena/kits/platformer/crate-strong.glb"),
-        ),
+        crate_scene: asset_server
+            .load(GltfAssetLabel::Scene(0).from_asset("arena/kits/platformer/crate-strong.glb")),
         steamer_material: materials.add(StandardMaterial {
             base_color: Color::srgb(0.72, 0.62, 0.52),
             perceptual_roughness: 0.46,
@@ -599,14 +598,16 @@ fn spawn_pickup(
 ) -> Entity {
     let (mesh, material, scale) = item_visuals(assets, kind, false);
 
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        SceneRoot(assets.scene_for(kind)),
-        Transform::from_translation(position).with_scale(scale),
-        ArenaItem::new(kind, position, phase),
-        Name::new(kind.label()),
-    )).id()
+    commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            SceneRoot(assets.scene_for(kind)),
+            Transform::from_translation(position).with_scale(scale),
+            ArenaItem::new(kind, position, phase),
+            Name::new(kind.label()),
+        ))
+        .id()
 }
 
 fn item_visuals(

@@ -2812,13 +2812,13 @@ mod tests {
                 (
                     PenguinSurfaceKind::UltimateIceTile,
                     PENGUIN_ULTIMATE_ICE_FIELD_LIFETIME,
-                    Vec3::new(-5.0, ARENA_TOP_Y + 0.2, 0.0),
+                    Vec3::new(-4.0, ARENA_TOP_Y + 0.2, 0.0),
                 ),
             ],
         )
         .expect("active snowfield should be selected");
 
-        assert_vec3_close(destination, Vec3::new(-5.0, ARENA_TOP_Y, 0.0));
+        assert_vec3_close(destination, Vec3::new(-4.0, ARENA_TOP_Y, 0.0));
     }
 
     #[test]

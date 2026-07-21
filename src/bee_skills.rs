@@ -627,9 +627,7 @@ fn bee_skill_visual_scale(kind: BeeSkillKind, size_scale: f32, age: f32) -> Vec3
         BeeSkillKind::HoneyGlob => Vec3::splat(0.38 * size_scale),
         BeeSkillKind::HoneyPuddle => Vec3::splat(honey_puddle_visual_pulse(age) * size_scale),
         BeeSkillKind::HomingSting => Vec3::splat(size_scale),
-        BeeSkillKind::UltimateSwarm => {
-            Vec3::splat(ultimate_swarm_visual_pulse(age) * size_scale)
-        }
+        BeeSkillKind::UltimateSwarm => Vec3::splat(ultimate_swarm_visual_pulse(age) * size_scale),
     }
 }
 
@@ -907,9 +905,8 @@ fn bee_skill_overlaps_target(
             let rendered_radius =
                 skill.radius * honey_puddle_visual_pulse(skill.age) + FIGHTER_RADIUS;
             let horizontal_overlap = flat_distance(origin, target_position) <= rendered_radius;
-            let vertical_overlap =
-                (target_position.y - origin.y).abs()
-                    <= BEE_HONEY_PUDDLE_VERTICAL_REACH * skill.size_scale;
+            let vertical_overlap = (target_position.y - origin.y).abs()
+                <= BEE_HONEY_PUDDLE_VERTICAL_REACH * skill.size_scale;
 
             horizontal_overlap && vertical_overlap
         }
@@ -917,9 +914,8 @@ fn bee_skill_overlaps_target(
             let target_position = target_transform.translation;
             let horizontal_overlap = flat_distance(origin, target_position)
                 <= skill.radius * ultimate_swarm_visual_pulse(skill.age) + FIGHTER_RADIUS;
-            let vertical_overlap =
-                (target_position.y - origin.y).abs()
-                    <= BEE_ULTIMATE_SWARM_VERTICAL_REACH * skill.size_scale;
+            let vertical_overlap = (target_position.y - origin.y).abs()
+                <= BEE_ULTIMATE_SWARM_VERTICAL_REACH * skill.size_scale;
 
             horizontal_overlap && vertical_overlap
         }
@@ -1326,13 +1322,9 @@ mod tests {
             1.0,
         );
         let puddle_origin = Vec3::new(0.0, 0.035, 0.0);
-        let hit_radius = BEE_HONEY_PUDDLE_RADIUS * honey_puddle_visual_pulse(skill.age)
-            + FIGHTER_RADIUS;
-        let grounded_target = Transform::from_translation(Vec3::new(
-            hit_radius - 0.01,
-            0.0,
-            0.0,
-        ));
+        let hit_radius =
+            BEE_HONEY_PUDDLE_RADIUS * honey_puddle_visual_pulse(skill.age) + FIGHTER_RADIUS;
+        let grounded_target = Transform::from_translation(Vec3::new(hit_radius - 0.01, 0.0, 0.0));
         let outside_rendered_body_edge =
             Transform::from_translation(Vec3::new(hit_radius + 0.01, 0.0, 0.0));
         let airborne_target =
@@ -1435,7 +1427,11 @@ mod tests {
         let first = bee_swarm_orbiter_offset(0, 0.0);
         assert_vec3_close(
             first,
-            Vec3::new(BEE_ULTIMATE_SWARM_ORBIT_RADIUS, BEE_ULTIMATE_SWARM_BEE_HEIGHT, 0.0),
+            Vec3::new(
+                BEE_ULTIMATE_SWARM_ORBIT_RADIUS,
+                BEE_ULTIMATE_SWARM_BEE_HEIGHT,
+                0.0,
+            ),
         );
 
         for index in 0..BEE_ULTIMATE_SWARM_BEE_COUNT {
