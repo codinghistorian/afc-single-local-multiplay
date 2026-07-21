@@ -3423,11 +3423,12 @@ fn resolve_circular_platform_side_collision_against(
     );
     let distance = offset.length();
     let expanded_radius = platform_radius + fighter_radius;
-    let inside_top = distance <= platform_radius && position.y >= platform.top_y - 0.05;
+    let clears_lip = position.y
+        >= platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE * 2.0;
 
     if (opening_radius > 0.0 && distance <= opening_radius)
         || distance >= expanded_radius
-        || inside_top
+        || clears_lip
         || position.y > platform.top_y + 0.7
     {
         return position;
@@ -3660,6 +3661,11 @@ mod tests {
         let pipe = crank.prop_colliders[0];
         let corner = Vec3::new(pipe.center.x + 1.1, ARENA_TOP_Y, pipe.center.y + 1.1);
         let side = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y);
+        let landing_approach = Vec3::new(
+            pipe.center.x + pipe_pair.collider_radius + FIGHTER_RADIUS * 0.5,
+            pipe.top_y - crate::constants::LANDING_SNAP_TOLERANCE * 2.0,
+            pipe.center.y,
+        );
 
         assert_eq!(
             resolve_circular_platform_side_collision_against(
@@ -3680,6 +3686,16 @@ mod tests {
                 pipe_pair.trigger_radius,
             )
             .x > side.x
+        );
+        assert_eq!(
+            resolve_circular_platform_side_collision_against(
+                landing_approach,
+                FIGHTER_RADIUS,
+                &pipe,
+                pipe_pair.collider_radius,
+                0.0,
+            ),
+            landing_approach
         );
 
         let opening = Vec3::new(pipe.center.x, ARENA_TOP_Y, pipe.center.y);
