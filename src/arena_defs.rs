@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use std::f32::consts::PI;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::{ARENA_TOP_Y, CAMERA_BASE_OFFSET, RINGOUT_RADIUS, RINGOUT_Y};
@@ -103,7 +102,6 @@ pub struct ArenaDefinition {
     pub item_anchors: &'static [ItemAnchor],
     pub ground_shapes: &'static [ArenaGroundShape],
     pub platforms: &'static [PlatformDefinition],
-    pub prop_colliders: &'static [PlatformDefinition],
     pub pipe_pair: Option<ArenaPipePairDefinition>,
     pub ringout_radius: f32,
     pub ringout_y: f32,
@@ -115,7 +113,7 @@ pub struct ArenaDefinition {
 
 impl ArenaDefinition {
     pub fn gameplay_platforms(&self) -> impl Iterator<Item = &PlatformDefinition> {
-        self.platforms.iter().chain(self.prop_colliders.iter())
+        self.platforms.iter()
     }
 }
 
@@ -170,11 +168,10 @@ pub const VENT_SPIRAL_REACTOR_YAW: f32 = std::f32::consts::PI * 0.25;
 pub const VENT_SPIRAL_REACTOR_BASE_Y: f32 = ARENA_TOP_Y + 0.02;
 const VENT_SPIRAL_REACTOR_LOCAL_BASE_HALF_EXTENT: f32 = 0.5;
 const VENT_SPIRAL_REACTOR_LOCAL_BASE_HEIGHT: f32 = 0.21;
-const VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT: f32 =
+pub(crate) const VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT: f32 =
     VENT_SPIRAL_REACTOR_LOCAL_BASE_HALF_EXTENT * VENT_SPIRAL_REACTOR_SCALE;
-const VENT_SPIRAL_REACTOR_BASE_TOP_Y: f32 =
-    VENT_SPIRAL_REACTOR_BASE_Y
-        + VENT_SPIRAL_REACTOR_LOCAL_BASE_HEIGHT * VENT_SPIRAL_REACTOR_SCALE;
+pub(crate) const VENT_SPIRAL_REACTOR_BASE_TOP_Y: f32 =
+    VENT_SPIRAL_REACTOR_BASE_Y + VENT_SPIRAL_REACTOR_LOCAL_BASE_HEIGHT * VENT_SPIRAL_REACTOR_SCALE;
 
 const VENT_SPIRAL_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::circle(0.0, 0.0, 2.75, ARENA_TOP_Y),
@@ -283,28 +280,6 @@ const SPLIT_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, -6.8, 2.8, 1.2, ARENA_TOP_Y + 0.24),
 ];
 
-const SPLIT_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    // Bridge frames.
-    PlatformDefinition::new(-7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
-    PlatformDefinition::new(7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
-    // Watch-tree trunks, matched to each prop's scale and base height.
-    PlatformDefinition::new(-8.4, 5.6, 0.56, 0.56, ARENA_TOP_Y + 1.56),
-    PlatformDefinition::new(8.4, -5.6, 0.5, 0.5, ARENA_TOP_Y + 1.37),
-];
-
-const NO_PROP_COLLIDERS: &[PlatformDefinition] = &[];
-
-const VENT_SPIRAL_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::rectangle(
-        0.0,
-        0.0,
-        VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT,
-        VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT,
-        VENT_SPIRAL_REACTOR_YAW,
-        VENT_SPIRAL_REACTOR_BASE_TOP_Y,
-    ),
-];
-
 const SPLIT_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::Barrel,
@@ -332,13 +307,6 @@ const SUNSTONE_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, 0.0, 3.2, 2.4, ARENA_TOP_Y + 0.18),
     PlatformDefinition::new(0.0, -8.6, 4.2, 1.0, ARENA_TOP_Y - 0.08),
     PlatformDefinition::new(0.0, 8.6, 4.2, 1.0, ARENA_TOP_Y - 0.08),
-];
-
-const SUNSTONE_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::rectangle(-6.0, 3.8, 1.7, 1.45, -0.55, ARENA_TOP_Y + 1.08),
-    PlatformDefinition::rectangle(6.0, -3.8, 1.7, 1.45, -0.55, ARENA_TOP_Y + 1.08),
-    PlatformDefinition::circle(-6.0, -4.7, 1.25, ARENA_TOP_Y + 0.78),
-    PlatformDefinition::circle(6.0, 4.7, 1.25, ARENA_TOP_Y + 0.78),
 ];
 
 const SUNSTONE_ITEMS: &[ItemAnchor] = &[
@@ -382,23 +350,6 @@ const CRANK_PIPE_MODEL_HALF_WIDTH: f32 = 0.68;
 pub const CRANK_PIPE_VISUAL_SCALE: f32 = 1.5;
 const CRANK_PIPE_TOP_Y: f32 = ARENA_TOP_Y + CRANK_PIPE_MODEL_HEIGHT * CRANK_PIPE_VISUAL_SCALE;
 const CRANK_PIPE_HALF_EXTENT: f32 = CRANK_PIPE_MODEL_HALF_WIDTH * CRANK_PIPE_VISUAL_SCALE;
-
-const CRANK_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(
-        -1.7,
-        7.0,
-        CRANK_PIPE_HALF_EXTENT,
-        CRANK_PIPE_HALF_EXTENT,
-        CRANK_PIPE_TOP_Y,
-    ),
-    PlatformDefinition::new(
-        1.7,
-        -7.0,
-        CRANK_PIPE_HALF_EXTENT,
-        CRANK_PIPE_HALF_EXTENT,
-        CRANK_PIPE_TOP_Y,
-    ),
-];
 
 const CRANK_PIPE_PAIR: ArenaPipePairDefinition = ArenaPipePairDefinition {
     endpoints: [Vec2::new(-1.7, 7.0), Vec2::new(1.7, -7.0)],
@@ -484,12 +435,6 @@ const BUMPER_ALLEY_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(9.35, 0.0, 1.95, 1.65, ARENA_TOP_Y - 0.06),
 ];
 
-const BUMPER_ALLEY_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::circle(0.0, 4.25, 0.58, ARENA_TOP_Y + 0.82),
-    PlatformDefinition::circle(0.0, 0.0, 0.58, ARENA_TOP_Y + 0.82),
-    PlatformDefinition::circle(0.0, -4.25, 0.58, ARENA_TOP_Y + 0.82),
-];
-
 const BUMPER_ALLEY_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::Barrel,
@@ -518,15 +463,6 @@ const FEAST_MARKET_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(6.25, -2.75, 1.8, 1.1, ARENA_TOP_Y - 0.04),
     PlatformDefinition::new(-2.75, -6.25, 1.1, 1.8, ARENA_TOP_Y - 0.04),
     PlatformDefinition::new(2.75, 6.25, 1.1, 1.8, ARENA_TOP_Y - 0.04),
-];
-
-const FEAST_MARKET_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::rectangle(-5.8, 3.4, 1.05, 0.85, 0.25, ARENA_TOP_Y + 0.92),
-    PlatformDefinition::circle(5.8, -3.4, 1.0, ARENA_TOP_Y + 0.96),
-    PlatformDefinition::rectangle(3.0, 6.2, 1.05, 0.72, 0.1, ARENA_TOP_Y + 0.52),
-    PlatformDefinition::circle(-3.0, -6.2, 0.92, ARENA_TOP_Y + 0.72),
-    PlatformDefinition::circle(5.7, 3.9, 0.9, ARENA_TOP_Y + 0.88),
-    PlatformDefinition::rectangle(-5.9, -3.9, 0.78, 0.78, 0.2, ARENA_TOP_Y + 0.9),
 ];
 
 const FEAST_MARKET_ITEMS: &[ItemAnchor] = &[
@@ -579,16 +515,6 @@ const SNARE_GARDEN_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(8.9, 0.0, 1.35, 3.15, ARENA_TOP_Y - 0.05),
 ];
 
-const SNARE_GARDEN_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::rectangle(0.0, 7.0, 1.5, 0.55, 0.0, ARENA_TOP_Y + 1.0),
-    PlatformDefinition::rectangle(0.0, -7.0, 1.5, 0.55, PI, ARENA_TOP_Y + 1.0),
-    PlatformDefinition::rectangle(-7.0, 0.0, 1.05, 1.05, PI * 0.5, ARENA_TOP_Y + 1.0),
-    PlatformDefinition::rectangle(7.0, 0.0, 1.05, 1.05, -PI * 0.5, ARENA_TOP_Y + 1.0),
-    PlatformDefinition::circle(-5.1, 1.7, 0.68, ARENA_TOP_Y + 0.72),
-    PlatformDefinition::circle(5.1, -1.7, 0.68, ARENA_TOP_Y + 0.72),
-    PlatformDefinition::circle(-7.8, 6.8, 0.7, ARENA_TOP_Y + 1.55),
-];
-
 const SNARE_GARDEN_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::CupCoffee,
@@ -624,20 +550,6 @@ const SKY_STEPS_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(5.7, 4.6, 1.55, 1.3, ARENA_TOP_Y + 0.82),
     PlatformDefinition::new(-5.7, 4.6, 1.55, 1.3, ARENA_TOP_Y + 0.34),
     PlatformDefinition::new(5.7, -4.6, 1.55, 1.3, ARENA_TOP_Y + 0.34),
-];
-
-const SKY_STEPS_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::circle(-8.0, -6.4, 0.58, ARENA_TOP_Y + 1.08),
-    PlatformDefinition::circle(6.8, 5.5, 0.58, ARENA_TOP_Y + 1.88),
-    PlatformDefinition::circle(-5.8, 4.7, 0.72, ARENA_TOP_Y + 1.18),
-    PlatformDefinition::circle(5.6, -4.7, 0.48, ARENA_TOP_Y + 0.98),
-    // The central shelter is a hollow frame: four solid, landable beams with an open interior.
-    PlatformDefinition::rectangle(-0.74, 0.74, 1.4, 0.2, PI * 0.25, ARENA_TOP_Y + 1.36),
-    PlatformDefinition::rectangle(0.74, -0.74, 1.4, 0.2, PI * 0.25, ARENA_TOP_Y + 1.36),
-    PlatformDefinition::rectangle(0.85, 0.85, 0.2, 0.85, PI * 0.25, ARENA_TOP_Y + 1.36),
-    PlatformDefinition::rectangle(-0.85, -0.85, 0.2, 0.85, PI * 0.25, ARENA_TOP_Y + 1.36),
-    PlatformDefinition::circle(-3.0, -2.4, 0.92, ARENA_TOP_Y + 0.68),
-    PlatformDefinition::circle(3.0, 2.4, 0.92, ARENA_TOP_Y + 1.08),
 ];
 
 const SKY_STEPS_ITEMS: &[ItemAnchor] = &[
@@ -818,7 +730,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: CROWN_ITEMS,
         ground_shapes: CROWN_GROUND,
         platforms: CROWN_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS,
         ringout_y: RINGOUT_Y,
@@ -838,7 +749,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SPLIT_ITEMS,
         ground_shapes: SPLIT_GROUND,
         platforms: SPLIT_PLATFORMS,
-        prop_colliders: SPLIT_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 1.0,
         ringout_y: RINGOUT_Y,
@@ -858,7 +768,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SUNSTONE_ITEMS,
         ground_shapes: SUNSTONE_GROUND,
         platforms: SUNSTONE_PLATFORMS,
-        prop_colliders: SUNSTONE_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.6,
         ringout_y: RINGOUT_Y - 0.25,
@@ -878,7 +787,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: CRANK_ITEMS,
         ground_shapes: CRANK_GROUND,
         platforms: CRANK_PLATFORMS,
-        prop_colliders: CRANK_PROP_COLLIDERS,
         pipe_pair: Some(CRANK_PIPE_PAIR),
         ringout_radius: RINGOUT_RADIUS + 0.35,
         ringout_y: RINGOUT_Y,
@@ -898,7 +806,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: VENT_SPIRAL_ITEMS,
         ground_shapes: VENT_SPIRAL_GROUND,
         platforms: VENT_SPIRAL_PLATFORMS,
-        prop_colliders: VENT_SPIRAL_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.45,
         ringout_y: RINGOUT_Y,
@@ -918,7 +825,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: BUMPER_ALLEY_ITEMS,
         ground_shapes: BUMPER_GROUND,
         platforms: BUMPER_ALLEY_PLATFORMS,
-        prop_colliders: BUMPER_ALLEY_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.1,
         ringout_y: RINGOUT_Y,
@@ -938,7 +844,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: FEAST_MARKET_ITEMS,
         ground_shapes: FEAST_MARKET_GROUND,
         platforms: FEAST_MARKET_PLATFORMS,
-        prop_colliders: FEAST_MARKET_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.75,
         ringout_y: RINGOUT_Y,
@@ -958,7 +863,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SNARE_GARDEN_ITEMS,
         ground_shapes: SNARE_GARDEN_GROUND,
         platforms: SNARE_GARDEN_PLATFORMS,
-        prop_colliders: SNARE_GARDEN_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.55,
         ringout_y: RINGOUT_Y,
@@ -978,7 +882,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SKY_STEPS_ITEMS,
         ground_shapes: SKY_STEPS_GROUND,
         platforms: SKY_STEPS_PLATFORMS,
-        prop_colliders: SKY_STEPS_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.85,
         ringout_y: RINGOUT_Y - 0.45,
@@ -998,7 +901,6 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: POWDER_KEG_ITEMS,
         ground_shapes: POWDER_KEG_GROUND,
         platforms: POWDER_KEG_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.25,
         ringout_y: RINGOUT_Y,
@@ -1100,30 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn split_causeway_solid_props_have_matching_colliders() {
-        let split = arena_definition(1);
-        assert_eq!(split.prop_colliders.len(), 4);
-        assert_eq!(split.prop_colliders[0].center, Vec2::new(-7.2, 0.0));
-        assert_eq!(split.prop_colliders[1].center, Vec2::new(7.2, 0.0));
-        assert!(
-            split
-                .prop_colliders
-                .iter()
-                .take(2)
-                .all(|collider| collider.top_y > ARENA_TOP_Y + 2.0)
-        );
-        assert_eq!(split.prop_colliders[2].center, Vec2::new(-8.4, 5.6));
-        assert_eq!(split.prop_colliders[3].center, Vec2::new(8.4, -5.6));
-        assert!(
-            split
-                .prop_colliders
-                .iter()
-                .skip(2)
-                .all(|collider| collider.half_extents.max_element() <= 0.56)
-        );
-    }
-
-    #[test]
     fn sunstone_steps_uses_a_clear_hazard_and_symmetric_terraces() {
         let sunstone = arena_definition(2);
         assert_eq!(sunstone.hazards.len(), 1);
@@ -1140,61 +1018,17 @@ mod tests {
     }
 
     #[test]
-    fn sunstone_items_clear_hazards_and_solid_props() {
-        let sunstone = arena_definition(2);
-        assert_eq!(sunstone.prop_colliders.len(), 4);
-
-        for anchor in sunstone.item_anchors {
-            let item = Vec2::new(anchor.position.x, anchor.position.z);
-            for collider in sunstone.prop_colliders {
-                let offset = (item - collider.center).abs();
-                assert!(
-                    offset.x > collider.half_extents.x + 0.5
-                        || offset.y > collider.half_extents.y + 0.5,
-                    "item at {item:?} overlaps solid prop at {:?}",
-                    collider.center
-                );
-            }
-            for hazard in sunstone.hazards {
-                let hazard_center = Vec2::new(hazard.center.x, hazard.center.z);
-                assert!(
-                    item.distance(hazard_center) > hazard.radius + 0.75,
-                    "item at {item:?} is too close to the central hazard"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn sunstone_fighter_spawns_clear_hazards_and_solid_props() {
-        let sunstone = arena_definition(2);
-
-        for spawn in sunstone.spawn_points {
-            let position = Vec2::new(spawn.x, spawn.z);
-            for collider in sunstone.prop_colliders {
-                let offset = (position - collider.center).abs();
-                assert!(
-                    offset.x >= collider.half_extents.x + 0.4
-                        || offset.y >= collider.half_extents.y + 0.4,
-                    "fighter spawn at {position:?} overlaps solid prop at {:?}",
-                    collider.center
-                );
-            }
-            for hazard in sunstone.hazards {
-                let hazard_center = Vec2::new(hazard.center.x, hazard.center.z);
-                assert!(position.distance(hazard_center) > hazard.radius + 0.4);
-            }
-        }
-    }
-
-    #[test]
-    fn crank_yard_pipe_pair_matches_standable_prop_colliders() {
+    fn crank_yard_pipe_pair_matches_standable_round_barriers() {
         let crank = arena_definition(3);
         let pipe_pair = crank.pipe_pair.expect("Crank Yard should link its pipes");
-        assert_eq!(crank.prop_colliders.len(), 2);
 
-        for (index, endpoint) in pipe_pair.endpoints.into_iter().enumerate() {
-            let collider = crank.prop_colliders[index];
+        for endpoint in pipe_pair.endpoints {
+            let collider = PlatformDefinition::circle(
+                endpoint.x,
+                endpoint.y,
+                pipe_pair.collider_radius,
+                pipe_pair.top_y,
+            );
             assert_eq!(collider.center, endpoint);
             assert_eq!(collider.top_y, pipe_pair.top_y);
             assert_eq!(collider.half_extents, Vec2::splat(CRANK_PIPE_HALF_EXTENT));
@@ -1224,22 +1058,6 @@ mod tests {
         assert_eq!(crank.hazards[0].center.x, -3.1);
         assert_eq!(crank.hazards[1].center.x, 3.1);
         assert!(crank.hazards.iter().all(|hazard| hazard.center.z == 0.0));
-    }
-
-    #[test]
-    fn requested_decorative_props_are_solid_and_landable() {
-        for arena_index in [2, 5, 6, 7, 8] {
-            let arena = arena_definition(arena_index);
-            assert!(
-                !arena.prop_colliders.is_empty(),
-                "{} should expose prop collision geometry",
-                arena.name
-            );
-            assert!(arena
-                .prop_colliders
-                .iter()
-                .all(|collider| collider.top_y > ARENA_TOP_Y));
-        }
     }
 
     #[test]
@@ -1307,35 +1125,6 @@ mod tests {
                 let turbine = Vec2::new(hazard.center.x, hazard.center.z);
                 assert!(item.distance(turbine) > hazard.radius + 0.75);
             }
-        }
-    }
-
-    #[test]
-    fn vent_spiral_spawns_clear_the_solid_reactor() {
-        let vent = arena_definition(4);
-        assert_eq!(vent.prop_colliders.len(), 1);
-        let reactor_base = vent.prop_colliders[0];
-        assert_eq!(reactor_base.center, Vec2::ZERO);
-        assert_eq!(
-            reactor_base.half_extents,
-            Vec2::splat(VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT)
-        );
-        assert_eq!(reactor_base.top_y, VENT_SPIRAL_REACTOR_BASE_TOP_Y);
-
-        for spawn in vent.spawn_points {
-            assert_eq!(
-                reactor_base.resolve_side_collision(
-                    spawn,
-                    0.4,
-                    LANDING_SNAP_TOLERANCE,
-                ),
-                spawn
-            );
-            assert_eq!(
-                crate::arena::ground_support_for_arena_with_radius(vent, spawn.x, spawn.z, 0.0)
-                    .height(),
-                Some(spawn.y)
-            );
         }
     }
 

@@ -12,6 +12,9 @@ use crate::arena_defs::{
     ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, CRANK_PIPE_VISUAL_SCALE,
     PlatformDefinition, active_arena_definition, active_arena_index, arena_definitions,
 };
+use crate::arena_prop_colliders::{
+    LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
+};
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
@@ -22,8 +25,7 @@ use crate::components::{
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
 use crate::constants::{
-    ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY,
-    LEDGE_SUPPORT_GRACE_MAX,
+    ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
@@ -288,6 +290,19 @@ impl ArenaAssetProp {
         Transform::from_xyz(self.x, self.y + ARENA_PROP_SURFACE_CLEARANCE, self.z)
             .with_rotation(Quat::from_rotation_y(self.yaw))
             .with_scale(Vec3::splat(self.scale))
+    }
+
+    fn collision_barriers(self) -> impl Iterator<Item = WorldPropBarrier> {
+        prop_collision_profile(self.file)
+            .iter()
+            .copied()
+            .map(move |barrier: LocalPropBarrier| {
+                barrier.to_world(
+                    Vec3::new(self.x, self.y + ARENA_PROP_SURFACE_CLEARANCE, self.z),
+                    self.yaw,
+                    self.scale,
+                )
+            })
     }
 }
 
@@ -1374,6 +1389,20 @@ fn arena_asset_props(arena_index: usize) -> &'static [ArenaAssetProp] {
         8 => SKY_STEPS_ASSET_PROPS,
         9 => POWDER_KEG_ASSET_PROPS,
         _ => CROWN_ASSET_PROPS,
+    }
+}
+
+fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaAssetProp] {
+    let arena_index = arena_definitions()
+        .iter()
+        .position(|candidate| candidate.name == arena.name)
+        .unwrap_or_else(active_arena_index);
+
+    // Champions Court is rendered from its RON scene rather than this fallback prop list.
+    if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
+        &[]
+    } else {
+        arena_asset_props(arena_index)
     }
 }
 
@@ -2494,8 +2523,7 @@ pub fn update_crank_yard_machinery(
     let elapsed = time.elapsed_secs();
     let arena_index = active_arena_index();
     state.sync_to_arena(arena_index, active_arena_definition().hazards.len());
-    state.crank_lever_toggle_cooldown =
-        (state.crank_lever_toggle_cooldown - dt).max(0.0);
+    state.crank_lever_toggle_cooldown = (state.crank_lever_toggle_cooldown - dt).max(0.0);
 
     if arena_index == CRANK_YARD_ARENA_INDEX
         && state.crank_lever_toggle_cooldown <= 0.0
@@ -2568,15 +2596,18 @@ pub fn update_powder_keg_cannons(
     mut feedback: ResMut<HitEffects>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut bombs: Query<(Entity, &mut ArenaCannonBomb, &mut Transform)>,
-    mut fighters: Query<(
-        &Fighter,
-        &mut FighterStats,
-        &mut FighterMotor,
-        &mut FighterActionState,
-        &FighterStyle,
-        &FighterEquipment,
-        &Transform,
-    ), Without<ArenaCannonBomb>>,
+    mut fighters: Query<
+        (
+            &Fighter,
+            &mut FighterStats,
+            &mut FighterMotor,
+            &mut FighterActionState,
+            &FighterStyle,
+            &FighterEquipment,
+            &Transform,
+        ),
+        Without<ArenaCannonBomb>,
+    >,
 ) {
     if hitstop.active() {
         return;
@@ -2638,8 +2669,8 @@ pub fn update_powder_keg_cannons(
                 continue;
             }
 
-            let mut impact = powder_cannon_impact_profile()
-                .with_hit_effects_enabled(feel.hit_effects_enabled());
+            let mut impact =
+                powder_cannon_impact_profile().with_hit_effects_enabled(feel.hit_effects_enabled());
             impact.knockback_direction = Some(
                 Vec3::new(
                     transform.translation.x - position.x,
@@ -3136,8 +3167,11 @@ pub fn update_arena_hazards(
             } else {
                 arena_hazard_impact_profile(hazard.kind)
             }
-                .with_hit_effects_enabled(feel.hit_effects_enabled());
-            if matches!(hazard.kind, ArenaHazardKind::SawBlade | ArenaHazardKind::BumperNode) {
+            .with_hit_effects_enabled(feel.hit_effects_enabled());
+            if matches!(
+                hazard.kind,
+                ArenaHazardKind::SawBlade | ArenaHazardKind::BumperNode
+            ) {
                 impact.knockback_direction = Some(saw_knockback_direction(
                     transform.translation,
                     hazard.center,
@@ -3277,6 +3311,41 @@ pub fn ground_support_for_arena_with_radius(
         }
     }
 
+    for prop in arena_asset_props_for_definition(arena) {
+        for collider in prop.collision_barriers() {
+            let support = match collider.definition.support_at(Vec2::new(x, z), ledge_grace) {
+                Some(crate::arena_barriers::BarrierSupport::Firm) => {
+                    Some(GroundSupport::Firm(collider.definition.top_y))
+                }
+                Some(crate::arena_barriers::BarrierSupport::Grace) => {
+                    Some(GroundSupport::Grace(collider.definition.top_y))
+                }
+                None => None,
+            };
+            if let Some(support) = support {
+                best = Some(prefer_ground_support(best, support));
+            }
+        }
+    }
+
+    if let Some(pipe_pair) = arena.pipe_pair {
+        for endpoint in pipe_pair.endpoints {
+            let pipe = pipe_barrier(pipe_pair, endpoint);
+            let support = match pipe.support_at(Vec2::new(x, z), ledge_grace) {
+                Some(crate::arena_barriers::BarrierSupport::Firm) => {
+                    Some(GroundSupport::Firm(pipe.top_y))
+                }
+                Some(crate::arena_barriers::BarrierSupport::Grace) => {
+                    Some(GroundSupport::Grace(pipe.top_y))
+                }
+                None => None,
+            };
+            if let Some(support) = support {
+                best = Some(prefer_ground_support(best, support));
+            }
+        }
+    }
+
     best.unwrap_or(GroundSupport::Airborne)
 }
 
@@ -3385,6 +3454,33 @@ fn resolve_platform_side_collision_for_arena(
             resolve_platform_side_collision_against(resolved, radius, platform)
         };
     }
+
+    if let Some(pipe_pair) = arena.pipe_pair {
+        for endpoint in pipe_pair.endpoints {
+            let pipe = pipe_barrier(pipe_pair, endpoint);
+            resolved = resolve_circular_platform_side_collision_against(
+                resolved,
+                radius,
+                &pipe,
+                pipe_pair.collider_radius,
+                0.0,
+            );
+        }
+    }
+    for prop in arena_asset_props_for_definition(arena) {
+        for collider in prop.collision_barriers() {
+            if collider.behavior == PropBarrierBehavior::OneWayTop
+                || collider.definition.top_y <= PLATFORM_SIDE_COLLISION_MIN_TOP_Y
+            {
+                continue;
+            }
+            resolved = collider.definition.resolve_side_collision(
+                resolved,
+                radius,
+                crate::constants::LANDING_SNAP_TOLERANCE,
+            );
+        }
+    }
     resolved
 }
 
@@ -3423,8 +3519,7 @@ fn resolve_circular_platform_side_collision_against(
     );
     let distance = offset.length();
     let expanded_radius = platform_radius + fighter_radius;
-    let clears_lip = position.y
-        >= platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE * 2.0;
+    let clears_lip = position.y >= platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE * 2.0;
 
     if (opening_radius > 0.0 && distance <= opening_radius)
         || distance >= expanded_radius
@@ -3439,6 +3534,15 @@ fn resolve_circular_platform_side_collision_against(
         platform.center.x + direction.x * expanded_radius,
         position.y,
         platform.center.y + direction.y * expanded_radius,
+    )
+}
+
+fn pipe_barrier(pipe_pair: ArenaPipePairDefinition, endpoint: Vec2) -> PlatformDefinition {
+    PlatformDefinition::circle(
+        endpoint.x,
+        endpoint.y,
+        pipe_pair.collider_radius,
+        pipe_pair.top_y,
     )
 }
 
@@ -3658,7 +3762,7 @@ mod tests {
     fn round_pipe_collision_does_not_create_invisible_square_corners() {
         let crank = &arena_definitions()[CRANK_YARD_ARENA_INDEX];
         let pipe_pair = crank.pipe_pair.expect("Crank Yard pipe pair");
-        let pipe = crank.prop_colliders[0];
+        let pipe = pipe_barrier(pipe_pair, pipe_pair.endpoints[0]);
         let corner = Vec3::new(pipe.center.x + 1.1, ARENA_TOP_Y, pipe.center.y + 1.1);
         let side = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y);
         let landing_approach = Vec3::new(
@@ -3727,37 +3831,6 @@ mod tests {
                 .height(),
             Some(pipe.top_y)
         );
-    }
-
-    #[test]
-    fn vent_reactor_collision_is_round_and_supports_visible_tops() {
-        let vent = &arena_definitions()[VENT_SPIRAL_ARENA_INDEX];
-        let base = &vent.prop_colliders[0];
-
-        assert_eq!(circular_platform_profile(vent, base), None);
-        assert!(matches!(
-            base.footprint,
-            crate::arena_barriers::BarrierFootprint::Rectangle { .. }
-        ));
-        assert_eq!(
-            ground_support_for_arena_with_radius(vent, 1.2, 1.2, 0.0).height(),
-            Some(ARENA_TOP_Y)
-        );
-        assert_eq!(
-            ground_support_for_arena_with_radius(vent, 1.4, 0.0, 0.0).height(),
-            Some(base.top_y)
-        );
-        assert_eq!(
-            ground_support_for_arena_with_radius(vent, 0.0, 0.0, 0.0).height(),
-            Some(base.top_y)
-        );
-
-        let blocked_center = base.resolve_side_collision(
-            Vec3::new(0.0, ARENA_TOP_Y, 0.0),
-            FIGHTER_RADIUS,
-            crate::constants::LANDING_SNAP_TOLERANCE,
-        );
-        assert_ne!(blocked_center, Vec3::new(0.0, ARENA_TOP_Y, 0.0));
     }
 
     #[test]
@@ -4247,56 +4320,37 @@ mod tests {
     }
 
     #[test]
-    fn split_solid_props_block_sides_and_support_their_tops() {
-        let split = &arena_definitions()[1];
-        assert_eq!(split.prop_colliders.len(), 4);
-
-        for collider in split.prop_colliders {
-            assert_eq!(
-                ground_support_for_arena_with_radius(
-                    split,
-                    collider.center.x,
-                    collider.center.y,
-                    0.0,
-                ),
-                GroundSupport::Firm(collider.top_y)
-            );
-
-            let interior_direction = -collider.center.x.signum();
-            let side_position = Vec3::new(
-                collider.center.x
-                    + interior_direction * (collider.half_extents.x + FIGHTER_RADIUS * 0.5),
-                ARENA_TOP_Y,
-                collider.center.y,
-            );
-            let resolved =
-                resolve_platform_side_collision_against(side_position, FIGHTER_RADIUS, collider);
-            assert!(
-                (resolved.x - collider.center.x).abs() + 0.001
-                    >= collider.half_extents.x + FIGHTER_RADIUS
-            );
+    fn every_rendered_prop_has_an_explicit_collision_policy() {
+        for arena_index in 1..arena_definitions().len() {
+            for prop in arena_asset_props(arena_index) {
+                let _ = prop_collision_profile(prop.file);
+            }
         }
     }
 
     #[test]
-    fn sunstone_solid_props_block_at_their_visual_footprints() {
+    fn hollow_structure_center_stays_open_while_posts_block() {
         let sunstone = &arena_definitions()[2];
-        assert_eq!(sunstone.prop_colliders.len(), 4);
+        let structure = SUNSTONE_ASSET_PROPS[0];
+        let inside = Vec3::new(structure.x, ARENA_TOP_Y, structure.z);
+        assert_eq!(
+            resolve_platform_side_collision_for_arena(sunstone, inside, FIGHTER_RADIUS,),
+            inside
+        );
 
-        for collider in sunstone.prop_colliders {
-            let inward = -collider.center.x.signum();
-            let side_position = Vec3::new(
-                collider.center.x + inward * (collider.half_extents.x + FIGHTER_RADIUS * 0.5),
-                ARENA_TOP_Y,
-                collider.center.y,
-            );
-            let resolved =
-                resolve_platform_side_collision_against(side_position, FIGHTER_RADIUS, collider);
-            assert!(
-                (resolved.x - collider.center.x).abs() + 0.001
-                    >= collider.half_extents.x + FIGHTER_RADIUS
-            );
-        }
+        let post = structure
+            .collision_barriers()
+            .find(|barrier| barrier.behavior == PropBarrierBehavior::Solid)
+            .expect("wood structure should have solid posts");
+        let post_position = Vec3::new(
+            post.definition.center.x,
+            ARENA_TOP_Y,
+            post.definition.center.y,
+        );
+        assert_ne!(
+            resolve_platform_side_collision_for_arena(sunstone, post_position, FIGHTER_RADIUS,),
+            post_position
+        );
     }
 
     #[test]

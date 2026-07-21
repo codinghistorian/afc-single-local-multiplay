@@ -1,6 +1,7 @@
 mod arena;
 mod arena_barriers;
 mod arena_defs;
+mod arena_prop_colliders;
 mod bee_skills;
 mod body_collision;
 mod bot;
