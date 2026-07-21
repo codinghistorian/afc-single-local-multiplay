@@ -1,4 +1,5 @@
 mod arena;
+mod arena_barriers;
 mod arena_defs;
 mod bee_skills;
 mod body_collision;

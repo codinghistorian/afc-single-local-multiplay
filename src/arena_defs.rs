@@ -4,22 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::constants::{ARENA_TOP_Y, CAMERA_BASE_OFFSET, RINGOUT_RADIUS, RINGOUT_Y};
 use crate::items::ItemKind;
 
-#[derive(Clone, Copy)]
-pub struct PlatformDefinition {
-    pub center: Vec2,
-    pub half_extents: Vec2,
-    pub top_y: f32,
-}
-
-impl PlatformDefinition {
-    pub const fn new(x: f32, z: f32, hx: f32, hz: f32, top_y: f32) -> Self {
-        Self {
-            center: Vec2::new(x, z),
-            half_extents: Vec2::new(hx, hz),
-            top_y,
-        }
-    }
-}
+pub use crate::arena_barriers::ArenaBarrierDefinition as PlatformDefinition;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ArenaGroundShape {
@@ -179,6 +164,16 @@ const VENT_SPIRAL_TIER_STEP: f32 = 0.65;
 const VENT_SPIRAL_TIER_1_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP;
 const VENT_SPIRAL_TIER_2_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP * 2.0;
 const VENT_SPIRAL_TIER_3_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP * 3.0;
+pub const VENT_SPIRAL_REACTOR_SCALE: f32 = 3.1;
+pub const VENT_SPIRAL_REACTOR_YAW: f32 = std::f32::consts::PI * 0.25;
+pub const VENT_SPIRAL_REACTOR_BASE_Y: f32 = ARENA_TOP_Y + 0.02;
+const VENT_SPIRAL_REACTOR_LOCAL_BASE_HALF_EXTENT: f32 = 0.5;
+const VENT_SPIRAL_REACTOR_LOCAL_BASE_HEIGHT: f32 = 0.21;
+const VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT: f32 =
+    VENT_SPIRAL_REACTOR_LOCAL_BASE_HALF_EXTENT * VENT_SPIRAL_REACTOR_SCALE;
+const VENT_SPIRAL_REACTOR_BASE_TOP_Y: f32 =
+    VENT_SPIRAL_REACTOR_BASE_Y
+        + VENT_SPIRAL_REACTOR_LOCAL_BASE_HEIGHT * VENT_SPIRAL_REACTOR_SCALE;
 
 const VENT_SPIRAL_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::circle(0.0, 0.0, 2.75, ARENA_TOP_Y),
@@ -299,8 +294,14 @@ const SPLIT_PROP_COLLIDERS: &[PlatformDefinition] = &[
 const NO_PROP_COLLIDERS: &[PlatformDefinition] = &[];
 
 const VENT_SPIRAL_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(0.0, 0.0, 1.55, 1.55, ARENA_TOP_Y + 0.68),
-    PlatformDefinition::new(0.0, 0.0, 0.46, 0.46, ARENA_TOP_Y + 1.52),
+    PlatformDefinition::rectangle(
+        0.0,
+        0.0,
+        VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT,
+        VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT,
+        VENT_SPIRAL_REACTOR_YAW,
+        VENT_SPIRAL_REACTOR_BASE_TOP_Y,
+    ),
 ];
 
 const SPLIT_ITEMS: &[ItemAnchor] = &[
@@ -912,10 +913,10 @@ const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
         name: "Vent Spiral",
         spawn_points: [
-            Vec3::new(-2.35, ARENA_TOP_Y, 0.0),
-            Vec3::new(2.35, ARENA_TOP_Y, 0.0),
-            Vec3::new(0.0, ARENA_TOP_Y, -2.35),
-            Vec3::new(0.0, ARENA_TOP_Y, 2.35),
+            Vec3::new(-1.8, ARENA_TOP_Y, -1.8),
+            Vec3::new(1.8, ARENA_TOP_Y, 1.8),
+            Vec3::new(-1.8, ARENA_TOP_Y, 1.8),
+            Vec3::new(1.8, ARENA_TOP_Y, -1.8),
         ],
         item_anchors: VENT_SPIRAL_ITEMS,
         ground_shapes: VENT_SPIRAL_GROUND,
@@ -1316,15 +1317,24 @@ mod tests {
     #[test]
     fn vent_spiral_spawns_clear_the_solid_reactor() {
         let vent = arena_definition(4);
-        assert_eq!(vent.prop_colliders.len(), 2);
+        assert_eq!(vent.prop_colliders.len(), 1);
         let reactor_base = vent.prop_colliders[0];
         assert_eq!(reactor_base.center, Vec2::ZERO);
-        assert_eq!(reactor_base.half_extents, Vec2::splat(1.55));
-        assert!(vent.prop_colliders[1].top_y > reactor_base.top_y);
+        assert_eq!(
+            reactor_base.half_extents,
+            Vec2::splat(VENT_SPIRAL_REACTOR_BASE_HALF_EXTENT)
+        );
+        assert_eq!(reactor_base.top_y, VENT_SPIRAL_REACTOR_BASE_TOP_Y);
 
         for spawn in vent.spawn_points {
-            let distance = Vec2::new(spawn.x, spawn.z).distance(reactor_base.center);
-            assert!(distance >= reactor_base.half_extents.x + 0.75);
+            assert_eq!(
+                reactor_base.resolve_side_collision(
+                    spawn,
+                    0.4,
+                    LANDING_SNAP_TOLERANCE,
+                ),
+                spawn
+            );
             assert_eq!(
                 crate::arena::ground_support_for_arena_with_radius(vent, spawn.x, spawn.z, 0.0)
                     .height(),

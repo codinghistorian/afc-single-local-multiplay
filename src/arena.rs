@@ -717,17 +717,9 @@ fn spawn_vent_spiral_platform_blocks(
             arena_platform_depth_bias(index),
         );
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(
-                platform.half_extents.x * 2.0,
-                height,
-                platform.half_extents.y * 2.0,
-            ))),
+            Mesh3d(meshes.add(platform.block_mesh(height))),
             MeshMaterial3d(material),
-            Transform::from_xyz(
-                platform.center.x,
-                platform.top_y - height * 0.5,
-                platform.center.y,
-            ),
+            platform.block_transform(height),
             Name::new(format!("Vent spiral tier {tier} block {index}")),
             ArenaGeometry,
         ));
@@ -1516,10 +1508,10 @@ const VENT_SPIRAL_ASSET_PROPS: &[ArenaAssetProp] = &[ArenaAssetProp {
     name: "Vent spiral crystal core",
     file: "tower/tower-round-crystals.glb",
     x: 0.0,
-    y: ARENA_TOP_Y + 0.02,
+    y: crate::arena_defs::VENT_SPIRAL_REACTOR_BASE_Y,
     z: 0.0,
-    yaw: PI * 0.25,
-    scale: 3.1,
+    yaw: crate::arena_defs::VENT_SPIRAL_REACTOR_YAW,
+    scale: crate::arena_defs::VENT_SPIRAL_REACTOR_SCALE,
 }];
 
 const BUMPER_ALLEY_ASSET_PROPS: &[ArenaAssetProp] = &[
@@ -3001,7 +2993,17 @@ pub fn ground_support_for_arena_with_radius(
     for platform in arena.gameplay_platforms() {
         let dx = (x - platform.center.x).abs();
         let dz = (z - platform.center.y).abs();
-        let support = if let Some((outer_radius, opening_radius)) =
+        let support = if arena.visual_theme == ArenaVisualTheme::Reactor {
+            match platform.support_at(Vec2::new(x, z), ledge_grace) {
+                Some(crate::arena_barriers::BarrierSupport::Firm) => {
+                    Some(GroundSupport::Firm(platform.top_y))
+                }
+                Some(crate::arena_barriers::BarrierSupport::Grace) => {
+                    Some(GroundSupport::Grace(platform.top_y))
+                }
+                None => None,
+            }
+        } else if let Some((outer_radius, opening_radius)) =
             circular_platform_profile(arena, platform)
         {
             let distance = Vec2::new(x - platform.center.x, z - platform.center.y).length();
@@ -3112,6 +3114,16 @@ pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
                 collider_radius,
                 opening_radius,
             )
+        } else if arena.visual_theme == ArenaVisualTheme::Reactor {
+            if platform.top_y <= PLATFORM_SIDE_COLLISION_MIN_TOP_Y {
+                resolved
+            } else {
+                platform.resolve_side_collision(
+                    resolved,
+                    radius,
+                    crate::constants::LANDING_SNAP_TOLERANCE,
+                )
+            }
         } else {
             resolve_platform_side_collision_against(resolved, radius, platform)
         };
@@ -3128,15 +3140,6 @@ fn circular_platform_profile(
         && pipe_pair.endpoints.contains(&platform.center)
     {
         return Some((pipe_pair.collider_radius, pipe_pair.trigger_radius));
-    }
-
-    if arena.visual_theme == ArenaVisualTheme::Reactor
-        && arena
-            .prop_colliders
-            .iter()
-            .any(|collider| std::ptr::eq(collider, platform))
-    {
-        return Some((platform.half_extents.min_element(), 0.0));
     }
 
     None
@@ -3440,9 +3443,12 @@ mod tests {
     fn vent_reactor_collision_is_round_and_supports_visible_tops() {
         let vent = &arena_definitions()[VENT_SPIRAL_ARENA_INDEX];
         let base = &vent.prop_colliders[0];
-        let crystal = &vent.prop_colliders[1];
 
-        assert_eq!(circular_platform_profile(vent, base), Some((1.55, 0.0)));
+        assert_eq!(circular_platform_profile(vent, base), None);
+        assert!(matches!(
+            base.footprint,
+            crate::arena_barriers::BarrierFootprint::Rectangle { .. }
+        ));
         assert_eq!(
             ground_support_for_arena_with_radius(vent, 1.2, 1.2, 0.0).height(),
             Some(ARENA_TOP_Y)
@@ -3453,17 +3459,48 @@ mod tests {
         );
         assert_eq!(
             ground_support_for_arena_with_radius(vent, 0.0, 0.0, 0.0).height(),
-            Some(crystal.top_y)
+            Some(base.top_y)
         );
 
-        let blocked_center = resolve_circular_platform_side_collision_against(
+        let blocked_center = base.resolve_side_collision(
             Vec3::new(0.0, ARENA_TOP_Y, 0.0),
             FIGHTER_RADIUS,
-            base,
-            base.half_extents.x,
-            0.0,
+            crate::constants::LANDING_SNAP_TOLERANCE,
         );
-        assert!(blocked_center.x >= base.half_extents.x + FIGHTER_RADIUS);
+        assert_ne!(blocked_center, Vec3::new(0.0, ARENA_TOP_Y, 0.0));
+    }
+
+    #[test]
+    fn vent_tier_side_collision_opens_at_landing_height() {
+        let vent = &arena_definitions()[VENT_SPIRAL_ARENA_INDEX];
+        let tier = &vent.platforms[0];
+        let approach = Vec3::new(
+            4.15,
+            ARENA_TOP_Y,
+            tier.center.y - tier.half_extents.y - FIGHTER_RADIUS * 0.5,
+        );
+        assert_ne!(
+            tier.resolve_side_collision(
+                approach,
+                FIGHTER_RADIUS,
+                crate::constants::LANDING_SNAP_TOLERANCE,
+            ),
+            approach
+        );
+
+        let landing = Vec3::new(
+            approach.x,
+            tier.top_y - crate::constants::LANDING_SNAP_TOLERANCE,
+            approach.z,
+        );
+        assert_eq!(
+            tier.resolve_side_collision(
+                landing,
+                FIGHTER_RADIUS,
+                crate::constants::LANDING_SNAP_TOLERANCE,
+            ),
+            landing
+        );
     }
 
     #[test]
