@@ -280,8 +280,12 @@ const SPLIT_PLATFORMS: &[PlatformDefinition] = &[
 ];
 
 const SPLIT_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    // Bridge frames.
     PlatformDefinition::new(-7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
     PlatformDefinition::new(7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
+    // Watch-tree trunks, matched to each prop's scale and base height.
+    PlatformDefinition::new(-8.4, 5.6, 0.56, 0.56, ARENA_TOP_Y + 1.56),
+    PlatformDefinition::new(8.4, -5.6, 0.5, 0.5, ARENA_TOP_Y + 1.37),
 ];
 
 const NO_PROP_COLLIDERS: &[PlatformDefinition] = &[];
@@ -1053,15 +1057,27 @@ mod tests {
     }
 
     #[test]
-    fn split_causeway_wooden_frames_have_matching_prop_colliders() {
+    fn split_causeway_solid_props_have_matching_colliders() {
         let split = arena_definition(1);
-        assert_eq!(split.prop_colliders.len(), 2);
+        assert_eq!(split.prop_colliders.len(), 4);
         assert_eq!(split.prop_colliders[0].center, Vec2::new(-7.2, 0.0));
         assert_eq!(split.prop_colliders[1].center, Vec2::new(7.2, 0.0));
-        assert!(split
-            .prop_colliders
-            .iter()
-            .all(|collider| collider.top_y > ARENA_TOP_Y + 2.0));
+        assert!(
+            split
+                .prop_colliders
+                .iter()
+                .take(2)
+                .all(|collider| collider.top_y > ARENA_TOP_Y + 2.0)
+        );
+        assert_eq!(split.prop_colliders[2].center, Vec2::new(-8.4, 5.6));
+        assert_eq!(split.prop_colliders[3].center, Vec2::new(8.4, -5.6));
+        assert!(
+            split
+                .prop_colliders
+                .iter()
+                .skip(2)
+                .all(|collider| collider.half_extents.max_element() <= 0.56)
+        );
     }
 
     #[test]

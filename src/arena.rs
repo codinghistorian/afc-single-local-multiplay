@@ -2493,9 +2493,9 @@ mod tests {
     }
 
     #[test]
-    fn split_wooden_structures_block_sides_and_support_their_tops() {
+    fn split_solid_props_block_sides_and_support_their_tops() {
         let split = &arena_definitions()[1];
-        assert_eq!(split.prop_colliders.len(), 2);
+        assert_eq!(split.prop_colliders.len(), 4);
 
         for collider in split.prop_colliders {
             assert_eq!(
@@ -2510,7 +2510,8 @@ mod tests {
 
             let interior_direction = -collider.center.x.signum();
             let side_position = Vec3::new(
-                collider.center.x + interior_direction,
+                collider.center.x
+                    + interior_direction * (collider.half_extents.x + FIGHTER_RADIUS * 0.5),
                 ARENA_TOP_Y,
                 collider.center.y,
             );
