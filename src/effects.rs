@@ -17,6 +17,7 @@ pub enum EffectKind {
     AftermathPulse,
     FeedbackBurst,
     FirePunch,
+    Burning,
     SpecialPulse,
     RingOutBurst,
     RespawnColumn,
@@ -42,6 +43,7 @@ pub struct EffectAssets {
     ring_mesh: Handle<Mesh>,
     trail_mesh: Handle<Mesh>,
     fire_punch_mesh: Handle<Mesh>,
+    burn_flame_mesh: Handle<Mesh>,
     crescent_mesh: Handle<Mesh>,
     heart_mesh: Handle<Mesh>,
     blast_mesh: Handle<Mesh>,
@@ -2019,6 +2021,7 @@ pub fn setup_effect_assets(
         ring_mesh: meshes.add(Torus::new(0.42, 0.035)),
         trail_mesh: meshes.add(Capsule3d::new(0.12, 0.5)),
         fire_punch_mesh: meshes.add(fire_punch_mesh()),
+        burn_flame_mesh: meshes.add(Cone::new(0.3, 0.82)),
         crescent_mesh: meshes.add(crescent_slash_mesh()),
         heart_mesh: meshes.add(heart_mesh()),
         blast_mesh: meshes.add(Sphere::new(POP_BOMB_BLAST_MESH_RADIUS).mesh().uv(16, 8)),
@@ -2364,12 +2367,80 @@ pub fn update_effects(
             EffectKind::DashTrail => 0.92,
             EffectKind::FeedbackBurst => 1.0 + (t * PI).sin() * 0.05,
             EffectKind::FirePunch => 1.0 + (t * PI).sin() * 0.08,
+            EffectKind::Burning => 1.0 + (effect.age * 18.0).sin() * 0.12,
             EffectKind::SpecialPulse => 1.0 + (t * PI).sin() * 0.1,
             EffectKind::RespawnColumn => 1.0 + (t * PI).sin() * 0.08,
             _ => 1.0,
         };
         transform.scale = effect.start_scale.lerp(effect.end_scale, t) * kind_scale;
     }
+}
+
+pub fn spawn_burning_fighter_effect(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    fighter_entity: Entity,
+    duration: f32,
+) {
+    let flame_offsets = [
+        Vec3::new(-0.24, 0.18, 0.12),
+        Vec3::new(0.22, 0.28, -0.1),
+        Vec3::new(-0.12, 0.54, -0.18),
+        Vec3::new(0.16, 0.7, 0.14),
+        Vec3::new(0.0, 0.92, 0.0),
+    ];
+
+    commands.entity(fighter_entity).with_children(|parent| {
+        for (index, offset) in flame_offsets.into_iter().enumerate() {
+            let scale = 1.35 + index as f32 * 0.11;
+            let material = match index % 2 {
+                0 => assets.yellow.clone(),
+                _ => assets.orange.clone(),
+            };
+            parent.spawn((
+                Mesh3d(assets.burn_flame_mesh.clone()),
+                MeshMaterial3d(material),
+                Transform::from_translation(offset)
+                    .with_rotation(Quat::from_rotation_y(index as f32 * 1.3))
+                    .with_scale(Vec3::new(scale * 0.7, scale, scale * 0.7)),
+                VisualEffect {
+                    kind: EffectKind::Burning,
+                    lifetime: duration * (0.86 + index as f32 * 0.035),
+                    age: 0.0,
+                    velocity: Vec3::new(
+                        (index as f32 - 2.0) * 0.035,
+                        0.46 + index as f32 * 0.04,
+                        if index % 2 == 0 { 0.06 } else { -0.06 },
+                    ),
+                    spin: Vec3::new(0.0, 2.2 + index as f32 * 0.3, 0.0),
+                    start_scale: Vec3::new(scale * 0.7, scale, scale * 0.7),
+                    end_scale: Vec3::new(0.14, 0.3, 0.14),
+                },
+                Name::new("Burning fighter flame"),
+            ));
+        }
+
+        for (index, offset) in [Vec3::new(-0.14, 0.88, 0.02), Vec3::new(0.16, 1.04, -0.04)]
+            .into_iter()
+            .enumerate()
+        {
+            parent.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(assets.smoke.clone()),
+                Transform::from_translation(offset).with_scale(Vec3::splat(0.7)),
+                VisualEffect {
+                    kind: EffectKind::Burning,
+                    lifetime: duration * (0.72 + index as f32 * 0.1),
+                    age: 0.0,
+                    velocity: Vec3::new(if index == 0 { -0.08 } else { 0.08 }, 0.58, 0.0),
+                    spin: Vec3::new(0.4, 0.8, 0.2),
+                    start_scale: Vec3::splat(0.7),
+                    end_scale: Vec3::splat(0.22),
+                },
+                Name::new("Burning fighter smoke"),
+            ));
+        }
+    });
 }
 
 pub fn spawn_hit_spark(

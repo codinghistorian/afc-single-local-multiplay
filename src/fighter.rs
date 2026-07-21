@@ -3,7 +3,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::arena::{
-    ground_height_at_with_radius, ground_support_at_with_radius, resolve_platform_side_collision,
+    ArenaFighterBurn, ground_height_at_with_radius, ground_support_at_with_radius,
+    resolve_platform_side_collision,
 };
 use crate::arena_defs::{ArenaDefinition, active_arena_definition};
 use crate::body_collision::{body_box_separation, fighter_body_box};
@@ -4946,7 +4947,13 @@ fn light_punch_corner_cue_transform(
 
 pub fn sync_fighter_tint_visuals(
     mut commands: Commands,
-    fighters: Query<(&Fighter, &FighterCharacter, &FighterActionState, &Children)>,
+    fighters: Query<(
+        &Fighter,
+        &FighterCharacter,
+        &FighterActionState,
+        Option<&ArenaFighterBurn>,
+        &Children,
+    )>,
     pose_roots: Query<(), With<FighterPoseRoot>>,
     child_query: Query<&Children>,
     tint_skip: Query<
@@ -4961,8 +4968,8 @@ pub fn sync_fighter_tint_visuals(
     tint_materials: Query<&FighterTintMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (fighter, character, action, children) in &fighters {
-        let tint = active_fighter_tint(character.kind, action);
+    for (fighter, character, action, burn, children) in &fighters {
+        let tint = active_fighter_tint(character.kind, action, burn.copied());
         for child in children {
             if pose_roots.get(*child).is_err() {
                 continue;
@@ -5001,6 +5008,7 @@ struct FighterTint {
 
 #[derive(Clone, Copy)]
 enum FighterTintPalette {
+    Burning,
     PigCharge,
     CounterFlash,
 }
@@ -5008,7 +5016,15 @@ enum FighterTintPalette {
 fn active_fighter_tint(
     character: CharacterKind,
     action: &FighterActionState,
+    burn: Option<ArenaFighterBurn>,
 ) -> Option<FighterTint> {
+    if let Some(burn) = burn {
+        return Some(FighterTint {
+            amount: burn.visual_amount(),
+            palette: FighterTintPalette::Burning,
+        });
+    }
+
     let counter = guard_counter_flash_tint_amount(action);
     if counter > 0.0 {
         return Some(FighterTint {
@@ -5168,9 +5184,30 @@ fn fallback_charge_tint_base(color: Color) -> StandardMaterial {
 
 fn fighter_tinted_material(base: &StandardMaterial, tint: FighterTint) -> StandardMaterial {
     match tint.palette {
+        FighterTintPalette::Burning => burning_tinted_material(base, tint.amount),
         FighterTintPalette::PigCharge => charge_tinted_material(base, tint.amount),
         FighterTintPalette::CounterFlash => counter_flash_tinted_material(base, tint.amount),
     }
+}
+
+fn burning_tinted_material(base: &StandardMaterial, amount: f32) -> StandardMaterial {
+    let amount = amount.clamp(0.0, 1.0);
+    let mut material = base.clone();
+    material.base_color = burning_tinted_color(base.base_color, amount);
+    material.emissive =
+        LinearRgba::from(Color::srgb(1.0, 0.12, 0.01).to_linear()) * (0.5 + amount * 3.2);
+    material
+}
+
+fn burning_tinted_color(base: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let base = base.to_srgba();
+    Color::srgba(
+        base.red + (1.0 - base.red) * (0.88 * amount),
+        base.green * (1.0 - 0.72 * amount) + 0.12 * amount,
+        base.blue * (1.0 - 0.9 * amount) + 0.02 * amount,
+        base.alpha,
+    )
 }
 
 fn charge_tinted_material(base: &StandardMaterial, amount: f32) -> StandardMaterial {
@@ -9184,6 +9221,17 @@ mod tests {
             pig_charge_tint_amount(CharacterKind::Pig, &dash_charging),
             1.0
         );
+    }
+
+    #[test]
+    fn burning_tint_turns_the_fighter_hot_orange() {
+        let base = Color::srgb(0.28, 0.42, 0.68);
+        let burning = burning_tinted_color(base, 1.0).to_srgba();
+        let base = base.to_srgba();
+
+        assert!(burning.red > base.red);
+        assert!(burning.green < base.green);
+        assert!(burning.blue < base.blue);
     }
 
     #[test]

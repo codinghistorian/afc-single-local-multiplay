@@ -8,13 +8,13 @@ use std::f32::consts::{PI, TAU};
 use std::fs;
 
 use crate::arena_defs::{
-    active_arena_definition, active_arena_index, arena_definitions, ArenaBackgroundDefinition,
-    ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition, ArenaHazardKind, ArenaVisualTheme,
-    PlatformDefinition,
+    ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
+    ArenaHazardKind, ArenaVisualTheme, PlatformDefinition, active_arena_definition,
+    active_arena_index, arena_definitions,
 };
 use crate::combat::{
-    apply_impact, can_receive_impact, impact_profile, DamageDefenderProfile, HitEffects,
-    ImpactFeedbackIntensity, ImpactProfile, ImpactSource, NEUTRAL_IMPACT_OWNER_ID,
+    DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
+    NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
 };
 use crate::components::{Fighter, FighterActionState, FighterMotor, FighterStats};
 #[cfg(test)]
@@ -23,7 +23,7 @@ use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
-use crate::effects::EffectAssets;
+use crate::effects::{EffectAssets, spawn_burning_fighter_effect};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
 use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
@@ -38,7 +38,9 @@ const ARENA_HAZARD_SNARE_KNOCKBACK: f32 = 2.2;
 const ARENA_HAZARD_BUMPER_DAMAGE: f32 = 9.0;
 const ARENA_HAZARD_BUMPER_KNOCKBACK: f32 = 7.6;
 const ARENA_HAZARD_CAMPFIRE_DAMAGE: f32 = 4.0;
-const ARENA_HAZARD_CAMPFIRE_KNOCKBACK: f32 = 3.0;
+const ARENA_HAZARD_CAMPFIRE_KNOCKBACK: f32 = 4.4;
+const ARENA_HAZARD_CAMPFIRE_LAUNCH: f32 = 4.6;
+const ARENA_HAZARD_CAMPFIRE_BURN_SECONDS: f32 = 1.35;
 const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
 const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
@@ -70,6 +72,27 @@ pub struct ArenaHazardMarker {
 pub struct ArenaCampfireFlame {
     base_scale: Vec3,
     phase: f32,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ArenaFighterBurn {
+    remaining: f32,
+    duration: f32,
+}
+
+impl ArenaFighterBurn {
+    fn new(duration: f32) -> Self {
+        Self {
+            remaining: duration,
+            duration,
+        }
+    }
+
+    pub fn visual_amount(self) -> f32 {
+        let fade = (self.remaining / self.duration.max(0.01)).clamp(0.0, 1.0);
+        let flicker = 0.76 + (self.remaining * 19.0).sin().abs() * 0.24;
+        fade.sqrt() * flicker
+    }
 }
 
 #[allow(dead_code)]
@@ -1835,7 +1858,9 @@ pub fn update_arena_hazards(
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
     mut telemetry: ResMut<MatchTelemetry>,
+    mut burns: Query<(Entity, &mut ArenaFighterBurn)>,
     mut fighters: Query<(
+        Entity,
         &Fighter,
         &mut FighterStats,
         &mut FighterMotor,
@@ -1856,6 +1881,13 @@ pub fn update_arena_hazards(
     state.elapsed += dt;
     state.tick_cooldowns(dt);
 
+    for (fighter_entity, mut burn) in &mut burns {
+        burn.remaining = (burn.remaining - dt).max(0.0);
+        if burn.remaining <= 0.0 {
+            commands.entity(fighter_entity).remove::<ArenaFighterBurn>();
+        }
+    }
+
     for (hazard_index, hazard) in arena.hazards.iter().enumerate() {
         if !arena_hazard_is_active_for_kind(state.elapsed, hazard) {
             continue;
@@ -1865,8 +1897,16 @@ pub fn update_arena_hazards(
             continue;
         };
 
-        for (fighter, mut stats, mut motor, mut action, style, equipment, transform) in
-            &mut fighters
+        for (
+            fighter_entity,
+            fighter,
+            mut stats,
+            mut motor,
+            mut action,
+            style,
+            equipment,
+            transform,
+        ) in &mut fighters
         {
             if fighter.id >= FIGHTER_COUNT
                 || !match_state.fighter_can_participate(fighter.id)
@@ -1875,6 +1915,18 @@ pub fn update_arena_hazards(
                 || !arena_hazard_overlaps(hazard, transform.translation)
             {
                 continue;
+            }
+
+            if hazard.kind == ArenaHazardKind::Campfire {
+                commands
+                    .entity(fighter_entity)
+                    .insert(ArenaFighterBurn::new(ARENA_HAZARD_CAMPFIRE_BURN_SECONDS));
+                spawn_burning_fighter_effect(
+                    &mut commands,
+                    &effect_assets,
+                    fighter_entity,
+                    ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+                );
             }
 
             if hazard.kind == ArenaHazardKind::SnareField {
@@ -2163,12 +2215,12 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
             ImpactSource::Hazard,
             ARENA_HAZARD_CAMPFIRE_DAMAGE,
             ARENA_HAZARD_CAMPFIRE_KNOCKBACK,
-            1.8,
-            false,
+            ARENA_HAZARD_CAMPFIRE_LAUNCH,
             true,
+            false,
             12.0,
-            ImpactFeedbackIntensity::Light,
-            ReactionFamilyId::ShortStandingStagger,
+            ImpactFeedbackIntensity::Heavy,
+            ReactionFamilyId::LauncherDown,
         ),
     };
     profile.element = DamageElement::Hazard;
@@ -2287,6 +2339,18 @@ mod tests {
     }
 
     #[test]
+    fn fighter_burn_visual_starts_hot_and_fades_out() {
+        let fresh = ArenaFighterBurn::new(ARENA_HAZARD_CAMPFIRE_BURN_SECONDS);
+        let ending = ArenaFighterBurn {
+            remaining: 0.01,
+            duration: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+        };
+
+        assert!(fresh.visual_amount() > 0.7);
+        assert!(ending.visual_amount() < 0.15);
+    }
+
+    #[test]
     fn arena_hazard_profiles_vary_by_kind() {
         let pulse = arena_hazard_impact_profile(ArenaHazardKind::PulseVent);
         let snare = arena_hazard_impact_profile(ArenaHazardKind::SnareField);
@@ -2298,7 +2362,10 @@ mod tests {
         assert!(snare.knockback < pulse.knockback);
         assert!(bumper.knockback > pulse.knockback);
         assert!(campfire.knockback > snare.knockback);
-        assert!(!campfire.force_knockdown);
+        assert!(campfire.force_knockdown);
+        assert!(!campfire.guardable);
+        assert_eq!(campfire.reaction_family, ReactionFamilyId::LauncherDown);
+        assert!(campfire.reaction.landing_aftermath.is_some());
         assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SnareField) < 1.0);
     }
 
@@ -2381,9 +2448,11 @@ mod tests {
     #[test]
     fn dry_arena_props_do_not_use_river_assets() {
         for index in [1, 2] {
-            assert!(arena_asset_props(index)
-                .iter()
-                .all(|prop| !prop.file.contains("river")));
+            assert!(
+                arena_asset_props(index)
+                    .iter()
+                    .all(|prop| !prop.file.contains("river"))
+            );
         }
     }
 
