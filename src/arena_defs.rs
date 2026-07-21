@@ -82,6 +82,7 @@ pub enum ArenaHazardKind {
     PulseVent,
     SnareField,
     BumperNode,
+    Campfire,
 }
 
 #[derive(Clone, Copy)]
@@ -107,12 +108,19 @@ pub struct ArenaDefinition {
     pub item_anchors: &'static [ItemAnchor],
     pub ground_shapes: &'static [ArenaGroundShape],
     pub platforms: &'static [PlatformDefinition],
+    pub prop_colliders: &'static [PlatformDefinition],
     pub ringout_radius: f32,
     pub ringout_y: f32,
     pub camera_offset: Vec3,
     pub hazards: &'static [ArenaHazardDefinition],
     pub background: ArenaBackgroundDefinition,
     pub visual_theme: ArenaVisualTheme,
+}
+
+impl ArenaDefinition {
+    pub fn gameplay_platforms(&self) -> impl Iterator<Item = &PlatformDefinition> {
+        self.platforms.iter().chain(self.prop_colliders.iter())
+    }
 }
 
 const ANIME_SKY_BACKGROUND: ArenaBackgroundDefinition = ArenaBackgroundDefinition {
@@ -270,6 +278,13 @@ const SPLIT_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, 6.8, 2.8, 1.2, ARENA_TOP_Y + 0.24),
     PlatformDefinition::new(0.0, -6.8, 2.8, 1.2, ARENA_TOP_Y + 0.24),
 ];
+
+const SPLIT_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::new(-7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
+    PlatformDefinition::new(7.2, 0.0, 1.15, 1.15, ARENA_TOP_Y + 2.4),
+];
+
+const NO_PROP_COLLIDERS: &[PlatformDefinition] = &[];
 
 const SPLIT_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
@@ -589,13 +604,22 @@ const POWDER_KEG_ITEMS: &[ItemAnchor] = &[
 
 const CROWN_HAZARDS: &[ArenaHazardDefinition] = &[];
 
-const SPLIT_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
-    kind: ArenaHazardKind::SnareField,
-    center: Vec3::new(0.0, ARENA_TOP_Y + 0.05, -4.2),
-    radius: 1.65,
-    pulse_seconds: 3.1,
-    phase: 0.0,
-}];
+const SPLIT_HAZARDS: &[ArenaHazardDefinition] = &[
+    ArenaHazardDefinition {
+        kind: ArenaHazardKind::Campfire,
+        center: Vec3::new(0.0, ARENA_TOP_Y + 0.07, 4.7),
+        radius: 1.05,
+        pulse_seconds: 1.4,
+        phase: 0.0,
+    },
+    ArenaHazardDefinition {
+        kind: ArenaHazardKind::Campfire,
+        center: Vec3::new(0.0, ARENA_TOP_Y + 0.07, -4.7),
+        radius: 1.05,
+        pulse_seconds: 1.4,
+        phase: 0.7,
+    },
+];
 
 const SUNSTONE_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
     kind: ArenaHazardKind::SnareField,
@@ -763,6 +787,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: CROWN_ITEMS,
         ground_shapes: CROWN_GROUND,
         platforms: CROWN_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS,
         ringout_y: RINGOUT_Y,
         camera_offset: CAMERA_BASE_OFFSET,
@@ -781,6 +806,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SPLIT_ITEMS,
         ground_shapes: SPLIT_GROUND,
         platforms: SPLIT_PLATFORMS,
+        prop_colliders: SPLIT_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 1.0,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
@@ -799,6 +825,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SUNSTONE_ITEMS,
         ground_shapes: SUNSTONE_GROUND,
         platforms: SUNSTONE_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.6,
         ringout_y: RINGOUT_Y - 0.25,
         camera_offset: Vec3::new(0.0, 13.6, 15.6),
@@ -817,6 +844,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: CRANK_ITEMS,
         ground_shapes: CRANK_GROUND,
         platforms: CRANK_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.35,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 12.8, 14.8),
@@ -835,6 +863,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: VENT_SPIRAL_ITEMS,
         ground_shapes: VENT_SPIRAL_GROUND,
         platforms: VENT_SPIRAL_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.45,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.4),
@@ -853,6 +882,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: BUMPER_ALLEY_ITEMS,
         ground_shapes: BUMPER_GROUND,
         platforms: BUMPER_ALLEY_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.1,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.4, 15.8),
@@ -871,6 +901,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: FEAST_MARKET_ITEMS,
         ground_shapes: FEAST_MARKET_GROUND,
         platforms: FEAST_MARKET_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.75,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
@@ -889,6 +920,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SNARE_GARDEN_ITEMS,
         ground_shapes: SNARE_GARDEN_GROUND,
         platforms: SNARE_GARDEN_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.55,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.3, 15.4),
@@ -907,6 +939,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SKY_STEPS_ITEMS,
         ground_shapes: SKY_STEPS_GROUND,
         platforms: SKY_STEPS_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.85,
         ringout_y: RINGOUT_Y - 0.45,
         camera_offset: Vec3::new(0.0, 14.0, 16.2),
@@ -925,6 +958,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: POWDER_KEG_ITEMS,
         ground_shapes: POWDER_KEG_GROUND,
         platforms: POWDER_KEG_PLATFORMS,
+        prop_colliders: NO_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.25,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.6),
@@ -1003,6 +1037,31 @@ mod tests {
         assert_eq!(arena_definition(0).name, "Crown Ring");
         assert_eq!(arena_definition(1).name, "Split Causeway");
         assert_eq!(arena_definition(usize::MAX).name, "Powder Keg Court");
+    }
+
+    #[test]
+    fn split_causeway_uses_two_symmetric_campfires() {
+        let split = arena_definition(1);
+        assert_eq!(split.hazards.len(), 2);
+        assert!(split
+            .hazards
+            .iter()
+            .all(|hazard| hazard.kind == ArenaHazardKind::Campfire));
+        assert_eq!(split.hazards[0].center.x, 0.0);
+        assert_eq!(split.hazards[1].center.x, 0.0);
+        assert_eq!(split.hazards[0].center.z, -split.hazards[1].center.z);
+    }
+
+    #[test]
+    fn split_causeway_wooden_frames_have_matching_prop_colliders() {
+        let split = arena_definition(1);
+        assert_eq!(split.prop_colliders.len(), 2);
+        assert_eq!(split.prop_colliders[0].center, Vec2::new(-7.2, 0.0));
+        assert_eq!(split.prop_colliders[1].center, Vec2::new(7.2, 0.0));
+        assert!(split
+            .prop_colliders
+            .iter()
+            .all(|collider| collider.top_y > ARENA_TOP_Y + 2.0));
     }
 
     #[test]

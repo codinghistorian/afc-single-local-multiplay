@@ -1342,6 +1342,7 @@ fn arena_hazard_avoid_radius(hazard: &ArenaHazardDefinition) -> f32 {
             ArenaHazardKind::PulseVent => 1.15,
             ArenaHazardKind::SnareField => 0.8,
             ArenaHazardKind::BumperNode => 1.35,
+            ArenaHazardKind::Campfire => 1.0,
         }
 }
 

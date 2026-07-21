@@ -37,6 +37,8 @@ const ARENA_HAZARD_SNARE_DAMAGE: f32 = 3.0;
 const ARENA_HAZARD_SNARE_KNOCKBACK: f32 = 2.2;
 const ARENA_HAZARD_BUMPER_DAMAGE: f32 = 9.0;
 const ARENA_HAZARD_BUMPER_KNOCKBACK: f32 = 7.6;
+const ARENA_HAZARD_CAMPFIRE_DAMAGE: f32 = 4.0;
+const ARENA_HAZARD_CAMPFIRE_KNOCKBACK: f32 = 3.0;
 const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
 const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
@@ -62,6 +64,12 @@ pub struct ArenaHazardMarker {
     phase: f32,
     base_scale: f32,
     base_y: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaCampfireFlame {
+    base_scale: Vec3,
+    phase: f32,
 }
 
 #[allow(dead_code)]
@@ -325,6 +333,7 @@ fn spawn_arena_geometry(
     spawn_platform_blocks(commands, meshes, materials, secondary, arena.platforms);
     spawn_arena_theme_accents(commands, meshes, trim, arena.visual_theme);
     spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
+    spawn_campfire_props(commands, meshes, materials, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
 }
 
@@ -340,7 +349,7 @@ fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
             primary: Color::srgb(0.36, 0.55, 0.34),
             secondary: Color::srgb(0.48, 0.34, 0.2),
             trim: Color::srgb(0.86, 0.67, 0.24),
-            hazard: Color::srgb(0.2, 0.76, 0.94),
+            hazard: Color::srgb(0.98, 0.28, 0.08),
         },
         ArenaVisualTheme::Terrace => ArenaThemePalette {
             primary: Color::srgb(0.58, 0.62, 0.36),
@@ -1075,24 +1084,6 @@ const CROWN_ASSET_PROPS: &[ArenaAssetProp] = &[
 
 const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Split north stone crossing",
-        file: "tower/tile-straight.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y,
-        z: 4.7,
-        yaw: PI * 0.5,
-        scale: 3.25,
-    },
-    ArenaAssetProp {
-        name: "Split south stone crossing",
-        file: "tower/tile-straight.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y,
-        z: -4.7,
-        yaw: PI * 0.5,
-        scale: 3.25,
-    },
-    ArenaAssetProp {
         name: "Split west bridge frame",
         file: "tower/wood-structure-high.glb",
         x: -7.2,
@@ -1652,6 +1643,124 @@ fn spawn_arena_lights(commands: &mut Commands) {
     ));
 }
 
+fn spawn_campfire_props(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    hazards: &[ArenaHazardDefinition],
+) {
+    if !hazards
+        .iter()
+        .any(|hazard| hazard.kind == ArenaHazardKind::Campfire)
+    {
+        return;
+    }
+
+    let stone_mesh = meshes.add(Cuboid::new(0.34, 0.2, 0.27));
+    let log_mesh = meshes.add(Cylinder::new(0.12, 1.05));
+    let outer_flame_mesh = meshes.add(Cone::new(0.38, 0.95));
+    let inner_flame_mesh = meshes.add(Cone::new(0.2, 0.58));
+    let stone_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.32, 0.29, 0.26),
+        perceptual_roughness: 0.96,
+        ..default()
+    });
+    let log_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.24, 0.09, 0.035),
+        perceptual_roughness: 0.92,
+        ..default()
+    });
+    let outer_flame_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.19, 0.025),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.08, 0.01)) * 5.0,
+        perceptual_roughness: 0.48,
+        ..default()
+    });
+    let inner_flame_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.76, 0.08),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.48, 0.025)) * 7.0,
+        perceptual_roughness: 0.42,
+        ..default()
+    });
+
+    for hazard in hazards
+        .iter()
+        .filter(|hazard| hazard.kind == ArenaHazardKind::Campfire)
+    {
+        for stone_index in 0..8 {
+            let angle = stone_index as f32 / 8.0 * TAU;
+            commands.spawn((
+                Mesh3d(stone_mesh.clone()),
+                MeshMaterial3d(stone_material.clone()),
+                Transform::from_xyz(
+                    hazard.center.x + angle.cos() * 0.62,
+                    hazard.center.y + 0.1,
+                    hazard.center.z + angle.sin() * 0.62,
+                )
+                .with_rotation(Quat::from_rotation_y(-angle)),
+                Name::new("Campfire stone"),
+                ArenaGeometry,
+            ));
+        }
+
+        for yaw in [PI * 0.25, -PI * 0.25] {
+            commands.spawn((
+                Mesh3d(log_mesh.clone()),
+                MeshMaterial3d(log_material.clone()),
+                Transform::from_xyz(hazard.center.x, hazard.center.y + 0.24, hazard.center.z)
+                    .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_z(PI * 0.5)),
+                Name::new("Campfire log"),
+                ArenaGeometry,
+            ));
+        }
+
+        let outer_scale = Vec3::new(1.0, 1.0, 1.0);
+        commands.spawn((
+            Mesh3d(outer_flame_mesh.clone()),
+            MeshMaterial3d(outer_flame_material.clone()),
+            Transform::from_xyz(hazard.center.x, hazard.center.y + 0.63, hazard.center.z)
+                .with_scale(outer_scale),
+            ArenaCampfireFlame {
+                base_scale: outer_scale,
+                phase: hazard.phase,
+            },
+            Name::new("Campfire outer flame"),
+            ArenaGeometry,
+        ));
+
+        let inner_scale = Vec3::new(0.92, 1.0, 0.92);
+        commands.spawn((
+            Mesh3d(inner_flame_mesh.clone()),
+            MeshMaterial3d(inner_flame_material.clone()),
+            Transform::from_xyz(
+                hazard.center.x,
+                hazard.center.y + 0.48,
+                hazard.center.z - 0.03,
+            )
+            .with_scale(inner_scale),
+            ArenaCampfireFlame {
+                base_scale: inner_scale,
+                phase: hazard.phase + 1.7,
+            },
+            Name::new("Campfire inner flame"),
+            ArenaGeometry,
+        ));
+
+        commands.spawn((
+            PointLight {
+                color: Color::srgb(1.0, 0.32, 0.06),
+                intensity: 180_000.0,
+                range: 4.5,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(hazard.center.x, hazard.center.y + 1.05, hazard.center.z),
+            Name::new("Campfire light"),
+            ArenaGeometry,
+        ));
+    }
+}
+
 fn spawn_arena_hazard_markers(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1680,7 +1789,8 @@ fn spawn_arena_hazard_markers(
 
 pub fn update_arena_hazard_visuals(
     state: Res<ArenaHazardState>,
-    mut markers: Query<(&ArenaHazardMarker, &mut Transform)>,
+    mut markers: Query<(&ArenaHazardMarker, &mut Transform), Without<ArenaCampfireFlame>>,
+    mut flames: Query<(&ArenaCampfireFlame, &mut Transform), Without<ArenaHazardMarker>>,
 ) {
     for (marker, mut transform) in &mut markers {
         let wave = ((state.elapsed + marker.phase) / marker.pulse_seconds.max(0.1) * TAU).sin();
@@ -1693,6 +1803,17 @@ pub fn update_arena_hazard_visuals(
                 0.0
             };
     }
+
+    for (flame, mut transform) in &mut flames {
+        let flicker = (state.elapsed * 9.0 + flame.phase).sin();
+        let flutter = (state.elapsed * 13.0 + flame.phase * 0.7).sin();
+        transform.scale = flame.base_scale
+            * Vec3::new(
+                1.0 - flicker * 0.055,
+                1.0 + flicker * 0.1,
+                1.0 + flutter * 0.045,
+            );
+    }
 }
 
 fn arena_hazard_marker_scale(kind: ArenaHazardKind, wave: f32) -> f32 {
@@ -1700,6 +1821,7 @@ fn arena_hazard_marker_scale(kind: ArenaHazardKind, wave: f32) -> f32 {
         ArenaHazardKind::PulseVent => 1.0 + wave.max(0.0) * 0.28,
         ArenaHazardKind::SnareField => 0.94 + (wave + 1.0) * 0.08,
         ArenaHazardKind::BumperNode => 0.96 + wave.max(0.0) * 0.2,
+        ArenaHazardKind::Campfire => 0.98 + (wave + 1.0) * 0.035,
     }
 }
 
@@ -1827,7 +1949,7 @@ pub fn ground_support_for_arena_with_radius(
         }
     }
 
-    for platform in arena.platforms {
+    for platform in arena.gameplay_platforms() {
         let dx = (x - platform.center.x).abs();
         let dz = (z - platform.center.y).abs();
         let support = if dx <= platform.half_extents.x && dz <= platform.half_extents.y {
@@ -1916,7 +2038,7 @@ fn prefer_ground_support(
 
 pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
     let mut resolved = position;
-    for platform in active_arena_definition().platforms {
+    for platform in active_arena_definition().gameplay_platforms() {
         resolved = resolve_platform_side_collision_against(resolved, radius, platform);
     }
     resolved
@@ -1977,6 +2099,7 @@ fn arena_hazard_active_fraction(kind: ArenaHazardKind) -> f32 {
         ArenaHazardKind::PulseVent => 0.32,
         ArenaHazardKind::SnareField => 0.68,
         ArenaHazardKind::BumperNode => 0.24,
+        ArenaHazardKind::Campfire => 1.0,
     }
 }
 
@@ -1985,6 +2108,7 @@ fn arena_hazard_hit_cooldown(kind: ArenaHazardKind) -> f32 {
         ArenaHazardKind::PulseVent => 1.05,
         ArenaHazardKind::SnareField => 0.56,
         ArenaHazardKind::BumperNode => 0.82,
+        ArenaHazardKind::Campfire => 0.82,
     }
 }
 
@@ -2033,6 +2157,18 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
             20.0,
             ImpactFeedbackIntensity::Heavy,
             ReactionFamilyId::LightAirPop,
+        ),
+        ArenaHazardKind::Campfire => impact_profile(
+            NEUTRAL_IMPACT_OWNER_ID,
+            ImpactSource::Hazard,
+            ARENA_HAZARD_CAMPFIRE_DAMAGE,
+            ARENA_HAZARD_CAMPFIRE_KNOCKBACK,
+            1.8,
+            false,
+            true,
+            12.0,
+            ImpactFeedbackIntensity::Light,
+            ReactionFamilyId::ShortStandingStagger,
         ),
     };
     profile.element = DamageElement::Hazard;
@@ -2119,6 +2255,16 @@ mod tests {
             phase: 1.6,
         };
         assert!(arena_hazard_is_active_for_kind(0.5, &phased_pulse));
+
+        let campfire = ArenaHazardDefinition {
+            kind: ArenaHazardKind::Campfire,
+            center: Vec3::ZERO,
+            radius: 1.0,
+            pulse_seconds: 1.4,
+            phase: 0.0,
+        };
+        assert!(arena_hazard_is_active_for_kind(0.1, &campfire));
+        assert!(arena_hazard_is_active_for_kind(1.3, &campfire));
     }
 
     #[test]
@@ -2145,11 +2291,14 @@ mod tests {
         let pulse = arena_hazard_impact_profile(ArenaHazardKind::PulseVent);
         let snare = arena_hazard_impact_profile(ArenaHazardKind::SnareField);
         let bumper = arena_hazard_impact_profile(ArenaHazardKind::BumperNode);
+        let campfire = arena_hazard_impact_profile(ArenaHazardKind::Campfire);
 
         assert!(pulse.force_knockdown);
         assert!(!snare.force_knockdown);
         assert!(snare.knockback < pulse.knockback);
         assert!(bumper.knockback > pulse.knockback);
+        assert!(campfire.knockback > snare.knockback);
+        assert!(!campfire.force_knockdown);
         assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SnareField) < 1.0);
     }
 
@@ -2167,6 +2316,10 @@ mod tests {
             arena_hazard_marker_scale(ArenaHazardKind::SnareField, 1.0)
                 > arena_hazard_marker_scale(ArenaHazardKind::SnareField, -1.0)
         );
+        assert!(
+            arena_hazard_marker_scale(ArenaHazardKind::Campfire, 1.0)
+                > arena_hazard_marker_scale(ArenaHazardKind::Campfire, -1.0)
+        );
     }
 
     #[test]
@@ -2183,7 +2336,8 @@ mod tests {
     fn mini_arena_props_cover_stage_variants() {
         for index in 0..arena_definitions().len() {
             let props = arena_asset_props(index);
-            assert!(props.len() >= 5);
+            let expected_minimum = if index == 1 { 4 } else { 5 };
+            assert!(props.len() >= expected_minimum);
             assert!(props.iter().all(|prop| prop.file.ends_with(".glb")));
             assert!(props.iter().all(|prop| prop.scale > 0.0));
             assert!(props.iter().all(|prop| prop.y >= ARENA_TOP_Y - 0.6));
@@ -2266,6 +2420,37 @@ mod tests {
                     hazard.center
                 );
             }
+        }
+    }
+
+    #[test]
+    fn split_wooden_structures_block_sides_and_support_their_tops() {
+        let split = &arena_definitions()[1];
+        assert_eq!(split.prop_colliders.len(), 2);
+
+        for collider in split.prop_colliders {
+            assert_eq!(
+                ground_support_for_arena_with_radius(
+                    split,
+                    collider.center.x,
+                    collider.center.y,
+                    0.0,
+                ),
+                GroundSupport::Firm(collider.top_y)
+            );
+
+            let interior_direction = -collider.center.x.signum();
+            let side_position = Vec3::new(
+                collider.center.x + interior_direction,
+                ARENA_TOP_Y,
+                collider.center.y,
+            );
+            let resolved =
+                resolve_platform_side_collision_against(side_position, FIGHTER_RADIUS, collider);
+            assert!(
+                (resolved.x - collider.center.x).abs() + 0.001
+                    >= collider.half_extents.x + FIGHTER_RADIUS
+            );
         }
     }
 
