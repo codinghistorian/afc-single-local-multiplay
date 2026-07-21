@@ -385,6 +385,7 @@ pub struct ArenaHazardState {
     elapsed: f32,
     hit_cooldowns: Vec<[f32; FIGHTER_COUNT]>,
     crank_saws_stopped: bool,
+    crank_lever_toggle_cooldown: f32,
 }
 
 impl ArenaHazardState {
@@ -394,6 +395,7 @@ impl ArenaHazardState {
             elapsed: 0.0,
             hit_cooldowns: vec![[0.0; FIGHTER_COUNT]; hazard_count],
             crank_saws_stopped: false,
+            crank_lever_toggle_cooldown: 0.0,
         }
     }
 
@@ -587,7 +589,6 @@ fn spawn_arena_geometry(
         arena_index,
         arena.hazards,
     );
-    spawn_pipe_portal_visuals(commands, meshes, materials, arena.pipe_pair);
     spawn_crank_yard_machinery(
         commands,
         asset_server,
@@ -1984,6 +1985,7 @@ fn spawn_campfire_props(
     }
 }
 
+#[allow(dead_code)]
 fn spawn_pipe_portal_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2492,9 +2494,11 @@ pub fn update_crank_yard_machinery(
     let elapsed = time.elapsed_secs();
     let arena_index = active_arena_index();
     state.sync_to_arena(arena_index, active_arena_definition().hazards.len());
+    state.crank_lever_toggle_cooldown =
+        (state.crank_lever_toggle_cooldown - dt).max(0.0);
 
     if arena_index == CRANK_YARD_ARENA_INDEX
-        && !state.crank_saws_stopped
+        && state.crank_lever_toggle_cooldown <= 0.0
         && fighters.iter().any(|(input, transform)| {
             (input.raw_light_pressed || input.raw_heavy_pressed)
                 && Vec2::new(
@@ -2505,7 +2509,8 @@ pub fn update_crank_yard_machinery(
                     <= CRANK_LEVER_ATTACK_RADIUS
         })
     {
-        state.crank_saws_stopped = true;
+        state.crank_saws_stopped = !state.crank_saws_stopped;
+        state.crank_lever_toggle_cooldown = 0.3;
     }
 
     for (lever, mut transform) in &mut levers {
@@ -3398,7 +3403,8 @@ fn circular_platform_profile(
         && platform.top_y == pipe_pair.top_y
         && pipe_pair.endpoints.contains(&platform.center)
     {
-        return Some((pipe_pair.collider_radius, pipe_pair.trigger_radius));
+        // The teleport still uses trigger_radius, but the visible pipe top is a full landing disc.
+        return Some((pipe_pair.collider_radius, 0.0));
     }
 
     None
@@ -3677,13 +3683,13 @@ mod tests {
         );
 
         let opening = Vec3::new(pipe.center.x, ARENA_TOP_Y, pipe.center.y);
-        assert_eq!(
+        assert_ne!(
             resolve_circular_platform_side_collision_against(
                 opening,
                 FIGHTER_RADIUS,
                 &pipe,
                 pipe_pair.collider_radius,
-                pipe_pair.trigger_radius,
+                0.0,
             ),
             opening
         );
@@ -3695,7 +3701,7 @@ mod tests {
             0.0,
         );
         assert_ne!(corner_support.height(), Some(pipe.top_y));
-        assert_ne!(
+        assert_eq!(
             ground_support_for_arena_with_radius(crank, pipe.center.x, pipe.center.y, 0.0,)
                 .height(),
             Some(pipe.top_y)
