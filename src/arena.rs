@@ -16,11 +16,14 @@ use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
 };
-use crate::components::{Fighter, FighterAction, FighterActionState, FighterMotor, FighterStats};
+use crate::components::{
+    Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterStats,
+};
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
 use crate::constants::{
-    ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, LEDGE_SUPPORT_GRACE_MAX,
+    ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY,
+    LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
@@ -60,7 +63,13 @@ const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
 const CRANK_YARD_ARENA_INDEX: usize = 3;
 const VENT_SPIRAL_ARENA_INDEX: usize = 4;
+const POWDER_KEG_ARENA_INDEX: usize = 9;
 const CRANK_SAW_VISUAL_Y: f32 = ARENA_TOP_Y + 0.72;
+const CRANK_LEVER_POSITION: Vec3 = Vec3::new(6.7, ARENA_TOP_Y, 1.7);
+const CRANK_LEVER_ATTACK_RADIUS: f32 = 1.85;
+const POWDER_CANNON_INTERVAL_SECONDS: f32 = 2.6;
+const POWDER_CANNON_BOMB_DAMAGE: f32 = 9.0;
+const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
 const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
@@ -119,6 +128,18 @@ pub struct ArenaSawWarningLight {
 pub struct ArenaSawAmbientSpark {
     center: Vec3,
     phase: f32,
+}
+
+#[derive(Component)]
+pub(crate) struct CrankLeverVisual {
+    running_rotation: Quat,
+    stopped_rotation: Quat,
+}
+
+#[derive(Component)]
+pub(crate) struct ArenaCannonBomb {
+    velocity: Vec3,
+    lifetime: f32,
 }
 
 #[derive(Component)]
@@ -363,6 +384,7 @@ pub struct ArenaHazardState {
     arena_index: usize,
     elapsed: f32,
     hit_cooldowns: Vec<[f32; FIGHTER_COUNT]>,
+    crank_saws_stopped: bool,
 }
 
 impl ArenaHazardState {
@@ -371,6 +393,7 @@ impl ArenaHazardState {
             arena_index,
             elapsed: 0.0,
             hit_cooldowns: vec![[0.0; FIGHTER_COUNT]; hazard_count],
+            crank_saws_stopped: false,
         }
     }
 
@@ -395,6 +418,35 @@ impl ArenaHazardState {
     }
 }
 
+#[derive(Resource)]
+pub(crate) struct ArenaOrdnanceAssets {
+    bomb_mesh: Handle<Mesh>,
+    bomb_material: Handle<StandardMaterial>,
+}
+
+#[derive(Resource)]
+pub(crate) struct PowderKegCannonState {
+    arena_index: usize,
+    fire_timer: f32,
+    next_cannon: usize,
+}
+
+impl PowderKegCannonState {
+    fn new(arena_index: usize) -> Self {
+        Self {
+            arena_index,
+            fire_timer: 0.8,
+            next_cannon: 0,
+        }
+    }
+
+    fn sync_to_arena(&mut self, arena_index: usize) {
+        if self.arena_index != arena_index {
+            *self = Self::new(arena_index);
+        }
+    }
+}
+
 pub fn setup_arena(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -410,6 +462,17 @@ pub fn setup_arena(
         arena.hazards.len(),
     ));
     commands.insert_resource(ArenaPipeState::new(active_arena_index()));
+    commands.insert_resource(PowderKegCannonState::new(active_arena_index()));
+    commands.insert_resource(ArenaOrdnanceAssets {
+        bomb_mesh: meshes.add(Sphere::new(0.34).mesh().uv(14, 8)),
+        bomb_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.08, 0.07, 0.065),
+            emissive: LinearRgba::rgb(0.5, 0.11, 0.015),
+            metallic: 0.48,
+            perceptual_roughness: 0.34,
+            ..default()
+        }),
+    });
     spawn_arena_geometry(&mut commands, &asset_server, &mut meshes, &mut materials);
     spawn_arena_lights(&mut commands);
 }
@@ -658,17 +721,9 @@ fn spawn_platform_blocks(
         let platform_material =
             material_with_depth_bias(materials, &material, arena_platform_depth_bias(index));
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(
-                platform.half_extents.x * 2.0,
-                height,
-                platform.half_extents.y * 2.0,
-            ))),
+            Mesh3d(meshes.add(platform.block_mesh(height))),
             MeshMaterial3d(platform_material),
-            Transform::from_xyz(
-                platform.center.x,
-                platform.top_y - height * 0.5,
-                platform.center.y,
-            ),
+            platform.block_transform(height),
             Name::new(format!("Arena platform {index}")),
             ArenaGeometry,
         ));
@@ -1484,24 +1539,6 @@ const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
         yaw: 0.0,
         scale: CRANK_PIPE_VISUAL_SCALE,
     },
-    ArenaAssetProp {
-        name: "Crank yard control lever",
-        file: "platformer/lever.glb",
-        x: 6.7,
-        y: ARENA_TOP_Y,
-        z: 1.7,
-        yaw: -PI * 0.5,
-        scale: 2.0,
-    },
-    ArenaAssetProp {
-        name: "Crank yard crate stack",
-        file: "platformer/crate-strong.glb",
-        x: -6.2,
-        y: ARENA_TOP_Y,
-        z: -1.6,
-        yaw: 0.3,
-        scale: 1.7,
-    },
 ];
 
 const VENT_SPIRAL_ASSET_PROPS: &[ArenaAssetProp] = &[ArenaAssetProp {
@@ -1559,24 +1596,6 @@ const BUMPER_ALLEY_ASSET_PROPS: &[ArenaAssetProp] = &[
         z: -7.6,
         yaw: -PI * 0.5,
         scale: 2.5,
-    },
-    ArenaAssetProp {
-        name: "Bumper alley west crate",
-        file: "blaster/crate-wide.glb",
-        x: -4.0,
-        y: ARENA_TOP_Y,
-        z: -5.8,
-        yaw: 0.15,
-        scale: 2.0,
-    },
-    ArenaAssetProp {
-        name: "Bumper alley east crate",
-        file: "blaster/crate-medium.glb",
-        x: 4.0,
-        y: ARENA_TOP_Y,
-        z: 5.8,
-        yaw: -0.2,
-        scale: 2.0,
     },
 ];
 
@@ -1824,15 +1843,6 @@ const POWDER_KEG_ASSET_PROPS: &[ArenaAssetProp] = &[
         yaw: 0.0,
         scale: 2.5,
     },
-    ArenaAssetProp {
-        name: "Powder keg timber barricade",
-        file: "tower/wood-structure-high.glb",
-        x: -5.4,
-        y: ARENA_TOP_Y,
-        z: -5.6,
-        yaw: PI * 0.25,
-        scale: 2.1,
-    },
 ];
 
 fn spawn_arena_lights(commands: &mut Commands) {
@@ -2057,6 +2067,22 @@ fn spawn_crank_yard_machinery(
     if arena_index != CRANK_YARD_ARENA_INDEX {
         return;
     }
+
+    let running_rotation = Quat::from_rotation_y(-PI * 0.5);
+    commands.spawn((
+        SceneRoot(asset_server.load(
+            GltfAssetLabel::Scene(0).from_asset(arena_prop_asset_path("platformer/lever.glb")),
+        )),
+        Transform::from_translation(CRANK_LEVER_POSITION)
+            .with_rotation(running_rotation)
+            .with_scale(Vec3::splat(2.0)),
+        CrankLeverVisual {
+            running_rotation,
+            stopped_rotation: running_rotation * Quat::from_rotation_z(-0.82),
+        },
+        Name::new("Crank yard saw stop lever"),
+        ArenaGeometry,
+    ));
 
     let saw_scene = asset_server
         .load(GltfAssetLabel::Scene(0).from_asset(arena_prop_asset_path("platformer/saw.glb")));
@@ -2423,29 +2449,88 @@ pub fn update_arena_pipe_visuals(
 
 pub fn update_crank_yard_machinery(
     time: Res<Time>,
+    mut state: ResMut<ArenaHazardState>,
+    fighters: Query<(&FighterInput, &Transform), With<Fighter>>,
+    mut levers: Query<
+        (&CrankLeverVisual, &mut Transform),
+        (
+            Without<Fighter>,
+            Without<ArenaSawBladeVisual>,
+            Without<ArenaSawWarningLight>,
+            Without<ArenaSawAmbientSpark>,
+        ),
+    >,
     mut blades: Query<
         (&ArenaSawBladeVisual, &mut Transform),
-        (Without<ArenaSawWarningLight>, Without<ArenaSawAmbientSpark>),
+        (
+            Without<Fighter>,
+            Without<CrankLeverVisual>,
+            Without<ArenaSawWarningLight>,
+            Without<ArenaSawAmbientSpark>,
+        ),
     >,
     mut warning_lights: Query<
         (&ArenaSawWarningLight, &mut Transform),
-        (Without<ArenaSawBladeVisual>, Without<ArenaSawAmbientSpark>),
+        (
+            Without<Fighter>,
+            Without<CrankLeverVisual>,
+            Without<ArenaSawBladeVisual>,
+            Without<ArenaSawAmbientSpark>,
+        ),
     >,
     mut sparks: Query<
         (&ArenaSawAmbientSpark, &mut Transform),
-        (Without<ArenaSawBladeVisual>, Without<ArenaSawWarningLight>),
+        (
+            Without<Fighter>,
+            Without<CrankLeverVisual>,
+            Without<ArenaSawBladeVisual>,
+            Without<ArenaSawWarningLight>,
+        ),
     >,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
+    let arena_index = active_arena_index();
+    state.sync_to_arena(arena_index, active_arena_definition().hazards.len());
+
+    if arena_index == CRANK_YARD_ARENA_INDEX
+        && !state.crank_saws_stopped
+        && fighters.iter().any(|(input, transform)| {
+            (input.raw_light_pressed || input.raw_heavy_pressed)
+                && Vec2::new(
+                    transform.translation.x - CRANK_LEVER_POSITION.x,
+                    transform.translation.z - CRANK_LEVER_POSITION.z,
+                )
+                .length()
+                    <= CRANK_LEVER_ATTACK_RADIUS
+        })
+    {
+        state.crank_saws_stopped = true;
+    }
+
+    for (lever, mut transform) in &mut levers {
+        let target = if state.crank_saws_stopped {
+            lever.stopped_rotation
+        } else {
+            lever.running_rotation
+        };
+        transform.rotation = transform.rotation.slerp(target, (dt * 9.0).min(1.0));
+    }
 
     for (blade, mut transform) in &mut blades {
-        transform.rotate_local_z(blade.spin_speed * dt);
+        if !state.crank_saws_stopped {
+            transform.rotate_local_z(blade.spin_speed * dt);
+        }
     }
 
     for (warning, mut transform) in &mut warning_lights {
         let pulse = ((elapsed * 7.0 + warning.phase).sin() * 0.5 + 0.5).powf(3.0);
-        transform.scale = warning.base_scale * (0.72 + pulse * 0.5);
+        transform.scale = warning.base_scale
+            * if state.crank_saws_stopped {
+                0.28
+            } else {
+                0.72 + pulse * 0.5
+            };
     }
 
     for (spark, mut transform) in &mut sparks {
@@ -2458,8 +2543,156 @@ pub fn update_crank_yard_machinery(
                 flare * 0.52,
                 angle.sin() * 0.34,
             );
-        transform.scale = Vec3::splat(flare * 1.6);
+        transform.scale = Vec3::splat(if state.crank_saws_stopped {
+            0.0
+        } else {
+            flare * 1.6
+        });
     }
+}
+
+pub fn update_powder_keg_cannons(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<ArenaOrdnanceAssets>,
+    mut cannon_state: ResMut<PowderKegCannonState>,
+    match_state: Res<MatchState>,
+    feel: Res<CombatFeelTuning>,
+    effect_assets: Res<EffectAssets>,
+    mut hitstop: ResMut<Hitstop>,
+    mut feedback: ResMut<HitEffects>,
+    mut telemetry: ResMut<MatchTelemetry>,
+    mut bombs: Query<(Entity, &mut ArenaCannonBomb, &mut Transform)>,
+    mut fighters: Query<(
+        &Fighter,
+        &mut FighterStats,
+        &mut FighterMotor,
+        &mut FighterActionState,
+        &FighterStyle,
+        &FighterEquipment,
+        &Transform,
+    ), Without<ArenaCannonBomb>>,
+) {
+    if hitstop.active() {
+        return;
+    }
+
+    let arena_index = active_arena_index();
+    cannon_state.sync_to_arena(arena_index);
+    if arena_index != POWDER_KEG_ARENA_INDEX {
+        return;
+    }
+
+    let dt = time.delta_secs();
+    cannon_state.fire_timer -= dt;
+    if cannon_state.fire_timer <= 0.0 {
+        let (origin, velocity) = powder_cannon_shot(cannon_state.next_cannon);
+        commands.spawn((
+            Mesh3d(assets.bomb_mesh.clone()),
+            MeshMaterial3d(assets.bomb_material.clone()),
+            Transform::from_translation(origin),
+            ArenaCannonBomb {
+                velocity,
+                lifetime: 3.4,
+            },
+            ArenaGeometry,
+            Name::new("Powder keg cannon bomb"),
+        ));
+        cannon_state.next_cannon = (cannon_state.next_cannon + 1) % 2;
+        cannon_state.fire_timer += POWDER_CANNON_INTERVAL_SECONDS;
+    }
+
+    for (bomb_entity, mut bomb, mut bomb_transform) in &mut bombs {
+        bomb.lifetime -= dt;
+        bomb.velocity.y -= GRAVITY * dt;
+        bomb_transform.translation += bomb.velocity * dt;
+        bomb_transform.rotate_x(dt * 8.0);
+        bomb_transform.rotate_z(dt * 5.0);
+
+        let position = bomb_transform.translation;
+        let ground_hit = ground_height_at(position.x, position.z)
+            .is_some_and(|ground_y| position.y <= ground_y + 0.22 && bomb.velocity.y <= 0.0);
+        let expired = bomb.lifetime <= 0.0;
+        let mut detonated = ground_hit || expired;
+
+        for (fighter, mut stats, mut motor, mut action, style, equipment, transform) in
+            &mut fighters
+        {
+            if !match_state.fighter_can_participate(fighter.id)
+                || !can_receive_impact(&stats, &action)
+            {
+                continue;
+            }
+            let fighter_center = transform.translation + Vec3::Y * 0.72;
+            let hit_radius = if ground_hit || expired {
+                POWDER_CANNON_BOMB_RADIUS
+            } else {
+                0.34 + FIGHTER_RADIUS * stats.item_size_multiplier()
+            };
+            if fighter_center.distance(position) > hit_radius {
+                continue;
+            }
+
+            let mut impact = powder_cannon_impact_profile()
+                .with_hit_effects_enabled(feel.hit_effects_enabled());
+            impact.knockback_direction = Some(
+                Vec3::new(
+                    transform.translation.x - position.x,
+                    0.0,
+                    transform.translation.z - position.z,
+                )
+                .normalize_or(Vec3::Z),
+            );
+            apply_impact(
+                &mut commands,
+                &effect_assets,
+                &mut feedback,
+                &mut hitstop,
+                &match_state,
+                &mut stats,
+                &mut motor,
+                &mut action,
+                transform,
+                None,
+                position,
+                impact,
+                DamageDefenderProfile::from_loadout(style, equipment),
+                &mut telemetry,
+            );
+            detonated = true;
+        }
+
+        if detonated {
+            commands.entity(bomb_entity).despawn();
+        }
+    }
+}
+
+fn powder_cannon_shot(index: usize) -> (Vec3, Vec3) {
+    let cannon = if index % 2 == 0 {
+        Vec3::new(-6.7, ARENA_TOP_Y + 1.05, 1.8)
+    } else {
+        Vec3::new(6.7, ARENA_TOP_Y + 1.05, -1.8)
+    };
+    let direction = Vec3::new(-cannon.x, 0.0, -cannon.z).normalize_or(Vec3::X);
+    (cannon + direction * 1.0, direction * 7.8 + Vec3::Y * 5.0)
+}
+
+fn powder_cannon_impact_profile() -> ImpactProfile {
+    let mut profile = impact_profile(
+        NEUTRAL_IMPACT_OWNER_ID,
+        ImpactSource::Hazard,
+        POWDER_CANNON_BOMB_DAMAGE,
+        8.4,
+        4.2,
+        true,
+        true,
+        18.0,
+        ImpactFeedbackIntensity::Heavy,
+        ReactionFamilyId::LauncherDown,
+    );
+    profile.element = DamageElement::Hazard;
+    profile
 }
 
 pub fn update_vent_spiral_machinery(
@@ -2836,6 +3069,9 @@ pub fn update_arena_hazards(
     }
 
     for (hazard_index, hazard) in arena.hazards.iter().enumerate() {
+        if hazard.kind == ArenaHazardKind::SawBlade && state.crank_saws_stopped {
+            continue;
+        }
         if !arena_hazard_is_active_for_kind(state.elapsed, hazard) {
             continue;
         }
@@ -2890,9 +3126,13 @@ pub fn update_arena_hazards(
                 );
             }
 
-            let mut impact = arena_hazard_impact_profile(hazard.kind)
+            let mut impact = if hazard.kind == ArenaHazardKind::BumperNode {
+                bumper_impact_profile(Vec2::new(motor.velocity.x, motor.velocity.z).length())
+            } else {
+                arena_hazard_impact_profile(hazard.kind)
+            }
                 .with_hit_effects_enabled(feel.hit_effects_enabled());
-            if hazard.kind == ArenaHazardKind::SawBlade {
+            if matches!(hazard.kind, ArenaHazardKind::SawBlade | ArenaHazardKind::BumperNode) {
                 impact.knockback_direction = Some(saw_knockback_direction(
                     transform.translation,
                     hazard.center,
@@ -2993,7 +3233,9 @@ pub fn ground_support_for_arena_with_radius(
     for platform in arena.gameplay_platforms() {
         let dx = (x - platform.center.x).abs();
         let dz = (z - platform.center.y).abs();
-        let support = if arena.visual_theme == ArenaVisualTheme::Reactor {
+        let support = if is_authored_platform(arena, platform)
+            || arena.visual_theme == ArenaVisualTheme::Reactor
+        {
             match platform.support_at(Vec2::new(x, z), ledge_grace) {
                 Some(crate::arena_barriers::BarrierSupport::Firm) => {
                     Some(GroundSupport::Firm(platform.top_y))
@@ -3102,6 +3344,14 @@ fn prefer_ground_support(
 
 pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
     let arena = active_arena_definition();
+    resolve_platform_side_collision_for_arena(arena, position, radius)
+}
+
+fn resolve_platform_side_collision_for_arena(
+    arena: &ArenaDefinition,
+    position: Vec3,
+    radius: f32,
+) -> Vec3 {
     let mut resolved = position;
     for platform in arena.gameplay_platforms() {
         resolved = if let Some((collider_radius, opening_radius)) =
@@ -3114,7 +3364,9 @@ pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
                 collider_radius,
                 opening_radius,
             )
-        } else if arena.visual_theme == ArenaVisualTheme::Reactor {
+        } else if is_authored_platform(arena, platform)
+            || arena.visual_theme == ArenaVisualTheme::Reactor
+        {
             if platform.top_y <= PLATFORM_SIDE_COLLISION_MIN_TOP_Y {
                 resolved
             } else {
@@ -3129,6 +3381,13 @@ pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
         };
     }
     resolved
+}
+
+fn is_authored_platform(arena: &ArenaDefinition, candidate: &PlatformDefinition) -> bool {
+    arena
+        .platforms
+        .iter()
+        .any(|platform| std::ptr::eq(platform, candidate))
 }
 
 fn circular_platform_profile(
@@ -3230,7 +3489,7 @@ fn arena_hazard_active_fraction(kind: ArenaHazardKind) -> f32 {
     match kind {
         ArenaHazardKind::PulseVent => 0.32,
         ArenaHazardKind::SnareField => 0.68,
-        ArenaHazardKind::BumperNode => 0.24,
+        ArenaHazardKind::BumperNode => 1.0,
         ArenaHazardKind::Campfire => 1.0,
         ArenaHazardKind::SawBlade => 1.0,
     }
@@ -3293,18 +3552,7 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
             ImpactFeedbackIntensity::Light,
             ReactionFamilyId::ShortStandingStagger,
         ),
-        ArenaHazardKind::BumperNode => impact_profile(
-            NEUTRAL_IMPACT_OWNER_ID,
-            ImpactSource::Hazard,
-            ARENA_HAZARD_BUMPER_DAMAGE,
-            ARENA_HAZARD_BUMPER_KNOCKBACK,
-            2.8,
-            false,
-            true,
-            20.0,
-            ImpactFeedbackIntensity::Heavy,
-            ReactionFamilyId::LightAirPop,
-        ),
+        ArenaHazardKind::BumperNode => bumper_impact_profile(0.0),
         ArenaHazardKind::Campfire => impact_profile(
             NEUTRAL_IMPACT_OWNER_ID,
             ImpactSource::Hazard,
@@ -3332,6 +3580,26 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
     };
     profile.element = DamageElement::Hazard;
     profile
+}
+
+fn bumper_impact_profile(planar_speed: f32) -> ImpactProfile {
+    let speed_factor = ((planar_speed - 2.0) / 9.0).clamp(0.0, 1.0);
+    impact_profile(
+        NEUTRAL_IMPACT_OWNER_ID,
+        ImpactSource::Hazard,
+        ARENA_HAZARD_BUMPER_DAMAGE * (0.45 + speed_factor * 1.55),
+        ARENA_HAZARD_BUMPER_KNOCKBACK * (0.8 + speed_factor * 1.0),
+        2.4 + speed_factor * 4.2,
+        speed_factor >= 0.62,
+        true,
+        16.0 + speed_factor * 12.0,
+        ImpactFeedbackIntensity::Heavy,
+        if speed_factor >= 0.62 {
+            ReactionFamilyId::LauncherDown
+        } else {
+            ReactionFamilyId::LightAirPop
+        },
+    )
 }
 
 #[cfg(test)]
@@ -3384,7 +3652,7 @@ mod tests {
         let crank = &arena_definitions()[CRANK_YARD_ARENA_INDEX];
         let pipe_pair = crank.pipe_pair.expect("Crank Yard pipe pair");
         let pipe = crank.prop_colliders[0];
-        let corner = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y + 0.9);
+        let corner = Vec3::new(pipe.center.x + 1.1, ARENA_TOP_Y, pipe.center.y + 1.1);
         let side = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y);
 
         assert_eq!(
@@ -3422,8 +3690,8 @@ mod tests {
 
         let corner_support = ground_support_for_arena_with_radius(
             crank,
-            pipe.center.x + 0.7,
-            pipe.center.y + 0.7,
+            pipe.center.x + pipe_pair.collider_radius * 0.8,
+            pipe.center.y + pipe_pair.collider_radius * 0.8,
             0.0,
         );
         assert_ne!(corner_support.height(), Some(pipe.top_y));
@@ -3501,6 +3769,62 @@ mod tests {
             ),
             landing
         );
+    }
+
+    #[test]
+    fn raised_walkable_platforms_open_at_landing_height_across_arenas() {
+        let platform_cases = [
+            (1, 2, "Split Causeway"),
+            (2, 0, "Sunstone Steps"),
+            (3, 0, "Crank Yard"),
+            (4, 0, "Vent Spiral"),
+            (8, 0, "Sky Steps"),
+        ];
+
+        for (arena_index, platform_index, arena_name) in platform_cases {
+            let arena = &arena_definitions()[arena_index];
+            let platform = &arena.platforms[platform_index];
+            let approach = Vec3::new(
+                platform.center.x + platform.half_extents.x + FIGHTER_RADIUS * 0.5,
+                platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE - 0.01,
+                platform.center.y,
+            );
+            assert_ne!(
+                resolve_platform_side_collision_for_arena(arena, approach, FIGHTER_RADIUS),
+                approach,
+                "{arena_name} should block below its visible platform top"
+            );
+
+            let landing = Vec3::new(
+                approach.x,
+                platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE,
+                approach.z,
+            );
+            assert_eq!(
+                resolve_platform_side_collision_for_arena(arena, landing, FIGHTER_RADIUS),
+                landing,
+                "{arena_name} should open at landing height"
+            );
+        }
+    }
+
+    #[test]
+    fn floor_level_platforms_remain_free_of_side_barriers() {
+        for arena_index in [0, 5, 6, 7, 9] {
+            let arena = &arena_definitions()[arena_index];
+            let platform = &arena.platforms[0];
+            let position = Vec3::new(
+                platform.center.x - platform.half_extents.x - FIGHTER_RADIUS * 0.5,
+                ARENA_TOP_Y,
+                platform.center.y,
+            );
+            assert_eq!(
+                resolve_platform_side_collision_for_arena(arena, position, FIGHTER_RADIUS),
+                position,
+                "{} should not gain a floor-level side wall",
+                arena.name
+            );
+        }
     }
 
     #[test]
@@ -3800,6 +4124,7 @@ mod tests {
             let props = arena_asset_props(index);
             let expected_minimum = match index {
                 1 | 2 => 4,
+                CRANK_YARD_ARENA_INDEX => 4,
                 VENT_SPIRAL_ARENA_INDEX => 1,
                 _ => 5,
             };

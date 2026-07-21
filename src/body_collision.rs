@@ -92,6 +92,36 @@ pub fn body_box_separation(a: FighterBodyBox, b: FighterBodyBox) -> Option<Vec2>
     Some(smallest_axis * (smallest_overlap + BODY_SEPARATION_EPSILON))
 }
 
+pub fn body_box_landing_correction(
+    upper: FighterBodyBox,
+    lower: FighterBodyBox,
+    max_penetration: f32,
+) -> Option<f32> {
+    if upper.center.y <= lower.center.y || !body_boxes_overlap_xz(upper, lower) {
+        return None;
+    }
+
+    let upper_bottom = upper.center.y - upper.half_extents.y;
+    let lower_top = lower.center.y + lower.half_extents.y;
+    let correction = lower_top - upper_bottom;
+    (correction >= 0.0 && correction <= max_penetration).then_some(correction)
+}
+
+fn body_boxes_overlap_xz(a: FighterBodyBox, b: FighterBodyBox) -> bool {
+    let axes = [
+        body_axis_xz(a.right),
+        body_axis_xz(a.forward),
+        body_axis_xz(b.right),
+        body_axis_xz(b.forward),
+    ];
+    let center_delta = body_center_xz(a) - body_center_xz(b);
+    axes.into_iter().filter(|axis| axis.length_squared() > 0.0001).all(|axis| {
+        let axis = axis.normalize();
+        center_delta.dot(axis).abs()
+            < body_projection_radius(a, axis) + body_projection_radius(b, axis)
+    })
+}
+
 pub fn sphere_body_box_contact(
     sphere_center: Vec3,
     sphere_radius: f32,
@@ -200,6 +230,17 @@ mod tests {
         let airborne = fighter_body_box(Vec3::new(0.0, 2.0, 0.0), Vec3::Z, body, 1.0);
 
         assert!(body_box_separation(grounded, airborne).is_none());
+    }
+
+    #[test]
+    fn descending_body_can_land_on_another_body() {
+        let body = character_body_profile(CharacterKind::Cat);
+        let lower = fighter_body_box(Vec3::ZERO, Vec3::Z, body, 1.0);
+        let upper = fighter_body_box(Vec3::new(0.0, 1.3, 0.0), Vec3::Z, body, 1.0);
+
+        let correction = body_box_landing_correction(upper, lower, 0.5).unwrap();
+        assert!(correction > 0.0);
+        assert!(body_box_landing_correction(lower, upper, 0.5).is_none());
     }
 
     #[test]

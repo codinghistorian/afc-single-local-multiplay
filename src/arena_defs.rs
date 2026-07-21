@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use std::f32::consts::PI;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::{ARENA_TOP_Y, CAMERA_BASE_OFFSET, RINGOUT_RADIUS, RINGOUT_Y};
@@ -334,10 +335,10 @@ const SUNSTONE_PLATFORMS: &[PlatformDefinition] = &[
 ];
 
 const SUNSTONE_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(-6.0, 3.8, 1.65, 1.65, ARENA_TOP_Y + 1.3),
-    PlatformDefinition::new(6.0, -3.8, 1.65, 1.65, ARENA_TOP_Y + 1.3),
-    PlatformDefinition::new(-6.0, -4.7, 1.1, 1.1, ARENA_TOP_Y + 0.93),
-    PlatformDefinition::new(6.0, 4.7, 1.1, 1.1, ARENA_TOP_Y + 0.93),
+    PlatformDefinition::rectangle(-6.0, 3.8, 1.7, 1.45, -0.55, ARENA_TOP_Y + 1.08),
+    PlatformDefinition::rectangle(6.0, -3.8, 1.7, 1.45, -0.55, ARENA_TOP_Y + 1.08),
+    PlatformDefinition::circle(-6.0, -4.7, 1.25, ARENA_TOP_Y + 0.78),
+    PlatformDefinition::circle(6.0, 4.7, 1.25, ARENA_TOP_Y + 0.78),
 ];
 
 const SUNSTONE_ITEMS: &[ItemAnchor] = &[
@@ -377,7 +378,7 @@ const CRANK_PLATFORMS: &[PlatformDefinition] = &[
 ];
 
 const CRANK_PIPE_MODEL_HEIGHT: f32 = 0.564_285_76;
-const CRANK_PIPE_MODEL_HALF_WIDTH: f32 = 0.5;
+const CRANK_PIPE_MODEL_HALF_WIDTH: f32 = 0.68;
 pub const CRANK_PIPE_VISUAL_SCALE: f32 = 1.5;
 const CRANK_PIPE_TOP_Y: f32 = ARENA_TOP_Y + CRANK_PIPE_MODEL_HEIGHT * CRANK_PIPE_VISUAL_SCALE;
 const CRANK_PIPE_HALF_EXTENT: f32 = CRANK_PIPE_MODEL_HALF_WIDTH * CRANK_PIPE_VISUAL_SCALE;
@@ -407,6 +408,11 @@ const CRANK_PIPE_PAIR: ArenaPipePairDefinition = ArenaPipePairDefinition {
 };
 
 const CRANK_ITEMS: &[ItemAnchor] = &[
+    ItemAnchor {
+        kind: ItemKind::Crate,
+        position: Vec3::new(-6.2, ARENA_TOP_Y + 0.5, -1.6),
+        phase: 5.9,
+    },
     ItemAnchor {
         kind: ItemKind::Turkey,
         position: Vec3::new(0.0, ARENA_TOP_Y + 0.62, 3.4),
@@ -478,6 +484,12 @@ const BUMPER_ALLEY_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(9.35, 0.0, 1.95, 1.65, ARENA_TOP_Y - 0.06),
 ];
 
+const BUMPER_ALLEY_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::circle(0.0, 4.25, 0.58, ARENA_TOP_Y + 0.82),
+    PlatformDefinition::circle(0.0, 0.0, 0.58, ARENA_TOP_Y + 0.82),
+    PlatformDefinition::circle(0.0, -4.25, 0.58, ARENA_TOP_Y + 0.82),
+];
+
 const BUMPER_ALLEY_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::Barrel,
@@ -506,6 +518,15 @@ const FEAST_MARKET_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(6.25, -2.75, 1.8, 1.1, ARENA_TOP_Y - 0.04),
     PlatformDefinition::new(-2.75, -6.25, 1.1, 1.8, ARENA_TOP_Y - 0.04),
     PlatformDefinition::new(2.75, 6.25, 1.1, 1.8, ARENA_TOP_Y - 0.04),
+];
+
+const FEAST_MARKET_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::rectangle(-5.8, 3.4, 1.05, 0.85, 0.25, ARENA_TOP_Y + 0.92),
+    PlatformDefinition::circle(5.8, -3.4, 1.0, ARENA_TOP_Y + 0.96),
+    PlatformDefinition::rectangle(3.0, 6.2, 1.05, 0.72, 0.1, ARENA_TOP_Y + 0.52),
+    PlatformDefinition::circle(-3.0, -6.2, 0.92, ARENA_TOP_Y + 0.72),
+    PlatformDefinition::circle(5.7, 3.9, 0.9, ARENA_TOP_Y + 0.88),
+    PlatformDefinition::rectangle(-5.9, -3.9, 0.78, 0.78, 0.2, ARENA_TOP_Y + 0.9),
 ];
 
 const FEAST_MARKET_ITEMS: &[ItemAnchor] = &[
@@ -558,6 +579,16 @@ const SNARE_GARDEN_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(8.9, 0.0, 1.35, 3.15, ARENA_TOP_Y - 0.05),
 ];
 
+const SNARE_GARDEN_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::rectangle(0.0, 7.0, 1.5, 0.55, 0.0, ARENA_TOP_Y + 1.0),
+    PlatformDefinition::rectangle(0.0, -7.0, 1.5, 0.55, PI, ARENA_TOP_Y + 1.0),
+    PlatformDefinition::rectangle(-7.0, 0.0, 1.05, 1.05, PI * 0.5, ARENA_TOP_Y + 1.0),
+    PlatformDefinition::rectangle(7.0, 0.0, 1.05, 1.05, -PI * 0.5, ARENA_TOP_Y + 1.0),
+    PlatformDefinition::circle(-5.1, 1.7, 0.68, ARENA_TOP_Y + 0.72),
+    PlatformDefinition::circle(5.1, -1.7, 0.68, ARENA_TOP_Y + 0.72),
+    PlatformDefinition::circle(-7.8, 6.8, 0.7, ARENA_TOP_Y + 1.55),
+];
+
 const SNARE_GARDEN_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::CupCoffee,
@@ -593,6 +624,20 @@ const SKY_STEPS_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(5.7, 4.6, 1.55, 1.3, ARENA_TOP_Y + 0.82),
     PlatformDefinition::new(-5.7, 4.6, 1.55, 1.3, ARENA_TOP_Y + 0.34),
     PlatformDefinition::new(5.7, -4.6, 1.55, 1.3, ARENA_TOP_Y + 0.34),
+];
+
+const SKY_STEPS_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::circle(-8.0, -6.4, 0.58, ARENA_TOP_Y + 1.08),
+    PlatformDefinition::circle(6.8, 5.5, 0.58, ARENA_TOP_Y + 1.88),
+    PlatformDefinition::circle(-5.8, 4.7, 0.72, ARENA_TOP_Y + 1.18),
+    PlatformDefinition::circle(5.6, -4.7, 0.48, ARENA_TOP_Y + 0.98),
+    // The central shelter is a hollow frame: four solid, landable beams with an open interior.
+    PlatformDefinition::rectangle(-0.74, 0.74, 1.4, 0.2, PI * 0.25, ARENA_TOP_Y + 1.36),
+    PlatformDefinition::rectangle(0.74, -0.74, 1.4, 0.2, PI * 0.25, ARENA_TOP_Y + 1.36),
+    PlatformDefinition::rectangle(0.85, 0.85, 0.2, 0.85, PI * 0.25, ARENA_TOP_Y + 1.36),
+    PlatformDefinition::rectangle(-0.85, -0.85, 0.2, 0.85, PI * 0.25, ARENA_TOP_Y + 1.36),
+    PlatformDefinition::circle(-3.0, -2.4, 0.92, ARENA_TOP_Y + 0.68),
+    PlatformDefinition::circle(3.0, 2.4, 0.92, ARENA_TOP_Y + 1.08),
 ];
 
 const SKY_STEPS_ITEMS: &[ItemAnchor] = &[
@@ -757,77 +802,9 @@ const BUMPER_ALLEY_HAZARDS: &[ArenaHazardDefinition] = &[
 
 const FEAST_MARKET_HAZARDS: &[ArenaHazardDefinition] = &[];
 
-const SNARE_GARDEN_HAZARDS: &[ArenaHazardDefinition] = &[
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::SnareField,
-        center: Vec3::new(-3.0, ARENA_TOP_Y + 0.05, 0.0),
-        radius: 1.55,
-        pulse_seconds: 3.8,
-        phase: 0.0,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::SnareField,
-        center: Vec3::new(3.0, ARENA_TOP_Y + 0.05, 0.0),
-        radius: 1.55,
-        pulse_seconds: 3.8,
-        phase: 1.9,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::SnareField,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.05, 3.0),
-        radius: 1.4,
-        pulse_seconds: 4.4,
-        phase: 1.1,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::SnareField,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.05, -3.0),
-        radius: 1.4,
-        pulse_seconds: 4.4,
-        phase: 3.3,
-    },
-];
-
-const SKY_STEPS_HAZARDS: &[ArenaHazardDefinition] = &[
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(-5.6, ARENA_TOP_Y + 0.34, 4.7),
-        radius: 0.95,
-        pulse_seconds: 3.2,
-        phase: 0.0,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(5.6, ARENA_TOP_Y + 0.34, -4.7),
-        radius: 0.95,
-        pulse_seconds: 3.2,
-        phase: 1.6,
-    },
-];
-
-const POWDER_KEG_HAZARDS: &[ArenaHazardDefinition] = &[
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.06, 0.0),
-        radius: 1.15,
-        pulse_seconds: 2.8,
-        phase: 0.0,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::BumperNode,
-        center: Vec3::new(-4.4, ARENA_TOP_Y + 0.05, 4.4),
-        radius: 0.85,
-        pulse_seconds: 2.3,
-        phase: 0.8,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::BumperNode,
-        center: Vec3::new(4.4, ARENA_TOP_Y + 0.05, -4.4),
-        radius: 0.85,
-        pulse_seconds: 2.3,
-        phase: 1.9,
-    },
-];
+const SNARE_GARDEN_HAZARDS: &[ArenaHazardDefinition] = &[];
+const SKY_STEPS_HAZARDS: &[ArenaHazardDefinition] = &[];
+const POWDER_KEG_HAZARDS: &[ArenaHazardDefinition] = &[];
 
 const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
@@ -941,7 +918,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: BUMPER_ALLEY_ITEMS,
         ground_shapes: BUMPER_GROUND,
         platforms: BUMPER_ALLEY_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: BUMPER_ALLEY_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.1,
         ringout_y: RINGOUT_Y,
@@ -961,7 +938,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: FEAST_MARKET_ITEMS,
         ground_shapes: FEAST_MARKET_GROUND,
         platforms: FEAST_MARKET_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: FEAST_MARKET_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.75,
         ringout_y: RINGOUT_Y,
@@ -981,7 +958,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SNARE_GARDEN_ITEMS,
         ground_shapes: SNARE_GARDEN_GROUND,
         platforms: SNARE_GARDEN_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: SNARE_GARDEN_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.55,
         ringout_y: RINGOUT_Y,
@@ -1001,7 +978,7 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: SKY_STEPS_ITEMS,
         ground_shapes: SKY_STEPS_GROUND,
         platforms: SKY_STEPS_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: SKY_STEPS_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.85,
         ringout_y: RINGOUT_Y - 0.45,
@@ -1081,6 +1058,9 @@ mod tests {
         assert!(arenas[3].hazards.len() >= 2);
         assert!(arenas[4].hazards.iter().any(|hazard| hazard.phase > 0.0));
         assert!(arenas[6].hazards.is_empty());
+        assert!(arenas[7].hazards.is_empty());
+        assert!(arenas[8].hazards.is_empty());
+        assert!(arenas[9].hazards.is_empty());
         assert!(
             arenas[8]
                 .platforms
@@ -1244,6 +1224,22 @@ mod tests {
         assert_eq!(crank.hazards[0].center.x, -3.1);
         assert_eq!(crank.hazards[1].center.x, 3.1);
         assert!(crank.hazards.iter().all(|hazard| hazard.center.z == 0.0));
+    }
+
+    #[test]
+    fn requested_decorative_props_are_solid_and_landable() {
+        for arena_index in [2, 5, 6, 7, 8] {
+            let arena = arena_definition(arena_index);
+            assert!(
+                !arena.prop_colliders.is_empty(),
+                "{} should expose prop collision geometry",
+                arena.name
+            );
+            assert!(arena
+                .prop_colliders
+                .iter()
+                .all(|collider| collider.top_y > ARENA_TOP_Y));
+        }
     }
 
     #[test]

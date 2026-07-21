@@ -136,6 +136,7 @@ pub enum ItemRole {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
+    Crate,
     Steamer,
     Apple,
     WineWhite,
@@ -164,6 +165,18 @@ impl ItemKind {
 
     fn definition(self) -> ItemDefinition {
         match self {
+            ItemKind::Crate => ItemDefinition {
+                label: "Mystery Crate",
+                role: ItemRole::Utility,
+                portable: true,
+                loose_offset: 0.5,
+                max_durability: 1,
+                throw_speed: ITEM_STONE_CRATE_THROW_SPEED,
+                throw_arc: ITEM_STONE_CRATE_THROW_ARC,
+                throw_lifetime: ITEM_THROW_LIFETIME,
+                throw_owner_grace: ITEM_MALLET_THROW_GRACE,
+                pickup_lockout: ITEM_STONE_CRATE_PICKUP_LOCKOUT,
+            },
             ItemKind::Steamer => ItemDefinition {
                 label: "Steamer",
                 role: ItemRole::Explosive,
@@ -450,6 +463,7 @@ pub struct ItemAssets {
     barrel_scene: Handle<Scene>,
     cup_coffee_scene: Handle<Scene>,
     mushroom_scene: Handle<Scene>,
+    crate_scene: Handle<Scene>,
     steamer_material: Handle<StandardMaterial>,
     apple_material: Handle<StandardMaterial>,
     wine_white_material: Handle<StandardMaterial>,
@@ -457,12 +471,14 @@ pub struct ItemAssets {
     barrel_material: Handle<StandardMaterial>,
     coffee_material: Handle<StandardMaterial>,
     mushroom_material: Handle<StandardMaterial>,
+    crate_material: Handle<StandardMaterial>,
     live_bomb_material: Handle<StandardMaterial>,
 }
 
 impl ItemAssets {
     pub fn material_for(&self, kind: ItemKind, live_bomb: bool) -> Handle<StandardMaterial> {
         match kind {
+            ItemKind::Crate => self.crate_material.clone(),
             ItemKind::Steamer if live_bomb => self.live_bomb_material.clone(),
             ItemKind::Steamer => self.steamer_material.clone(),
             ItemKind::Apple => self.apple_material.clone(),
@@ -476,6 +492,7 @@ impl ItemAssets {
 
     pub fn scene_for(&self, kind: ItemKind) -> Handle<Scene> {
         match kind {
+            ItemKind::Crate => self.crate_scene.clone(),
             ItemKind::Steamer => self.steamer_scene.clone(),
             ItemKind::Apple => self.apple_scene.clone(),
             ItemKind::WineWhite => self.wine_white_scene.clone(),
@@ -502,6 +519,9 @@ pub fn setup_items(
         barrel_scene: food_scene(&asset_server, "barrel.glb"),
         cup_coffee_scene: food_scene(&asset_server, "cup-coffee.glb"),
         mushroom_scene: food_scene(&asset_server, "mushroom.glb"),
+        crate_scene: asset_server.load(
+            GltfAssetLabel::Scene(0).from_asset("arena/kits/platformer/crate-strong.glb"),
+        ),
         steamer_material: materials.add(StandardMaterial {
             base_color: Color::srgb(0.72, 0.62, 0.52),
             perceptual_roughness: 0.46,
@@ -540,6 +560,11 @@ pub fn setup_items(
             perceptual_roughness: 0.42,
             ..default()
         }),
+        crate_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.54, 0.31, 0.12),
+            perceptual_roughness: 0.78,
+            ..default()
+        }),
         live_bomb_material: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.44, 0.08),
             emissive: LinearRgba::rgb(0.24, 0.08, 0.01),
@@ -571,7 +596,7 @@ fn spawn_pickup(
     kind: ItemKind,
     position: Vec3,
     phase: f32,
-) {
+) -> Entity {
     let (mesh, material, scale) = item_visuals(assets, kind, false);
 
     commands.spawn((
@@ -581,7 +606,7 @@ fn spawn_pickup(
         Transform::from_translation(position).with_scale(scale),
         ArenaItem::new(kind, position, phase),
         Name::new(kind.label()),
-    ));
+    )).id()
 }
 
 fn item_visuals(
@@ -590,7 +615,8 @@ fn item_visuals(
     live_bomb: bool,
 ) -> (Handle<Mesh>, Handle<StandardMaterial>, Vec3) {
     match kind {
-        ItemKind::Steamer
+        ItemKind::Crate
+        | ItemKind::Steamer
         | ItemKind::Apple
         | ItemKind::WineWhite
         | ItemKind::Turkey
@@ -764,7 +790,7 @@ enum HeldItemCommand {
 }
 
 fn held_item_command(input: &FighterInput, kind: ItemKind) -> HeldItemCommand {
-    if kind == ItemKind::Steamer {
+    if matches!(kind, ItemKind::Steamer | ItemKind::Crate) {
         if input.heavy || input.light {
             return HeldItemCommand::Throw;
         }
@@ -793,6 +819,7 @@ fn use_held_item(
     position: Vec3,
 ) -> bool {
     let message = match item.kind {
+        ItemKind::Crate => return false,
         ItemKind::Apple => {
             stats.health = (stats.health + ITEM_APPLE_HEALTH).min(MAX_HEALTH);
             "ate Apple"
@@ -1086,6 +1113,7 @@ struct ItemSwingConfig {
 fn item_swing_config(kind: ItemKind) -> Option<ItemSwingConfig> {
     match kind {
         ItemKind::Steamer
+        | ItemKind::Crate
         | ItemKind::Apple
         | ItemKind::WineWhite
         | ItemKind::Turkey
@@ -1336,6 +1364,18 @@ pub fn update_moving_items(
                 }
 
                 if impacted {
+                    if item.kind == ItemKind::Crate {
+                        spawn_dust_puff(&mut commands, &effect_assets, transform.translation);
+                        open_mystery_crate(
+                            &mut commands,
+                            &assets,
+                            &mut item,
+                            &mut visibility,
+                            transform.translation,
+                            time.elapsed_secs(),
+                        );
+                        continue;
+                    }
                     if item.durability <= 0 {
                         spawn_dust_puff(&mut commands, &effect_assets, transform.translation);
                         item.set_respawning();
@@ -1359,6 +1399,18 @@ pub fn update_moving_items(
                     if transform.translation.y <= ground_y + item.kind.loose_offset()
                         && item.velocity.y <= 0.0
                     {
+                        if item.kind == ItemKind::Crate {
+                            spawn_dust_puff(&mut commands, &effect_assets, transform.translation);
+                            open_mystery_crate(
+                                &mut commands,
+                                &assets,
+                                &mut item,
+                                &mut visibility,
+                                transform.translation,
+                                time.elapsed_secs(),
+                            );
+                            continue;
+                        }
                         let settle_position = transform.translation;
                         place_loose(&mut item, &mut transform, &mut visibility, settle_position);
                         continue;
@@ -1578,7 +1630,9 @@ fn item_throw_profile_from_payload(
         ItemKind::Apple | ItemKind::WineWhite | ItemKind::CupCoffee | ItemKind::Mushroom => {
             (AttackPayloadId::ItemThrowLight, 0.55, 0.72, 0.86)
         }
-        ItemKind::Turkey | ItemKind::Barrel => (AttackPayloadId::ItemThrowHeavy, 1.05, 0.98, 0.96),
+        ItemKind::Turkey | ItemKind::Barrel | ItemKind::Crate => {
+            (AttackPayloadId::ItemThrowHeavy, 1.05, 0.98, 0.96)
+        }
         ItemKind::Steamer => (AttackPayloadId::ItemThrowHeavy, 1.0, 1.0, 1.0),
     };
 
@@ -1614,6 +1668,7 @@ fn should_respawn_item(position: Vec3) -> bool {
 
 pub fn item_scale(kind: ItemKind) -> Vec3 {
     match kind {
+        ItemKind::Crate => Vec3::splat(1.7),
         ItemKind::Steamer => Vec3::splat(0.72 * 2.0),
         ItemKind::Apple => Vec3::splat(0.82 * 3.0),
         ItemKind::WineWhite => Vec3::splat(0.78 * 2.0),
@@ -1684,7 +1739,8 @@ pub fn sync_item_visuals(
                 };
                 item_scale(item.kind) * pulse
             }
-            ItemKind::Apple
+            ItemKind::Crate
+            | ItemKind::Apple
             | ItemKind::WineWhite
             | ItemKind::Turkey
             | ItemKind::Barrel
@@ -1694,6 +1750,41 @@ pub fn sync_item_visuals(
         material.0 = assets.material_for(item.kind, false);
         *visibility = Visibility::Visible;
     }
+}
+
+fn open_mystery_crate(
+    commands: &mut Commands,
+    assets: &ItemAssets,
+    crate_item: &mut ArenaItem,
+    visibility: &mut Visibility,
+    position: Vec3,
+    randomizer: f32,
+) {
+    let reward = mystery_crate_reward(position, randomizer);
+    let ground_y = ground_height_at(position.x, position.z).unwrap_or(ARENA_TOP_Y);
+    let reward_position = Vec3::new(position.x, ground_y + reward.loose_offset(), position.z);
+    let reward_entity = spawn_pickup(commands, assets, reward, reward_position, randomizer);
+    commands
+        .entity(reward_entity)
+        .insert(crate::arena::ArenaGeometry);
+    crate_item.set_respawning();
+    *visibility = Visibility::Hidden;
+}
+
+fn mystery_crate_reward(position: Vec3, randomizer: f32) -> ItemKind {
+    const REWARDS: [ItemKind; 7] = [
+        ItemKind::Steamer,
+        ItemKind::Apple,
+        ItemKind::WineWhite,
+        ItemKind::Turkey,
+        ItemKind::Barrel,
+        ItemKind::CupCoffee,
+        ItemKind::Mushroom,
+    ];
+    let noise = (position.x * 12.9898 + position.z * 78.233 + randomizer * 37.719)
+        .sin()
+        .abs();
+    REWARDS[((noise * 10_000.0) as usize) % REWARDS.len()]
 }
 
 #[allow(dead_code)]
@@ -1786,6 +1877,7 @@ mod tests {
     #[test]
     fn expanded_items_have_distinct_roles() {
         assert_eq!(ItemKind::Steamer.role(), ItemRole::Explosive);
+        assert_eq!(ItemKind::Crate.role(), ItemRole::Utility);
         assert_eq!(ItemKind::CupCoffee.role(), ItemRole::Utility);
         assert_eq!(ItemKind::Apple.role(), ItemRole::Recovery);
         assert_eq!(ItemKind::Mushroom.role(), ItemRole::Utility);
@@ -1805,6 +1897,7 @@ mod tests {
             ArenaItem::new(ItemKind::Barrel, Vec3::ZERO, 0.0).max_durability,
             3
         );
+        assert_ne!(mystery_crate_reward(Vec3::ZERO, 1.0), ItemKind::Crate);
     }
 
     #[test]

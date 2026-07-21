@@ -7,7 +7,9 @@ use crate::arena::{
     resolve_platform_side_collision,
 };
 use crate::arena_defs::{ArenaDefinition, active_arena_definition};
-use crate::body_collision::{body_box_separation, fighter_body_box};
+use crate::body_collision::{
+    FighterBodyBox, body_box_landing_correction, body_box_separation, fighter_body_box,
+};
 use crate::bot::default_bot_brain_for_fighter;
 use crate::camera::{GameplayCameraControl, camera_relative_direction};
 use crate::characters::{
@@ -4372,14 +4374,28 @@ pub fn separate_fighters(
 
         for i in 0..snapshots.len() {
             for j in (i + 1)..snapshots.len() {
-                let (a_entity, a_body) = snapshots[i];
-                let (b_entity, b_body) = snapshots[j];
-                let Some(separation) = body_box_separation(a_body, b_body) else {
+                let a = snapshots[i];
+                let b = snapshots[j];
+                if a.velocity_y <= 0.0
+                    && let Some(rise) =
+                        body_box_landing_correction(a.body, b.body, FIGHTER_HEIGHT * 0.42)
+                {
+                    corrections.push((a.entity, Vec3::Y * rise));
+                    continue;
+                }
+                if b.velocity_y <= 0.0
+                    && let Some(rise) =
+                        body_box_landing_correction(b.body, a.body, FIGHTER_HEIGHT * 0.42)
+                {
+                    corrections.push((b.entity, Vec3::Y * rise));
+                    continue;
+                }
+                let Some(separation) = body_box_separation(a.body, b.body) else {
                     continue;
                 };
                 let correction = Vec3::new(separation.x * 0.5, 0.0, separation.y * 0.5);
-                corrections.push((a_entity, correction));
-                corrections.push((b_entity, -correction));
+                corrections.push((a.entity, correction));
+                corrections.push((b.entity, -correction));
             }
         }
 
@@ -4391,14 +4407,24 @@ pub fn separate_fighters(
             if !fighter_body_blocks_overlap(action.action) {
                 continue;
             }
-            let correction = corrections
-                .iter()
-                .filter(|(target, _)| *target == entity)
-                .fold(Vec3::ZERO, |acc, (_, delta)| acc + *delta);
+            let correction = corrections.iter().filter(|(target, _)| *target == entity).fold(
+                Vec3::ZERO,
+                |mut acc, (_, delta)| {
+                    acc.x += delta.x;
+                    acc.z += delta.z;
+                    acc.y = acc.y.max(delta.y);
+                    acc
+                },
+            );
             if correction.length_squared() <= 0.000001 {
                 continue;
             }
             transform.translation += correction;
+            if correction.y > 0.0 {
+                motor.velocity.y = 0.0;
+                motor.grounded = true;
+                motor.ledge_grace_timer = LEDGE_GRACE_SECONDS;
+            }
             cancel_velocity_into_body_overlap(&mut motor, correction);
         }
     }
@@ -4417,22 +4443,30 @@ fn fighter_body_snapshots(
         With<Fighter>,
     >,
     character_catalog: &CharacterMoveCatalog,
-) -> Vec<(Entity, crate::body_collision::FighterBodyBox)> {
+) -> Vec<FighterBodySnapshot> {
     fighters
         .iter()
         .filter(|(_, _, _, _, _, action)| fighter_body_blocks_overlap(action.action))
         .map(|(entity, transform, motor, character, stats, _)| {
-            (
+            FighterBodySnapshot {
                 entity,
-                fighter_body_box(
+                body: fighter_body_box(
                     transform.translation,
                     motor.facing,
                     character_catalog.body(character.kind),
                     stats.item_size_multiplier(),
                 ),
-            )
+                velocity_y: motor.velocity.y,
+            }
         })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+struct FighterBodySnapshot {
+    entity: Entity,
+    body: FighterBodyBox,
+    velocity_y: f32,
 }
 
 fn fighter_body_blocks_overlap(action: FighterAction) -> bool {

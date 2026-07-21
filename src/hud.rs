@@ -2,7 +2,7 @@ use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
-use crate::arena_defs::{active_arena_definition, arena_definitions};
+use crate::arena_defs::{active_arena_definition, active_arena_index, arena_definitions};
 use crate::characters::{CharacterKind, FighterCharacter, character_label};
 use crate::combat::{HitEffects, ImpactSource};
 use crate::components::{
@@ -100,6 +100,7 @@ pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|parent| {
             parent.spawn(top_timer());
             parent.spawn(phase_plate());
+            parent.spawn(dev_arena_label());
             parent.spawn(announcement_banner());
             #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
             {
@@ -320,6 +321,49 @@ fn phase_plate() -> impl Bundle {
 }
 
 #[derive(Component)]
+pub(crate) struct DevArenaLabelPanel;
+
+#[derive(Component)]
+pub(crate) struct DevArenaNameText;
+
+fn dev_arena_label() -> impl Bundle {
+    (
+        GameplayHudPanel,
+        DevArenaLabelPanel,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            right: Val::Px(18.0),
+            min_width: Val::Px(220.0),
+            height: Val::Px(38.0),
+            padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.78)),
+        Pickable::IGNORE,
+        children![(
+            Text::new(dev_arena_label_text(active_arena_index())),
+            text_style(17.0, Color::srgb(1.0, 0.78, 0.28)),
+            TextShadow::default(),
+            DevArenaNameText,
+        )],
+    )
+}
+
+fn dev_arena_label_text(arena_index: usize) -> String {
+    let arenas = arena_definitions();
+    let arena_index = arena_index.min(arenas.len().saturating_sub(1));
+    format!(
+        "MAP {:02}/{:02}  {}",
+        arena_index + 1,
+        arenas.len(),
+        arenas[arena_index].name.to_ascii_uppercase()
+    )
+}
+
+#[derive(Component)]
 pub(crate) struct GameplayHudPanel;
 
 #[derive(Component)]
@@ -339,7 +383,7 @@ fn controls_overlay() -> impl Bundle {
         BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.62)),
         children![(
             Text::new(
-                "Move Arrows | Shift+U user mode | Shift+Arrows camera | Shift+R camera reset | Shift+C filter cycle | Z aim/grab | X strong/throw | C light/pickup | V jump | double-tap dash | X+C guard | H debug | F2 map editor"
+                "Move Arrows | Shift+A next map | Shift+U user mode | Shift+Arrows camera | Shift+R camera reset | Shift+C filter cycle | Z aim/grab | X strong/throw | C light/pickup | V jump | double-tap dash | X+C guard | H debug | F2 map editor"
             ),
             text_style(14.0, Color::srgb(0.88, 0.88, 0.82)),
         )],
@@ -879,6 +923,30 @@ pub fn update_hud(
     }
 }
 
+pub fn update_dev_arena_label(
+    user_mode: Res<UserModeState>,
+    mut panels: Query<&mut Node, With<DevArenaLabelPanel>>,
+    mut texts: Query<&mut Text, With<DevArenaNameText>>,
+) {
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    let show_dev_arena = !user_mode.hides_dev_controls();
+    #[cfg(target_arch = "wasm32")]
+    let show_dev_arena = false;
+
+    for mut node in &mut panels {
+        node.display = if show_dev_arena {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    let label = dev_arena_label_text(active_arena_index());
+    for mut text in &mut texts {
+        **text = label.clone();
+    }
+}
+
 fn timer_label(state: &MatchState) -> String {
     match state.phase {
         MatchPhase::Setup => "SETUP".to_string(),
@@ -1317,6 +1385,11 @@ mod tests {
     fn life_label_uses_stock_when_available() {
         assert_eq!(life_label(Some(2)), "Life 2");
         assert_eq!(life_label(None), "Life --");
+    }
+
+    #[test]
+    fn dev_arena_label_identifies_the_active_map() {
+        assert_eq!(dev_arena_label_text(4), "MAP 05/10  VENT SPIRAL");
     }
 
     #[test]

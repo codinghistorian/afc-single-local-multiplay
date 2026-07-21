@@ -990,6 +990,7 @@ fn bot_held_item_decision(
     }
 
     match kind {
+        ItemKind::Crate => return Some(BotHeldItemDecision::Heavy),
         ItemKind::Apple | ItemKind::Turkey => return Some(BotHeldItemDecision::Light),
         ItemKind::WineWhite | ItemKind::Barrel => {
             if stamina <= MAX_STAMINA - 10.0 {

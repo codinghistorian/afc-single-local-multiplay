@@ -198,6 +198,11 @@ fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+fn dev_arena_cycle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::KeyA) && shift_pressed(keys)
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn input_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys)
         || keys.pressed(KeyCode::ControlLeft)
@@ -216,6 +221,20 @@ fn dev_character_cycle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn setup_rule_hotkeys_active(phase: MatchPhase) -> bool {
     phase == MatchPhase::Setup
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+fn cycle_dev_arena(
+    setup: &mut LocalSetup,
+    state: &mut MatchState,
+    arena_count: usize,
+) -> usize {
+    let arena_count = arena_count.max(1);
+    setup.arena_index = state.arena_index.min(arena_count - 1);
+    setup.cycle_arena(arena_count);
+    state.arena_index = setup.arena_index;
+    state.request_rematch();
+    state.arena_index
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -951,6 +970,13 @@ pub fn handle_global_input(
             && !map_editor_allows_setup_input(editor)
         {
             return;
+        }
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    {
+        if !dev_input_blocked && state.is_fighting() && dev_arena_cycle_pressed(&keys) {
+            cycle_dev_arena(&mut setup, &mut state, arena_definitions().len());
         }
     }
 
@@ -1849,6 +1875,34 @@ mod tests {
         state.return_to_setup();
         assert_eq!(state.phase, MatchPhase::Setup);
         assert!(!state.reset_requested);
+    }
+
+    #[test]
+    fn shift_a_cycles_dev_arena_forward_and_requests_reset() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(KeyCode::KeyA);
+        assert!(dev_arena_cycle_pressed(&keys));
+
+        let arena_count = arena_definitions().len();
+        let mut setup = LocalSetup::default();
+        setup.arena_index = arena_count - 1;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.arena_index = arena_count - 1;
+
+        assert_eq!(cycle_dev_arena(&mut setup, &mut state, arena_count), 0);
+        assert_eq!(setup.arena_index, 0);
+        assert_eq!(state.arena_index, 0);
+        assert_eq!(state.phase, MatchPhase::Resetting);
+        assert!(state.reset_requested);
+    }
+
+    #[test]
+    fn plain_a_does_not_trigger_dev_arena_cycle() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyA);
+        assert!(!dev_arena_cycle_pressed(&keys));
     }
 
     #[test]

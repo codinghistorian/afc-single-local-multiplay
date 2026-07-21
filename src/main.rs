@@ -246,6 +246,7 @@ fn main() {
                 arena::update_arena_hazard_visuals,
                 arena::update_arena_pipe_visuals,
                 arena::update_crank_yard_machinery,
+                arena::update_powder_keg_cannons,
                 arena::update_vent_spiral_machinery,
             )
                 .chain()
@@ -312,6 +313,12 @@ fn main() {
             )
                 .chain()
                 .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            hud::update_dev_arena_label
+                .in_set(GameSet::Presentation)
+                .run_if(user_mode::gameplay_scene_loaded),
         )
         .add_systems(
             Update,
