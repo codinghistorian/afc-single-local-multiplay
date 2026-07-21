@@ -8,13 +8,13 @@ use std::f32::consts::{PI, TAU};
 use std::fs;
 
 use crate::arena_defs::{
-    ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
-    ArenaHazardKind, ArenaVisualTheme, PlatformDefinition, active_arena_definition,
-    active_arena_index, arena_definitions,
+    active_arena_definition, active_arena_index, arena_definitions, ArenaBackgroundDefinition,
+    ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition, ArenaHazardKind, ArenaVisualTheme,
+    PlatformDefinition,
 };
 use crate::combat::{
-    DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
-    NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
+    apply_impact, can_receive_impact, impact_profile, DamageDefenderProfile, HitEffects,
+    ImpactFeedbackIntensity, ImpactProfile, ImpactSource, NEUTRAL_IMPACT_OWNER_ID,
 };
 use crate::components::{Fighter, FighterActionState, FighterMotor, FighterStats};
 #[cfg(test)]
@@ -46,6 +46,11 @@ const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
+const ARENA_GROUND_DEPTH_BIAS_BASE: f32 = -2_048.0;
+const ARENA_GROUND_DEPTH_BIAS_STEP: f32 = 128.0;
+const ARENA_PLATFORM_DEPTH_BIAS_BASE: f32 = -768.0;
+const ARENA_PLATFORM_DEPTH_BIAS_STEP: f32 = 64.0;
+const ARENA_PROP_SURFACE_CLEARANCE: f32 = 0.012;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
@@ -87,7 +92,7 @@ struct ArenaThemePalette {
 
 impl ArenaAssetProp {
     fn transform(self) -> Transform {
-        Transform::from_xyz(self.x, self.y, self.z)
+        Transform::from_xyz(self.x, self.y + ARENA_PROP_SURFACE_CLEARANCE, self.z)
             .with_rotation(Quat::from_rotation_y(self.yaw))
             .with_scale(Vec3::splat(self.scale))
     }
@@ -271,6 +276,7 @@ fn spawn_arena_geometry(
         base_color: palette.hazard.with_alpha(0.34),
         emissive: LinearRgba::from(palette.hazard) * 0.16,
         alpha_mode: AlphaMode::Blend,
+        depth_bias: 16.0,
         ..default()
     });
 
@@ -308,8 +314,15 @@ fn spawn_arena_geometry(
         ..default()
     });
 
-    spawn_arena_ground_shapes(commands, meshes, primary.clone(), secondary.clone(), arena);
-    spawn_platform_blocks(commands, meshes, secondary, arena.platforms);
+    spawn_arena_ground_shapes(
+        commands,
+        meshes,
+        materials,
+        primary.clone(),
+        secondary.clone(),
+        arena,
+    );
+    spawn_platform_blocks(commands, meshes, materials, secondary, arena.platforms);
     spawn_arena_theme_accents(commands, meshes, trim, arena.visual_theme);
     spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
@@ -383,16 +396,15 @@ fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
 fn spawn_arena_ground_shapes(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     primary: Handle<StandardMaterial>,
     secondary: Handle<StandardMaterial>,
     arena: &ArenaDefinition,
 ) {
     for (index, shape) in arena.ground_shapes.iter().enumerate() {
-        let material = if index % 2 == 0 {
-            primary.clone()
-        } else {
-            secondary.clone()
-        };
+        let base_material = if index % 2 == 0 { &primary } else { &secondary };
+        let material =
+            material_with_depth_bias(materials, base_material, arena_ground_depth_bias(index));
         let (mesh, transform) = match *shape {
             ArenaGroundShape::Circle {
                 center,
@@ -430,26 +442,51 @@ fn spawn_arena_ground_shapes(
 fn spawn_platform_blocks(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     material: Handle<StandardMaterial>,
     platforms: &[PlatformDefinition],
 ) {
-    for platform in platforms {
+    for (index, platform) in platforms.iter().enumerate() {
         let height = ARENA_HEIGHT + (platform.top_y - ARENA_TOP_Y).max(0.0);
+        let platform_material =
+            material_with_depth_bias(materials, &material, arena_platform_depth_bias(index));
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(
                 platform.half_extents.x * 2.0,
                 height,
                 platform.half_extents.y * 2.0,
             ))),
-            MeshMaterial3d(material.clone()),
+            MeshMaterial3d(platform_material),
             Transform::from_xyz(
                 platform.center.x,
                 platform.top_y - height * 0.5,
                 platform.center.y,
             ),
+            Name::new(format!("Arena platform {index}")),
             ArenaGeometry,
         ));
     }
+}
+
+fn material_with_depth_bias(
+    materials: &mut Assets<StandardMaterial>,
+    source: &Handle<StandardMaterial>,
+    depth_bias: f32,
+) -> Handle<StandardMaterial> {
+    let mut material = materials
+        .get(source)
+        .cloned()
+        .expect("arena base material should exist before geometry is spawned");
+    material.depth_bias = depth_bias;
+    materials.add(material)
+}
+
+fn arena_ground_depth_bias(index: usize) -> f32 {
+    ARENA_GROUND_DEPTH_BIAS_BASE + index as f32 * ARENA_GROUND_DEPTH_BIAS_STEP
+}
+
+fn arena_platform_depth_bias(index: usize) -> f32 {
+    ARENA_PLATFORM_DEPTH_BIAS_BASE + index as f32 * ARENA_PLATFORM_DEPTH_BIAS_STEP
 }
 
 fn spawn_arena_theme_accents(
@@ -688,7 +725,7 @@ fn champions_runtime_asset_path(
 }
 
 fn champions_object_transform(object: &ChampionsCourtObject) -> Transform {
-    Transform::from_translation(champions_stage_position(object.position))
+    Transform::from_translation(champions_object_position(object.position))
         .with_rotation(champions_yaw(object.rotation_y))
         .with_scale(champions_scale(object.scale))
 }
@@ -707,7 +744,7 @@ fn champions_prefab_object_transform(
 
     Transform::from_translation(Vec3::new(
         translation.x,
-        champions_stage_y(translation.y),
+        champions_stage_y(translation.y) + ARENA_PROP_SURFACE_CLEARANCE,
         translation.z,
     ))
     .with_rotation(parent_rotation * child_rotation)
@@ -893,6 +930,10 @@ fn champions_floor_asset_scale(asset_key: &str, tile_size: f32) -> f32 {
 fn champions_stage_position(position: (f32, f32, f32)) -> Vec3 {
     let position = champions_raw_position(position);
     Vec3::new(position.x, champions_stage_y(position.y), position.z)
+}
+
+fn champions_object_position(position: (f32, f32, f32)) -> Vec3 {
+    champions_stage_position(position) + Vec3::Y * ARENA_PROP_SURFACE_CLEARANCE
 }
 
 fn champions_raw_position(position: (f32, f32, f32)) -> Vec3 {
@@ -1618,16 +1659,13 @@ fn spawn_arena_hazard_markers(
     hazards: &[ArenaHazardDefinition],
 ) {
     for hazard in hazards {
-        let marker_height = match hazard.kind {
-            ArenaHazardKind::PulseVent => 0.025,
-            ArenaHazardKind::SnareField => 0.018,
-            ArenaHazardKind::BumperNode => 0.08,
-        };
         let base_scale = (hazard.pulse_seconds / 2.2).clamp(0.8, 1.3);
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(hazard.radius, marker_height))),
+            Mesh3d(meshes.add(Annulus::new(hazard.radius * 0.68, hazard.radius))),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(hazard.center).with_scale(Vec3::splat(base_scale)),
+            Transform::from_translation(hazard.center)
+                .with_rotation(Quat::from_rotation_x(-PI * 0.5))
+                .with_scale(Vec3::splat(base_scale)),
             ArenaHazardMarker {
                 kind: hazard.kind,
                 pulse_seconds: hazard.pulse_seconds,
@@ -1654,9 +1692,6 @@ pub fn update_arena_hazard_visuals(
             } else {
                 0.0
             };
-        if marker.kind == ArenaHazardKind::SnareField {
-            transform.rotate_y(0.012 + wave.abs() * 0.008);
-        }
     }
 }
 
@@ -2162,13 +2197,39 @@ mod tests {
     }
 
     #[test]
+    fn arena_render_depth_bias_separates_coplanar_surfaces() {
+        for arena in arena_definitions() {
+            for index in 1..arena.ground_shapes.len() {
+                assert!(arena_ground_depth_bias(index) > arena_ground_depth_bias(index - 1));
+            }
+            for index in 1..arena.platforms.len() {
+                assert!(arena_platform_depth_bias(index) > arena_platform_depth_bias(index - 1));
+            }
+            if !arena.ground_shapes.is_empty() && !arena.platforms.is_empty() {
+                assert!(
+                    arena_ground_depth_bias(arena.ground_shapes.len() - 1)
+                        < arena_platform_depth_bias(0),
+                    "{} ground surfaces must render behind platform surfaces",
+                    arena.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arena_props_clear_the_floor_contact_plane() {
+        let prop = CROWN_ASSET_PROPS[0];
+        let transform = prop.transform();
+
+        assert!((transform.translation.y - prop.y - ARENA_PROP_SURFACE_CLEARANCE).abs() < 0.001);
+    }
+
+    #[test]
     fn dry_arena_props_do_not_use_river_assets() {
         for index in [1, 2] {
-            assert!(
-                arena_asset_props(index)
-                    .iter()
-                    .all(|prop| !prop.file.contains("river"))
-            );
+            assert!(arena_asset_props(index)
+                .iter()
+                .all(|prop| !prop.file.contains("river")));
         }
     }
 
@@ -2314,7 +2375,10 @@ mod tests {
 
         let transform = champions_prefab_object_transform(&prefab_instance, &object);
         assert!((transform.translation.x - 10.0).abs() < 0.001);
-        assert!((transform.translation.y - (ARENA_TOP_Y + 1.5)).abs() < 0.001);
+        assert!(
+            (transform.translation.y - (ARENA_TOP_Y + 1.5 + ARENA_PROP_SURFACE_CLEARANCE)).abs()
+                < 0.001
+        );
         assert!((transform.translation.z + 2.0).abs() < 0.001);
         assert_eq!(transform.scale, Vec3::new(1.0, 0.5, 1.0));
     }
