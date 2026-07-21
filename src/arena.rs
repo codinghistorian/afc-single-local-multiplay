@@ -9,21 +9,21 @@ use std::fs;
 
 use crate::arena_defs::{
     ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
-    ArenaHazardKind, ArenaVisualTheme, PlatformDefinition, active_arena_definition,
-    active_arena_index, arena_definitions,
+    ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, PlatformDefinition,
+    active_arena_definition, active_arena_index, arena_definitions,
 };
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
 };
-use crate::components::{Fighter, FighterActionState, FighterMotor, FighterStats};
+use crate::components::{Fighter, FighterAction, FighterActionState, FighterMotor, FighterStats};
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
 use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
-use crate::effects::{EffectAssets, spawn_burning_fighter_effect};
+use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
 use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
@@ -41,11 +41,22 @@ const ARENA_HAZARD_CAMPFIRE_DAMAGE: f32 = 4.0;
 const ARENA_HAZARD_CAMPFIRE_KNOCKBACK: f32 = 8.8;
 const ARENA_HAZARD_CAMPFIRE_LAUNCH: f32 = 4.6;
 const ARENA_HAZARD_CAMPFIRE_BURN_SECONDS: f32 = 1.35;
+const ARENA_HAZARD_SAW_DAMAGE: f32 = 5.0;
+const ARENA_HAZARD_SAW_KNOCKBACK: f32 = 3.2;
+const PIPE_ENTRY_DWELL_SECONDS: f32 = 0.25;
+const PIPE_ENTER_SECONDS: f32 = 0.32;
+const PIPE_TRAVEL_SECONDS: f32 = 0.12;
+const PIPE_EXIT_SECONDS: f32 = 0.34;
+const PIPE_REENTRY_COOLDOWN_SECONDS: f32 = 0.9;
+const PIPE_SINK_DEPTH: f32 = 1.15;
+const PIPE_EXIT_CLEARANCE_RADIUS: f32 = 1.05;
 const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
 const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
+const CRANK_YARD_ARENA_INDEX: usize = 3;
+const CRANK_SAW_VISUAL_Y: f32 = ARENA_TOP_Y + 0.72;
 const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
@@ -74,6 +85,38 @@ pub struct ArenaCampfireFlame {
     phase: f32,
 }
 
+#[derive(Component)]
+pub struct ArenaPipePortalRing {
+    endpoint: usize,
+    phase: f32,
+    base_scale: Vec3,
+}
+
+#[derive(Component)]
+pub struct ArenaPipePortalParticle {
+    endpoint: usize,
+    phase: f32,
+    radius: f32,
+    base_y: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaSawBladeVisual {
+    spin_speed: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaSawWarningLight {
+    phase: f32,
+    base_scale: Vec3,
+}
+
+#[derive(Component)]
+pub struct ArenaSawAmbientSpark {
+    center: Vec3,
+    phase: f32,
+}
+
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ArenaFighterBurn {
     remaining: f32,
@@ -92,6 +135,66 @@ impl ArenaFighterBurn {
         let fade = (self.remaining / self.duration.max(0.01)).clamp(0.0, 1.0);
         let flicker = 0.76 + (self.remaining * 19.0).sin().abs() * 0.24;
         fade.sqrt() * flicker
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FighterPipeState {
+    Ready {
+        candidate: Option<usize>,
+        dwell: f32,
+        cooldown: f32,
+    },
+    Transit {
+        source: usize,
+        destination: usize,
+        elapsed: f32,
+        entry_y: f32,
+        base_scale: Vec3,
+    },
+}
+
+impl Default for FighterPipeState {
+    fn default() -> Self {
+        Self::Ready {
+            candidate: None,
+            dwell: 0.0,
+            cooldown: 0.0,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct ArenaPipeState {
+    arena_index: usize,
+    fighters: [FighterPipeState; FIGHTER_COUNT],
+}
+
+impl ArenaPipeState {
+    fn new(arena_index: usize) -> Self {
+        Self {
+            arena_index,
+            fighters: [FighterPipeState::default(); FIGHTER_COUNT],
+        }
+    }
+
+    fn sync_to_arena(&mut self, arena_index: usize) {
+        if self.arena_index != arena_index {
+            *self = Self::new(arena_index);
+        }
+    }
+
+    fn endpoint_active(&self, endpoint: usize) -> bool {
+        self.fighters.iter().any(|state| {
+            matches!(
+                state,
+                FighterPipeState::Transit {
+                    source,
+                    destination,
+                    ..
+                } if *source == endpoint || *destination == endpoint
+            )
+        })
     }
 }
 
@@ -268,6 +371,7 @@ pub fn setup_arena(
         active_arena_index(),
         arena.hazards.len(),
     ));
+    commands.insert_resource(ArenaPipeState::new(active_arena_index()));
     spawn_arena_geometry(&mut commands, &asset_server, &mut meshes, &mut materials);
     spawn_arena_lights(&mut commands);
 }
@@ -358,6 +462,15 @@ fn spawn_arena_geometry(
     spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
     spawn_campfire_props(commands, meshes, materials, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
+    spawn_pipe_portal_visuals(commands, meshes, materials, arena.pipe_pair);
+    spawn_crank_yard_machinery(
+        commands,
+        asset_server,
+        meshes,
+        materials,
+        arena_index,
+        arena.hazards,
+    );
 }
 
 fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
@@ -1203,15 +1316,6 @@ const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
         scale: 2.4,
     },
     ArenaAssetProp {
-        name: "Crank yard center saw",
-        file: "platformer/saw.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y + 0.04,
-        z: 0.0,
-        yaw: 0.0,
-        scale: 2.5,
-    },
-    ArenaAssetProp {
         name: "Crank yard north pipe",
         file: "platformer/pipe.glb",
         x: -1.7,
@@ -1766,13 +1870,183 @@ fn spawn_campfire_props(
     }
 }
 
+fn spawn_pipe_portal_visuals(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    pipe_pair: Option<ArenaPipePairDefinition>,
+) {
+    let Some(pipe_pair) = pipe_pair else {
+        return;
+    };
+
+    let ring_mesh = meshes.add(Torus::new(0.66, 0.055));
+    let particle_mesh = meshes.add(Sphere::new(0.075).mesh().uv(8, 5));
+    let portal_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.12, 1.0, 0.72, 0.82),
+        emissive: LinearRgba::from(Color::srgb(0.04, 1.0, 0.58)) * 5.0,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.32,
+        ..default()
+    });
+
+    for (endpoint, center) in pipe_pair.endpoints.into_iter().enumerate() {
+        let base_scale = Vec3::splat(1.0);
+        commands.spawn((
+            Mesh3d(ring_mesh.clone()),
+            MeshMaterial3d(portal_material.clone()),
+            Transform::from_xyz(center.x, pipe_pair.top_y + 0.045, center.y).with_scale(base_scale),
+            ArenaPipePortalRing {
+                endpoint,
+                phase: endpoint as f32 * PI,
+                base_scale,
+            },
+            Name::new(format!("Crank pipe portal ring {endpoint}")),
+            ArenaGeometry,
+        ));
+
+        for particle_index in 0..5 {
+            let phase = particle_index as f32 / 5.0 * TAU + endpoint as f32 * 0.8;
+            let radius = 0.32 + (particle_index % 2) as f32 * 0.16;
+            commands.spawn((
+                Mesh3d(particle_mesh.clone()),
+                MeshMaterial3d(portal_material.clone()),
+                Transform::from_xyz(
+                    center.x + phase.cos() * radius,
+                    pipe_pair.top_y + 0.12,
+                    center.y + phase.sin() * radius,
+                ),
+                ArenaPipePortalParticle {
+                    endpoint,
+                    phase,
+                    radius,
+                    base_y: pipe_pair.top_y + 0.08,
+                },
+                Name::new("Crank pipe portal mote"),
+                ArenaGeometry,
+            ));
+        }
+
+        commands.spawn((
+            PointLight {
+                color: Color::srgb(0.08, 1.0, 0.62),
+                intensity: 70_000.0,
+                range: 3.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(center.x, pipe_pair.top_y + 0.55, center.y),
+            Name::new("Crank pipe portal light"),
+            ArenaGeometry,
+        ));
+    }
+}
+
+fn spawn_crank_yard_machinery(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    arena_index: usize,
+    hazards: &[ArenaHazardDefinition],
+) {
+    if arena_index != CRANK_YARD_ARENA_INDEX {
+        return;
+    }
+
+    let saw_scene = asset_server
+        .load(GltfAssetLabel::Scene(0).from_asset(arena_prop_asset_path("platformer/saw.glb")));
+    let housing_mesh = meshes.add(Cuboid::new(1.75, 0.28, 0.2));
+    let light_mesh = meshes.add(Sphere::new(0.13).mesh().uv(10, 6));
+    let spark_mesh = meshes.add(Sphere::new(0.045).mesh().uv(6, 4));
+    let housing_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.1, 0.12, 0.14),
+        metallic: 0.72,
+        perceptual_roughness: 0.38,
+        ..default()
+    });
+    let warning_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.035, 0.015),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.015, 0.005)) * 7.0,
+        perceptual_roughness: 0.25,
+        ..default()
+    });
+    let spark_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.72, 0.08),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.36, 0.015)) * 6.0,
+        perceptual_roughness: 0.3,
+        ..default()
+    });
+
+    for (index, hazard) in hazards
+        .iter()
+        .filter(|hazard| hazard.kind == ArenaHazardKind::SawBlade)
+        .enumerate()
+    {
+        let spin_speed = if index % 2 == 0 { 9.5 } else { -9.5 };
+        commands.spawn((
+            SceneRoot(saw_scene.clone()),
+            Transform::from_xyz(hazard.center.x, CRANK_SAW_VISUAL_Y, hazard.center.z)
+                .with_scale(Vec3::splat(2.5)),
+            ArenaSawBladeVisual { spin_speed },
+            Name::new(format!("Crank yard active saw {index}")),
+            ArenaGeometry,
+        ));
+
+        for side in [-1.0, 1.0] {
+            commands.spawn((
+                Mesh3d(housing_mesh.clone()),
+                MeshMaterial3d(housing_material.clone()),
+                Transform::from_xyz(
+                    hazard.center.x,
+                    ARENA_TOP_Y + 0.5,
+                    hazard.center.z + side * 0.68,
+                ),
+                Name::new("Crank saw housing rail"),
+                ArenaGeometry,
+            ));
+        }
+
+        let warning_scale = Vec3::splat(1.35);
+        commands.spawn((
+            Mesh3d(light_mesh.clone()),
+            MeshMaterial3d(warning_material.clone()),
+            Transform::from_xyz(hazard.center.x, ARENA_TOP_Y + 1.22, hazard.center.z + 0.72)
+                .with_scale(warning_scale),
+            ArenaSawWarningLight {
+                phase: index as f32 * PI,
+                base_scale: warning_scale,
+            },
+            Name::new("Crank saw warning lamp"),
+            ArenaGeometry,
+        ));
+
+        for spark_index in 0..5 {
+            commands.spawn((
+                Mesh3d(spark_mesh.clone()),
+                MeshMaterial3d(spark_material.clone()),
+                Transform::from_xyz(hazard.center.x, ARENA_TOP_Y + 0.92, hazard.center.z),
+                ArenaSawAmbientSpark {
+                    center: Vec3::new(hazard.center.x, ARENA_TOP_Y + 0.92, hazard.center.z),
+                    phase: spark_index as f32 / 5.0 * TAU + index as f32,
+                },
+                Name::new("Crank saw tooth spark"),
+                ArenaGeometry,
+            ));
+        }
+    }
+}
+
 fn spawn_arena_hazard_markers(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: Handle<StandardMaterial>,
     hazards: &[ArenaHazardDefinition],
 ) {
-    for hazard in hazards {
+    for hazard in hazards
+        .iter()
+        .filter(|hazard| hazard.kind != ArenaHazardKind::SawBlade)
+    {
         let base_scale = (hazard.pulse_seconds / 2.2).clamp(0.8, 1.3);
         commands.spawn((
             Mesh3d(meshes.add(Annulus::new(hazard.radius * 0.68, hazard.radius))),
@@ -1821,12 +2095,312 @@ pub fn update_arena_hazard_visuals(
     }
 }
 
+pub fn update_arena_pipe_visuals(
+    time: Res<Time>,
+    state: Res<ArenaPipeState>,
+    mut rings: Query<(&ArenaPipePortalRing, &mut Transform), Without<ArenaPipePortalParticle>>,
+    mut particles: Query<(&ArenaPipePortalParticle, &mut Transform), Without<ArenaPipePortalRing>>,
+) {
+    let Some(pipe_pair) = active_arena_definition().pipe_pair else {
+        return;
+    };
+    let elapsed = time.elapsed_secs();
+
+    for (ring, mut transform) in &mut rings {
+        let active = state.endpoint_active(ring.endpoint);
+        let pulse = (elapsed * if active { 8.0 } else { 3.2 } + ring.phase).sin();
+        let scale = 1.0 + pulse * 0.06 + if active { 0.16 } else { 0.0 };
+        transform.scale = ring.base_scale * scale;
+        transform.rotate_y(time.delta_secs() * if active { 2.8 } else { 1.1 });
+    }
+
+    for (particle, mut transform) in &mut particles {
+        let Some(center) = pipe_pair.endpoints.get(particle.endpoint).copied() else {
+            continue;
+        };
+        let active = state.endpoint_active(particle.endpoint);
+        let speed = if active { 3.8 } else { 1.65 };
+        let angle = elapsed * speed + particle.phase;
+        let rise =
+            (elapsed * if active { 1.9 } else { 1.15 } + particle.phase / TAU).rem_euclid(1.0);
+        transform.translation = Vec3::new(
+            center.x + angle.cos() * particle.radius,
+            particle.base_y + rise * if active { 1.05 } else { 0.62 },
+            center.y + angle.sin() * particle.radius,
+        );
+        transform.scale = Vec3::splat((1.0 - rise).max(0.08) * if active { 1.35 } else { 1.0 });
+    }
+}
+
+pub fn update_crank_yard_machinery(
+    time: Res<Time>,
+    mut blades: Query<
+        (&ArenaSawBladeVisual, &mut Transform),
+        (Without<ArenaSawWarningLight>, Without<ArenaSawAmbientSpark>),
+    >,
+    mut warning_lights: Query<
+        (&ArenaSawWarningLight, &mut Transform),
+        (Without<ArenaSawBladeVisual>, Without<ArenaSawAmbientSpark>),
+    >,
+    mut sparks: Query<
+        (&ArenaSawAmbientSpark, &mut Transform),
+        (Without<ArenaSawBladeVisual>, Without<ArenaSawWarningLight>),
+    >,
+) {
+    let dt = time.delta_secs();
+    let elapsed = time.elapsed_secs();
+
+    for (blade, mut transform) in &mut blades {
+        transform.rotate_local_z(blade.spin_speed * dt);
+    }
+
+    for (warning, mut transform) in &mut warning_lights {
+        let pulse = ((elapsed * 7.0 + warning.phase).sin() * 0.5 + 0.5).powf(3.0);
+        transform.scale = warning.base_scale * (0.72 + pulse * 0.5);
+    }
+
+    for (spark, mut transform) in &mut sparks {
+        let cycle = elapsed * 2.7 + spark.phase;
+        let flare = (cycle.sin() * 0.5 + 0.5).powf(9.0);
+        let angle = cycle * 2.3;
+        transform.translation = spark.center
+            + Vec3::new(
+                angle.cos() * (0.46 + flare * 0.28),
+                flare * 0.52,
+                angle.sin() * 0.34,
+            );
+        transform.scale = Vec3::splat(flare * 1.6);
+    }
+}
+
+pub fn update_arena_pipe_transits(
+    time: Res<Time>,
+    mut state: ResMut<ArenaPipeState>,
+    mut fighters: ParamSet<(
+        Query<(&Fighter, &Transform)>,
+        Query<(
+            &Fighter,
+            &mut FighterStats,
+            &mut FighterMotor,
+            &mut FighterActionState,
+            &mut Transform,
+        )>,
+    )>,
+) {
+    let arena_index = active_arena_index();
+    state.sync_to_arena(arena_index);
+    let Some(pipe_pair) = active_arena_definition().pipe_pair else {
+        return;
+    };
+    let dt = time.delta_secs();
+    let snapshots: Vec<(usize, Vec3)> = fighters
+        .p0()
+        .iter()
+        .map(|(fighter, transform)| (fighter.id, transform.translation))
+        .collect();
+
+    for (fighter, mut stats, mut motor, mut action, mut transform) in &mut fighters.p1() {
+        if fighter.id >= FIGHTER_COUNT {
+            continue;
+        }
+
+        match state.fighters[fighter.id] {
+            FighterPipeState::Ready {
+                candidate,
+                dwell,
+                cooldown,
+            } => {
+                let cooldown = (cooldown - dt).max(0.0);
+                let endpoint = if cooldown == 0.0 {
+                    pipe_entry_endpoint(pipe_pair, transform.translation, &motor, action.action)
+                } else {
+                    None
+                };
+                let next_dwell = if endpoint.is_some() && endpoint == candidate {
+                    dwell + dt
+                } else {
+                    0.0
+                };
+
+                if let Some(source) = endpoint
+                    && next_dwell >= PIPE_ENTRY_DWELL_SECONDS
+                {
+                    let destination = 1 - source;
+                    state.fighters[fighter.id] = FighterPipeState::Transit {
+                        source,
+                        destination,
+                        elapsed: 0.0,
+                        entry_y: transform.translation.y,
+                        base_scale: transform.scale,
+                    };
+                    motor.velocity = Vec3::ZERO;
+                    motor.grounded = false;
+                    *action = FighterActionState::default();
+                    action.action = FighterAction::Respawning;
+                    stats.invulnerability = stats.invulnerability.max(0.25);
+                } else {
+                    state.fighters[fighter.id] = FighterPipeState::Ready {
+                        candidate: endpoint,
+                        dwell: next_dwell,
+                        cooldown,
+                    };
+                }
+            }
+            FighterPipeState::Transit {
+                source,
+                destination,
+                elapsed,
+                entry_y,
+                base_scale,
+            } => {
+                let destination_center = pipe_pair.endpoints[destination];
+                let exit_occupied = snapshots.iter().any(|(other_id, position)| {
+                    *other_id != fighter.id
+                        && Vec2::new(
+                            position.x - destination_center.x,
+                            position.z - destination_center.y,
+                        )
+                        .length()
+                            < PIPE_EXIT_CLEARANCE_RADIUS
+                        && position.y >= pipe_pair.top_y - 0.2
+                });
+                let hidden_boundary = PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS;
+                let next_elapsed = if exit_occupied && elapsed >= hidden_boundary {
+                    hidden_boundary
+                } else {
+                    elapsed + dt
+                };
+                let sample = pipe_transit_sample(
+                    pipe_pair,
+                    source,
+                    destination,
+                    next_elapsed,
+                    entry_y,
+                    base_scale,
+                );
+
+                transform.translation = sample.position;
+                transform.scale = sample.scale;
+                motor.velocity = Vec3::ZERO;
+                motor.grounded = false;
+                *action = FighterActionState::default();
+                action.action = FighterAction::Respawning;
+                stats.invulnerability = stats.invulnerability.max(0.25);
+
+                if sample.complete {
+                    transform.translation =
+                        Vec3::new(destination_center.x, pipe_pair.top_y, destination_center.y);
+                    transform.scale = base_scale;
+                    motor.facing = Vec3::new(-destination_center.x, 0.0, -destination_center.y)
+                        .normalize_or_zero();
+                    motor.grounded = true;
+                    *action = FighterActionState::default();
+                    action.action = FighterAction::Idle;
+                    stats.invulnerability = stats.invulnerability.max(0.35);
+                    state.fighters[fighter.id] = FighterPipeState::Ready {
+                        candidate: None,
+                        dwell: 0.0,
+                        cooldown: PIPE_REENTRY_COOLDOWN_SECONDS,
+                    };
+                } else {
+                    state.fighters[fighter.id] = FighterPipeState::Transit {
+                        source,
+                        destination,
+                        elapsed: next_elapsed,
+                        entry_y,
+                        base_scale,
+                    };
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PipeTransitSample {
+    position: Vec3,
+    scale: Vec3,
+    complete: bool,
+}
+
+fn pipe_entry_endpoint(
+    pipe_pair: ArenaPipePairDefinition,
+    position: Vec3,
+    motor: &FighterMotor,
+    action: FighterAction,
+) -> Option<usize> {
+    if !motor.grounded
+        || !matches!(action, FighterAction::Idle | FighterAction::Moving)
+        || (position.y - pipe_pair.top_y).abs() > 0.18
+    {
+        return None;
+    }
+
+    pipe_pair.endpoints.iter().position(|center| {
+        Vec2::new(position.x - center.x, position.z - center.y).length() <= pipe_pair.trigger_radius
+    })
+}
+
+fn pipe_transit_sample(
+    pipe_pair: ArenaPipePairDefinition,
+    source: usize,
+    destination: usize,
+    elapsed: f32,
+    entry_y: f32,
+    base_scale: Vec3,
+) -> PipeTransitSample {
+    let source_center = pipe_pair.endpoints[source];
+    let destination_center = pipe_pair.endpoints[destination];
+    let hidden_y = pipe_pair.top_y - PIPE_SINK_DEPTH;
+    let total = PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS;
+
+    if elapsed < PIPE_ENTER_SECONDS {
+        let t = smooth_step(elapsed / PIPE_ENTER_SECONDS);
+        return PipeTransitSample {
+            position: Vec3::new(
+                source_center.x,
+                entry_y + (hidden_y - entry_y) * t,
+                source_center.y,
+            ),
+            scale: base_scale * (1.0 + (0.45 - 1.0) * t),
+            complete: false,
+        };
+    }
+
+    if elapsed < PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS {
+        return PipeTransitSample {
+            position: Vec3::new(destination_center.x, hidden_y, destination_center.y),
+            scale: base_scale * 0.45,
+            complete: false,
+        };
+    }
+
+    let t = smooth_step(
+        ((elapsed - PIPE_ENTER_SECONDS - PIPE_TRAVEL_SECONDS) / PIPE_EXIT_SECONDS).clamp(0.0, 1.0),
+    );
+    PipeTransitSample {
+        position: Vec3::new(
+            destination_center.x,
+            hidden_y + (pipe_pair.top_y - hidden_y) * t,
+            destination_center.y,
+        ),
+        scale: base_scale * (0.45 + (1.0 - 0.45) * t),
+        complete: elapsed >= total,
+    }
+}
+
+fn smooth_step(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
 fn arena_hazard_marker_scale(kind: ArenaHazardKind, wave: f32) -> f32 {
     match kind {
         ArenaHazardKind::PulseVent => 1.0 + wave.max(0.0) * 0.28,
         ArenaHazardKind::SnareField => 0.94 + (wave + 1.0) * 0.08,
         ArenaHazardKind::BumperNode => 0.96 + wave.max(0.0) * 0.2,
         ArenaHazardKind::Campfire => 0.98 + (wave + 1.0) * 0.035,
+        ArenaHazardKind::SawBlade => 1.0,
     }
 }
 
@@ -1914,6 +2488,14 @@ pub fn update_arena_hazards(
             if hazard.kind == ArenaHazardKind::SnareField {
                 motor.velocity.x *= 0.55;
                 motor.velocity.z *= 0.55;
+            }
+
+            if hazard.kind == ArenaHazardKind::SawBlade {
+                spawn_machine_scratch(
+                    &mut commands,
+                    &effect_assets,
+                    transform.translation + Vec3::Y * 0.72,
+                );
             }
 
             apply_impact(
@@ -2134,6 +2716,7 @@ fn arena_hazard_active_fraction(kind: ArenaHazardKind) -> f32 {
         ArenaHazardKind::SnareField => 0.68,
         ArenaHazardKind::BumperNode => 0.24,
         ArenaHazardKind::Campfire => 1.0,
+        ArenaHazardKind::SawBlade => 1.0,
     }
 }
 
@@ -2143,6 +2726,7 @@ fn arena_hazard_hit_cooldown(kind: ArenaHazardKind) -> f32 {
         ArenaHazardKind::SnareField => 0.56,
         ArenaHazardKind::BumperNode => 0.82,
         ArenaHazardKind::Campfire => 0.82,
+        ArenaHazardKind::SawBlade => 0.68,
     }
 }
 
@@ -2203,6 +2787,18 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
             12.0,
             ImpactFeedbackIntensity::Heavy,
             ReactionFamilyId::LauncherDown,
+        ),
+        ArenaHazardKind::SawBlade => impact_profile(
+            NEUTRAL_IMPACT_OWNER_ID,
+            ImpactSource::Hazard,
+            ARENA_HAZARD_SAW_DAMAGE,
+            ARENA_HAZARD_SAW_KNOCKBACK,
+            0.7,
+            false,
+            false,
+            8.0,
+            ImpactFeedbackIntensity::Light,
+            ReactionFamilyId::ShortStandingStagger,
         ),
     };
     profile.element = DamageElement::Hazard;
@@ -2338,6 +2934,7 @@ mod tests {
         let snare = arena_hazard_impact_profile(ArenaHazardKind::SnareField);
         let bumper = arena_hazard_impact_profile(ArenaHazardKind::BumperNode);
         let campfire = arena_hazard_impact_profile(ArenaHazardKind::Campfire);
+        let saw = arena_hazard_impact_profile(ArenaHazardKind::SawBlade);
 
         assert!(pulse.force_knockdown);
         assert!(!snare.force_knockdown);
@@ -2348,7 +2945,98 @@ mod tests {
         assert!(!campfire.guardable);
         assert_eq!(campfire.reaction_family, ReactionFamilyId::LauncherDown);
         assert!(campfire.reaction.landing_aftermath.is_some());
+        assert_eq!(saw.damage, ARENA_HAZARD_SAW_DAMAGE);
+        assert!(!saw.force_knockdown);
+        assert!(!saw.guardable);
+        assert_eq!(saw.reaction_family, ReactionFamilyId::ShortStandingStagger);
+        assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SawBlade) < 0.7);
         assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SnareField) < 1.0);
+    }
+
+    #[test]
+    fn crank_pipe_entry_requires_grounded_locomotion_on_the_opening() {
+        let pipe_pair = arena_definitions()[CRANK_YARD_ARENA_INDEX]
+            .pipe_pair
+            .expect("Crank Yard pipe pair");
+        let center = pipe_pair.endpoints[0];
+        let position = Vec3::new(center.x, pipe_pair.top_y, center.y);
+        let grounded_motor = FighterMotor {
+            grounded: true,
+            ..default()
+        };
+        let airborne_motor = FighterMotor {
+            grounded: false,
+            ..default()
+        };
+
+        assert_eq!(
+            pipe_entry_endpoint(pipe_pair, position, &grounded_motor, FighterAction::Idle),
+            Some(0)
+        );
+        assert_eq!(
+            pipe_entry_endpoint(pipe_pair, position, &airborne_motor, FighterAction::Idle),
+            None
+        );
+        assert_eq!(
+            pipe_entry_endpoint(
+                pipe_pair,
+                position,
+                &grounded_motor,
+                FighterAction::HeavyAttack
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn crank_pipe_transit_sinks_then_emerges_at_the_other_endpoint() {
+        let pipe_pair = arena_definitions()[CRANK_YARD_ARENA_INDEX]
+            .pipe_pair
+            .expect("Crank Yard pipe pair");
+        let base_scale = Vec3::splat(1.2);
+        let entering = pipe_transit_sample(
+            pipe_pair,
+            0,
+            1,
+            PIPE_ENTER_SECONDS * 0.5,
+            pipe_pair.top_y,
+            base_scale,
+        );
+        assert_eq!(entering.position.x, pipe_pair.endpoints[0].x);
+        assert!(entering.position.y < pipe_pair.top_y);
+        assert!(entering.scale.x < base_scale.x);
+
+        let exiting = pipe_transit_sample(
+            pipe_pair,
+            0,
+            1,
+            PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS * 0.5,
+            pipe_pair.top_y,
+            base_scale,
+        );
+        assert_eq!(exiting.position.x, pipe_pair.endpoints[1].x);
+        assert!(exiting.position.y < pipe_pair.top_y);
+
+        let complete = pipe_transit_sample(
+            pipe_pair,
+            0,
+            1,
+            PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS,
+            pipe_pair.top_y,
+            base_scale,
+        );
+        assert!(complete.complete);
+        assert_eq!(complete.position.y, pipe_pair.top_y);
+        assert_eq!(complete.scale, base_scale);
+    }
+
+    #[test]
+    fn crank_yard_has_no_harmless_static_saw_decoy() {
+        assert!(
+            CRANK_ASSET_PROPS
+                .iter()
+                .all(|prop| prop.name != "Crank yard center saw")
+        );
     }
 
     #[test]

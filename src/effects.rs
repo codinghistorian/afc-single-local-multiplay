@@ -18,6 +18,7 @@ pub enum EffectKind {
     FeedbackBurst,
     FirePunch,
     Burning,
+    Scratch,
     SpecialPulse,
     RingOutBurst,
     RespawnColumn,
@@ -2458,6 +2459,30 @@ pub fn spawn_hit_spark(
         heavy,
         scale,
     );
+}
+
+pub fn spawn_machine_scratch(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    for index in 0..3 {
+        let offset = index as f32 - 1.0;
+        let start_scale = Vec3::new(0.42, 1.35, 0.42);
+        commands.spawn((
+            Mesh3d(assets.trail_mesh.clone()),
+            MeshMaterial3d(assets.slash_red.clone()),
+            Transform::from_translation(position + Vec3::new(offset * 0.22, offset * 0.08, 0.16))
+                .with_rotation(Quat::from_rotation_z(-0.68))
+                .with_scale(start_scale),
+            VisualEffect {
+                kind: EffectKind::Scratch,
+                lifetime: 0.26,
+                age: 0.0,
+                velocity: Vec3::Y * 0.32,
+                spin: Vec3::ZERO,
+                start_scale,
+                end_scale: Vec3::new(0.12, 1.7, 0.12),
+            },
+            Name::new("Machine scratch slash"),
+        ));
+    }
 }
 
 pub fn spawn_element_hit_spark(

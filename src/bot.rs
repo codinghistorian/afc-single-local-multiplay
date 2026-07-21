@@ -1343,6 +1343,7 @@ fn arena_hazard_avoid_radius(hazard: &ArenaHazardDefinition) -> f32 {
             ArenaHazardKind::SnareField => 0.8,
             ArenaHazardKind::BumperNode => 1.35,
             ArenaHazardKind::Campfire => 1.0,
+            ArenaHazardKind::SawBlade => 1.25,
         }
 }
 
@@ -1607,8 +1608,16 @@ mod tests {
             pulse_seconds: 2.0,
             phase: 0.0,
         };
+        let saw = ArenaHazardDefinition {
+            kind: ArenaHazardKind::SawBlade,
+            center: Vec3::ZERO,
+            radius: 1.0,
+            pulse_seconds: 1.0,
+            phase: 0.0,
+        };
 
         assert!(arena_hazard_avoid_radius(&bumper) > arena_hazard_avoid_radius(&pulse));
+        assert!(arena_hazard_avoid_radius(&saw) > arena_hazard_avoid_radius(&pulse));
     }
 
     #[test]

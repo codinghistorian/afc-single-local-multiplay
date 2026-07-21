@@ -223,7 +223,11 @@ fn main() {
         )
         .add_systems(
             Update,
-            (fighter::apply_fighter_movement, fighter::separate_fighters)
+            (
+                fighter::apply_fighter_movement,
+                arena::update_arena_pipe_transits,
+                fighter::separate_fighters,
+            )
                 .chain()
                 .in_set(GameSet::Movement)
                 .run_if(game_state::match_accepts_gameplay),
@@ -239,6 +243,8 @@ fn main() {
                 penguin_skills::update_penguin_surfaces,
                 arena::update_arena_hazards,
                 arena::update_arena_hazard_visuals,
+                arena::update_arena_pipe_visuals,
+                arena::update_crank_yard_machinery,
             )
                 .chain()
                 .in_set(GameSet::Combat)

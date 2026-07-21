@@ -83,6 +83,7 @@ pub enum ArenaHazardKind {
     SnareField,
     BumperNode,
     Campfire,
+    SawBlade,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +93,13 @@ pub struct ArenaHazardDefinition {
     pub radius: f32,
     pub pulse_seconds: f32,
     pub phase: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArenaPipePairDefinition {
+    pub endpoints: [Vec2; 2],
+    pub top_y: f32,
+    pub trigger_radius: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +117,7 @@ pub struct ArenaDefinition {
     pub ground_shapes: &'static [ArenaGroundShape],
     pub platforms: &'static [PlatformDefinition],
     pub prop_colliders: &'static [PlatformDefinition],
+    pub pipe_pair: Option<ArenaPipePairDefinition>,
     pub ringout_radius: f32,
     pub ringout_y: f32,
     pub camera_offset: Vec3,
@@ -361,6 +370,19 @@ const CRANK_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(-5.8, 5.8, 1.55, 1.55, ARENA_TOP_Y + 0.38),
     PlatformDefinition::new(5.8, 5.8, 1.55, 1.55, ARENA_TOP_Y + 0.38),
 ];
+
+const CRANK_PIPE_TOP_Y: f32 = ARENA_TOP_Y + 1.14;
+
+const CRANK_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::new(-1.7, 7.0, 1.0, 1.0, CRANK_PIPE_TOP_Y),
+    PlatformDefinition::new(1.7, -7.0, 1.0, 1.0, CRANK_PIPE_TOP_Y),
+];
+
+const CRANK_PIPE_PAIR: ArenaPipePairDefinition = ArenaPipePairDefinition {
+    endpoints: [Vec2::new(-1.7, 7.0), Vec2::new(1.7, -7.0)],
+    top_y: CRANK_PIPE_TOP_Y,
+    trigger_radius: 0.56,
+};
 
 const CRANK_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
@@ -641,14 +663,14 @@ const SUNSTONE_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
 
 const CRANK_HAZARDS: &[ArenaHazardDefinition] = &[
     ArenaHazardDefinition {
-        kind: ArenaHazardKind::BumperNode,
+        kind: ArenaHazardKind::SawBlade,
         center: Vec3::new(-3.1, ARENA_TOP_Y + 0.05, 0.0),
         radius: 0.95,
         pulse_seconds: 2.1,
         phase: 0.0,
     },
     ArenaHazardDefinition {
-        kind: ArenaHazardKind::BumperNode,
+        kind: ArenaHazardKind::SawBlade,
         center: Vec3::new(3.1, ARENA_TOP_Y + 0.05, 0.0),
         radius: 0.95,
         pulse_seconds: 2.1,
@@ -798,6 +820,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: CROWN_GROUND,
         platforms: CROWN_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS,
         ringout_y: RINGOUT_Y,
         camera_offset: CAMERA_BASE_OFFSET,
@@ -817,6 +840,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: SPLIT_GROUND,
         platforms: SPLIT_PLATFORMS,
         prop_colliders: SPLIT_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 1.0,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
@@ -836,6 +860,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: SUNSTONE_GROUND,
         platforms: SUNSTONE_PLATFORMS,
         prop_colliders: SUNSTONE_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.6,
         ringout_y: RINGOUT_Y - 0.25,
         camera_offset: Vec3::new(0.0, 13.6, 15.6),
@@ -854,7 +879,8 @@ const ARENAS: &[ArenaDefinition] = &[
         item_anchors: CRANK_ITEMS,
         ground_shapes: CRANK_GROUND,
         platforms: CRANK_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: CRANK_PROP_COLLIDERS,
+        pipe_pair: Some(CRANK_PIPE_PAIR),
         ringout_radius: RINGOUT_RADIUS + 0.35,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 12.8, 14.8),
@@ -874,6 +900,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: VENT_SPIRAL_GROUND,
         platforms: VENT_SPIRAL_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.45,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.4),
@@ -893,6 +920,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: BUMPER_GROUND,
         platforms: BUMPER_ALLEY_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.1,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.4, 15.8),
@@ -912,6 +940,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: FEAST_MARKET_GROUND,
         platforms: FEAST_MARKET_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.75,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
@@ -931,6 +960,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: SNARE_GARDEN_GROUND,
         platforms: SNARE_GARDEN_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.55,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.3, 15.4),
@@ -950,6 +980,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: SKY_STEPS_GROUND,
         platforms: SKY_STEPS_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.85,
         ringout_y: RINGOUT_Y - 0.45,
         camera_offset: Vec3::new(0.0, 14.0, 16.2),
@@ -969,6 +1000,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: POWDER_KEG_GROUND,
         platforms: POWDER_KEG_PLATFORMS,
         prop_colliders: NO_PROP_COLLIDERS,
+        pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.25,
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.6),
@@ -1053,10 +1085,12 @@ mod tests {
     fn split_causeway_uses_two_symmetric_campfires() {
         let split = arena_definition(1);
         assert_eq!(split.hazards.len(), 2);
-        assert!(split
-            .hazards
-            .iter()
-            .all(|hazard| hazard.kind == ArenaHazardKind::Campfire));
+        assert!(
+            split
+                .hazards
+                .iter()
+                .all(|hazard| hazard.kind == ArenaHazardKind::Campfire)
+        );
         assert_eq!(split.hazards[0].center.x, 0.0);
         assert_eq!(split.hazards[1].center.x, 0.0);
         assert_eq!(split.hazards[0].center.z, -split.hazards[1].center.z);
@@ -1148,6 +1182,35 @@ mod tests {
                 assert!(position.distance(hazard_center) > hazard.radius + 0.4);
             }
         }
+    }
+
+    #[test]
+    fn crank_yard_pipe_pair_matches_standable_prop_colliders() {
+        let crank = arena_definition(3);
+        let pipe_pair = crank.pipe_pair.expect("Crank Yard should link its pipes");
+        assert_eq!(crank.prop_colliders.len(), 2);
+
+        for (index, endpoint) in pipe_pair.endpoints.into_iter().enumerate() {
+            let collider = crank.prop_colliders[index];
+            assert_eq!(collider.center, endpoint);
+            assert_eq!(collider.top_y, pipe_pair.top_y);
+            assert!(collider.half_extents.min_element() >= pipe_pair.trigger_radius);
+        }
+    }
+
+    #[test]
+    fn crank_yard_damage_zones_are_saw_blades_on_the_conveyors() {
+        let crank = arena_definition(3);
+        assert_eq!(crank.hazards.len(), 2);
+        assert!(
+            crank
+                .hazards
+                .iter()
+                .all(|hazard| hazard.kind == ArenaHazardKind::SawBlade)
+        );
+        assert_eq!(crank.hazards[0].center.x, -3.1);
+        assert_eq!(crank.hazards[1].center.x, 3.1);
+        assert!(crank.hazards.iter().all(|hazard| hazard.center.z == 0.0));
     }
 
     #[test]
