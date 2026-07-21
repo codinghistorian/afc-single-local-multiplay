@@ -315,35 +315,41 @@ const SPLIT_ITEMS: &[ItemAnchor] = &[
 
 const SUNSTONE_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, 0.0, 3.2, 2.4, ARENA_TOP_Y + 0.18),
-    PlatformDefinition::new(-6.4, 3.8, 1.8, 1.2, ARENA_TOP_Y + 0.52),
-    PlatformDefinition::new(6.4, -3.8, 1.8, 1.2, ARENA_TOP_Y + 0.52),
     PlatformDefinition::new(0.0, -8.6, 4.2, 1.0, ARENA_TOP_Y - 0.08),
+    PlatformDefinition::new(0.0, 8.6, 4.2, 1.0, ARENA_TOP_Y - 0.08),
+];
+
+const SUNSTONE_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::new(-6.0, 3.8, 1.65, 1.65, ARENA_TOP_Y + 1.3),
+    PlatformDefinition::new(6.0, -3.8, 1.65, 1.65, ARENA_TOP_Y + 1.3),
+    PlatformDefinition::new(-6.0, -4.7, 1.1, 1.1, ARENA_TOP_Y + 0.93),
+    PlatformDefinition::new(6.0, 4.7, 1.1, 1.1, ARENA_TOP_Y + 0.93),
 ];
 
 const SUNSTONE_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::CupCoffee,
-        position: Vec3::new(0.0, ARENA_TOP_Y + 0.68, 0.0),
+        position: Vec3::new(0.0, ARENA_TOP_Y + 0.42, -8.6),
         phase: 0.6,
     },
     ItemAnchor {
         kind: ItemKind::Barrel,
-        position: Vec3::new(-6.4, ARENA_TOP_Y + 0.96, 3.8),
+        position: Vec3::new(-3.6, ARENA_TOP_Y + 0.28, 1.0),
         phase: 2.1,
     },
     ItemAnchor {
         kind: ItemKind::Turkey,
-        position: Vec3::new(6.4, ARENA_TOP_Y + 0.96, -3.8),
+        position: Vec3::new(3.6, ARENA_TOP_Y + 0.28, -1.0),
         phase: 3.4,
     },
     ItemAnchor {
         kind: ItemKind::Apple,
-        position: Vec3::new(-5.8, ARENA_TOP_Y + 0.48, -4.7),
+        position: Vec3::new(-3.2, ARENA_TOP_Y + 0.32, -5.8),
         phase: 4.8,
     },
     ItemAnchor {
         kind: ItemKind::Steamer,
-        position: Vec3::new(5.8, ARENA_TOP_Y + 0.46, 4.7),
+        position: Vec3::new(0.0, ARENA_TOP_Y + 0.38, 8.6),
         phase: 5.6,
     },
 ];
@@ -626,10 +632,10 @@ const SPLIT_HAZARDS: &[ArenaHazardDefinition] = &[
 ];
 
 const SUNSTONE_HAZARDS: &[ArenaHazardDefinition] = &[ArenaHazardDefinition {
-    kind: ArenaHazardKind::SnareField,
-    center: Vec3::new(0.0, ARENA_TOP_Y + 0.05, 1.8),
-    radius: 1.8,
-    pulse_seconds: 3.3,
+    kind: ArenaHazardKind::Campfire,
+    center: Vec3::new(0.0, ARENA_TOP_Y + 0.25, 0.0),
+    radius: 1.05,
+    pulse_seconds: 1.4,
     phase: 0.0,
 }];
 
@@ -821,15 +827,15 @@ const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
         name: "Sunstone Steps",
         spawn_points: [
-            Vec3::new(-4.8, ARENA_TOP_Y, 4.0),
-            Vec3::new(4.8, ARENA_TOP_Y, -4.0),
-            Vec3::new(-4.8, ARENA_TOP_Y, -4.0),
-            Vec3::new(4.8, ARENA_TOP_Y, 4.0),
+            Vec3::new(-3.8, ARENA_TOP_Y, 2.8),
+            Vec3::new(3.8, ARENA_TOP_Y, -2.8),
+            Vec3::new(-3.8, ARENA_TOP_Y, -2.8),
+            Vec3::new(3.8, ARENA_TOP_Y, 2.8),
         ],
         item_anchors: SUNSTONE_ITEMS,
         ground_shapes: SUNSTONE_GROUND,
         platforms: SUNSTONE_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: SUNSTONE_PROP_COLLIDERS,
         ringout_radius: RINGOUT_RADIUS + 0.6,
         ringout_y: RINGOUT_Y - 0.25,
         camera_offset: Vec3::new(0.0, 13.6, 15.6),
@@ -1078,6 +1084,70 @@ mod tests {
                 .skip(2)
                 .all(|collider| collider.half_extents.max_element() <= 0.56)
         );
+    }
+
+    #[test]
+    fn sunstone_steps_uses_a_clear_hazard_and_symmetric_terraces() {
+        let sunstone = arena_definition(2);
+        assert_eq!(sunstone.hazards.len(), 1);
+        assert_eq!(sunstone.hazards[0].kind, ArenaHazardKind::Campfire);
+        assert_eq!(sunstone.hazards[0].center.x, 0.0);
+        assert_eq!(sunstone.hazards[0].center.z, 0.0);
+
+        for z in [-8.6, 8.6] {
+            assert_eq!(
+                crate::arena::ground_support_for_arena_with_radius(sunstone, 0.0, z, 0.0).height(),
+                Some(ARENA_TOP_Y - 0.08)
+            );
+        }
+    }
+
+    #[test]
+    fn sunstone_items_clear_hazards_and_solid_props() {
+        let sunstone = arena_definition(2);
+        assert_eq!(sunstone.prop_colliders.len(), 4);
+
+        for anchor in sunstone.item_anchors {
+            let item = Vec2::new(anchor.position.x, anchor.position.z);
+            for collider in sunstone.prop_colliders {
+                let offset = (item - collider.center).abs();
+                assert!(
+                    offset.x > collider.half_extents.x + 0.5
+                        || offset.y > collider.half_extents.y + 0.5,
+                    "item at {item:?} overlaps solid prop at {:?}",
+                    collider.center
+                );
+            }
+            for hazard in sunstone.hazards {
+                let hazard_center = Vec2::new(hazard.center.x, hazard.center.z);
+                assert!(
+                    item.distance(hazard_center) > hazard.radius + 0.75,
+                    "item at {item:?} is too close to the central hazard"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sunstone_fighter_spawns_clear_hazards_and_solid_props() {
+        let sunstone = arena_definition(2);
+
+        for spawn in sunstone.spawn_points {
+            let position = Vec2::new(spawn.x, spawn.z);
+            for collider in sunstone.prop_colliders {
+                let offset = (position - collider.center).abs();
+                assert!(
+                    offset.x >= collider.half_extents.x + 0.4
+                        || offset.y >= collider.half_extents.y + 0.4,
+                    "fighter spawn at {position:?} overlaps solid prop at {:?}",
+                    collider.center
+                );
+            }
+            for hazard in sunstone.hazards {
+                let hazard_center = Vec2::new(hazard.center.x, hazard.center.z);
+                assert!(position.distance(hazard_center) > hazard.radius + 0.4);
+            }
+        }
     }
 
     #[test]

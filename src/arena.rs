@@ -1146,15 +1146,6 @@ const SPLIT_ASSET_PROPS: &[ArenaAssetProp] = &[
 
 const SUNSTONE_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
-        name: "Sunstone central dais",
-        file: "tower/tile-rock.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y - 0.1,
-        z: 0.0,
-        yaw: PI * 0.25,
-        scale: 3.3,
-    },
-    ArenaAssetProp {
         name: "Sunstone west timber lookout",
         file: "tower/wood-structure.glb",
         x: -6.0,
@@ -1189,15 +1180,6 @@ const SUNSTONE_ASSET_PROPS: &[ArenaAssetProp] = &[
         z: 4.7,
         yaw: -0.25,
         scale: 2.2,
-    },
-    ArenaAssetProp {
-        name: "Sunstone rear rise",
-        file: "tower/tile-hill.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y - 0.5,
-        z: 8.4,
-        yaw: PI,
-        scale: 3.0,
     },
 ];
 
@@ -2403,7 +2385,7 @@ mod tests {
     fn mini_arena_props_cover_stage_variants() {
         for index in 0..arena_definitions().len() {
             let props = arena_asset_props(index);
-            let expected_minimum = if index == 1 { 4 } else { 5 };
+            let expected_minimum = if matches!(index, 1 | 2) { 4 } else { 5 };
             assert!(props.len() >= expected_minimum);
             assert!(props.iter().all(|prop| prop.file.ends_with(".glb")));
             assert!(props.iter().all(|prop| prop.scale > 0.0));
@@ -2512,6 +2494,27 @@ mod tests {
             let side_position = Vec3::new(
                 collider.center.x
                     + interior_direction * (collider.half_extents.x + FIGHTER_RADIUS * 0.5),
+                ARENA_TOP_Y,
+                collider.center.y,
+            );
+            let resolved =
+                resolve_platform_side_collision_against(side_position, FIGHTER_RADIUS, collider);
+            assert!(
+                (resolved.x - collider.center.x).abs() + 0.001
+                    >= collider.half_extents.x + FIGHTER_RADIUS
+            );
+        }
+    }
+
+    #[test]
+    fn sunstone_solid_props_block_at_their_visual_footprints() {
+        let sunstone = &arena_definitions()[2];
+        assert_eq!(sunstone.prop_colliders.len(), 4);
+
+        for collider in sunstone.prop_colliders {
+            let inward = -collider.center.x.signum();
+            let side_position = Vec3::new(
+                collider.center.x + inward * (collider.half_extents.x + FIGHTER_RADIUS * 0.5),
                 ARENA_TOP_Y,
                 collider.center.y,
             );
