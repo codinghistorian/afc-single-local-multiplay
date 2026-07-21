@@ -245,6 +245,7 @@ fn main() {
                 arena::update_arena_hazard_visuals,
                 arena::update_arena_pipe_visuals,
                 arena::update_crank_yard_machinery,
+                arena::update_vent_spiral_machinery,
             )
                 .chain()
                 .in_set(GameSet::Combat)

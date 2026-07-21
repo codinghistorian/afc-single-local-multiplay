@@ -3,7 +3,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::arena::{
-    ArenaHazardState, arena_hazard_is_active_for_kind, ground_support_for_arena_with_radius,
+    ArenaHazardState, arena_hazard_affects_height, arena_hazard_is_active_for_kind,
+    ground_support_for_arena_with_radius,
 };
 use crate::arena_defs::{
     ArenaDefinition, ArenaHazardDefinition, ArenaHazardKind, active_arena_definition,
@@ -643,6 +644,15 @@ pub fn bot_input(
             distance,
             range,
         );
+
+        if bot_should_jump_for_elevation(
+            transform.translation,
+            input.movement,
+            motor.grounded,
+            active_arena_definition(),
+        ) {
+            input.jump = true;
+        }
 
         if bot_should_dash_for_movement(
             brain.movement_plan,
@@ -1316,6 +1326,31 @@ fn arena_point_supported(arena: &ArenaDefinition, x: f32, z: f32) -> bool {
         .is_some()
 }
 
+fn bot_should_jump_for_elevation(
+    position: Vec3,
+    movement: Vec2,
+    grounded: bool,
+    arena: &ArenaDefinition,
+) -> bool {
+    if !grounded || movement.length_squared() <= 0.01 {
+        return false;
+    }
+
+    let Some(current_height) =
+        ground_support_for_arena_with_radius(arena, position.x, position.z, 0.0).height()
+    else {
+        return false;
+    };
+    let probe = Vec2::new(position.x, position.z) + movement.normalize_or_zero() * 1.05;
+    let Some(next_height) =
+        ground_support_for_arena_with_radius(arena, probe.x, probe.y, 0.0).height()
+    else {
+        return false;
+    };
+    let rise = next_height - current_height;
+    rise >= 0.3 && rise <= 0.75
+}
+
 fn arena_hazard_avoidance(
     position: Vec3,
     hazard_elapsed: f32,
@@ -1324,7 +1359,9 @@ fn arena_hazard_avoidance(
 ) -> Vec2 {
     let mut avoidance = Vec2::ZERO;
     for hazard in hazards {
-        if !arena_hazard_is_active_for_kind(hazard_elapsed, hazard) {
+        if !arena_hazard_is_active_for_kind(hazard_elapsed, hazard)
+            || !arena_hazard_affects_height(hazard, position.y)
+        {
             continue;
         }
         let flat = Vec2::new(position.x - hazard.center.x, position.z - hazard.center.z);
@@ -1590,6 +1627,10 @@ mod tests {
             arena_hazard_avoidance(position, 1.2, &hazards, 1.0),
             Vec2::ZERO
         );
+        assert_eq!(
+            arena_hazard_avoidance(Vec3::new(0.5, ARENA_TOP_Y - 0.65, 0.0), 0.2, &hazards, 1.0,),
+            Vec2::ZERO
+        );
     }
 
     #[test]
@@ -1618,6 +1659,26 @@ mod tests {
 
         assert!(arena_hazard_avoid_radius(&bumper) > arena_hazard_avoid_radius(&pulse));
         assert!(arena_hazard_avoid_radius(&saw) > arena_hazard_avoid_radius(&pulse));
+    }
+
+    #[test]
+    fn bot_jumps_when_the_vent_spiral_route_rises_a_tier() {
+        let vent = crate::arena_defs::arena_definition(4);
+        let approach = Vec3::new(4.15, ARENA_TOP_Y, 2.2);
+
+        assert!(bot_should_jump_for_elevation(approach, Vec2::Y, true, vent,));
+        assert!(!bot_should_jump_for_elevation(
+            approach,
+            Vec2::Y,
+            false,
+            vent,
+        ));
+        assert!(!bot_should_jump_for_elevation(
+            approach,
+            -Vec2::Y,
+            true,
+            vent,
+        ));
     }
 
     #[test]

@@ -99,6 +99,7 @@ pub struct ArenaHazardDefinition {
 pub struct ArenaPipePairDefinition {
     pub endpoints: [Vec2; 2],
     pub top_y: f32,
+    pub collider_radius: f32,
     pub trigger_radius: f32,
 }
 
@@ -174,17 +175,15 @@ const CRANK_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::rectangle(5.8, 5.8, 1.8, 1.8, 0.0, ARENA_TOP_Y + 0.12),
 ];
 
+const VENT_SPIRAL_TIER_STEP: f32 = 0.65;
+const VENT_SPIRAL_TIER_1_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP;
+const VENT_SPIRAL_TIER_2_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP * 2.0;
+const VENT_SPIRAL_TIER_3_Y: f32 = ARENA_TOP_Y + VENT_SPIRAL_TIER_STEP * 3.0;
+
 const VENT_SPIRAL_GROUND: &[ArenaGroundShape] = &[
-    ArenaGroundShape::circle(0.0, 0.0, 2.45, ARENA_TOP_Y),
-    ArenaGroundShape::rectangle(3.5, 0.0, 2.5, 1.35, 0.0, ARENA_TOP_Y),
-    ArenaGroundShape::rectangle(5.0, 2.5, 2.25, 1.25, 0.78, ARENA_TOP_Y + 0.08),
-    ArenaGroundShape::rectangle(3.0, 5.0, 2.35, 1.25, 0.0, ARENA_TOP_Y + 0.16),
-    ArenaGroundShape::rectangle(-0.3, 5.5, 2.25, 1.25, 0.0, ARENA_TOP_Y + 0.24),
-    ArenaGroundShape::rectangle(-3.7, 4.2, 2.4, 1.25, -0.7, ARENA_TOP_Y + 0.3),
-    ArenaGroundShape::rectangle(-5.2, 1.2, 2.25, 1.25, 0.0, ARENA_TOP_Y + 0.36),
-    ArenaGroundShape::rectangle(-4.0, -2.2, 2.45, 1.25, 0.7, ARENA_TOP_Y + 0.42),
-    ArenaGroundShape::rectangle(-1.2, -4.4, 2.25, 1.25, 0.0, ARENA_TOP_Y + 0.48),
-    ArenaGroundShape::rectangle(2.4, -4.5, 2.45, 1.25, 0.0, ARENA_TOP_Y + 0.54),
+    ArenaGroundShape::circle(0.0, 0.0, 2.75, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(4.0, 0.0, 2.2, 1.5, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(5.1, 2.35, 1.55, 1.55, 0.0, ARENA_TOP_Y),
 ];
 
 const BUMPER_GROUND: &[ArenaGroundShape] = &[
@@ -299,6 +298,11 @@ const SPLIT_PROP_COLLIDERS: &[PlatformDefinition] = &[
 
 const NO_PROP_COLLIDERS: &[PlatformDefinition] = &[];
 
+const VENT_SPIRAL_PROP_COLLIDERS: &[PlatformDefinition] = &[
+    PlatformDefinition::new(0.0, 0.0, 1.55, 1.55, ARENA_TOP_Y + 0.68),
+    PlatformDefinition::new(0.0, 0.0, 0.46, 0.46, ARENA_TOP_Y + 1.52),
+];
+
 const SPLIT_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::Barrel,
@@ -371,17 +375,34 @@ const CRANK_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(5.8, 5.8, 1.55, 1.55, ARENA_TOP_Y + 0.38),
 ];
 
-const CRANK_PIPE_TOP_Y: f32 = ARENA_TOP_Y + 1.14;
+const CRANK_PIPE_MODEL_HEIGHT: f32 = 0.564_285_76;
+const CRANK_PIPE_MODEL_HALF_WIDTH: f32 = 0.5;
+pub const CRANK_PIPE_VISUAL_SCALE: f32 = 1.5;
+const CRANK_PIPE_TOP_Y: f32 = ARENA_TOP_Y + CRANK_PIPE_MODEL_HEIGHT * CRANK_PIPE_VISUAL_SCALE;
+const CRANK_PIPE_HALF_EXTENT: f32 = CRANK_PIPE_MODEL_HALF_WIDTH * CRANK_PIPE_VISUAL_SCALE;
 
 const CRANK_PROP_COLLIDERS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(-1.7, 7.0, 1.0, 1.0, CRANK_PIPE_TOP_Y),
-    PlatformDefinition::new(1.7, -7.0, 1.0, 1.0, CRANK_PIPE_TOP_Y),
+    PlatformDefinition::new(
+        -1.7,
+        7.0,
+        CRANK_PIPE_HALF_EXTENT,
+        CRANK_PIPE_HALF_EXTENT,
+        CRANK_PIPE_TOP_Y,
+    ),
+    PlatformDefinition::new(
+        1.7,
+        -7.0,
+        CRANK_PIPE_HALF_EXTENT,
+        CRANK_PIPE_HALF_EXTENT,
+        CRANK_PIPE_TOP_Y,
+    ),
 ];
 
 const CRANK_PIPE_PAIR: ArenaPipePairDefinition = ArenaPipePairDefinition {
     endpoints: [Vec2::new(-1.7, 7.0), Vec2::new(1.7, -7.0)],
     top_y: CRANK_PIPE_TOP_Y,
-    trigger_radius: 0.56,
+    collider_radius: CRANK_PIPE_HALF_EXTENT,
+    trigger_radius: 0.5,
 };
 
 const CRANK_ITEMS: &[ItemAnchor] = &[
@@ -413,31 +434,38 @@ const CRANK_ITEMS: &[ItemAnchor] = &[
 ];
 
 const VENT_SPIRAL_PLATFORMS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(6.85, 2.15, 2.0, 1.15, ARENA_TOP_Y + 0.16),
-    PlatformDefinition::new(2.15, 6.85, 1.15, 2.0, ARENA_TOP_Y + 0.28),
-    PlatformDefinition::new(-6.85, -2.15, 2.0, 1.15, ARENA_TOP_Y + 0.16),
-    PlatformDefinition::new(-2.15, -6.85, 1.15, 2.0, ARENA_TOP_Y + 0.28),
+    PlatformDefinition::new(3.0, 4.5, 2.4, 1.45, VENT_SPIRAL_TIER_1_Y),
+    PlatformDefinition::new(0.0, 5.2, 1.8, 1.45, VENT_SPIRAL_TIER_1_Y),
+    PlatformDefinition::new(-3.0, 4.3, 1.8, 1.5, VENT_SPIRAL_TIER_1_Y),
+    PlatformDefinition::new(-4.6, 2.0, 1.5, 2.0, VENT_SPIRAL_TIER_2_Y),
+    PlatformDefinition::new(-4.4, -0.8, 1.6, 2.0, VENT_SPIRAL_TIER_2_Y),
+    PlatformDefinition::new(-2.6, -3.8, 2.2, 1.45, VENT_SPIRAL_TIER_3_Y),
+    PlatformDefinition::new(1.0, -4.3, 1.9, 1.45, VENT_SPIRAL_TIER_3_Y),
+    PlatformDefinition::new(6.85, 2.15, 2.0, 1.15, ARENA_TOP_Y),
+    PlatformDefinition::new(2.15, 6.85, 1.15, 2.0, VENT_SPIRAL_TIER_1_Y),
+    PlatformDefinition::new(-6.85, -2.15, 2.0, 1.15, VENT_SPIRAL_TIER_2_Y),
+    PlatformDefinition::new(-2.15, -6.85, 1.15, 2.0, VENT_SPIRAL_TIER_3_Y),
 ];
 
 const VENT_SPIRAL_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
-        kind: ItemKind::CupCoffee,
-        position: Vec3::new(-4.6, ARENA_TOP_Y + 0.5, 3.8),
+        kind: ItemKind::Steamer,
+        position: Vec3::new(6.85, ARENA_TOP_Y + 0.5, 2.15),
         phase: 0.8,
     },
     ItemAnchor {
-        kind: ItemKind::Mushroom,
-        position: Vec3::new(4.6, ARENA_TOP_Y + 0.5, -3.8),
+        kind: ItemKind::CupCoffee,
+        position: Vec3::new(2.15, VENT_SPIRAL_TIER_1_Y + 0.5, 6.85),
         phase: 2.4,
     },
     ItemAnchor {
-        kind: ItemKind::Steamer,
-        position: Vec3::new(6.85, ARENA_TOP_Y + 0.6, 2.15),
+        kind: ItemKind::Mushroom,
+        position: Vec3::new(-6.85, VENT_SPIRAL_TIER_2_Y + 0.5, -2.15),
         phase: 3.6,
     },
     ItemAnchor {
         kind: ItemKind::Turkey,
-        position: Vec3::new(-2.15, ARENA_TOP_Y + 0.72, -6.85),
+        position: Vec3::new(-2.15, VENT_SPIRAL_TIER_3_Y + 0.5, -6.85),
         phase: 5.0,
     },
 ];
@@ -681,31 +709,24 @@ const CRANK_HAZARDS: &[ArenaHazardDefinition] = &[
 const VENT_SPIRAL_HAZARDS: &[ArenaHazardDefinition] = &[
     ArenaHazardDefinition {
         kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.06, 0.0),
-        radius: 1.05,
-        pulse_seconds: 2.45,
+        center: Vec3::new(3.4, VENT_SPIRAL_TIER_1_Y + 0.06, 4.8),
+        radius: 0.82,
+        pulse_seconds: 3.6,
         phase: 0.0,
     },
     ArenaHazardDefinition {
         kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(-3.7, ARENA_TOP_Y + 0.06, 3.7),
-        radius: 0.9,
-        pulse_seconds: 3.0,
-        phase: 0.8,
+        center: Vec3::new(-4.6, VENT_SPIRAL_TIER_2_Y + 0.06, 1.6),
+        radius: 0.82,
+        pulse_seconds: 3.6,
+        phase: 2.4,
     },
     ArenaHazardDefinition {
         kind: ArenaHazardKind::PulseVent,
-        center: Vec3::new(3.7, ARENA_TOP_Y + 0.06, -3.7),
-        radius: 0.9,
-        pulse_seconds: 3.0,
-        phase: 1.8,
-    },
-    ArenaHazardDefinition {
-        kind: ArenaHazardKind::SnareField,
-        center: Vec3::new(4.5, ARENA_TOP_Y + 0.05, 1.0),
-        radius: 1.25,
-        pulse_seconds: 4.2,
-        phase: 2.1,
+        center: Vec3::new(-1.5, VENT_SPIRAL_TIER_3_Y + 0.06, -4.1),
+        radius: 0.82,
+        pulse_seconds: 3.6,
+        phase: 1.2,
     },
 ];
 
@@ -891,15 +912,15 @@ const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
         name: "Vent Spiral",
         spawn_points: [
-            Vec3::new(-4.5, ARENA_TOP_Y, 1.8),
-            Vec3::new(4.5, ARENA_TOP_Y, -1.0),
-            Vec3::new(-1.8, ARENA_TOP_Y, -4.5),
-            Vec3::new(1.8, ARENA_TOP_Y, 4.5),
+            Vec3::new(-2.35, ARENA_TOP_Y, 0.0),
+            Vec3::new(2.35, ARENA_TOP_Y, 0.0),
+            Vec3::new(0.0, ARENA_TOP_Y, -2.35),
+            Vec3::new(0.0, ARENA_TOP_Y, 2.35),
         ],
         item_anchors: VENT_SPIRAL_ITEMS,
         ground_shapes: VENT_SPIRAL_GROUND,
         platforms: VENT_SPIRAL_PLATFORMS,
-        prop_colliders: NO_PROP_COLLIDERS,
+        prop_colliders: VENT_SPIRAL_PROP_COLLIDERS,
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 0.45,
         ringout_y: RINGOUT_Y,
@@ -1037,6 +1058,7 @@ pub fn active_arena_definition() -> &'static ArenaDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{GRAVITY, JUMP_SPEED, LANDING_SNAP_TOLERANCE};
 
     #[test]
     fn arena_definitions_cover_current_stage_variety() {
@@ -1194,8 +1216,18 @@ mod tests {
             let collider = crank.prop_colliders[index];
             assert_eq!(collider.center, endpoint);
             assert_eq!(collider.top_y, pipe_pair.top_y);
+            assert_eq!(collider.half_extents, Vec2::splat(CRANK_PIPE_HALF_EXTENT));
+            assert_eq!(pipe_pair.collider_radius, CRANK_PIPE_HALF_EXTENT);
             assert!(collider.half_extents.min_element() >= pipe_pair.trigger_radius);
         }
+
+        let expected_top = ARENA_TOP_Y + CRANK_PIPE_MODEL_HEIGHT * CRANK_PIPE_VISUAL_SCALE;
+        assert_eq!(pipe_pair.top_y, expected_top);
+
+        let weakest_jump_speed = JUMP_SPEED * 0.9;
+        let weakest_jump_rise = weakest_jump_speed.powi(2) / (2.0 * GRAVITY);
+        let landing_clearance = weakest_jump_rise - (pipe_pair.top_y - ARENA_TOP_Y);
+        assert!(landing_clearance >= LANDING_SNAP_TOLERANCE + 0.04);
     }
 
     #[test]
@@ -1211,6 +1243,94 @@ mod tests {
         assert_eq!(crank.hazards[0].center.x, -3.1);
         assert_eq!(crank.hazards[1].center.x, 3.1);
         assert!(crank.hazards.iter().all(|hazard| hazard.center.z == 0.0));
+    }
+
+    #[test]
+    fn vent_spiral_uses_four_distinct_jumpable_tiers() {
+        let vent = arena_definition(4);
+        let mut heights = vec![ARENA_TOP_Y];
+        heights.extend(vent.platforms.iter().map(|platform| platform.top_y));
+        heights.sort_by(f32::total_cmp);
+        heights.dedup();
+
+        assert_eq!(
+            heights,
+            vec![
+                ARENA_TOP_Y,
+                VENT_SPIRAL_TIER_1_Y,
+                VENT_SPIRAL_TIER_2_Y,
+                VENT_SPIRAL_TIER_3_Y,
+            ]
+        );
+        assert!(
+            heights
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0] - VENT_SPIRAL_TIER_STEP).abs() < 0.001)
+        );
+
+        let weakest_jump_speed = JUMP_SPEED * 0.9;
+        let weakest_jump_rise = weakest_jump_speed.powi(2) / (2.0 * GRAVITY);
+        assert!(weakest_jump_rise - VENT_SPIRAL_TIER_STEP >= LANDING_SNAP_TOLERANCE + 0.2);
+    }
+
+    #[test]
+    fn vent_spiral_turbines_and_items_match_their_surface_heights() {
+        let vent = arena_definition(4);
+        assert_eq!(vent.hazards.len(), 3);
+        assert!(
+            vent.hazards
+                .iter()
+                .all(|hazard| hazard.kind == ArenaHazardKind::PulseVent)
+        );
+
+        for hazard in vent.hazards {
+            let support = crate::arena::ground_support_for_arena_with_radius(
+                vent,
+                hazard.center.x,
+                hazard.center.z,
+                0.0,
+            )
+            .height()
+            .expect("vent turbine should sit on a tier");
+            assert!((hazard.center.y - support - 0.06).abs() < 0.001);
+        }
+
+        for anchor in vent.item_anchors {
+            let support = crate::arena::ground_support_for_arena_with_radius(
+                vent,
+                anchor.position.x,
+                anchor.position.z,
+                0.0,
+            )
+            .height()
+            .expect("vent item should sit on a balcony");
+            assert!((anchor.position.y - support - 0.5).abs() < 0.001);
+            for hazard in vent.hazards {
+                let item = Vec2::new(anchor.position.x, anchor.position.z);
+                let turbine = Vec2::new(hazard.center.x, hazard.center.z);
+                assert!(item.distance(turbine) > hazard.radius + 0.75);
+            }
+        }
+    }
+
+    #[test]
+    fn vent_spiral_spawns_clear_the_solid_reactor() {
+        let vent = arena_definition(4);
+        assert_eq!(vent.prop_colliders.len(), 2);
+        let reactor_base = vent.prop_colliders[0];
+        assert_eq!(reactor_base.center, Vec2::ZERO);
+        assert_eq!(reactor_base.half_extents, Vec2::splat(1.55));
+        assert!(vent.prop_colliders[1].top_y > reactor_base.top_y);
+
+        for spawn in vent.spawn_points {
+            let distance = Vec2::new(spawn.x, spawn.z).distance(reactor_base.center);
+            assert!(distance >= reactor_base.half_extents.x + 0.75);
+            assert_eq!(
+                crate::arena::ground_support_for_arena_with_radius(vent, spawn.x, spawn.z, 0.0)
+                    .height(),
+                Some(spawn.y)
+            );
+        }
     }
 
     #[test]

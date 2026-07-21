@@ -36,6 +36,12 @@ pub struct VisualEffect {
     pub end_scale: Vec3,
 }
 
+#[derive(Component)]
+pub(crate) struct MachineScratchFollow {
+    target: Entity,
+    offset: Vec3,
+}
+
 #[derive(Resource, Default)]
 pub struct EffectAssets {
     spark_mesh: Handle<Mesh>,
@@ -2349,14 +2355,28 @@ fn fire_punch_effect_material(
 pub fn update_effects(
     time: Res<Time>,
     mut commands: Commands,
-    mut effects: Query<(Entity, &mut VisualEffect, &mut Transform)>,
+    mut effects: Query<(
+        Entity,
+        &mut VisualEffect,
+        &mut Transform,
+        Option<&MachineScratchFollow>,
+    )>,
+    targets: Query<&Transform, Without<VisualEffect>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut effect, mut transform) in &mut effects {
+    for (entity, mut effect, mut transform, follow) in &mut effects {
         effect.age += dt;
         if effect.age >= effect.lifetime {
             commands.entity(entity).despawn();
             continue;
+        }
+
+        if let Some(follow) = follow {
+            let Ok(target_transform) = targets.get(follow.target) else {
+                commands.entity(entity).despawn();
+                continue;
+            };
+            transform.translation = target_transform.translation + follow.offset;
         }
 
         let t = (effect.age / effect.lifetime).clamp(0.0, 1.0);
@@ -2461,27 +2481,65 @@ pub fn spawn_hit_spark(
     );
 }
 
-pub fn spawn_machine_scratch(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
-    for index in 0..3 {
-        let offset = index as f32 - 1.0;
-        let start_scale = Vec3::new(0.42, 1.35, 0.42);
-        commands.spawn((
-            Mesh3d(assets.trail_mesh.clone()),
-            MeshMaterial3d(assets.slash_red.clone()),
-            Transform::from_translation(position + Vec3::new(offset * 0.22, offset * 0.08, 0.16))
-                .with_rotation(Quat::from_rotation_z(-0.68))
-                .with_scale(start_scale),
-            VisualEffect {
-                kind: EffectKind::Scratch,
-                lifetime: 0.26,
-                age: 0.0,
-                velocity: Vec3::Y * 0.32,
-                spin: Vec3::ZERO,
-                start_scale,
-                end_scale: Vec3::new(0.12, 1.7, 0.12),
-            },
-            Name::new("Machine scratch slash"),
-        ));
+pub fn spawn_machine_scratch(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    fighter_entity: Entity,
+    fighter_position: Vec3,
+) {
+    for bank in 0..2 {
+        let angle = if bank == 0 { -0.72 } else { 0.72 };
+        for index in 0..3 {
+            let line_offset = index as f32 - 1.0;
+            let follow_offset = Vec3::new(line_offset * 0.25, 0.76 + line_offset * 0.1, 0.56);
+            for highlight in [false, true] {
+                let layer_offset = follow_offset
+                    + if highlight {
+                        Vec3::Z * 0.11
+                    } else {
+                        Vec3::ZERO
+                    };
+                let start_scale = if highlight {
+                    Vec3::new(0.24, 1.5, 0.24)
+                } else {
+                    Vec3::new(0.68, 1.9, 0.68)
+                };
+                let end_scale = if highlight {
+                    Vec3::new(0.08, 1.85, 0.08)
+                } else {
+                    Vec3::new(0.2, 2.25, 0.2)
+                };
+                commands.spawn((
+                    Mesh3d(assets.trail_mesh.clone()),
+                    MeshMaterial3d(if highlight {
+                        assets.white.clone()
+                    } else {
+                        assets.slash_red.clone()
+                    }),
+                    Transform::from_translation(fighter_position + layer_offset)
+                        .with_rotation(Quat::from_rotation_z(angle))
+                        .with_scale(start_scale),
+                    VisualEffect {
+                        kind: EffectKind::Scratch,
+                        lifetime: if highlight { 0.3 } else { 0.5 },
+                        age: 0.0,
+                        velocity: Vec3::ZERO,
+                        spin: Vec3::ZERO,
+                        start_scale,
+                        end_scale,
+                    },
+                    MachineScratchFollow {
+                        target: fighter_entity,
+                        offset: layer_offset,
+                    },
+                    Name::new(if highlight {
+                        "Machine scratch highlight"
+                    } else {
+                        "Machine scratch slash"
+                    }),
+                ));
+            }
+        }
     }
 }
 

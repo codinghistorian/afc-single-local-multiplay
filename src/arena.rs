@@ -9,8 +9,8 @@ use std::fs;
 
 use crate::arena_defs::{
     ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
-    ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, PlatformDefinition,
-    active_arena_definition, active_arena_index, arena_definitions,
+    ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, CRANK_PIPE_VISUAL_SCALE,
+    PlatformDefinition, active_arena_definition, active_arena_index, arena_definitions,
 };
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
@@ -42,7 +42,8 @@ const ARENA_HAZARD_CAMPFIRE_KNOCKBACK: f32 = 8.8;
 const ARENA_HAZARD_CAMPFIRE_LAUNCH: f32 = 4.6;
 const ARENA_HAZARD_CAMPFIRE_BURN_SECONDS: f32 = 1.35;
 const ARENA_HAZARD_SAW_DAMAGE: f32 = 5.0;
-const ARENA_HAZARD_SAW_KNOCKBACK: f32 = 3.2;
+const ARENA_HAZARD_SAW_KNOCKBACK: f32 = 12.0;
+const ARENA_HAZARD_SAW_LAUNCH: f32 = 4.8;
 const PIPE_ENTRY_DWELL_SECONDS: f32 = 0.25;
 const PIPE_ENTER_SECONDS: f32 = 0.32;
 const PIPE_TRAVEL_SECONDS: f32 = 0.12;
@@ -50,12 +51,15 @@ const PIPE_EXIT_SECONDS: f32 = 0.34;
 const PIPE_REENTRY_COOLDOWN_SECONDS: f32 = 0.9;
 const PIPE_SINK_DEPTH: f32 = 1.15;
 const PIPE_EXIT_CLEARANCE_RADIUS: f32 = 1.05;
+const PIPE_EXIT_HOP_SPEED: f32 = 3.2;
+const PIPE_EXIT_INWARD_SPEED: f32 = 2.4;
 const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
 const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
 const CRANK_YARD_ARENA_INDEX: usize = 3;
+const VENT_SPIRAL_ARENA_INDEX: usize = 4;
 const CRANK_SAW_VISUAL_Y: f32 = ARENA_TOP_Y + 0.72;
 const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
@@ -115,6 +119,40 @@ pub struct ArenaSawWarningLight {
 pub struct ArenaSawAmbientSpark {
     center: Vec3,
     phase: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaVentRotor {
+    pulse_seconds: f32,
+    phase: f32,
+    spin_direction: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaVentWarning {
+    pulse_seconds: f32,
+    phase: f32,
+    base_scale: Vec3,
+}
+
+#[derive(Component)]
+pub struct ArenaVentPlume {
+    pulse_seconds: f32,
+    phase: f32,
+    base_y: f32,
+    full_height: f32,
+    base_scale: Vec3,
+}
+
+#[derive(Component)]
+pub struct ArenaVentUfo {
+    base_y: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaVentUfoBeam {
+    base_y: f32,
+    base_scale: Vec3,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -418,7 +456,13 @@ fn spawn_arena_geometry(
     if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
         match spawn_champions_court_map(commands, asset_server) {
             Ok(()) => {
-                spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
+                spawn_arena_hazard_markers(
+                    commands,
+                    meshes,
+                    hazard_material,
+                    arena_index,
+                    arena.hazards,
+                );
                 return;
             }
             Err(error) => {
@@ -457,11 +501,29 @@ fn spawn_arena_geometry(
         secondary.clone(),
         arena,
     );
-    spawn_platform_blocks(commands, meshes, materials, secondary, arena.platforms);
+    if arena_index == VENT_SPIRAL_ARENA_INDEX {
+        spawn_vent_spiral_platform_blocks(commands, meshes, materials, arena.platforms);
+    } else {
+        spawn_platform_blocks(commands, meshes, materials, secondary, arena.platforms);
+    }
     spawn_arena_theme_accents(commands, meshes, trim, arena.visual_theme);
-    spawn_arena_hazard_markers(commands, meshes, hazard_material, arena.hazards);
+    spawn_arena_hazard_markers(
+        commands,
+        meshes,
+        hazard_material,
+        arena_index,
+        arena.hazards,
+    );
     spawn_campfire_props(commands, meshes, materials, arena.hazards);
     spawn_mini_arena_props(commands, asset_server, arena_index);
+    spawn_vent_spiral_machinery(
+        commands,
+        asset_server,
+        meshes,
+        materials,
+        arena_index,
+        arena.hazards,
+    );
     spawn_pipe_portal_visuals(commands, meshes, materials, arena.pipe_pair);
     spawn_crank_yard_machinery(
         commands,
@@ -500,10 +562,10 @@ fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
             hazard: Color::srgb(0.98, 0.28, 0.12),
         },
         ArenaVisualTheme::Reactor => ArenaThemePalette {
-            primary: Color::srgb(0.2, 0.25, 0.34),
-            secondary: Color::srgb(0.34, 0.4, 0.46),
-            trim: Color::srgb(0.2, 0.9, 0.78),
-            hazard: Color::srgb(0.88, 0.25, 0.86),
+            primary: Color::srgb(0.16, 0.22, 0.21),
+            secondary: Color::srgb(0.42, 0.47, 0.46),
+            trim: Color::srgb(0.18, 0.9, 0.78),
+            hazard: Color::srgb(1.0, 0.32, 0.12),
         },
         ArenaVisualTheme::Toybox => ArenaThemePalette {
             primary: Color::srgb(0.2, 0.55, 0.86),
@@ -613,6 +675,103 @@ fn spawn_platform_blocks(
     }
 }
 
+fn spawn_vent_spiral_platform_blocks(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    platforms: &[PlatformDefinition],
+) {
+    let tier_materials = [
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.34, 0.39, 0.38),
+            metallic: 0.18,
+            perceptual_roughness: 0.72,
+            ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.25, 0.38, 0.46),
+            metallic: 0.16,
+            perceptual_roughness: 0.7,
+            ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.25, 0.43, 0.34),
+            metallic: 0.14,
+            perceptual_roughness: 0.74,
+            ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.5, 0.46, 0.35),
+            metallic: 0.12,
+            perceptual_roughness: 0.76,
+            ..default()
+        }),
+    ];
+
+    for (index, platform) in platforms.iter().enumerate() {
+        let tier = (((platform.top_y - ARENA_TOP_Y) / 0.65).round() as usize).min(3);
+        let height = ARENA_HEIGHT + (platform.top_y - ARENA_TOP_Y).max(0.0);
+        let material = material_with_depth_bias(
+            materials,
+            &tier_materials[tier],
+            arena_platform_depth_bias(index),
+        );
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(
+                platform.half_extents.x * 2.0,
+                height,
+                platform.half_extents.y * 2.0,
+            ))),
+            MeshMaterial3d(material),
+            Transform::from_xyz(
+                platform.center.x,
+                platform.top_y - height * 0.5,
+                platform.center.y,
+            ),
+            Name::new(format!("Vent spiral tier {tier} block {index}")),
+            ArenaGeometry,
+        ));
+    }
+
+    spawn_vent_spiral_transition_marks(commands, meshes, materials);
+}
+
+fn spawn_vent_spiral_transition_marks(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let warning_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.62, 0.08),
+        emissive: LinearRgba::rgb(0.45, 0.19, 0.015),
+        metallic: 0.12,
+        perceptual_roughness: 0.58,
+        ..default()
+    });
+    let marker_mesh = meshes.add(Cuboid::new(0.42, 0.045, 0.13));
+    let transitions = [
+        (Vec3::new(4.15, ARENA_TOP_Y + 0.678, 3.16), 0.0),
+        (Vec3::new(-3.9, ARENA_TOP_Y + 1.328, 3.56), PI * 0.5),
+        (Vec3::new(-3.75, ARENA_TOP_Y + 1.978, -2.48), 0.0),
+    ];
+
+    for (transition_index, (center, yaw)) in transitions.into_iter().enumerate() {
+        for stripe in -1..=1 {
+            let offset = Quat::from_rotation_y(yaw) * Vec3::new(stripe as f32 * 0.52, 0.0, 0.0);
+            commands.spawn((
+                Mesh3d(marker_mesh.clone()),
+                MeshMaterial3d(warning_material.clone()),
+                Transform::from_translation(center + offset)
+                    .with_rotation(Quat::from_rotation_y(yaw)),
+                Name::new(format!(
+                    "Vent spiral jump marker {transition_index}-{stripe}"
+                )),
+                ArenaGeometry,
+            ));
+        }
+    }
+}
+
 fn material_with_depth_bias(
     materials: &mut Assets<StandardMaterial>,
     source: &Handle<StandardMaterial>,
@@ -644,7 +803,7 @@ fn spawn_arena_theme_accents(
         ArenaVisualTheme::Causeway => (&[(-4.7, 0.0), (4.7, 0.0)][..], Vec2::new(0.16, 11.5)),
         ArenaVisualTheme::Terrace => (&[(-2.2, 1.45), (2.2, -1.45)][..], Vec2::new(3.6, 0.12)),
         ArenaVisualTheme::Industrial => (&[(0.0, -1.8), (0.0, 1.8)][..], Vec2::new(13.0, 0.16)),
-        ArenaVisualTheme::Reactor => (&[(0.0, 0.0)][..], Vec2::new(4.0, 0.14)),
+        ArenaVisualTheme::Reactor => return,
         ArenaVisualTheme::Toybox => (&[(-2.8, 0.0), (2.8, 0.0)][..], Vec2::new(0.2, 15.2)),
         ArenaVisualTheme::Market => (&[(0.0, 0.0)][..], Vec2::new(8.8, 0.18)),
         ArenaVisualTheme::Garden => (&[(-3.4, 0.0), (3.4, 0.0)][..], Vec2::new(0.12, 2.8)),
@@ -1322,7 +1481,7 @@ const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
         y: ARENA_TOP_Y,
         z: 7.0,
         yaw: PI,
-        scale: 2.0,
+        scale: CRANK_PIPE_VISUAL_SCALE,
     },
     ArenaAssetProp {
         name: "Crank yard south pipe",
@@ -1331,7 +1490,7 @@ const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
         y: ARENA_TOP_Y,
         z: -7.0,
         yaw: 0.0,
-        scale: 2.0,
+        scale: CRANK_PIPE_VISUAL_SCALE,
     },
     ArenaAssetProp {
         name: "Crank yard control lever",
@@ -1353,62 +1512,15 @@ const CRANK_ASSET_PROPS: &[ArenaAssetProp] = &[
     },
 ];
 
-const VENT_SPIRAL_ASSET_PROPS: &[ArenaAssetProp] = &[
-    ArenaAssetProp {
-        name: "Vent spiral reactor base",
-        file: "tower/tower-round-base.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y + 0.02,
-        z: 0.0,
-        yaw: 0.0,
-        scale: 3.1,
-    },
-    ArenaAssetProp {
-        name: "Vent spiral crystal core",
-        file: "tower/tower-round-crystals.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y + 0.08,
-        z: 0.0,
-        yaw: PI * 0.25,
-        scale: 2.35,
-    },
-    ArenaAssetProp {
-        name: "Vent spiral west crystal bank",
-        file: "tower/detail-crystal-large.glb",
-        x: -5.25,
-        y: ARENA_TOP_Y + 0.34,
-        z: 1.2,
-        yaw: 0.2,
-        scale: 2.6,
-    },
-    ArenaAssetProp {
-        name: "Vent spiral east crystal bank",
-        file: "tower/detail-crystal-large.glb",
-        x: 5.0,
-        y: ARENA_TOP_Y + 0.08,
-        z: 2.5,
-        yaw: -0.35,
-        scale: 2.6,
-    },
-    ArenaAssetProp {
-        name: "Vent spiral hovering ufo",
-        file: "tower/enemy-ufo-a.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y + 4.0,
-        z: -1.0,
-        yaw: 0.25,
-        scale: 2.2,
-    },
-    ArenaAssetProp {
-        name: "Vent spiral ufo beam",
-        file: "tower/enemy-ufo-beam.glb",
-        x: 0.0,
-        y: ARENA_TOP_Y + 0.12,
-        z: -1.0,
-        yaw: 0.0,
-        scale: 1.55,
-    },
-];
+const VENT_SPIRAL_ASSET_PROPS: &[ArenaAssetProp] = &[ArenaAssetProp {
+    name: "Vent spiral crystal core",
+    file: "tower/tower-round-crystals.glb",
+    x: 0.0,
+    y: ARENA_TOP_Y + 0.02,
+    z: 0.0,
+    yaw: PI * 0.25,
+    scale: 3.1,
+}];
 
 const BUMPER_ALLEY_ASSET_PROPS: &[ArenaAssetProp] = &[
     ArenaAssetProp {
@@ -2037,16 +2149,201 @@ fn spawn_crank_yard_machinery(
     }
 }
 
+fn spawn_vent_spiral_machinery(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    arena_index: usize,
+    hazards: &[ArenaHazardDefinition],
+) {
+    if arena_index != VENT_SPIRAL_ARENA_INDEX {
+        return;
+    }
+
+    let housing_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.11, 0.12),
+        metallic: 0.68,
+        perceptual_roughness: 0.36,
+        ..default()
+    });
+    let rotor_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.58, 0.66, 0.64),
+        metallic: 0.82,
+        perceptual_roughness: 0.26,
+        ..default()
+    });
+    let warning_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.34, 0.06),
+        emissive: LinearRgba::rgb(1.6, 0.18, 0.01),
+        metallic: 0.08,
+        perceptual_roughness: 0.42,
+        ..default()
+    });
+    let plume_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.28, 0.96, 0.88, 0.48),
+        emissive: LinearRgba::rgb(0.16, 1.3, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        perceptual_roughness: 0.22,
+        ..default()
+    });
+    let blade_mesh = meshes.add(Cuboid::new(0.5, 0.055, 0.16));
+    let hub_mesh = meshes.add(Cylinder::new(0.15, 0.1));
+    let warning_bulb_mesh = meshes.add(Sphere::new(0.065).mesh().uv(8, 5));
+    let plume_mesh = meshes.add(Cone::new(0.22, 1.0));
+
+    for (index, hazard) in hazards
+        .iter()
+        .filter(|hazard| hazard.kind == ArenaHazardKind::PulseVent)
+        .enumerate()
+    {
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(hazard.radius * 0.93, 0.18))),
+            MeshMaterial3d(housing_material.clone()),
+            Transform::from_xyz(hazard.center.x, hazard.center.y + 0.03, hazard.center.z),
+            Name::new(format!("Vent spiral turbine housing {index}")),
+            ArenaGeometry,
+        ));
+
+        commands
+            .spawn((
+                Transform::from_xyz(hazard.center.x, hazard.center.y + 0.14, hazard.center.z),
+                Visibility::Visible,
+                ArenaVentRotor {
+                    pulse_seconds: hazard.pulse_seconds,
+                    phase: hazard.phase,
+                    spin_direction: if index % 2 == 0 { 1.0 } else { -1.0 },
+                },
+                Name::new(format!("Vent spiral turbine rotor {index}")),
+                ArenaGeometry,
+            ))
+            .with_children(|parent| {
+                for blade_index in 0..5 {
+                    let angle = blade_index as f32 / 5.0 * TAU;
+                    parent.spawn((
+                        Mesh3d(blade_mesh.clone()),
+                        MeshMaterial3d(rotor_material.clone()),
+                        Transform::from_xyz(angle.cos() * 0.27, 0.0, angle.sin() * 0.27)
+                            .with_rotation(Quat::from_rotation_y(-angle)),
+                        Name::new("Vent turbine fan blade"),
+                    ));
+                }
+                parent.spawn((
+                    Mesh3d(hub_mesh.clone()),
+                    MeshMaterial3d(warning_material.clone()),
+                    Transform::from_xyz(0.0, 0.055, 0.0),
+                    Name::new("Vent turbine energy hub"),
+                ));
+            });
+
+        let warning_scale = Vec3::splat(1.0);
+        commands.spawn((
+            Mesh3d(meshes.add(Annulus::new(hazard.radius * 0.98, hazard.radius * 1.14))),
+            MeshMaterial3d(warning_material.clone()),
+            Transform::from_xyz(hazard.center.x, hazard.center.y + 0.155, hazard.center.z)
+                .with_rotation(Quat::from_rotation_x(-PI * 0.5)),
+            ArenaVentWarning {
+                pulse_seconds: hazard.pulse_seconds,
+                phase: hazard.phase,
+                base_scale: warning_scale,
+            },
+            Name::new(format!("Vent spiral warning ring {index}")),
+            ArenaGeometry,
+        ));
+
+        for bulb_index in 0..8 {
+            let angle = bulb_index as f32 / 8.0 * TAU;
+            let radius = hazard.radius * 1.08;
+            let base_scale = Vec3::splat(if bulb_index % 2 == 0 { 1.0 } else { 0.76 });
+            commands.spawn((
+                Mesh3d(warning_bulb_mesh.clone()),
+                MeshMaterial3d(warning_material.clone()),
+                Transform::from_xyz(
+                    hazard.center.x + angle.cos() * radius,
+                    hazard.center.y + 0.19,
+                    hazard.center.z + angle.sin() * radius,
+                )
+                .with_scale(base_scale),
+                ArenaVentWarning {
+                    pulse_seconds: hazard.pulse_seconds,
+                    phase: hazard.phase + bulb_index as f32 * 0.025,
+                    base_scale,
+                },
+                Name::new("Vent turbine warning lamp"),
+                ArenaGeometry,
+            ));
+        }
+
+        for plume_index in 0..3 {
+            let angle = plume_index as f32 / 3.0 * TAU + index as f32 * 0.7;
+            let base_y = hazard.center.y + 0.2;
+            let full_height = 1.65 + plume_index as f32 * 0.18;
+            let base_scale = Vec3::new(0.76, full_height, 0.76);
+            commands.spawn((
+                Mesh3d(plume_mesh.clone()),
+                MeshMaterial3d(plume_material.clone()),
+                Transform::from_xyz(
+                    hazard.center.x + angle.cos() * 0.2,
+                    base_y,
+                    hazard.center.z + angle.sin() * 0.2,
+                )
+                .with_scale(Vec3::new(base_scale.x, 0.001, base_scale.z)),
+                ArenaVentPlume {
+                    pulse_seconds: hazard.pulse_seconds,
+                    phase: hazard.phase + plume_index as f32 * 0.035,
+                    base_y,
+                    full_height,
+                    base_scale,
+                },
+                Name::new("Vent turbine energy plume"),
+                ArenaGeometry,
+            ));
+        }
+    }
+
+    let ufo_position = Vec3::new(5.8, ARENA_TOP_Y + 4.15, -7.0);
+    commands.spawn((
+        SceneRoot(asset_server.load(
+            GltfAssetLabel::Scene(0).from_asset(arena_prop_asset_path("tower/enemy-ufo-a.glb")),
+        )),
+        Transform::from_translation(ufo_position)
+            .with_rotation(Quat::from_rotation_y(0.25))
+            .with_scale(Vec3::splat(2.2)),
+        ArenaVentUfo {
+            base_y: ufo_position.y,
+        },
+        Name::new("Vent spiral background ufo"),
+        ArenaGeometry,
+    ));
+
+    let beam_scale = Vec3::new(1.75, 4.0, 1.75);
+    commands.spawn((
+        SceneRoot(asset_server.load(
+            GltfAssetLabel::Scene(0).from_asset(arena_prop_asset_path("tower/enemy-ufo-beam.glb")),
+        )),
+        Transform::from_xyz(5.8, ARENA_TOP_Y + 0.08, -7.0).with_scale(beam_scale),
+        ArenaVentUfoBeam {
+            base_y: ARENA_TOP_Y + 0.08,
+            base_scale: beam_scale,
+        },
+        Name::new("Vent spiral background ufo beam"),
+        ArenaGeometry,
+    ));
+}
+
 fn spawn_arena_hazard_markers(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: Handle<StandardMaterial>,
+    arena_index: usize,
     hazards: &[ArenaHazardDefinition],
 ) {
-    for hazard in hazards
-        .iter()
-        .filter(|hazard| hazard.kind != ArenaHazardKind::SawBlade)
-    {
+    for hazard in hazards.iter().filter(|hazard| {
+        hazard.kind != ArenaHazardKind::SawBlade
+            && !(arena_index == VENT_SPIRAL_ARENA_INDEX
+                && hazard.kind == ArenaHazardKind::PulseVent)
+    }) {
         let base_scale = (hazard.pulse_seconds / 2.2).clamp(0.8, 1.3);
         commands.spawn((
             Mesh3d(meshes.add(Annulus::new(hazard.radius * 0.68, hazard.radius))),
@@ -2173,6 +2470,92 @@ pub fn update_crank_yard_machinery(
     }
 }
 
+pub fn update_vent_spiral_machinery(
+    time: Res<Time>,
+    state: Res<ArenaHazardState>,
+    mut visuals: ParamSet<(
+        Query<(&ArenaVentRotor, &mut Transform)>,
+        Query<(&ArenaVentWarning, &mut Transform)>,
+        Query<(&ArenaVentPlume, &mut Transform)>,
+        Query<(&ArenaVentUfo, &mut Transform)>,
+        Query<(&ArenaVentUfoBeam, &mut Transform)>,
+    )>,
+) {
+    let dt = time.delta_secs();
+    let elapsed = state.elapsed();
+
+    for (rotor, mut transform) in &mut visuals.p0() {
+        let active = vent_active_visual_amount(elapsed, rotor.pulse_seconds, rotor.phase);
+        let charge = vent_charge_visual_amount(elapsed, rotor.pulse_seconds, rotor.phase);
+        transform.rotate_y(rotor.spin_direction * (2.2 + charge * 4.0 + active * 14.0) * dt);
+    }
+
+    for (warning, mut transform) in &mut visuals.p1() {
+        let active = vent_active_visual_amount(elapsed, warning.pulse_seconds, warning.phase);
+        let charge = vent_charge_visual_amount(elapsed, warning.pulse_seconds, warning.phase);
+        let pulse = (elapsed * 15.0 + warning.phase * 3.0).sin().abs();
+        transform.scale = warning.base_scale
+            * (0.72 + charge * (0.32 + pulse * 0.2) + active * (0.35 + pulse * 0.16));
+    }
+
+    for (plume, mut transform) in &mut visuals.p2() {
+        let active = vent_active_visual_amount(elapsed, plume.pulse_seconds, plume.phase);
+        let flutter = (elapsed * 18.0 + plume.phase * 5.0).sin() * 0.06;
+        let height_amount = (active + flutter * active).clamp(0.001, 1.0);
+        transform.translation.y = plume.base_y + plume.full_height * height_amount * 0.5;
+        transform.scale = Vec3::new(
+            plume.base_scale.x * (0.58 + active * 0.42),
+            plume.base_scale.y * height_amount,
+            plume.base_scale.z * (0.58 + active * 0.42),
+        );
+    }
+
+    for (ufo, mut transform) in &mut visuals.p3() {
+        transform.translation.y = ufo.base_y + (elapsed * 1.7).sin() * 0.16;
+        transform.rotate_y(dt * 0.42);
+    }
+
+    let sequence_amount = active_arena_definition()
+        .hazards
+        .iter()
+        .filter(|hazard| hazard.kind == ArenaHazardKind::PulseVent)
+        .map(|hazard| {
+            vent_active_visual_amount(elapsed, hazard.pulse_seconds, hazard.phase)
+                + vent_charge_visual_amount(elapsed, hazard.pulse_seconds, hazard.phase) * 0.28
+        })
+        .fold(0.0_f32, f32::max)
+        .clamp(0.0, 1.0);
+    for (beam, mut transform) in &mut visuals.p4() {
+        let shimmer = (elapsed * 8.0).sin() * 0.04;
+        let amount = (0.58 + sequence_amount * 0.42 + shimmer).clamp(0.5, 1.05);
+        transform.translation.y = beam.base_y;
+        transform.scale = Vec3::new(
+            beam.base_scale.x * amount,
+            beam.base_scale.y * (0.94 + sequence_amount * 0.06),
+            beam.base_scale.z * amount,
+        );
+    }
+}
+
+fn vent_cycle_progress(elapsed: f32, pulse_seconds: f32, phase: f32) -> f32 {
+    (elapsed + phase).rem_euclid(pulse_seconds.max(0.1)) / pulse_seconds.max(0.1)
+}
+
+fn vent_active_visual_amount(elapsed: f32, pulse_seconds: f32, phase: f32) -> f32 {
+    let progress = vent_cycle_progress(elapsed, pulse_seconds, phase);
+    let active_fraction = arena_hazard_active_fraction(ArenaHazardKind::PulseVent);
+    if progress > active_fraction {
+        return 0.0;
+    }
+    let active_progress = progress / active_fraction;
+    0.25 + (active_progress * PI).sin().max(0.0) * 0.75
+}
+
+fn vent_charge_visual_amount(elapsed: f32, pulse_seconds: f32, phase: f32) -> f32 {
+    let progress = vent_cycle_progress(elapsed, pulse_seconds, phase);
+    ((progress - 0.72) / 0.28).clamp(0.0, 1.0)
+}
+
 pub fn update_arena_pipe_transits(
     time: Res<Time>,
     mut state: ResMut<ArenaPipeState>,
@@ -2216,7 +2599,13 @@ pub fn update_arena_pipe_transits(
                 } else {
                     None
                 };
-                let next_dwell = if endpoint.is_some() && endpoint == candidate {
+                let descending_entry = endpoint.is_some()
+                    && !motor.grounded
+                    && action.action == FighterAction::Jumping
+                    && motor.velocity.y <= 0.0;
+                let next_dwell = if descending_entry {
+                    PIPE_ENTRY_DWELL_SECONDS
+                } else if endpoint.is_some() && endpoint == candidate {
                     dwell + dt
                 } else {
                     0.0
@@ -2288,14 +2677,19 @@ pub fn update_arena_pipe_transits(
                 stats.invulnerability = stats.invulnerability.max(0.25);
 
                 if sample.complete {
-                    transform.translation =
-                        Vec3::new(destination_center.x, pipe_pair.top_y, destination_center.y);
+                    transform.translation = Vec3::new(
+                        destination_center.x,
+                        pipe_pair.top_y + 0.06,
+                        destination_center.y,
+                    );
                     transform.scale = base_scale;
                     motor.facing = Vec3::new(-destination_center.x, 0.0, -destination_center.y)
                         .normalize_or_zero();
-                    motor.grounded = true;
+                    motor.velocity = motor.facing * PIPE_EXIT_INWARD_SPEED;
+                    motor.velocity.y = PIPE_EXIT_HOP_SPEED;
+                    motor.grounded = false;
                     *action = FighterActionState::default();
-                    action.action = FighterAction::Idle;
+                    action.action = FighterAction::Jumping;
                     stats.invulnerability = stats.invulnerability.max(0.35);
                     state.fighters[fighter.id] = FighterPipeState::Ready {
                         candidate: None,
@@ -2329,10 +2723,15 @@ fn pipe_entry_endpoint(
     motor: &FighterMotor,
     action: FighterAction,
 ) -> Option<usize> {
-    if !motor.grounded
-        || !matches!(action, FighterAction::Idle | FighterAction::Moving)
-        || (position.y - pipe_pair.top_y).abs() > 0.18
-    {
+    let grounded_entry = motor.grounded
+        && matches!(action, FighterAction::Idle | FighterAction::Moving)
+        && (position.y - pipe_pair.top_y).abs() <= 0.18;
+    let descending_entry = !motor.grounded
+        && action == FighterAction::Jumping
+        && motor.velocity.y <= 0.0
+        && position.y >= pipe_pair.top_y - 0.12
+        && position.y <= pipe_pair.top_y + 0.58;
+    if !grounded_entry && !descending_entry {
         return None;
     }
 
@@ -2494,8 +2893,19 @@ pub fn update_arena_hazards(
                 spawn_machine_scratch(
                     &mut commands,
                     &effect_assets,
-                    transform.translation + Vec3::Y * 0.72,
+                    fighter_entity,
+                    transform.translation,
                 );
+            }
+
+            let mut impact = arena_hazard_impact_profile(hazard.kind)
+                .with_hit_effects_enabled(feel.hit_effects_enabled());
+            if hazard.kind == ArenaHazardKind::SawBlade {
+                impact.knockback_direction = Some(saw_knockback_direction(
+                    transform.translation,
+                    hazard.center,
+                    motor.facing,
+                ));
             }
 
             apply_impact(
@@ -2510,13 +2920,36 @@ pub fn update_arena_hazards(
                 transform,
                 None,
                 hazard.center,
-                arena_hazard_impact_profile(hazard.kind)
-                    .with_hit_effects_enabled(feel.hit_effects_enabled()),
+                impact,
                 DamageDefenderProfile::from_loadout(style, equipment),
                 &mut telemetry,
             );
             cooldowns[fighter.id] = arena_hazard_hit_cooldown(hazard.kind);
         }
+    }
+}
+
+fn saw_knockback_direction(
+    fighter_position: Vec3,
+    hazard_center: Vec3,
+    fighter_facing: Vec3,
+) -> Vec3 {
+    let away_from_blade = Vec3::new(
+        fighter_position.x - hazard_center.x,
+        0.0,
+        fighter_position.z - hazard_center.z,
+    )
+    .normalize_or_zero();
+    if away_from_blade.length_squared() > 0.0 {
+        return away_from_blade;
+    }
+
+    let away_from_arena_center =
+        Vec3::new(hazard_center.x, 0.0, hazard_center.z).normalize_or_zero();
+    if away_from_arena_center.length_squared() > 0.0 {
+        away_from_arena_center
+    } else {
+        Vec3::new(fighter_facing.x, 0.0, fighter_facing.z).normalize_or(Vec3::X)
     }
 }
 
@@ -2568,7 +3001,20 @@ pub fn ground_support_for_arena_with_radius(
     for platform in arena.gameplay_platforms() {
         let dx = (x - platform.center.x).abs();
         let dz = (z - platform.center.y).abs();
-        let support = if dx <= platform.half_extents.x && dz <= platform.half_extents.y {
+        let support = if let Some((outer_radius, opening_radius)) =
+            circular_platform_profile(arena, platform)
+        {
+            let distance = Vec2::new(x - platform.center.x, z - platform.center.y).length();
+            if opening_radius > 0.0 && distance <= opening_radius {
+                None
+            } else if distance <= outer_radius {
+                Some(GroundSupport::Firm(platform.top_y))
+            } else if distance <= outer_radius + ledge_grace {
+                Some(GroundSupport::Grace(platform.top_y))
+            } else {
+                None
+            }
+        } else if dx <= platform.half_extents.x && dz <= platform.half_extents.y {
             Some(GroundSupport::Firm(platform.top_y))
         } else if dx <= platform.half_extents.x + ledge_grace
             && dz <= platform.half_extents.y + ledge_grace
@@ -2653,11 +3099,78 @@ fn prefer_ground_support(
 }
 
 pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
+    let arena = active_arena_definition();
     let mut resolved = position;
-    for platform in active_arena_definition().gameplay_platforms() {
-        resolved = resolve_platform_side_collision_against(resolved, radius, platform);
+    for platform in arena.gameplay_platforms() {
+        resolved = if let Some((collider_radius, opening_radius)) =
+            circular_platform_profile(arena, platform)
+        {
+            resolve_circular_platform_side_collision_against(
+                resolved,
+                radius,
+                platform,
+                collider_radius,
+                opening_radius,
+            )
+        } else {
+            resolve_platform_side_collision_against(resolved, radius, platform)
+        };
     }
     resolved
+}
+
+fn circular_platform_profile(
+    arena: &ArenaDefinition,
+    platform: &PlatformDefinition,
+) -> Option<(f32, f32)> {
+    if let Some(pipe_pair) = arena.pipe_pair
+        && platform.top_y == pipe_pair.top_y
+        && pipe_pair.endpoints.contains(&platform.center)
+    {
+        return Some((pipe_pair.collider_radius, pipe_pair.trigger_radius));
+    }
+
+    if arena.visual_theme == ArenaVisualTheme::Reactor
+        && arena
+            .prop_colliders
+            .iter()
+            .any(|collider| std::ptr::eq(collider, platform))
+    {
+        return Some((platform.half_extents.min_element(), 0.0));
+    }
+
+    None
+}
+
+fn resolve_circular_platform_side_collision_against(
+    position: Vec3,
+    fighter_radius: f32,
+    platform: &PlatformDefinition,
+    platform_radius: f32,
+    opening_radius: f32,
+) -> Vec3 {
+    let offset = Vec2::new(
+        position.x - platform.center.x,
+        position.z - platform.center.y,
+    );
+    let distance = offset.length();
+    let expanded_radius = platform_radius + fighter_radius;
+    let inside_top = distance <= platform_radius && position.y >= platform.top_y - 0.05;
+
+    if (opening_radius > 0.0 && distance <= opening_radius)
+        || distance >= expanded_radius
+        || inside_top
+        || position.y > platform.top_y + 0.7
+    {
+        return position;
+    }
+
+    let direction = offset.normalize_or(Vec2::X);
+    Vec3::new(
+        platform.center.x + direction.x * expanded_radius,
+        position.y,
+        platform.center.y + direction.y * expanded_radius,
+    )
 }
 
 pub fn resolve_platform_side_collision_against(
@@ -2736,6 +3249,19 @@ fn arena_hazard_overlaps(hazard: &ArenaHazardDefinition, fighter_position: Vec3)
         fighter_position.z - hazard.center.z,
     );
     flat.length() <= hazard.radius + FIGHTER_RADIUS
+        && arena_hazard_affects_height(hazard, fighter_position.y)
+}
+
+pub fn arena_hazard_affects_height(hazard: &ArenaHazardDefinition, fighter_y: f32) -> bool {
+    let offset = fighter_y - hazard.center.y;
+    let (below, above) = match hazard.kind {
+        ArenaHazardKind::PulseVent => (0.32, 2.35),
+        ArenaHazardKind::SnareField => (0.35, 0.8),
+        ArenaHazardKind::BumperNode => (0.45, 1.45),
+        ArenaHazardKind::Campfire => (0.3, 1.55),
+        ArenaHazardKind::SawBlade => (0.4, 1.35),
+    };
+    offset >= -below && offset <= above
 }
 
 fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
@@ -2793,12 +3319,12 @@ fn arena_hazard_impact_profile(kind: ArenaHazardKind) -> ImpactProfile {
             ImpactSource::Hazard,
             ARENA_HAZARD_SAW_DAMAGE,
             ARENA_HAZARD_SAW_KNOCKBACK,
-            0.7,
+            ARENA_HAZARD_SAW_LAUNCH,
+            true,
             false,
-            false,
-            8.0,
-            ImpactFeedbackIntensity::Light,
-            ReactionFamilyId::ShortStandingStagger,
+            18.0,
+            ImpactFeedbackIntensity::Heavy,
+            ReactionFamilyId::LauncherDown,
         ),
     };
     profile.element = DamageElement::Hazard;
@@ -2848,6 +3374,96 @@ mod tests {
             &platform,
         );
         assert_eq!(top, Vec3::new(0.0, platform.top_y, 0.0));
+    }
+
+    #[test]
+    fn round_pipe_collision_does_not_create_invisible_square_corners() {
+        let crank = &arena_definitions()[CRANK_YARD_ARENA_INDEX];
+        let pipe_pair = crank.pipe_pair.expect("Crank Yard pipe pair");
+        let pipe = crank.prop_colliders[0];
+        let corner = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y + 0.9);
+        let side = Vec3::new(pipe.center.x + 0.9, ARENA_TOP_Y, pipe.center.y);
+
+        assert_eq!(
+            resolve_circular_platform_side_collision_against(
+                corner,
+                FIGHTER_RADIUS,
+                &pipe,
+                pipe_pair.collider_radius,
+                pipe_pair.trigger_radius,
+            ),
+            corner
+        );
+        assert!(
+            resolve_circular_platform_side_collision_against(
+                side,
+                FIGHTER_RADIUS,
+                &pipe,
+                pipe_pair.collider_radius,
+                pipe_pair.trigger_radius,
+            )
+            .x > side.x
+        );
+
+        let opening = Vec3::new(pipe.center.x, ARENA_TOP_Y, pipe.center.y);
+        assert_eq!(
+            resolve_circular_platform_side_collision_against(
+                opening,
+                FIGHTER_RADIUS,
+                &pipe,
+                pipe_pair.collider_radius,
+                pipe_pair.trigger_radius,
+            ),
+            opening
+        );
+
+        let corner_support = ground_support_for_arena_with_radius(
+            crank,
+            pipe.center.x + 0.7,
+            pipe.center.y + 0.7,
+            0.0,
+        );
+        assert_ne!(corner_support.height(), Some(pipe.top_y));
+        assert_ne!(
+            ground_support_for_arena_with_radius(crank, pipe.center.x, pipe.center.y, 0.0,)
+                .height(),
+            Some(pipe.top_y)
+        );
+        assert_eq!(
+            ground_support_for_arena_with_radius(crank, pipe.center.x + 0.62, pipe.center.y, 0.0,)
+                .height(),
+            Some(pipe.top_y)
+        );
+    }
+
+    #[test]
+    fn vent_reactor_collision_is_round_and_supports_visible_tops() {
+        let vent = &arena_definitions()[VENT_SPIRAL_ARENA_INDEX];
+        let base = &vent.prop_colliders[0];
+        let crystal = &vent.prop_colliders[1];
+
+        assert_eq!(circular_platform_profile(vent, base), Some((1.55, 0.0)));
+        assert_eq!(
+            ground_support_for_arena_with_radius(vent, 1.2, 1.2, 0.0).height(),
+            Some(ARENA_TOP_Y)
+        );
+        assert_eq!(
+            ground_support_for_arena_with_radius(vent, 1.4, 0.0, 0.0).height(),
+            Some(base.top_y)
+        );
+        assert_eq!(
+            ground_support_for_arena_with_radius(vent, 0.0, 0.0, 0.0).height(),
+            Some(crystal.top_y)
+        );
+
+        let blocked_center = resolve_circular_platform_side_collision_against(
+            Vec3::new(0.0, ARENA_TOP_Y, 0.0),
+            FIGHTER_RADIUS,
+            base,
+            base.half_extents.x,
+            0.0,
+        );
+        assert!(blocked_center.x >= base.half_extents.x + FIGHTER_RADIUS);
     }
 
     #[test]
@@ -2917,6 +3533,36 @@ mod tests {
     }
 
     #[test]
+    fn raised_vent_hazards_do_not_hit_through_lower_tiers() {
+        let hazard = ArenaHazardDefinition {
+            kind: ArenaHazardKind::PulseVent,
+            center: Vec3::new(0.0, ARENA_TOP_Y + 1.36, 0.0),
+            radius: 0.82,
+            pulse_seconds: 3.6,
+            phase: 0.0,
+        };
+
+        assert!(arena_hazard_overlaps(
+            &hazard,
+            Vec3::new(0.0, ARENA_TOP_Y + 1.3, 0.0)
+        ));
+        assert!(!arena_hazard_overlaps(
+            &hazard,
+            Vec3::new(0.0, ARENA_TOP_Y + 0.65, 0.0)
+        ));
+        assert!(arena_hazard_affects_height(&hazard, hazard.center.y + 1.8));
+    }
+
+    #[test]
+    fn vent_visual_clock_warns_before_matching_active_window() {
+        let cycle = 3.6;
+        assert_eq!(vent_charge_visual_amount(1.8, cycle, 0.0), 0.0);
+        assert!(vent_charge_visual_amount(3.4, cycle, 0.0) > 0.7);
+        assert!(vent_active_visual_amount(0.2, cycle, 0.0) > 0.25);
+        assert_eq!(vent_active_visual_amount(1.8, cycle, 0.0), 0.0);
+    }
+
+    #[test]
     fn fighter_burn_visual_starts_hot_and_fades_out() {
         let fresh = ArenaFighterBurn::new(ARENA_HAZARD_CAMPFIRE_BURN_SECONDS);
         let ending = ArenaFighterBurn {
@@ -2946,15 +3592,29 @@ mod tests {
         assert_eq!(campfire.reaction_family, ReactionFamilyId::LauncherDown);
         assert!(campfire.reaction.landing_aftermath.is_some());
         assert_eq!(saw.damage, ARENA_HAZARD_SAW_DAMAGE);
-        assert!(!saw.force_knockdown);
+        assert!(saw.knockback > campfire.knockback);
+        assert!(saw.vertical_knockback > campfire.vertical_knockback);
+        assert!(saw.force_knockdown);
         assert!(!saw.guardable);
-        assert_eq!(saw.reaction_family, ReactionFamilyId::ShortStandingStagger);
+        assert!(saw.feedback.heavy_spark);
+        assert_eq!(saw.reaction_family, ReactionFamilyId::LauncherDown);
+        assert!(saw.reaction.landing_aftermath.is_some());
         assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SawBlade) < 0.7);
         assert!(arena_hazard_hit_cooldown(ArenaHazardKind::SnareField) < 1.0);
     }
 
     #[test]
-    fn crank_pipe_entry_requires_grounded_locomotion_on_the_opening() {
+    fn saw_knockback_always_points_away_from_the_blade() {
+        let center = Vec3::new(-3.1, ARENA_TOP_Y, 0.0);
+        assert_eq!(
+            saw_knockback_direction(center + Vec3::Z, center, -Vec3::Z),
+            Vec3::Z
+        );
+        assert_eq!(saw_knockback_direction(center, center, Vec3::Z), -Vec3::X);
+    }
+
+    #[test]
+    fn crank_pipe_accepts_a_grounded_fighter_or_descending_jump() {
         let pipe_pair = arena_definitions()[CRANK_YARD_ARENA_INDEX]
             .pipe_pair
             .expect("Crank Yard pipe pair");
@@ -2968,6 +3628,16 @@ mod tests {
             grounded: false,
             ..default()
         };
+        let descending_motor = FighterMotor {
+            velocity: Vec3::NEG_Y,
+            grounded: false,
+            ..default()
+        };
+        let ascending_motor = FighterMotor {
+            velocity: Vec3::Y,
+            grounded: false,
+            ..default()
+        };
 
         assert_eq!(
             pipe_entry_endpoint(pipe_pair, position, &grounded_motor, FighterAction::Idle),
@@ -2975,6 +3645,24 @@ mod tests {
         );
         assert_eq!(
             pipe_entry_endpoint(pipe_pair, position, &airborne_motor, FighterAction::Idle),
+            None
+        );
+        assert_eq!(
+            pipe_entry_endpoint(
+                pipe_pair,
+                position + Vec3::Y * 0.35,
+                &descending_motor,
+                FighterAction::Jumping,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            pipe_entry_endpoint(
+                pipe_pair,
+                position + Vec3::Y * 0.35,
+                &ascending_motor,
+                FighterAction::Jumping,
+            ),
             None
         );
         assert_eq!(
@@ -3073,7 +3761,11 @@ mod tests {
     fn mini_arena_props_cover_stage_variants() {
         for index in 0..arena_definitions().len() {
             let props = arena_asset_props(index);
-            let expected_minimum = if matches!(index, 1 | 2) { 4 } else { 5 };
+            let expected_minimum = match index {
+                1 | 2 => 4,
+                VENT_SPIRAL_ARENA_INDEX => 1,
+                _ => 5,
+            };
             assert!(props.len() >= expected_minimum);
             assert!(props.iter().all(|prop| prop.file.ends_with(".glb")));
             assert!(props.iter().all(|prop| prop.scale > 0.0));
@@ -3085,6 +3777,14 @@ mod tests {
                     .is_file()
             }));
         }
+    }
+
+    #[test]
+    fn vent_spiral_uses_one_non_overlapping_static_reactor_mesh() {
+        let props = arena_asset_props(VENT_SPIRAL_ARENA_INDEX);
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].file, "tower/tower-round-crystals.glb");
+        assert_eq!(props[0].scale, 3.1);
     }
 
     #[test]
