@@ -191,6 +191,7 @@ pub fn build_app() -> App {
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
                 user_mode::sync_user_mode_battle_music,
+                user_mode::sync_dev_mode_music,
                 user_mode::sync_user_mode_preview_scene,
                 game_state::sync_setup_character_scene_models,
                 game_state::tick_hitstop,

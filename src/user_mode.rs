@@ -5,7 +5,7 @@ use bevy::scene::SceneInstanceReady;
 use bevy::time::{Real, Virtual};
 use bevy::ui::UiTargetCamera;
 
-use crate::arena_defs::{arena_definitions, set_active_arena_index};
+use crate::arena_defs::{active_arena_index, arena_definitions, set_active_arena_index};
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
 use crate::characters::{
@@ -783,8 +783,10 @@ pub(crate) struct UserModePreviewScene {
 #[derive(Component)]
 pub(crate) struct UserModeMusic;
 
-#[derive(Component)]
-pub(crate) struct UserModeBattleMusic;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ArenaMusic {
+    arena_index: usize,
+}
 
 fn user_mode_preview_render_layers() -> RenderLayers {
     RenderLayers::layer(USER_MODE_PREVIEW_LAYER)
@@ -1532,23 +1534,44 @@ pub fn sync_user_mode_battle_music(
     asset_server: Res<AssetServer>,
     mut user_mode: ResMut<UserModeState>,
     state: Res<MatchState>,
-    battle_music: Query<Entity, With<UserModeBattleMusic>>,
+    arena_music: Query<(Entity, &ArenaMusic)>,
     mut commands: Commands,
 ) {
     if user_mode.battle_music_pending && state.phase == MatchPhase::Fighting {
-        if battle_music.is_empty() {
-            start_user_mode_battle_music(&mut commands, &asset_server, state.arena_index);
-        }
+        reconcile_arena_music(
+            &mut commands,
+            &asset_server,
+            &arena_music,
+            state.arena_index,
+        );
         user_mode.battle_music_pending = false;
         user_mode.battle_active = true;
         return;
     }
 
     if user_mode.battle_active && state.phase != MatchPhase::Fighting {
-        stop_user_mode_battle_music(&mut commands, &battle_music);
+        stop_arena_music(&mut commands, &arena_music);
         user_mode.battle_bot_ai_pending = false;
         user_mode.battle_active = false;
     }
+}
+
+pub fn sync_dev_mode_music(
+    asset_server: Res<AssetServer>,
+    user_mode: Res<UserModeState>,
+    arena_music: Query<(Entity, &ArenaMusic)>,
+    mut commands: Commands,
+) {
+    if !dev_mode_music_enabled(&user_mode) {
+        return;
+    }
+
+    reconcile_arena_music(
+        &mut commands,
+        &asset_server,
+        &arena_music,
+        active_arena_index(),
+    );
 }
 
 pub fn sync_user_mode_battle_bot(
@@ -2226,23 +2249,57 @@ fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServe
 }
 
 fn user_mode_battle_music_path(arena_index: usize) -> &'static str {
-    USER_MODE_BATTLE_MUSIC_PATHS
-        .get(arena_index)
-        .copied()
-        .unwrap_or(USER_MODE_BATTLE_MUSIC_PATHS[0])
+    USER_MODE_BATTLE_MUSIC_PATHS[normalized_arena_music_index(arena_index)]
 }
 
-fn start_user_mode_battle_music(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    arena_index: usize,
-) {
+fn normalized_arena_music_index(arena_index: usize) -> usize {
+    (arena_index < USER_MODE_BATTLE_MUSIC_PATHS.len())
+        .then_some(arena_index)
+        .unwrap_or(0)
+}
+
+fn start_arena_music(commands: &mut Commands, asset_server: &AssetServer, arena_index: usize) {
+    let arena_index = normalized_arena_music_index(arena_index);
     commands.spawn((
         UserModeMusic,
-        UserModeBattleMusic,
+        ArenaMusic { arena_index },
         AudioPlayer::new(asset_server.load(user_mode_battle_music_path(arena_index))),
         PlaybackSettings::LOOP,
     ));
+}
+
+fn dev_mode_music_enabled(user_mode: &UserModeState) -> bool {
+    !user_mode.blocks_dev_input()
+}
+
+fn arena_music_should_stay(
+    music_arena_index: usize,
+    desired_arena_index: usize,
+    desired_track_already_kept: bool,
+) -> bool {
+    !desired_track_already_kept && music_arena_index == desired_arena_index
+}
+
+fn reconcile_arena_music(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    music: &Query<(Entity, &ArenaMusic)>,
+    arena_index: usize,
+) {
+    let arena_index = normalized_arena_music_index(arena_index);
+    let mut desired_track_kept = false;
+
+    for (entity, current_music) in music {
+        if arena_music_should_stay(current_music.arena_index, arena_index, desired_track_kept) {
+            desired_track_kept = true;
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    if !desired_track_kept {
+        start_arena_music(commands, asset_server, arena_index);
+    }
 }
 
 fn stop_user_mode_music(commands: &mut Commands, music: &Query<Entity, With<UserModeMusic>>) {
@@ -2251,11 +2308,8 @@ fn stop_user_mode_music(commands: &mut Commands, music: &Query<Entity, With<User
     }
 }
 
-fn stop_user_mode_battle_music(
-    commands: &mut Commands,
-    music: &Query<Entity, With<UserModeBattleMusic>>,
-) {
-    for entity in music {
+fn stop_arena_music(commands: &mut Commands, music: &Query<(Entity, &ArenaMusic)>) {
+    for (entity, _) in music {
         commands.entity(entity).despawn();
     }
 }
@@ -3102,6 +3156,41 @@ mod tests {
                 "missing user-mode music asset: {path}"
             );
         }
+    }
+
+    #[test]
+    fn arena_music_reconciliation_keeps_only_one_matching_track() {
+        let desired_arena_index = 2;
+        let mut desired_track_kept = false;
+        let keep = [1, 2, 2, 3].map(|music_arena_index| {
+            let should_stay =
+                arena_music_should_stay(music_arena_index, desired_arena_index, desired_track_kept);
+            desired_track_kept |= should_stay;
+            should_stay
+        });
+
+        assert_eq!(keep, [false, true, false, false]);
+        assert!(desired_track_kept);
+        assert_eq!(
+            normalized_arena_music_index(USER_MODE_BATTLE_MUSIC_PATHS.len()),
+            0
+        );
+    }
+
+    #[test]
+    fn dev_mode_music_yields_to_user_mode_screens_and_battles() {
+        let mut user_mode = UserModeState::default();
+        assert!(dev_mode_music_enabled(&user_mode));
+
+        user_mode.enter_mode_select();
+        assert!(!dev_mode_music_enabled(&user_mode));
+
+        user_mode.screen = UserModeScreen::Dev;
+        user_mode.battle_active = true;
+        assert!(!dev_mode_music_enabled(&user_mode));
+
+        user_mode.clear_battle_state();
+        assert!(dev_mode_music_enabled(&user_mode));
     }
 
     #[test]
