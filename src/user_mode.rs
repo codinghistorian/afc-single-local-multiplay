@@ -5,6 +5,7 @@ use bevy::scene::SceneInstanceReady;
 use bevy::time::{Real, Virtual};
 use bevy::ui::UiTargetCamera;
 
+use crate::arena::ARENA_PREVIEW_RENDER_LAYER;
 use crate::arena_defs::{active_arena_index, arena_definitions, set_active_arena_index};
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
@@ -36,6 +37,9 @@ const USER_MODE_PREVIEW_TEXTURE_SIZE: u32 = 384;
 const USER_MODE_PREVIEW_LAYER: usize = 20;
 const USER_MODE_PREVIEW_ORIGIN: Vec3 = Vec3::new(92.0, 32.0, 92.0);
 const USER_MODE_PREVIEW_SCALE: f32 = 1.248;
+const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
+const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
+const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
 const USER_MODE_PLAYER_FIGHTER_ID: usize = 0;
 const USER_MODE_BOT_FIGHTER_ID: usize = 1;
 const USER_MODE_STOCK_RULE_INDEX: usize = 2;
@@ -229,7 +233,8 @@ pub fn should_spawn_web_gameplay_scene(
     state: Res<MatchState>,
 ) -> bool {
     !scene.loaded
-        && (user_mode.screen == UserModeScreen::ControlsBriefing
+        && (user_mode.screen == UserModeScreen::ArenaSelect
+            || user_mode.screen == UserModeScreen::ControlsBriefing
             || user_mode.battle_music_pending
             || user_mode.battle_active
             || state.reset_requested
@@ -776,7 +781,7 @@ pub(crate) struct UserModeCharacterPreview;
 pub(crate) struct UserModeArenaPreviewPanel;
 
 #[derive(Component)]
-pub(crate) struct UserModeArenaPreviewImage;
+pub(crate) struct UserModeArenaPreviewCamera;
 
 #[derive(Component)]
 pub(crate) struct UserModePreviewRoot;
@@ -903,9 +908,16 @@ pub fn setup_user_mode_ui(
         USER_MODE_PREVIEW_TEXTURE_SIZE,
         USER_MODE_PREVIEW_TEXTURE_SIZE,
         TextureFormat::Rgba8Unorm,
-        preview_view_format,
+        preview_view_format.clone(),
     );
     let preview_image = images.add(preview_image);
+    let arena_preview_image = Image::new_target_texture(
+        USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH,
+        USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        preview_view_format,
+    );
+    let arena_preview_image = images.add(arena_preview_image);
     let preview_origin = USER_MODE_PREVIEW_ORIGIN;
     let preview_scene =
         character_scene_model(&asset_server, &character_catalog, CharacterKind::Cat);
@@ -955,6 +967,38 @@ pub fn setup_user_mode_ui(
             .looking_at(preview_origin + Vec3::new(0.0, 0.86, 0.0), Vec3::Y),
         UserModePreviewCamera,
         user_mode_preview_render_layers(),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 18_000.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-8.0, 16.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
+    ));
+    commands.spawn((
+        PointLight {
+            intensity: 900_000.0,
+            range: 40.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 12.0, 7.0),
+        RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: -5,
+            is_active: false,
+            clear_color: Color::srgb(0.025, 0.03, 0.04).into(),
+            ..default()
+        },
+        RenderTarget::Image(arena_preview_image.clone().into()),
+        arena_preview_camera_transform(0),
+        UserModeArenaPreviewCamera,
+        RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
 
     let mut user_mode_root = commands.spawn((
@@ -1053,8 +1097,7 @@ pub fn setup_user_mode_ui(
                         BackgroundColor(Color::srgb(0.035, 0.04, 0.05)),
                         BorderColor::all(Color::srgb(0.78, 0.67, 0.4)),
                         children![(
-                            UserModeArenaPreviewImage,
-                            ImageNode::new(asset_server.load(arena_preview_asset_path(0))),
+                            ImageNode::new(arena_preview_image),
                             Node {
                                 width: Val::Percent(100.0),
                                 height: Val::Percent(100.0),
@@ -1470,6 +1513,7 @@ pub fn handle_user_mode_input(
                 return;
             }
             user_mode.enter_arena_select();
+            set_active_arena_index(user_mode.arena_index);
             announcements.show("Choose arena", 0.9);
         }
         return;
@@ -1478,9 +1522,11 @@ pub fn handle_user_mode_input(
     if user_mode.screen == UserModeScreen::ArenaSelect {
         if select_previous_pressed(&keys) {
             user_mode.select_previous_arena();
+            set_active_arena_index(user_mode.arena_index);
         }
         if select_next_pressed(&keys) {
             user_mode.select_next_arena();
+            set_active_arena_index(user_mode.arena_index);
         }
         if keys.just_pressed(KeyCode::Enter) {
             stop_user_mode_music(&mut commands, &music);
@@ -1716,7 +1762,6 @@ pub fn rotate_user_mode_preview(
 
 pub fn update_user_mode_selection_previews(
     user_mode: Res<UserModeState>,
-    asset_server: Res<AssetServer>,
     mut character_previews: Query<
         &mut Node,
         (
@@ -1731,7 +1776,10 @@ pub fn update_user_mode_selection_previews(
             Without<UserModeCharacterPreview>,
         ),
     >,
-    mut arena_preview_images: Query<&mut ImageNode, With<UserModeArenaPreviewImage>>,
+    mut arena_preview_cameras: Query<
+        (&mut Camera, &mut Transform),
+        With<UserModeArenaPreviewCamera>,
+    >,
 ) {
     let character_visible = user_mode.screen() == UserModeScreen::CharacterSelect;
     let arena_visible = user_mode.screen() == UserModeScreen::ArenaSelect;
@@ -1751,12 +1799,12 @@ pub fn update_user_mode_selection_previews(
         };
     }
 
-    if arena_visible {
-        let preview = asset_server.load(arena_preview_asset_path(user_mode.arena_index));
-        for mut image in &mut arena_preview_images {
-            if image.image != preview {
-                image.image = preview.clone();
-            }
+    for (mut camera, mut transform) in &mut arena_preview_cameras {
+        if camera.is_active != arena_visible {
+            camera.is_active = arena_visible;
+        }
+        if arena_visible {
+            *transform = arena_preview_camera_transform(user_mode.arena_index);
         }
     }
 }
@@ -2122,10 +2170,13 @@ fn arena_select_message(selected_index: usize) -> String {
         .join("\n")
 }
 
-fn arena_preview_asset_path(selected_index: usize) -> &'static str {
+fn arena_preview_camera_transform(selected_index: usize) -> Transform {
     let arenas = arena_definitions();
     let selected_index = selected_index.min(arenas.len().saturating_sub(1));
-    arenas[selected_index].background.asset_path
+    Transform::from_translation(
+        arenas[selected_index].camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE,
+    )
+    .looking_at(Vec3::Y * 0.6, Vec3::Y)
 }
 
 fn user_mode_select_title_message(user_mode: &UserModeState) -> String {
@@ -2634,13 +2685,16 @@ mod tests {
     }
 
     #[test]
-    fn arena_preview_uses_each_selected_arenas_background() {
+    fn arena_preview_camera_frames_each_selected_arena() {
         for (index, arena) in arena_definitions().iter().enumerate() {
-            assert_eq!(arena_preview_asset_path(index), arena.background.asset_path);
+            assert_eq!(
+                arena_preview_camera_transform(index).translation,
+                arena.camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+            );
         }
         assert_eq!(
-            arena_preview_asset_path(arena_definitions().len()),
-            arena_definitions().last().unwrap().background.asset_path
+            arena_preview_camera_transform(arena_definitions().len()).translation,
+            arena_preview_camera_transform(arena_definitions().len() - 1).translation
         );
     }
 

@@ -317,7 +317,12 @@ pub fn build_app() -> App {
                 fighter::sync_loadout_visuals.run_if(user_mode::gameplay_scene_loaded),
                 items::sync_item_visuals.run_if(user_mode::gameplay_scene_loaded),
                 effects::update_effects,
-                arena::sync_arena_visuals.run_if(user_mode::gameplay_scene_loaded),
+                (
+                    arena::sync_arena_visuals.run_if(user_mode::gameplay_scene_loaded),
+                    arena::sync_arena_preview_render_layers
+                        .run_if(user_mode::gameplay_scene_loaded),
+                )
+                    .chain(),
                 map_editor::sync_map_overlay_visuals.run_if(user_mode::gameplay_scene_loaded),
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 map_editor::sync_map_editor_preview.run_if(user_mode::gameplay_scene_loaded),

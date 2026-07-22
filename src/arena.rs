@@ -1,6 +1,8 @@
+use bevy::camera::visibility::RenderLayers;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::EulerRot;
 use bevy::prelude::*;
+use bevy::scene::SceneInstanceReady;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
@@ -83,9 +85,47 @@ const ARENA_GROUND_DEPTH_BIAS_STEP: f32 = 128.0;
 const ARENA_PLATFORM_DEPTH_BIAS_BASE: f32 = -768.0;
 const ARENA_PLATFORM_DEPTH_BIAS_STEP: f32 = 64.0;
 const ARENA_PROP_SURFACE_CLEARANCE: f32 = 0.012;
+pub(crate) const ARENA_PREVIEW_RENDER_LAYER: usize = 21;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+fn arena_geometry_render_layers() -> RenderLayers {
+    RenderLayers::from_layers(&[0, ARENA_PREVIEW_RENDER_LAYER])
+}
+
+fn apply_arena_geometry_render_layers(
+    scene_ready: On<SceneInstanceReady>,
+    children: Query<&Children>,
+    mut commands: Commands,
+) {
+    commands
+        .entity(scene_ready.entity)
+        .insert(arena_geometry_render_layers());
+    for descendant in children.iter_descendants(scene_ready.entity) {
+        commands
+            .entity(descendant)
+            .insert(arena_geometry_render_layers());
+    }
+}
+
+pub fn sync_arena_preview_render_layers(
+    mut commands: Commands,
+    children: Query<&Children>,
+    geometry: Query<Entity, (Added<ArenaGeometry>, Without<ArenaBackgroundWallpaper>)>,
+) {
+    for entity in &geometry {
+        commands
+            .entity(entity)
+            .insert(arena_geometry_render_layers())
+            .observe(apply_arena_geometry_render_layers);
+        for descendant in children.iter_descendants(entity) {
+            commands
+                .entity(descendant)
+                .insert(arena_geometry_render_layers());
+        }
+    }
+}
 
 #[derive(Component)]
 pub(crate) struct ArenaBackgroundWallpaper(ArenaBackgroundDefinition);
@@ -3836,6 +3876,15 @@ fn bumper_impact_profile(planar_speed: f32) -> ImpactProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arena_preview_layers_include_gameplay_and_preview_cameras() {
+        let layers = arena_geometry_render_layers();
+
+        assert!(layers.intersects(&RenderLayers::default()));
+        assert!(layers.intersects(&RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER)));
+        assert_ne!(ARENA_PREVIEW_RENDER_LAYER, 0);
+    }
 
     #[test]
     fn radius_support_extends_platform_ground_query_slightly() {
