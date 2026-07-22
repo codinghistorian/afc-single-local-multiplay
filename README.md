@@ -41,6 +41,7 @@ Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
 
 - [Development workflow](docs/development.md)
 - [Runtime architecture](docs/architecture.md)
+- [Multiplayer architecture and delivery plan](docs/multiplayer-architecture.md)
 - [Performance budgets and profiling](docs/performance.md)
 
 ## Controls
