@@ -341,8 +341,12 @@ pub fn build_app() -> App {
                 hud::update_hud.run_if(user_mode::gameplay_scene_loaded),
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 map_editor::update_map_editor_ui.run_if(user_mode::gameplay_scene_loaded),
-                user_mode::rotate_user_mode_preview,
-                user_mode::update_user_mode_ui,
+                (
+                    user_mode::rotate_user_mode_preview,
+                    user_mode::update_user_mode_selection_previews,
+                    user_mode::update_user_mode_ui,
+                )
+                    .chain(),
             )
                 .chain()
                 .in_set(GameSet::Presentation),

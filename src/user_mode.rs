@@ -770,6 +770,15 @@ pub(crate) struct UserModeSelectTitleText;
 pub(crate) struct UserModeSelectHintText;
 
 #[derive(Component)]
+pub(crate) struct UserModeCharacterPreview;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaPreviewPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaPreviewImage;
+
+#[derive(Component)]
 pub(crate) struct UserModePreviewRoot;
 
 #[derive(Component)]
@@ -1022,12 +1031,36 @@ pub fn setup_user_mode_ui(
                         TextShadow::default(),
                     ),
                     (
+                        UserModeCharacterPreview,
                         ImageNode::new(preview_image),
                         Node {
                             width: Val::Px(310.0),
                             height: Val::Px(310.0),
                             ..default()
                         },
+                    ),
+                    (
+                        UserModeArenaPreviewPanel,
+                        Node {
+                            display: Display::None,
+                            width: Val::Percent(68.0),
+                            max_width: Val::Px(720.0),
+                            aspect_ratio: Some(1.5),
+                            border: UiRect::all(Val::Px(3.0)),
+                            padding: UiRect::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.035, 0.04, 0.05)),
+                        BorderColor::all(Color::srgb(0.78, 0.67, 0.4)),
+                        children![(
+                            UserModeArenaPreviewImage,
+                            ImageNode::new(asset_server.load(arena_preview_asset_path(0))),
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                ..default()
+                            },
+                        )],
                     ),
                     (
                         UserModeChoiceText,
@@ -1681,6 +1714,53 @@ pub fn rotate_user_mode_preview(
     }
 }
 
+pub fn update_user_mode_selection_previews(
+    user_mode: Res<UserModeState>,
+    asset_server: Res<AssetServer>,
+    mut character_previews: Query<
+        &mut Node,
+        (
+            With<UserModeCharacterPreview>,
+            Without<UserModeArenaPreviewPanel>,
+        ),
+    >,
+    mut arena_preview_panels: Query<
+        &mut Node,
+        (
+            With<UserModeArenaPreviewPanel>,
+            Without<UserModeCharacterPreview>,
+        ),
+    >,
+    mut arena_preview_images: Query<&mut ImageNode, With<UserModeArenaPreviewImage>>,
+) {
+    let character_visible = user_mode.screen() == UserModeScreen::CharacterSelect;
+    let arena_visible = user_mode.screen() == UserModeScreen::ArenaSelect;
+
+    for mut node in &mut character_previews {
+        node.display = if character_visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut node in &mut arena_preview_panels {
+        node.display = if arena_visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    if arena_visible {
+        let preview = asset_server.load(arena_preview_asset_path(user_mode.arena_index));
+        for mut image in &mut arena_preview_images {
+            if image.image != preview {
+                image.image = preview.clone();
+            }
+        }
+    }
+}
+
 pub fn sync_user_mode_ui_camera(
     mut commands: Commands,
     roots: Query<Entity, (With<UserModeRoot>, Without<UiTargetCamera>)>,
@@ -2040,6 +2120,12 @@ fn arena_select_message(selected_index: usize) -> String {
         .map(|row| row.join("   "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn arena_preview_asset_path(selected_index: usize) -> &'static str {
+    let arenas = arena_definitions();
+    let selected_index = selected_index.min(arenas.len().saturating_sub(1));
+    arenas[selected_index].background.asset_path
 }
 
 fn user_mode_select_title_message(user_mode: &UserModeState) -> String {
@@ -2545,6 +2631,17 @@ mod tests {
         assert!(message.contains("POWDER KEG COURT"));
         assert_eq!(message.lines().count(), 3);
         assert!(message.lines().all(|line| line.chars().count() <= 80));
+    }
+
+    #[test]
+    fn arena_preview_uses_each_selected_arenas_background() {
+        for (index, arena) in arena_definitions().iter().enumerate() {
+            assert_eq!(arena_preview_asset_path(index), arena.background.asset_path);
+        }
+        assert_eq!(
+            arena_preview_asset_path(arena_definitions().len()),
+            arena_definitions().last().unwrap().background.asset_path
+        );
     }
 
     #[test]
