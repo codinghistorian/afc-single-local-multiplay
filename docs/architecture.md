@@ -8,6 +8,10 @@ Frame-rate-dependent work samples input and presents the latest simulation state
 through animation, effects, camera, rendering, and HUD systems. Dependencies are
 declared between those stages; independent systems remain parallel.
 
+Directional gameplay input modifiers run after all human and bot input producers
+and before action interpretation. This keeps modifiers such as drunkenness
+consistent across controller types without changing action-button semantics.
+
 Inactive match states and map-specific behavior are gated with run conditions.
 Systems should not retain unused query parameters or overlapping mutable queries,
 because both reduce scheduler parallelism and can cause Bevy access conflicts.

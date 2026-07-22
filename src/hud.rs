@@ -1290,6 +1290,7 @@ fn debug_overlay_message(
             ItemState::Thrown { .. } => thrown_items += 1,
             ItemState::Armed { .. } => armed_items += 1,
             ItemState::Rolling { .. } => thrown_items += 1,
+            ItemState::Spraying { .. } => thrown_items += 1,
             ItemState::Respawning => respawning_items += 1,
         }
     }

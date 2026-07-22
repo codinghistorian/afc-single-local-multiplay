@@ -23,6 +23,8 @@ pub enum EffectKind {
     RingOutBurst,
     RespawnColumn,
     PopBombBlast,
+    AlcoholSpray,
+    DrunkBubble,
 }
 
 #[derive(Component)]
@@ -65,6 +67,8 @@ pub struct EffectAssets {
     slash_red: Handle<StandardMaterial>,
     fire_punch: Handle<StandardMaterial>,
     fire_punch_blue: Handle<StandardMaterial>,
+    alcohol: Handle<StandardMaterial>,
+    alcohol_bubble: Handle<StandardMaterial>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2043,6 +2047,8 @@ pub fn setup_effect_assets(
         slash_red: slash_effect_material(&mut materials),
         fire_punch: fire_punch_effect_material(&mut materials, FirePunchPalette::Red),
         fire_punch_blue: fire_punch_effect_material(&mut materials, FirePunchPalette::Blue),
+        alcohol: effect_material(&mut materials, Color::srgba(0.62, 0.16, 0.95, 0.82), 1.5),
+        alcohol_bubble: effect_material(&mut materials, Color::srgba(0.8, 0.58, 1.0, 0.76), 1.1),
     };
     commands.insert_resource(assets);
 }
@@ -2739,6 +2745,80 @@ pub fn spawn_pop_bomb_blast(commands: &mut Commands, assets: &EffectAssets, posi
         },
     ));
     spawn_hit_spark(commands, assets, position + Vec3::Y * 0.7, true, 1.25);
+}
+
+pub fn spawn_alcohol_spray(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    position: Vec3,
+    phase: f32,
+) {
+    commands.spawn((
+        Mesh3d(assets.ring_mesh.clone()),
+        MeshMaterial3d(assets.alcohol.clone()),
+        Transform::from_translation(position + Vec3::Y * 0.08),
+        VisualEffect {
+            kind: EffectKind::AlcoholSpray,
+            lifetime: 0.42,
+            age: 0.0,
+            velocity: Vec3::ZERO,
+            spin: Vec3::new(0.0, 5.0, 0.0),
+            start_scale: Vec3::splat(0.35),
+            end_scale: Vec3::splat(2.0),
+        },
+        Name::new("Alcohol spray ring"),
+    ));
+
+    for index in 0..8 {
+        let angle = phase * 0.7 + index as f32 * PI * 0.25;
+        let direction = Vec3::new(angle.cos(), 0.18 + (index % 3) as f32 * 0.05, angle.sin());
+        let speed = 1.4 + (index % 4) as f32 * 0.2;
+        commands.spawn((
+            Mesh3d(assets.puff_mesh.clone()),
+            MeshMaterial3d(assets.alcohol_bubble.clone()),
+            Transform::from_translation(position + Vec3::Y * 0.18).with_scale(Vec3::splat(0.16)),
+            VisualEffect {
+                kind: EffectKind::AlcoholSpray,
+                lifetime: 0.36,
+                age: 0.0,
+                velocity: direction.normalize_or_zero() * speed,
+                spin: Vec3::new(1.0, 2.0, 0.5),
+                start_scale: Vec3::splat(0.16),
+                end_scale: Vec3::splat(0.035),
+            },
+            Name::new("Alcohol spray droplet"),
+        ));
+    }
+}
+
+pub fn spawn_drunk_bubble(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    fighter_position: Vec3,
+    fighter_id: usize,
+    phase: f32,
+) {
+    let seed = fighter_id as f32 * 1.73 + phase * 2.41;
+    let offset = Vec3::new(
+        (seed * 1.7).sin() * 0.28,
+        0.72 + (seed * 0.91).cos().abs() * 0.58,
+        (seed * 1.13).cos() * 0.2,
+    );
+    commands.spawn((
+        Mesh3d(assets.puff_mesh.clone()),
+        MeshMaterial3d(assets.alcohol_bubble.clone()),
+        Transform::from_translation(fighter_position + offset).with_scale(Vec3::splat(0.13)),
+        VisualEffect {
+            kind: EffectKind::DrunkBubble,
+            lifetime: 0.72,
+            age: 0.0,
+            velocity: Vec3::new(0.0, 0.62 + (seed * 0.43).sin().abs() * 0.24, 0.0),
+            spin: Vec3::new(0.5, 1.2, 0.3),
+            start_scale: Vec3::splat(0.13),
+            end_scale: Vec3::splat(0.035),
+        },
+        Name::new("Drunk bubble"),
+    ));
 }
 
 #[cfg(test)]

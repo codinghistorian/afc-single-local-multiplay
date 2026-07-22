@@ -23,15 +23,16 @@ use crate::combat::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, ground_impact_priority};
 use crate::components::{
-    Controller, Fighter, FighterAction, FighterActionState, FighterBody, FighterGrabState,
-    FighterHand, FighterHead, FighterInput, FighterInventory, FighterMarker, FighterMotor,
-    FighterPoseRoot, FighterSceneModel, FighterSpecialState, FighterStats, FighterUltimateState,
-    FighterVisualRoot, PlayerControlBindings, PlayerKeyBindings, PlayerSlotId,
+    Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterBody,
+    FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory, FighterMarker,
+    FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState, FighterStats,
+    FighterUltimateState, FighterVisualRoot, PlayerControlBindings, PlayerKeyBindings,
+    PlayerSlotId,
 };
 use crate::constants::*;
 use crate::effects::{
-    EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_dust_puff, spawn_guard_flash,
-    spawn_respawn_column, spawn_ringout_burst,
+    EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_drunk_bubble, spawn_dust_puff,
+    spawn_guard_flash, spawn_respawn_column, spawn_ringout_burst,
 };
 #[cfg(test)]
 use crate::equipment::EquipmentKind;
@@ -230,6 +231,7 @@ pub fn spawn_fighters(
             Transform::from_translation(arena.spawn_points[id]),
             visibility,
         ));
+        entity.insert(DrunkStatus::default());
         entity.insert(FighterCharacter::new(character_kind));
 
         if controller.is_bot() {
@@ -479,6 +481,78 @@ pub fn collect_player_input(
             reserve_camera_inputs,
             &mut input,
         );
+    }
+}
+
+/// Gameplay input modifiers run after all human and bot input producers, but
+/// before action interpretation and directional input is consumed.
+pub fn apply_drunk_input_modifier(fighters: Query<(&DrunkStatus, &mut FighterInput)>) {
+    for (status, mut input) in fighters {
+        if status.active() {
+            invert_directional_input(&mut input);
+        }
+    }
+}
+
+fn invert_directional_input(input: &mut FighterInput) {
+    input.movement = -input.movement;
+}
+
+pub fn update_drunk_status(
+    time: Res<Time>,
+    hitstop: Res<Hitstop>,
+    state: Res<MatchState>,
+    mut previous_phase: Local<Option<crate::game_state::MatchPhase>>,
+    mut commands: Commands,
+    effect_assets: Res<EffectAssets>,
+    mut fighters: Query<(
+        Entity,
+        &Fighter,
+        &FighterActionState,
+        &Transform,
+        &mut DrunkStatus,
+    )>,
+) {
+    let dt = time.delta_secs();
+    let entering_fight = state.is_fighting() && *previous_phase != Some(state.phase);
+    *previous_phase = Some(state.phase);
+    for (_entity, fighter, action, transform, mut status) in &mut fighters {
+        if entering_fight {
+            *status = DrunkStatus::default();
+        }
+        if !state.is_fighting()
+            || !state.fighter_can_participate(fighter.id)
+            || matches!(
+                action.action,
+                FighterAction::RingOut | FighterAction::Respawning
+            )
+        {
+            status.remaining = 0.0;
+            status.bubble_timer = 0.0;
+            continue;
+        }
+        if hitstop.active() || !status.active() {
+            continue;
+        }
+
+        status.remaining = (status.remaining - dt).max(0.0);
+        if status.remaining <= 0.0 {
+            status.bubble_timer = 0.0;
+            continue;
+        }
+
+        status.bubble_timer -= dt;
+        while status.bubble_timer <= 0.0 {
+            spawn_drunk_bubble(
+                &mut commands,
+                &effect_assets,
+                transform.translation,
+                fighter.id,
+                status.bubble_phase,
+            );
+            status.bubble_timer += DRUNK_BUBBLE_CADENCE;
+            status.bubble_phase += 1.0;
+        }
     }
 }
 
@@ -4510,6 +4584,7 @@ pub fn ringout_and_respawn(
         &mut FighterMotor,
         &mut FighterActionState,
         &mut FighterUltimateState,
+        &mut DrunkStatus,
         &mut Transform,
         &mut Visibility,
     )>,
@@ -4523,6 +4598,7 @@ pub fn ringout_and_respawn(
         mut motor,
         mut action,
         mut ultimate_state,
+        mut drunk,
         transform,
         mut visibility,
     ) in &mut fighters
@@ -4552,6 +4628,7 @@ pub fn ringout_and_respawn(
             action.reaction_getup_ms = None;
             action.reaction_recover_ms = None;
             action.clear_reaction_visual();
+            *drunk = DrunkStatus::default();
             let resolution = if out {
                 let resolution = state.record_ringout(fighter.id, stats.last_attacker);
                 telemetry.record_ringout(resolution.awarded_to.is_some());
@@ -4636,7 +4713,7 @@ pub fn ringout_and_respawn(
 
     if !awards.is_empty() {
         for attacker in awards {
-            for (fighter, mut stats, _, _, _, _, _) in &mut fighters {
+            for (fighter, mut stats, _, _, _, _, _, _) in &mut fighters {
                 if fighter.id == attacker {
                     stats.score += 1;
                 }
@@ -4650,6 +4727,7 @@ pub fn ringout_and_respawn(
         mut motor,
         mut action,
         mut ultimate_state,
+        mut drunk,
         mut transform,
         mut visibility,
     ) in &mut fighters
@@ -4660,6 +4738,7 @@ pub fn ringout_and_respawn(
 
         match action.action {
             FighterAction::RingOut => {
+                *drunk = DrunkStatus::default();
                 stats.respawn_timer -= dt;
                 if stats.respawn_timer <= 0.0 {
                     transform.translation = fighter.spawn;
@@ -4986,6 +5065,7 @@ pub fn sync_fighter_tint_visuals(
         &FighterCharacter,
         &FighterActionState,
         Option<&ArenaFighterBurn>,
+        Option<&DrunkStatus>,
         &Children,
     )>,
     pose_roots: Query<(), With<FighterPoseRoot>>,
@@ -5001,9 +5081,16 @@ pub fn sync_fighter_tint_visuals(
     mut mesh_materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     tint_materials: Query<&FighterTintMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
 ) {
-    for (fighter, character, action, burn, children) in &fighters {
-        let tint = active_fighter_tint(character.kind, action, burn.copied());
+    for (fighter, character, action, burn, drunk, children) in &fighters {
+        let tint = active_fighter_tint(
+            character.kind,
+            action,
+            burn.copied(),
+            drunk.copied(),
+            time.elapsed_secs(),
+        );
         for child in children {
             if pose_roots.get(*child).is_err() {
                 continue;
@@ -5045,12 +5132,15 @@ enum FighterTintPalette {
     Burning,
     PigCharge,
     CounterFlash,
+    Drunk,
 }
 
 fn active_fighter_tint(
     character: CharacterKind,
     action: &FighterActionState,
     burn: Option<ArenaFighterBurn>,
+    drunk: Option<DrunkStatus>,
+    elapsed: f32,
 ) -> Option<FighterTint> {
     if let Some(burn) = burn {
         return Some(FighterTint {
@@ -5065,6 +5155,16 @@ fn active_fighter_tint(
             amount: counter,
             palette: FighterTintPalette::CounterFlash,
         });
+    }
+
+    if let Some(drunk) = drunk {
+        let amount = drunk_tint_amount(&drunk, elapsed);
+        if amount > 0.0 {
+            return Some(FighterTint {
+                amount,
+                palette: FighterTintPalette::Drunk,
+            });
+        }
     }
 
     let pig = pig_charge_tint_amount(character, action);
@@ -5086,6 +5186,15 @@ fn pig_charge_tint_amount(character: CharacterKind, action: &FighterActionState)
     } else {
         0.0
     }
+}
+
+fn drunk_tint_amount(status: &DrunkStatus, elapsed: f32) -> f32 {
+    if !status.active() {
+        return 0.0;
+    }
+    let pulse = 0.78 + (elapsed * 11.0).sin().abs() * 0.22;
+    let fade = (status.remaining / 0.5).min(1.0);
+    pulse * fade
 }
 
 fn guard_counter_flash_tint_amount(action: &FighterActionState) -> f32 {
@@ -5221,6 +5330,7 @@ fn fighter_tinted_material(base: &StandardMaterial, tint: FighterTint) -> Standa
         FighterTintPalette::Burning => burning_tinted_material(base, tint.amount),
         FighterTintPalette::PigCharge => charge_tinted_material(base, tint.amount),
         FighterTintPalette::CounterFlash => counter_flash_tinted_material(base, tint.amount),
+        FighterTintPalette::Drunk => drunk_tinted_material(base, tint.amount),
     }
 }
 
@@ -5281,6 +5391,28 @@ fn counter_flash_tinted_color(base: Color, amount: f32) -> Color {
         base.red + (1.0 - base.red) * (0.82 * amount),
         base.green + (1.0 - base.green) * (0.9 * amount),
         base.blue + (1.0 - base.blue) * amount,
+        base.alpha,
+    )
+}
+
+fn drunk_tinted_material(base: &StandardMaterial, amount: f32) -> StandardMaterial {
+    let amount = amount.clamp(0.0, 1.0);
+    let mut material = base.clone();
+    material.base_color = drunk_tinted_color(base.base_color, amount);
+    material.emissive =
+        LinearRgba::from(Color::srgb(0.34, 0.08, 0.72).to_linear()) * (0.18 + amount * 0.8);
+    material
+}
+
+fn drunk_tinted_color(base: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let base = base.to_srgba();
+    let purple = Color::srgb(0.58, 0.24, 0.86).to_srgba();
+    let mix = amount * 0.72;
+    Color::srgba(
+        base.red + (purple.red - base.red) * mix,
+        base.green + (purple.green - base.green) * mix,
+        base.blue + (purple.blue - base.blue) * mix,
         base.alpha,
     )
 }
@@ -9255,6 +9387,97 @@ mod tests {
             pig_charge_tint_amount(CharacterKind::Pig, &dash_charging),
             1.0
         );
+    }
+
+    #[test]
+    fn drunk_input_inverts_both_axes_without_changing_actions() {
+        let mut input = FighterInput {
+            movement: Vec2::new(0.75, -0.4),
+            aim: true,
+            jump: true,
+            dash: true,
+            light: true,
+            heavy: true,
+            grab: true,
+            guard: true,
+            ultimate: true,
+            special: true,
+            ..default()
+        };
+        invert_directional_input(&mut input);
+
+        assert_eq!(input.movement, Vec2::new(-0.75, 0.4));
+        assert!(input.aim && input.jump && input.dash);
+        assert!(input.light && input.heavy && input.grab && input.guard);
+        assert!(input.ultimate && input.special);
+    }
+
+    #[test]
+    fn drunk_contacts_refresh_to_five_seconds_without_stacking() {
+        let mut status = DrunkStatus {
+            remaining: 1.2,
+            ..default()
+        };
+        status.refresh();
+        assert_eq!(status.remaining, DRUNK_DURATION);
+        status.remaining = DRUNK_DURATION + 1.0;
+        status.refresh();
+        assert_eq!(status.remaining, DRUNK_DURATION + 1.0);
+    }
+
+    #[test]
+    fn drunk_tint_pulses_and_fades_during_final_half_second() {
+        let status = DrunkStatus {
+            remaining: DRUNK_DURATION,
+            ..default()
+        };
+        let full = drunk_tint_amount(&status, 0.0);
+        let pulsed = drunk_tint_amount(&status, 0.15);
+        let fading = drunk_tint_amount(
+            &DrunkStatus {
+                remaining: 0.2,
+                ..status
+            },
+            0.15,
+        );
+        assert!(full > 0.0 && pulsed != full);
+        assert!(fading < full);
+    }
+
+    #[test]
+    fn tint_priority_keeps_counter_flash_above_drunk() {
+        let drunk = Some(DrunkStatus {
+            remaining: DRUNK_DURATION,
+            ..default()
+        });
+        let counter_action = FighterActionState {
+            action: FighterAction::GuardCounter,
+            elapsed: 0.0,
+            ..default()
+        };
+        let counter = active_fighter_tint(CharacterKind::Cat, &counter_action, None, drunk, 0.0);
+        assert!(matches!(
+            counter,
+            Some(FighterTint {
+                palette: FighterTintPalette::CounterFlash,
+                ..
+            })
+        ));
+
+        let drunk_tint = active_fighter_tint(
+            CharacterKind::Cat,
+            &FighterActionState::default(),
+            None,
+            drunk,
+            0.0,
+        );
+        assert!(matches!(
+            drunk_tint,
+            Some(FighterTint {
+                palette: FighterTintPalette::Drunk,
+                ..
+            })
+        ));
     }
 
     #[test]

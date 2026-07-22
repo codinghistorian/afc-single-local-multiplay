@@ -189,6 +189,34 @@ pub struct FighterInput {
     pub special: bool,
 }
 
+/// Refresh-only directional input modifier applied after every input producer.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct DrunkStatus {
+    pub remaining: f32,
+    pub bubble_timer: f32,
+    pub bubble_phase: f32,
+}
+
+impl Default for DrunkStatus {
+    fn default() -> Self {
+        Self {
+            remaining: 0.0,
+            bubble_timer: 0.0,
+            bubble_phase: 0.0,
+        }
+    }
+}
+
+impl DrunkStatus {
+    pub fn refresh(&mut self) {
+        self.remaining = self.remaining.max(crate::constants::DRUNK_DURATION);
+    }
+
+    pub fn active(&self) -> bool {
+        self.remaining > 0.0
+    }
+}
+
 #[derive(Component, Default)]
 pub struct FighterInventory {
     pub held: Option<Entity>,

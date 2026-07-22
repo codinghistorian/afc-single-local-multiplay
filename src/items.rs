@@ -11,11 +11,13 @@ use crate::combat::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind};
 use crate::components::{
-    AttackKind, Fighter, FighterAction, FighterActionState, FighterInput, FighterInventory,
-    FighterMotor, FighterStats, Hitbox,
+    AttackKind, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterInput,
+    FighterInventory, FighterMotor, FighterStats, Hitbox,
 };
 use crate::constants::*;
-use crate::effects::{EffectAssets, spawn_dust_puff, spawn_guard_flash, spawn_pop_bomb_blast};
+use crate::effects::{
+    EffectAssets, spawn_alcohol_spray, spawn_dust_puff, spawn_guard_flash, spawn_pop_bomb_blast,
+};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
 use crate::fighter::cancel_dash_slide_for_action;
@@ -315,6 +317,14 @@ pub enum ItemState {
         timer: f32,
         grace: f32,
     },
+    Spraying {
+        owner: Entity,
+        owner_id: usize,
+        lifetime: f32,
+        spray_timer: f32,
+        spiral_phase: f32,
+        spiral_radius: f32,
+    },
     Rolling {
         lifetime: f32,
     },
@@ -433,6 +443,21 @@ impl ArenaItem {
             grace: self.kind.throw_owner_grace(),
         };
         self.pickup_lockout = self.kind.pickup_lockout();
+    }
+
+    pub fn start_barrel_spray(&mut self, owner: Entity, owner_id: usize) {
+        let planar_speed = Vec2::new(self.velocity.x, self.velocity.z).length();
+        self.state = ItemState::Spraying {
+            owner,
+            owner_id,
+            lifetime: BARREL_SPRAY_DURATION,
+            spray_timer: 0.0,
+            spiral_phase: 0.0,
+            spiral_radius: planar_speed.max(0.2),
+        };
+        self.velocity.y = 0.0;
+        self.pickup_lockout = BARREL_SPRAY_DURATION;
+        self.already_hit.clear();
     }
 
     pub fn roll_loose(&mut self, velocity: Vec3) {
@@ -1010,6 +1035,28 @@ fn place_loose(
     *visibility = Visibility::Visible;
 }
 
+fn begin_barrel_spray(
+    item: &mut ArenaItem,
+    transform: &mut Transform,
+    owner: Entity,
+    owner_id: usize,
+) {
+    if let Some(ground_y) = ground_height_at(transform.translation.x, transform.translation.z) {
+        transform.translation.y = ground_y + item.kind.loose_offset();
+    }
+    transform.rotation = Quat::IDENTITY;
+    item.start_barrel_spray(owner, owner_id);
+}
+
+fn advance_barrel_spray_timer(timer: f32, dt: f32) -> (bool, f32) {
+    let timer = timer - dt;
+    if timer <= 0.0 {
+        (true, timer + BARREL_SPRAY_CADENCE)
+    } else {
+        (false, timer)
+    }
+}
+
 pub fn spawn_item_hitboxes(
     mut commands: Commands,
     hitstop: Res<Hitstop>,
@@ -1268,6 +1315,7 @@ pub fn update_moving_items(
             &mut FighterStats,
             &mut FighterMotor,
             &mut FighterActionState,
+            &mut DrunkStatus,
             &FighterStyle,
             &FighterEquipment,
             &Transform,
@@ -1302,6 +1350,7 @@ pub fn update_moving_items(
                     mut stats,
                     mut motor,
                     mut action,
+                    _drunk,
                     target_style,
                     target_equipment,
                     target_transform,
@@ -1360,6 +1409,10 @@ pub fn update_moving_items(
                         );
                         continue;
                     }
+                    if item.kind == ItemKind::Barrel {
+                        begin_barrel_spray(&mut item, &mut transform, owner, owner_id);
+                        continue;
+                    }
                     if item.durability <= 0 {
                         spawn_dust_puff(&mut commands, &effect_assets, transform.translation);
                         item.set_respawning();
@@ -1393,6 +1446,11 @@ pub fn update_moving_items(
                                 transform.translation,
                                 time.elapsed_secs(),
                             );
+                            continue;
+                        }
+                        if item.kind == ItemKind::Barrel {
+                            item.durability -= 1;
+                            begin_barrel_spray(&mut item, &mut transform, owner, owner_id);
                             continue;
                         }
                         let settle_position = transform.translation;
@@ -1443,6 +1501,102 @@ pub fn update_moving_items(
                 }
 
                 item.state = ItemState::Rolling { lifetime };
+            }
+            ItemState::Spraying {
+                owner,
+                owner_id,
+                mut lifetime,
+                mut spray_timer,
+                mut spiral_phase,
+                mut spiral_radius,
+            } => {
+                lifetime -= dt;
+                let (spray_due, next_spray_timer) = advance_barrel_spray_timer(spray_timer, dt);
+                spray_timer = next_spray_timer;
+                spiral_phase += dt * (5.0 + spiral_radius * 1.8);
+                spiral_radius = (spiral_radius - dt * 0.9).max(0.16);
+
+                let planar = Vec2::new(item.velocity.x, item.velocity.z);
+                let speed = planar.length() * (-2.2 * dt).exp();
+                let direction = if planar.length_squared() > 0.0001 {
+                    planar / planar.length()
+                } else {
+                    Vec2::new(spiral_phase.cos(), spiral_phase.sin())
+                };
+                let turn = dt * (4.0 + spiral_radius * 3.0);
+                let (sin_turn, cos_turn) = turn.sin_cos();
+                let turned = Vec2::new(
+                    direction.x * cos_turn - direction.y * sin_turn,
+                    direction.x * sin_turn + direction.y * cos_turn,
+                );
+                item.velocity = Vec3::new(turned.x * speed, 0.0, turned.y * speed);
+                transform.translation += item.velocity * dt;
+                transform.rotate_y(dt * 24.0);
+                transform.rotate_x((spiral_phase * 2.4).sin() * dt * 0.7);
+                transform.rotate_z((spiral_phase * 1.7).cos() * dt * 0.55);
+
+                if should_respawn_item(transform.translation) {
+                    item.set_respawning();
+                    material.0 = assets.barrel_material.clone();
+                    *visibility = Visibility::Hidden;
+                    continue;
+                }
+
+                if spray_due {
+                    spawn_alcohol_spray(
+                        &mut commands,
+                        &effect_assets,
+                        transform.translation,
+                        spiral_phase,
+                    );
+                    for (
+                        target_entity,
+                        fighter,
+                        mut stats,
+                        _motor,
+                        action,
+                        mut drunk,
+                        _target_style,
+                        _target_equipment,
+                        fighter_transform,
+                    ) in &mut fighters
+                    {
+                        if target_entity == owner
+                            || !state.combat_target_allowed_for_state(owner_id, fighter.id)
+                            || !can_receive_impact(&stats, &action)
+                        {
+                            continue;
+                        }
+                        let delta = fighter_transform.translation - transform.translation;
+                        let flat_distance = Vec2::new(delta.x, delta.z).length();
+                        if flat_distance > BARREL_SPRAY_RADIUS {
+                            continue;
+                        }
+                        drunk.refresh();
+                        stats.hud_flash = stats.hud_flash.max(0.12);
+                    }
+                }
+
+                if lifetime <= 0.0 {
+                    if item.durability <= 0 {
+                        item.set_respawning();
+                        material.0 = assets.barrel_material.clone();
+                        *visibility = Visibility::Hidden;
+                    } else {
+                        let settle_position = transform.translation;
+                        place_loose(&mut item, &mut transform, &mut visibility, settle_position);
+                    }
+                    continue;
+                }
+
+                item.state = ItemState::Spraying {
+                    owner,
+                    owner_id,
+                    lifetime,
+                    spray_timer,
+                    spiral_phase,
+                    spiral_radius,
+                };
             }
             ItemState::Armed {
                 owner,
@@ -1503,6 +1657,7 @@ pub fn update_moving_items(
                     mut stats,
                     mut motor,
                     mut action,
+                    mut _drunk,
                     target_style,
                     target_equipment,
                     fighter_transform,
@@ -1822,6 +1977,40 @@ mod tests {
                 grace: ITEM_MALLET_THROW_GRACE,
             }
         );
+    }
+
+    #[test]
+    fn barrel_activation_consumes_once_and_enters_four_second_spray() {
+        let owner = entity(2);
+        let mut item = ArenaItem::new(ItemKind::Barrel, Vec3::ZERO, 0.0);
+        item.velocity = Vec3::new(4.0, -1.0, 1.0);
+        item.durability -= 1;
+        item.start_barrel_spray(owner, 3);
+
+        assert_eq!(item.durability, 2);
+        assert!(matches!(
+            item.state,
+            ItemState::Spraying {
+                owner: active_owner,
+                owner_id: 3,
+                lifetime,
+                spray_timer: 0.0,
+                ..
+            } if active_owner == owner && (lifetime - BARREL_SPRAY_DURATION).abs() < 0.001
+        ));
+        assert_eq!(item.velocity.y, 0.0);
+    }
+
+    #[test]
+    fn barrel_spray_cadence_fires_immediately_then_every_quarter_second() {
+        let (first, timer) = advance_barrel_spray_timer(0.0, 1.0 / 60.0);
+        assert!(first);
+        assert!((timer - (BARREL_SPRAY_CADENCE - 1.0 / 60.0)).abs() < 0.001);
+
+        let (second, timer) = advance_barrel_spray_timer(timer, 0.1);
+        assert!(!second);
+        let (third, _) = advance_barrel_spray_timer(timer, 0.2);
+        assert!(third);
     }
 
     #[test]

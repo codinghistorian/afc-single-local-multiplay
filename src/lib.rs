@@ -202,6 +202,13 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
+            fighter::update_drunk_status
+                .in_set(GameSet::Global)
+                .after(game_state::tick_hitstop)
+                .after(game_state::handle_global_input),
+        )
+        .add_systems(
+            Update,
             (
                 arena::setup_arena,
                 items::setup_items,
@@ -222,6 +229,7 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 bot::bot_action_control_input,
                 bot::bot_input,
+                fighter::apply_drunk_input_modifier,
             )
                 .chain()
                 .in_set(GameSet::Input)
