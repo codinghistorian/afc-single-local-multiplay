@@ -43,6 +43,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "gltf_animation",
     "png",
     "mp3",
+    "vorbis",
     "wav",
 ] }
 ron = "0.10"

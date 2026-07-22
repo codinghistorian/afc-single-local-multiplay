@@ -18,9 +18,19 @@ use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
 };
 
-const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/Desert_Teeth_intro_non_commercial.mp3";
-const USER_MODE_BATTLE_MUSIC_PATH: &str = "music/bgm/arena_arcade_battle_song.mp3";
-const USER_MODE_MENU_MUSIC_START_SECS: f32 = 16.3;
+const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
+const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
+    "music/bgm/cc0_crown_hope.ogg",
+    "music/bgm/cc0_causeway_pirate_tune.ogg",
+    "music/bgm/cc0_sunstone_desert_loop.mp3",
+    "music/bgm/cc0_crank_robotic_city.ogg",
+    "music/bgm/cc0_vent_urgent.mp3",
+    "music/bgm/cc0_bumper_carnival_rides.ogg",
+    "music/bgm/cc0_feast_medieval_fair.ogg",
+    "music/bgm/cc0_snare_rhythm_garden.ogg",
+    "music/bgm/cc0_sky_snow_stage.ogg",
+    "music/bgm/cc0_powder_pirate_indenture_loop.wav",
+];
 const USER_MODE_PREVIEW_TEXTURE_SIZE: u32 = 384;
 const USER_MODE_PREVIEW_LAYER: usize = 20;
 const USER_MODE_PREVIEW_ORIGIN: Vec3 = Vec3::new(92.0, 32.0, 92.0);
@@ -1491,7 +1501,7 @@ pub fn sync_user_mode_battle_music(
 ) {
     if user_mode.battle_music_pending && state.phase == MatchPhase::Fighting {
         if battle_music.is_empty() {
-            start_user_mode_battle_music(&mut commands, &asset_server);
+            start_user_mode_battle_music(&mut commands, &asset_server, state.arena_index);
         }
         user_mode.battle_music_pending = false;
         user_mode.battle_active = true;
@@ -2160,26 +2170,29 @@ fn result_choice_message(choice: UserModeResultChoice) -> String {
 }
 
 fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
-    start_user_mode_menu_music_at(commands, asset_server, USER_MODE_MENU_MUSIC_START_SECS);
-}
-
-fn start_user_mode_menu_music_at(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    start_secs: f32,
-) {
     commands.spawn((
         UserModeMusic,
         AudioPlayer::new(asset_server.load(USER_MODE_MENU_MUSIC_PATH)),
-        PlaybackSettings::LOOP.with_start_position(core::time::Duration::from_secs_f32(start_secs)),
+        PlaybackSettings::LOOP,
     ));
 }
 
-fn start_user_mode_battle_music(commands: &mut Commands, asset_server: &AssetServer) {
+fn user_mode_battle_music_path(arena_index: usize) -> &'static str {
+    USER_MODE_BATTLE_MUSIC_PATHS
+        .get(arena_index)
+        .copied()
+        .unwrap_or(USER_MODE_BATTLE_MUSIC_PATHS[0])
+}
+
+fn start_user_mode_battle_music(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    arena_index: usize,
+) {
     commands.spawn((
         UserModeMusic,
         UserModeBattleMusic,
-        AudioPlayer::new(asset_server.load(USER_MODE_BATTLE_MUSIC_PATH)),
+        AudioPlayer::new(asset_server.load(user_mode_battle_music_path(arena_index))),
         PlaybackSettings::LOOP,
     ));
 }
@@ -2871,15 +2884,50 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_music_uses_desert_teeth_asset_paths() {
+    fn user_mode_music_has_a_cc0_asset_for_every_arena() {
         assert_eq!(
-            USER_MODE_MENU_MUSIC_PATH,
-            "music/bgm/Desert_Teeth_intro_non_commercial.mp3"
+            USER_MODE_BATTLE_MUSIC_PATHS.len(),
+            arena_definitions().len()
         );
         assert_eq!(
-            USER_MODE_BATTLE_MUSIC_PATH,
-            "music/bgm/arena_arcade_battle_song.mp3"
+            user_mode_battle_music_path(USER_MODE_BATTLE_MUSIC_PATHS.len()),
+            USER_MODE_BATTLE_MUSIC_PATHS[0]
         );
-        assert_eq!(USER_MODE_MENU_MUSIC_START_SECS, 16.3);
+
+        for path in std::iter::once(USER_MODE_MENU_MUSIC_PATH)
+            .chain(USER_MODE_BATTLE_MUSIC_PATHS.iter().copied())
+        {
+            assert!(path.starts_with("music/bgm/cc0_"));
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(path)
+                    .is_file(),
+                "missing user-mode music asset: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_mode_music_assets_are_decodable_by_the_enabled_bevy_audio_formats() {
+        use bevy::audio::{AudioSource, Decodable};
+
+        for path in std::iter::once(USER_MODE_MENU_MUSIC_PATH)
+            .chain(USER_MODE_BATTLE_MUSIC_PATHS.iter().copied())
+        {
+            let bytes = std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(path),
+            )
+            .unwrap_or_else(|error| panic!("failed to read user-mode music asset {path}: {error}"));
+            let source = AudioSource {
+                bytes: bytes.into(),
+            };
+            assert!(
+                source.decoder().next().is_some(),
+                "user-mode music asset has no decodable samples: {path}"
+            );
+        }
     }
 }
