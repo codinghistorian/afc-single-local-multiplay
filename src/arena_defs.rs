@@ -93,7 +93,7 @@ pub struct ArenaBackgroundDefinition {
     pub asset_path: &'static str,
     pub image_size: Vec2,
     pub world_height: f32,
-    pub position: Vec3,
+    pub distance: f32,
 }
 
 pub struct ArenaDefinition {
@@ -117,12 +117,35 @@ impl ArenaDefinition {
     }
 }
 
-const ANIME_SKY_BACKGROUND: ArenaBackgroundDefinition = ArenaBackgroundDefinition {
-    asset_path: "backgrounds/beautiful_sky_anime.png",
-    image_size: Vec2::new(1536.0, 1024.0),
-    world_height: 300.0,
-    position: Vec3::new(0.0, 24.0, -24.0),
-};
+const fn arena_background(asset_path: &'static str) -> ArenaBackgroundDefinition {
+    ArenaBackgroundDefinition {
+        asset_path,
+        image_size: Vec2::new(1536.0, 1024.0),
+        world_height: 52.0,
+        distance: 52.0,
+    }
+}
+
+const CROWN_RING_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/crown_ring.png");
+const SPLIT_CAUSEWAY_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/split_causeway.png");
+const SUNSTONE_STEPS_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/sunstone_steps.png");
+const CRANK_YARD_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/crank_yard.png");
+const VENT_SPIRAL_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/vent_spiral.png");
+const BUMPER_ALLEY_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/bumper_alley.png");
+const FEAST_MARKET_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/feast_market.png");
+const SNARE_GARDEN_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/snare_garden.png");
+const SKY_STEPS_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/sky_steps.png");
+const POWDER_KEG_COURT_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background("backgrounds/powder_keg_court.png");
 
 const CROWN_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::circle(
     0.0,
@@ -735,7 +758,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: CAMERA_BASE_OFFSET,
         hazards: CROWN_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: CROWN_RING_BACKGROUND,
         visual_theme: ArenaVisualTheme::Crown,
     },
     ArenaDefinition {
@@ -754,7 +777,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
         hazards: SPLIT_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: SPLIT_CAUSEWAY_BACKGROUND,
         visual_theme: ArenaVisualTheme::Causeway,
     },
     ArenaDefinition {
@@ -773,7 +796,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y - 0.25,
         camera_offset: Vec3::new(0.0, 13.6, 15.6),
         hazards: SUNSTONE_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: SUNSTONE_STEPS_BACKGROUND,
         visual_theme: ArenaVisualTheme::Terrace,
     },
     ArenaDefinition {
@@ -792,7 +815,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 12.8, 14.8),
         hazards: CRANK_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: CRANK_YARD_BACKGROUND,
         visual_theme: ArenaVisualTheme::Industrial,
     },
     ArenaDefinition {
@@ -811,7 +834,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.4),
         hazards: VENT_SPIRAL_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: VENT_SPIRAL_BACKGROUND,
         visual_theme: ArenaVisualTheme::Reactor,
     },
     ArenaDefinition {
@@ -830,7 +853,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.4, 15.8),
         hazards: BUMPER_ALLEY_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: BUMPER_ALLEY_BACKGROUND,
         visual_theme: ArenaVisualTheme::Toybox,
     },
     ArenaDefinition {
@@ -849,7 +872,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.0, 15.2),
         hazards: FEAST_MARKET_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: FEAST_MARKET_BACKGROUND,
         visual_theme: ArenaVisualTheme::Market,
     },
     ArenaDefinition {
@@ -868,7 +891,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.3, 15.4),
         hazards: SNARE_GARDEN_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: SNARE_GARDEN_BACKGROUND,
         visual_theme: ArenaVisualTheme::Garden,
     },
     ArenaDefinition {
@@ -887,7 +910,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y - 0.45,
         camera_offset: Vec3::new(0.0, 14.0, 16.2),
         hazards: SKY_STEPS_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: SKY_STEPS_BACKGROUND,
         visual_theme: ArenaVisualTheme::Snow,
     },
     ArenaDefinition {
@@ -906,7 +929,7 @@ const ARENAS: &[ArenaDefinition] = &[
         ringout_y: RINGOUT_Y,
         camera_offset: Vec3::new(0.0, 13.2, 15.6),
         hazards: POWDER_KEG_HAZARDS,
-        background: ANIME_SKY_BACKGROUND,
+        background: POWDER_KEG_COURT_BACKGROUND,
         visual_theme: ArenaVisualTheme::Powder,
     },
 ];
@@ -977,6 +1000,44 @@ mod tests {
                 .count()
                 >= 3
         );
+    }
+
+    #[test]
+    fn every_arena_has_its_own_matching_background_asset() {
+        let expected_paths = [
+            "backgrounds/crown_ring.png",
+            "backgrounds/split_causeway.png",
+            "backgrounds/sunstone_steps.png",
+            "backgrounds/crank_yard.png",
+            "backgrounds/vent_spiral.png",
+            "backgrounds/bumper_alley.png",
+            "backgrounds/feast_market.png",
+            "backgrounds/snare_garden.png",
+            "backgrounds/sky_steps.png",
+            "backgrounds/powder_keg_court.png",
+        ];
+
+        let arenas = arena_definitions();
+        assert_eq!(arenas.len(), expected_paths.len());
+        for (arena, expected_path) in arenas.iter().zip(expected_paths) {
+            assert_eq!(arena.background.asset_path, expected_path, "{}", arena.name);
+            assert_eq!(arena.background.image_size, Vec2::new(1536.0, 1024.0));
+
+            let asset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(expected_path);
+            assert!(asset_path.is_file(), "missing {}", asset_path.display());
+        }
+
+        for (index, arena) in arenas.iter().enumerate() {
+            assert!(
+                arenas[index + 1..]
+                    .iter()
+                    .all(|other| other.background.asset_path != arena.background.asset_path),
+                "{} shares its background asset",
+                arena.name
+            );
+        }
     }
 
     #[test]

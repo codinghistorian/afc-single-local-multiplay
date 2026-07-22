@@ -348,6 +348,13 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
+            arena::sync_arena_background_to_camera
+                .after(camera::follow_camera)
+                .run_if(user_mode::gameplay_scene_loaded)
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
             hud::update_dev_arena_label
                 .in_set(GameSet::Presentation)
                 .run_if(user_mode::gameplay_scene_loaded),

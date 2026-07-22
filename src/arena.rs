@@ -16,6 +16,7 @@ use crate::arena_defs::{
 use crate::arena_prop_colliders::{
     LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
 };
+use crate::camera::ArenaCamera;
 use crate::combat::{
     DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
@@ -85,6 +86,9 @@ const ARENA_PROP_SURFACE_CLEARANCE: f32 = 0.012;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+#[derive(Component)]
+pub(crate) struct ArenaBackgroundWallpaper(ArenaBackgroundDefinition);
 
 #[derive(Component)]
 pub struct ArenaHazardMarker {
@@ -522,7 +526,14 @@ fn spawn_arena_geometry(
     materials: &mut Assets<StandardMaterial>,
 ) {
     let arena = active_arena_definition();
-    spawn_arena_background(commands, asset_server, meshes, materials, arena.background);
+    spawn_arena_background(
+        commands,
+        asset_server,
+        meshes,
+        materials,
+        arena.background,
+        arena.camera_offset,
+    );
 
     let arena_index = active_arena_index();
     let palette = arena_theme_palette(arena.visual_theme);
@@ -893,14 +904,27 @@ fn arena_background_wallpaper_size(background: ArenaBackgroundDefinition) -> Vec
     )
 }
 
+fn arena_background_wallpaper_transform(
+    background: ArenaBackgroundDefinition,
+    camera_transform: &Transform,
+) -> Transform {
+    Transform::from_translation(
+        camera_transform.translation + camera_transform.forward() * background.distance,
+    )
+    .with_rotation(camera_transform.rotation)
+}
+
 fn spawn_arena_background(
     commands: &mut Commands,
     asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     background: ArenaBackgroundDefinition,
+    camera_offset: Vec3,
 ) {
     let size = arena_background_wallpaper_size(background);
+    let camera_transform =
+        Transform::from_translation(camera_offset).looking_at(Vec3::Y * 0.6, Vec3::Y);
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(asset_server.load(background.asset_path)),
         unlit: true,
@@ -912,10 +936,27 @@ fn spawn_arena_background(
     commands.spawn((
         Mesh3d(meshes.add(Rectangle::new(size.x, size.y))),
         MeshMaterial3d(material),
-        Transform::from_translation(background.position),
-        Name::new("Arena anime sky wallpaper"),
+        arena_background_wallpaper_transform(background, &camera_transform),
+        ArenaBackgroundWallpaper(background),
+        Name::new("Arena scenic wallpaper"),
         ArenaGeometry,
     ));
+}
+
+pub fn sync_arena_background_to_camera(
+    camera: Query<&Transform, (With<ArenaCamera>, Without<ArenaBackgroundWallpaper>)>,
+    mut backgrounds: Query<
+        (&ArenaBackgroundWallpaper, &mut Transform),
+        (Without<ArenaCamera>, With<ArenaGeometry>),
+    >,
+) {
+    let Ok(camera_transform) = camera.single() else {
+        return;
+    };
+
+    for (background, mut transform) in &mut backgrounds {
+        *transform = arena_background_wallpaper_transform(background.0, camera_transform);
+    }
 }
 
 fn spawn_champions_court_map(
@@ -4283,13 +4324,27 @@ mod tests {
     }
 
     #[test]
-    fn arena_background_wallpaper_uses_anime_sky_aspect() {
-        let background = arena_definitions()[0].background;
-        assert_eq!(background.asset_path, "backgrounds/beautiful_sky_anime.png");
+    fn arena_background_wallpapers_use_authored_three_to_two_aspect() {
+        for arena in arena_definitions() {
+            let size = arena_background_wallpaper_size(arena.background);
+            assert!((size.x / size.y - 1.5).abs() < 0.001, "{}", arena.name);
+            assert!(size.x > ARENA_RADIUS * 2.0, "{}", arena.name);
 
-        let size = arena_background_wallpaper_size(background);
-        assert!((size.x / size.y - 1.5).abs() < 0.001);
-        assert!(size.x > ARENA_RADIUS * 2.0);
+            let camera_transform =
+                Transform::from_translation(arena.camera_offset).looking_at(Vec3::Y * 0.6, Vec3::Y);
+            let transform =
+                arena_background_wallpaper_transform(arena.background, &camera_transform);
+            let to_camera = (arena.camera_offset - transform.translation).normalize();
+            let normal = transform.rotation * Vec3::Z;
+            assert!(
+                (transform.translation.distance(arena.camera_offset) - arena.background.distance)
+                    .abs()
+                    < 0.001,
+                "{}",
+                arena.name
+            );
+            assert!(normal.dot(to_camera) > 0.999, "{}", arena.name);
+        }
     }
 
     #[test]

@@ -50,7 +50,14 @@ wasm-bindgen \
 BINDGEN_WASM="$PKG_DIR/ffc_prototype_bg.wasm"
 PRE_OPT_WASM_BYTES="$(size_bytes "$BINDGEN_WASM")"
 OPTIMIZED_WASM="$BINDGEN_WASM.optimized"
-wasm-opt -O3 --strip-debug "$BINDGEN_WASM" -o "$OPTIMIZED_WASM"
+wasm-opt \
+  -O3 \
+  --strip-debug \
+  --enable-bulk-memory \
+  --enable-bulk-memory-opt \
+  --enable-nontrapping-float-to-int \
+  "$BINDGEN_WASM" \
+  -o "$OPTIMIZED_WASM"
 mv "$OPTIMIZED_WASM" "$BINDGEN_WASM"
 FINAL_WASM_BYTES="$(size_bytes "$BINDGEN_WASM")"
 
