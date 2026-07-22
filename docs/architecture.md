@@ -12,6 +12,11 @@ Directional gameplay input modifiers run after all human and bot input producers
 and before action interpretation. This keeps modifiers such as drunkenness
 consistent across controller types without changing action-button semantics.
 
+Local play uses the four stable fighter slots directly. Each human slot owns a
+distinct keyboard assignment and binding set; user mode activates two to four human
+slots or one human plus a bot without changing fighter entity identity, spawn order,
+camera tracking, combat targeting, or replay ordering.
+
 Inactive match states and map-specific behavior are gated with run conditions.
 Systems should not retain unused query parameters or overlapping mutable queries,
 because both reduce scheduler parallelism and can cause Bevy access conflicts.

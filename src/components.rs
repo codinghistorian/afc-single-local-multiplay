@@ -396,6 +396,32 @@ impl PlayerControlBindings {
         }
     }
 
+    pub fn player_three_default() -> Self {
+        Self {
+            left: KeyCode::KeyF,
+            right: KeyCode::KeyH,
+            up: KeyCode::KeyR,
+            down: KeyCode::KeyG,
+            aim_grab: KeyCode::KeyB,
+            heavy: KeyCode::KeyN,
+            light: KeyCode::KeyM,
+            jump: KeyCode::Comma,
+        }
+    }
+
+    pub fn player_four_default() -> Self {
+        Self {
+            left: KeyCode::KeyJ,
+            right: KeyCode::KeyL,
+            up: KeyCode::KeyO,
+            down: KeyCode::KeyK,
+            aim_grab: KeyCode::Digit7,
+            heavy: KeyCode::Digit8,
+            light: KeyCode::Digit9,
+            jump: KeyCode::Digit0,
+        }
+    }
+
     pub fn key(self, action: ControlAction) -> KeyCode {
         match action {
             ControlAction::Left => self.left,
@@ -421,25 +447,14 @@ impl PlayerControlBindings {
             ControlAction::Jump => self.jump = key,
         }
     }
-
-    pub fn keys(self) -> [KeyCode; 8] {
-        [
-            self.left,
-            self.right,
-            self.up,
-            self.down,
-            self.aim_grab,
-            self.heavy,
-            self.light,
-            self.jump,
-        ]
-    }
 }
 
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct PlayerKeyBindings {
     pub p1: PlayerControlBindings,
     pub p2: PlayerControlBindings,
+    pub p3: PlayerControlBindings,
+    pub p4: PlayerControlBindings,
 }
 
 impl Default for PlayerKeyBindings {
@@ -447,6 +462,8 @@ impl Default for PlayerKeyBindings {
         Self {
             p1: PlayerControlBindings::player_one_default(),
             p2: PlayerControlBindings::player_two_default(),
+            p3: PlayerControlBindings::player_three_default(),
+            p4: PlayerControlBindings::player_four_default(),
         }
     }
 }
@@ -457,18 +474,24 @@ impl PlayerKeyBindings {
         assignment: LocalInputAssignment,
     ) -> Option<PlayerControlBindings> {
         match assignment {
-            LocalInputAssignment::Keyboard(0) => Some(self.p1),
-            LocalInputAssignment::Keyboard(1) => Some(self.p2),
+            LocalInputAssignment::Keyboard(player) => self.bindings_for_player(player),
+            _ => None,
+        }
+    }
+
+    pub fn bindings_for_player(&self, player: usize) -> Option<PlayerControlBindings> {
+        match player {
+            0 => Some(self.p1),
+            1 => Some(self.p2),
+            2 => Some(self.p3),
+            3 => Some(self.p4),
             _ => None,
         }
     }
 
     pub fn key_for(&self, player: usize, action: ControlAction) -> Option<KeyCode> {
-        match player {
-            0 => Some(self.p1.key(action)),
-            1 => Some(self.p2.key(action)),
-            _ => None,
-        }
+        self.bindings_for_player(player)
+            .map(|bindings| bindings.key(action))
     }
 
     #[allow(dead_code)]
@@ -520,13 +543,15 @@ impl PlayerKeyBindings {
         match player {
             0 => self.p1.set_key(action, key),
             1 => self.p2.set_key(action, key),
+            2 => self.p3.set_key(action, key),
+            3 => self.p4.set_key(action, key),
             _ => return Err("player"),
         }
         Ok(())
     }
 
     fn key_owner(&self, key: KeyCode) -> Option<(usize, ControlAction)> {
-        for player in 0..2 {
+        for player in 0..FIGHTER_COUNT {
             for action in ControlAction::ALL {
                 if self.key_for(player, action) == Some(key) {
                     return Some((player, action));
@@ -544,13 +569,13 @@ impl PlayerKeyBindings {
             .any(|(index, key)| keys.iter().skip(index + 1).any(|other| other == key))
     }
 
-    pub fn all_keys(&self) -> [KeyCode; 16] {
-        let p1 = self.p1.keys();
-        let p2 = self.p2.keys();
-        [
-            p1[0], p1[1], p1[2], p1[3], p1[4], p1[5], p1[6], p1[7], p2[0], p2[1], p2[2], p2[3],
-            p2[4], p2[5], p2[6], p2[7],
-        ]
+    pub fn all_keys(&self) -> [KeyCode; FIGHTER_COUNT * ControlAction::ALL.len()] {
+        std::array::from_fn(|index| {
+            let player = index / ControlAction::ALL.len();
+            let action = ControlAction::ALL[index % ControlAction::ALL.len()];
+            self.key_for(player, action)
+                .expect("every local player has a complete key binding")
+        })
     }
 }
 

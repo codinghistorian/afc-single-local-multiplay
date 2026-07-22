@@ -14,6 +14,7 @@ use crate::characters::{
 use crate::combat::HitEffects;
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind};
 use crate::components::{BotBrain, ControlAction, Controller, Fighter, PlayerKeyBindings};
+use crate::constants::FIGHTER_COUNT;
 use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
 };
@@ -51,6 +52,12 @@ const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
     CharacterKind::Penguin,
     CharacterKind::Chick,
 ];
+const USER_MODE_DEFAULT_CHARACTERS: [CharacterKind; FIGHTER_COUNT] = [
+    CharacterKind::Cat,
+    CharacterKind::Pig,
+    CharacterKind::Bee,
+    CharacterKind::Penguin,
+];
 const USER_MODE_KEY_ROW_FONT_SIZE: f32 = 18.0;
 const USER_MODE_KEY_ROW_HEIGHT: f32 = 34.0;
 const USER_MODE_KEY_ROW_GAP: f32 = 3.0;
@@ -77,12 +84,31 @@ pub enum UserModeScreen {
 pub enum UserPlayMode {
     SinglePlayer,
     TwoPlayers,
+    ThreePlayers,
+    FourPlayers,
+}
+
+impl UserPlayMode {
+    const fn human_player_count(self) -> usize {
+        match self {
+            Self::SinglePlayer => 1,
+            Self::TwoPlayers => 2,
+            Self::ThreePlayers => 3,
+            Self::FourPlayers => 4,
+        }
+    }
+
+    const fn is_single_player(self) -> bool {
+        matches!(self, Self::SinglePlayer)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserModeMenuChoice {
     SinglePlayer,
     TwoPlayers,
+    ThreePlayers,
+    FourPlayers,
     KeySettings,
 }
 
@@ -91,23 +117,31 @@ impl UserModeMenuChoice {
         match self {
             Self::SinglePlayer => Self::KeySettings,
             Self::TwoPlayers => Self::SinglePlayer,
-            Self::KeySettings => Self::TwoPlayers,
+            Self::ThreePlayers => Self::TwoPlayers,
+            Self::FourPlayers => Self::ThreePlayers,
+            Self::KeySettings => Self::FourPlayers,
         }
     }
 
     fn next(self) -> Self {
         match self {
             Self::SinglePlayer => Self::TwoPlayers,
-            Self::TwoPlayers => Self::KeySettings,
+            Self::TwoPlayers => Self::ThreePlayers,
+            Self::ThreePlayers => Self::FourPlayers,
+            Self::FourPlayers => Self::KeySettings,
             Self::KeySettings => Self::SinglePlayer,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CharacterSelectPlayer {
-    PlayerOne,
-    PlayerTwo,
+    const fn play_mode(self) -> Option<UserPlayMode> {
+        match self {
+            Self::SinglePlayer => Some(UserPlayMode::SinglePlayer),
+            Self::TwoPlayers => Some(UserPlayMode::TwoPlayers),
+            Self::ThreePlayers => Some(UserPlayMode::ThreePlayers),
+            Self::FourPlayers => Some(UserPlayMode::FourPlayers),
+            Self::KeySettings => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,10 +182,9 @@ pub struct UserModeState {
     screen: UserModeScreen,
     play_mode: UserPlayMode,
     menu_choice: UserModeMenuChoice,
-    p1_character: CharacterKind,
-    p2_character: CharacterKind,
+    player_characters: [CharacterKind; FIGHTER_COUNT],
     arena_index: usize,
-    character_select_player: CharacterSelectPlayer,
+    character_select_player: usize,
     key_settings_cursor: usize,
     key_capture: Option<KeyBindingCapture>,
     controls_briefing_seen: bool,
@@ -221,8 +254,7 @@ pub fn mark_web_gameplay_scene_loaded() {}
 #[cfg(target_arch = "wasm32")]
 struct WebMatchConfig {
     play_mode: UserPlayMode,
-    p1_character: CharacterKind,
-    p2_character: CharacterKind,
+    player_characters: [CharacterKind; FIGHTER_COUNT],
     arena_index: usize,
     bindings: Option<PlayerKeyBindings>,
 }
@@ -241,12 +273,20 @@ fn take_web_match_config() -> Option<WebMatchConfig> {
 
     let play_mode = match js_string_prop(&value, "mode").as_deref() {
         Some("two") => UserPlayMode::TwoPlayers,
+        Some("three") => UserPlayMode::ThreePlayers,
+        Some("four") => UserPlayMode::FourPlayers,
         _ => UserPlayMode::SinglePlayer,
     };
-    let p1_character = parse_web_character(js_string_prop(&value, "p1Character").as_deref())
-        .unwrap_or(CharacterKind::Cat);
-    let p2_character = parse_web_character(js_string_prop(&value, "p2Character").as_deref())
-        .unwrap_or_else(|| opposite_user_mode_character(p1_character));
+    let mut player_characters = USER_MODE_DEFAULT_CHARACTERS;
+    for (player, character) in player_characters.iter_mut().enumerate() {
+        let property = format!("p{}Character", player + 1);
+        if let Some(parsed) = parse_web_character(js_string_prop(&value, &property).as_deref()) {
+            *character = parsed;
+        }
+    }
+    if play_mode.is_single_player() {
+        player_characters[1] = opposite_user_mode_character(player_characters[0]);
+    }
     let arena_index = js_number_prop(&value, "arenaIndex")
         .map(|index| index as usize)
         .unwrap_or(0)
@@ -257,8 +297,7 @@ fn take_web_match_config() -> Option<WebMatchConfig> {
 
     Some(WebMatchConfig {
         play_mode,
-        p1_character,
-        p2_character,
+        player_characters,
         arena_index,
         bindings,
     })
@@ -320,17 +359,16 @@ fn parse_web_character(value: Option<&str>) -> Option<CharacterKind> {
 fn parse_web_bindings(value: &wasm_bindgen::JsValue) -> Option<PlayerKeyBindings> {
     use wasm_bindgen::JsValue;
 
+    let defaults = PlayerKeyBindings::default();
     let p1 = js_sys::Reflect::get(value, &JsValue::from_str("p1")).ok()?;
     let p2 = js_sys::Reflect::get(value, &JsValue::from_str("p2")).ok()?;
+    let p3 = js_sys::Reflect::get(value, &JsValue::from_str("p3")).ok()?;
+    let p4 = js_sys::Reflect::get(value, &JsValue::from_str("p4")).ok()?;
     let bindings = PlayerKeyBindings {
-        p1: parse_web_player_bindings(
-            &p1,
-            crate::components::PlayerControlBindings::player_one_default(),
-        ),
-        p2: parse_web_player_bindings(
-            &p2,
-            crate::components::PlayerControlBindings::player_two_default(),
-        ),
+        p1: parse_web_player_bindings(&p1, defaults.p1),
+        p2: parse_web_player_bindings(&p2, defaults.p2),
+        p3: parse_web_player_bindings(&p3, defaults.p3),
+        p4: parse_web_player_bindings(&p4, defaults.p4),
     };
     (!bindings.has_duplicate_keys()).then_some(bindings)
 }
@@ -375,6 +413,7 @@ fn parse_web_key_code(value: &str) -> Option<KeyCode> {
         "ArrowRight" => KeyCode::ArrowRight,
         "ArrowUp" => KeyCode::ArrowUp,
         "ArrowDown" => KeyCode::ArrowDown,
+        "Comma" => KeyCode::Comma,
         "Digit0" => KeyCode::Digit0,
         "Digit1" => KeyCode::Digit1,
         "Digit2" => KeyCode::Digit2,
@@ -434,10 +473,9 @@ impl Default for UserModeState {
             screen: default_user_mode_screen(),
             play_mode: UserPlayMode::SinglePlayer,
             menu_choice: UserModeMenuChoice::SinglePlayer,
-            p1_character: CharacterKind::Cat,
-            p2_character: CharacterKind::Pig,
+            player_characters: USER_MODE_DEFAULT_CHARACTERS,
             arena_index: 0,
-            character_select_player: CharacterSelectPlayer::PlayerOne,
+            character_select_player: 0,
             key_settings_cursor: 0,
             key_capture: None,
             controls_briefing_seen: false,
@@ -474,10 +512,7 @@ impl UserModeState {
     }
 
     pub fn selected_character(&self) -> CharacterKind {
-        match self.character_select_player {
-            CharacterSelectPlayer::PlayerOne => self.p1_character,
-            CharacterSelectPlayer::PlayerTwo => self.p2_character,
-        }
+        self.player_characters[self.character_select_player.min(FIGHTER_COUNT - 1)]
     }
 
     pub fn blocks_dev_input(&self) -> bool {
@@ -512,10 +547,9 @@ impl UserModeState {
         self.screen = UserModeScreen::ModeSelect;
         self.play_mode = UserPlayMode::SinglePlayer;
         self.menu_choice = UserModeMenuChoice::SinglePlayer;
-        self.p1_character = CharacterKind::Cat;
-        self.p2_character = CharacterKind::Pig;
+        self.player_characters = USER_MODE_DEFAULT_CHARACTERS;
         self.arena_index = 0;
-        self.character_select_player = CharacterSelectPlayer::PlayerOne;
+        self.character_select_player = 0;
         self.key_settings_cursor = 0;
         self.key_capture = None;
         self.controls_briefing_seen = false;
@@ -538,7 +572,7 @@ impl UserModeState {
 
     fn enter_character_select(&mut self) {
         self.screen = UserModeScreen::CharacterSelect;
-        self.character_select_player = CharacterSelectPlayer::PlayerOne;
+        self.character_select_player = 0;
         self.key_capture = None;
         self.clear_battle_state();
     }
@@ -616,10 +650,8 @@ impl UserModeState {
     }
 
     fn set_selected_character(&mut self, character: CharacterKind) {
-        match self.character_select_player {
-            CharacterSelectPlayer::PlayerOne => self.p1_character = character,
-            CharacterSelectPlayer::PlayerTwo => self.p2_character = character,
-        }
+        let player = self.character_select_player.min(FIGHTER_COUNT - 1);
+        self.player_characters[player] = character;
     }
 
     fn select_previous_arena(&mut self) {
@@ -633,10 +665,8 @@ impl UserModeState {
     }
 
     fn confirm_character_selection(&mut self) -> bool {
-        if self.play_mode == UserPlayMode::TwoPlayers
-            && self.character_select_player == CharacterSelectPlayer::PlayerOne
-        {
-            self.character_select_player = CharacterSelectPlayer::PlayerTwo;
+        if self.character_select_player + 1 < self.play_mode.human_player_count() {
+            self.character_select_player += 1;
             return false;
         }
         true
@@ -651,7 +681,7 @@ impl UserModeState {
     }
 
     fn move_key_cursor(&mut self, direction: isize) {
-        let total = ControlAction::ALL.len() * 2;
+        let total = ControlAction::ALL.len() * FIGHTER_COUNT;
         self.key_settings_cursor =
             (self.key_settings_cursor as isize + direction).rem_euclid(total as isize) as usize;
     }
@@ -660,7 +690,8 @@ impl UserModeState {
         let action_count = ControlAction::ALL.len();
         let action_index = self.key_settings_cursor % action_count;
         let player = self.key_settings_cursor / action_count;
-        let next_player = (player as isize + direction).clamp(0, 1) as usize;
+        let next_player =
+            (player as isize + direction).clamp(0, FIGHTER_COUNT as isize - 1) as usize;
         self.key_settings_cursor = next_player * action_count + action_index;
     }
 
@@ -774,13 +805,13 @@ fn apply_user_mode_preview_render_layers(
 fn key_settings_column(player: usize) -> impl Bundle {
     (
         Node {
-            flex_basis: Val::Percent(50.0),
-            max_width: Val::Px(420.0),
+            flex_basis: Val::Percent(25.0),
+            max_width: Val::Px(250.0),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Stretch,
             row_gap: Val::Px(8.0),
             border: UiRect::all(Val::Px(2.0)),
-            padding: UiRect::all(Val::Px(12.0)),
+            padding: UiRect::all(Val::Px(8.0)),
             ..default()
         },
         BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.88)),
@@ -789,7 +820,7 @@ fn key_settings_column(player: usize) -> impl Bundle {
             (
                 Text::new(format!("P{}", player + 1)),
                 TextFont {
-                    font_size: 24.0,
+                    font_size: 21.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.95, 0.86, 0.68)),
@@ -1053,15 +1084,20 @@ pub fn setup_user_mode_ui(
                     ),
                     (
                         Node {
-                            width: Val::Percent(88.0),
-                            max_width: Val::Px(900.0),
+                            width: Val::Percent(96.0),
+                            max_width: Val::Px(1120.0),
                             flex_direction: FlexDirection::Row,
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::FlexStart,
-                            column_gap: Val::Px(20.0),
+                            column_gap: Val::Px(10.0),
                             ..default()
                         },
-                        children![key_settings_column(0), key_settings_column(1)],
+                        children![
+                            key_settings_column(0),
+                            key_settings_column(1),
+                            key_settings_column(2),
+                            key_settings_column(3)
+                        ],
                     ),
                 ],
             ),
@@ -1097,7 +1133,7 @@ pub fn setup_user_mode_ui(
                             true,
                         )),
                         TextFont {
-                            font_size: 22.0,
+                            font_size: 18.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.92, 0.88, 0.78)),
@@ -1213,8 +1249,7 @@ pub fn handle_user_mode_input(
     ) {
         if let Some(config) = take_web_match_config() {
             user_mode.play_mode = config.play_mode;
-            user_mode.p1_character = config.p1_character;
-            user_mode.p2_character = config.p2_character;
+            user_mode.player_characters = config.player_characters;
             user_mode.arena_index = config.arena_index;
             if let Some(bindings) = config.bindings {
                 *key_bindings = bindings;
@@ -1249,16 +1284,11 @@ pub fn handle_user_mode_input(
             user_mode.menu_choice = user_mode.menu_choice.next();
         }
         if keys.just_pressed(KeyCode::Enter) {
-            match user_mode.menu_choice {
-                UserModeMenuChoice::SinglePlayer => {
-                    user_mode.play_mode = UserPlayMode::SinglePlayer;
-                    user_mode.enter_character_select();
-                }
-                UserModeMenuChoice::TwoPlayers => {
-                    user_mode.play_mode = UserPlayMode::TwoPlayers;
-                    user_mode.enter_character_select();
-                }
-                UserModeMenuChoice::KeySettings => user_mode.enter_key_settings(),
+            if let Some(play_mode) = user_mode.menu_choice.play_mode() {
+                user_mode.play_mode = play_mode;
+                user_mode.enter_character_select();
+            } else {
+                user_mode.enter_key_settings();
             }
         }
         return;
@@ -1395,7 +1425,13 @@ pub fn handle_user_mode_input(
         }
         if keys.just_pressed(KeyCode::Enter) {
             if !user_mode.confirm_character_selection() {
-                announcements.show("P2 choose character", 0.9);
+                announcements.show(
+                    format!(
+                        "P{} choose character",
+                        user_mode.character_select_player + 1
+                    ),
+                    0.9,
+                );
                 return;
             }
             user_mode.enter_arena_select();
@@ -1946,22 +1982,20 @@ fn character_select_message(selected: CharacterKind) -> String {
 }
 
 fn mode_select_message(choice: UserModeMenuChoice) -> String {
-    let single = if choice == UserModeMenuChoice::SinglePlayer {
-        "> SINGLE PLAYER <"
-    } else {
-        "  Single Player  "
-    };
-    let two = if choice == UserModeMenuChoice::TwoPlayers {
-        "> TWO PLAYERS <"
-    } else {
-        "  Two Players  "
-    };
-    let keys = if choice == UserModeMenuChoice::KeySettings {
-        "> KEY SETTINGS <"
-    } else {
-        "  Key Settings  "
-    };
-    format!("{single}        {two}        {keys}")
+    fn label(selected: bool, text: &str) -> String {
+        if selected {
+            format!("> {} <", text.to_ascii_uppercase())
+        } else {
+            format!("  {text}  ")
+        }
+    }
+
+    let single = label(choice == UserModeMenuChoice::SinglePlayer, "Single Player");
+    let two = label(choice == UserModeMenuChoice::TwoPlayers, "Two Players");
+    let three = label(choice == UserModeMenuChoice::ThreePlayers, "Three Players");
+    let four = label(choice == UserModeMenuChoice::FourPlayers, "Four Players");
+    let keys = label(choice == UserModeMenuChoice::KeySettings, "Key Settings");
+    format!("{single}        {two}        {three}\n{four}        {keys}")
 }
 
 fn arena_select_message(selected_index: usize) -> String {
@@ -2007,10 +2041,7 @@ fn user_mode_choice_message(user_mode: &UserModeState) -> String {
     match user_mode.screen {
         UserModeScreen::ModeSelect => mode_select_message(user_mode.menu_choice),
         UserModeScreen::CharacterSelect => {
-            let player = match user_mode.character_select_player {
-                CharacterSelectPlayer::PlayerOne => "P1",
-                CharacterSelectPlayer::PlayerTwo => "P2",
-            };
+            let player = format!("P{}", user_mode.character_select_player + 1);
             format!(
                 "{player} CHOOSE\n{}",
                 character_select_message(user_mode.selected_character())
@@ -2071,32 +2102,45 @@ fn controls_briefing_message(
         .min(arena_definitions().len().saturating_sub(1))]
     .name;
 
-    match user_mode.play_mode {
-        UserPlayMode::SinglePlayer => {
-            format!(
-                "Defeat the bot.\nArena: {}\n\n{}\n\nDash: double-tap movement\nGuard: {} + {}\n\n{}",
-                arena,
-                controls_player_message(0, bindings),
-                control_key_label(bindings, 0, ControlAction::Heavy),
-                control_key_label(bindings, 0, ControlAction::Light),
-                status,
-            )
-        }
-        UserPlayMode::TwoPlayers => {
-            format!(
-                "P1 and P2 share this keyboard.\nArena: {}\n\n{}\n\n{}\n\nDash: double-tap movement\nGuard: Heavy + Light\n\n{}",
-                arena,
-                controls_player_message(0, bindings),
-                controls_player_message(1, bindings),
-                status,
-            )
-        }
+    if user_mode.play_mode.is_single_player() {
+        return format!(
+            "Defeat the bot.\nArena: {}\n\n{}\n\nDash: double-tap movement\nGuard: {} + {}\n\n{}",
+            arena,
+            controls_player_message(0, bindings),
+            control_key_label(bindings, 0, ControlAction::Heavy),
+            control_key_label(bindings, 0, ControlAction::Light),
+            status,
+        );
     }
+
+    let player_count = user_mode.play_mode.human_player_count();
+    let player_controls = (0..player_count)
+        .map(|player| controls_player_compact_message(player, bindings))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{player_count} players share this keyboard.\nArena: {arena}\n\n{player_controls}\n\nDash: double-tap movement  |  Guard: Heavy + Light\n\n{status}"
+    )
 }
 
 fn controls_player_message(player: usize, bindings: &PlayerKeyBindings) -> String {
     format!(
         "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
+        player + 1,
+        control_key_label(bindings, player, ControlAction::Left),
+        control_key_label(bindings, player, ControlAction::Right),
+        control_key_label(bindings, player, ControlAction::Up),
+        control_key_label(bindings, player, ControlAction::Down),
+        control_key_label(bindings, player, ControlAction::AimGrab),
+        control_key_label(bindings, player, ControlAction::Heavy),
+        control_key_label(bindings, player, ControlAction::Light),
+        control_key_label(bindings, player, ControlAction::Jump),
+    )
+}
+
+fn controls_player_compact_message(player: usize, bindings: &PlayerKeyBindings) -> String {
+    format!(
+        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -2131,28 +2175,32 @@ fn key_code_label(key: KeyCode) -> String {
 }
 
 fn result_title_message(user_mode: &UserModeState) -> String {
+    if user_mode.play_mode.is_single_player() {
+        return match user_mode.result_winner {
+            Some(USER_MODE_PLAYER_FIGHTER_ID) => "YOU WIN".to_string(),
+            Some(_) => "YOU LOSE".to_string(),
+            None => "DRAW".to_string(),
+        };
+    }
+
     match user_mode.result_winner {
-        Some(USER_MODE_PLAYER_FIGHTER_ID) if user_mode.play_mode == UserPlayMode::TwoPlayers => {
-            "P1 WINS".to_string()
+        Some(winner) if winner < user_mode.play_mode.human_player_count() => {
+            format!("P{} WINS", winner + 1)
         }
-        Some(USER_MODE_BOT_FIGHTER_ID) if user_mode.play_mode == UserPlayMode::TwoPlayers => {
-            "P2 WINS".to_string()
-        }
-        Some(USER_MODE_PLAYER_FIGHTER_ID) => "YOU WIN".to_string(),
-        Some(USER_MODE_BOT_FIGHTER_ID) => "YOU LOSE".to_string(),
         _ => "DRAW".to_string(),
     }
 }
 
 fn result_sfx_kind(user_mode: &UserModeState) -> Option<CombatSfxKind> {
-    match user_mode.result_winner {
-        Some(USER_MODE_PLAYER_FIGHTER_ID) => Some(CombatSfxKind::ResultWin),
-        Some(USER_MODE_BOT_FIGHTER_ID) if user_mode.play_mode == UserPlayMode::TwoPlayers => {
-            Some(CombatSfxKind::ResultWin)
-        }
-        Some(USER_MODE_BOT_FIGHTER_ID) => Some(CombatSfxKind::ResultLose),
-        _ => None,
+    if user_mode.play_mode.is_single_player() {
+        return match user_mode.result_winner {
+            Some(USER_MODE_PLAYER_FIGHTER_ID) => Some(CombatSfxKind::ResultWin),
+            Some(_) => Some(CombatSfxKind::ResultLose),
+            None => None,
+        };
     }
+
+    user_mode.result_winner.map(|_| CombatSfxKind::ResultWin)
 }
 
 fn result_choice_message(choice: UserModeResultChoice) -> String {
@@ -2234,21 +2282,25 @@ fn prepare_user_mode_match(
     setup: &mut LocalSetup,
     state: &mut MatchState,
 ) -> UserModeMatchStartFlow {
-    let player_character = user_mode.p1_character;
-    let opponent_character = if user_mode.play_mode == UserPlayMode::TwoPlayers {
-        user_mode.p2_character
-    } else {
-        opposite_user_mode_character(player_character)
-    };
+    let player_character = user_mode.player_characters[0];
 
     setup.set_rule(USER_MODE_STOCK_RULE_INDEX);
     setup.arena_index = user_mode
         .arena_index
         .min(arena_definitions().len().saturating_sub(1));
-    if user_mode.play_mode == UserPlayMode::SinglePlayer {
-        setup.configure_single_player_duel(player_character, opponent_character);
-    } else {
-        setup.configure_two_player_duel(player_character, opponent_character);
+    match user_mode.play_mode {
+        UserPlayMode::SinglePlayer => setup.configure_single_player_duel(
+            player_character,
+            opposite_user_mode_character(player_character),
+        ),
+        UserPlayMode::TwoPlayers => setup.configure_two_player_duel(
+            user_mode.player_characters[0],
+            user_mode.player_characters[1],
+        ),
+        UserPlayMode::ThreePlayers | UserPlayMode::FourPlayers => setup.configure_local_players(
+            user_mode.player_characters,
+            user_mode.play_mode.human_player_count(),
+        ),
     }
     state.rule_index = setup.rule_index;
     state.rules = setup.active_rule();
@@ -2286,13 +2338,24 @@ fn reset_user_mode_presentation(
 }
 
 fn user_mode_result_winner(state: &MatchState) -> Option<usize> {
-    let player_stock = state.stock_for(USER_MODE_PLAYER_FIGHTER_ID).unwrap_or(0);
-    let bot_stock = state.stock_for(USER_MODE_BOT_FIGHTER_ID).unwrap_or(0);
-    match player_stock.cmp(&bot_stock) {
-        std::cmp::Ordering::Greater => Some(USER_MODE_PLAYER_FIGHTER_ID),
-        std::cmp::Ordering::Less => Some(USER_MODE_BOT_FIGHTER_ID),
-        std::cmp::Ordering::Equal => None,
+    let mut winner = None;
+    let mut winning_stock = i32::MIN;
+    let mut tied = false;
+
+    for fighter_id in 0..FIGHTER_COUNT {
+        let Some(stock) = state.stock_for(fighter_id) else {
+            continue;
+        };
+        if stock > winning_stock {
+            winner = Some(fighter_id);
+            winning_stock = stock;
+            tied = false;
+        } else if stock == winning_stock {
+            tied = true;
+        }
     }
+
+    (!tied).then_some(winner).flatten()
 }
 
 fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
@@ -2327,6 +2390,54 @@ mod tests {
         assert_eq!(user_mode.play_mode, UserPlayMode::SinglePlayer);
         assert_eq!(user_mode.menu_choice, UserModeMenuChoice::SinglePlayer);
         assert!(!user_mode.controls_briefing_seen);
+    }
+
+    #[test]
+    fn mode_select_cycles_through_all_local_player_counts() {
+        let choices = [
+            UserModeMenuChoice::SinglePlayer,
+            UserModeMenuChoice::TwoPlayers,
+            UserModeMenuChoice::ThreePlayers,
+            UserModeMenuChoice::FourPlayers,
+            UserModeMenuChoice::KeySettings,
+        ];
+        let mut choice = UserModeMenuChoice::SinglePlayer;
+        for expected in choices.into_iter().skip(1) {
+            choice = choice.next();
+            assert_eq!(choice, expected);
+        }
+        assert_eq!(choice.next(), UserModeMenuChoice::SinglePlayer);
+        assert_eq!(
+            UserModeMenuChoice::FourPlayers.play_mode(),
+            Some(UserPlayMode::FourPlayers)
+        );
+    }
+
+    #[test]
+    fn mode_select_copy_keeps_five_choices_in_two_readable_rows() {
+        let message = mode_select_message(UserModeMenuChoice::FourPlayers);
+
+        assert_eq!(message.lines().count(), 2);
+        assert!(message.contains("Single Player"));
+        assert!(message.contains("Two Players"));
+        assert!(message.contains("Three Players"));
+        assert!(message.contains("> FOUR PLAYERS <"));
+        assert!(message.contains("Key Settings"));
+        assert!(message.lines().all(|line| line.chars().count() <= 70));
+    }
+
+    #[test]
+    fn four_player_character_select_confirms_each_player_in_order() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        user_mode.enter_character_select();
+
+        for player in 0..FIGHTER_COUNT - 1 {
+            assert_eq!(user_mode.character_select_player, player);
+            assert!(!user_mode.confirm_character_selection());
+        }
+        assert_eq!(user_mode.character_select_player, FIGHTER_COUNT - 1);
+        assert!(user_mode.confirm_character_selection());
     }
 
     #[test]
@@ -2463,7 +2574,7 @@ mod tests {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
-        user_mode.p1_character = CharacterKind::Pig;
+        user_mode.player_characters[0] = CharacterKind::Pig;
         user_mode.arena_index = 5;
         user_mode.screen = UserModeScreen::CharacterSelect;
 
@@ -2508,7 +2619,7 @@ mod tests {
         user_mode.enter_battle_result(Some(USER_MODE_PLAYER_FIGHTER_ID));
         user_mode.enter_mode_select();
         user_mode.enter_character_select();
-        user_mode.p1_character = CharacterKind::Pig;
+        user_mode.player_characters[0] = CharacterKind::Pig;
 
         let replay_flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
 
@@ -2524,7 +2635,7 @@ mod tests {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
-        user_mode.p1_character = CharacterKind::Pig;
+        user_mode.player_characters[0] = CharacterKind::Pig;
         user_mode.screen = UserModeScreen::CharacterSelect;
         prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
 
@@ -2543,7 +2654,7 @@ mod tests {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
-        user_mode.p1_character = CharacterKind::Cat;
+        user_mode.player_characters[0] = CharacterKind::Cat;
         user_mode.screen = UserModeScreen::CharacterSelect;
 
         prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
@@ -2569,7 +2680,7 @@ mod tests {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
-        user_mode.p1_character = CharacterKind::Bee;
+        user_mode.player_characters[0] = CharacterKind::Bee;
         user_mode.screen = UserModeScreen::CharacterSelect;
 
         prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
@@ -2587,6 +2698,56 @@ mod tests {
             ParticipantKind::Bot
         );
         assert_eq!(state.active_fighter_count, 2);
+    }
+
+    #[test]
+    fn four_player_mode_activates_four_human_keyboard_slots() {
+        let mut user_mode = UserModeState::default();
+        let mut setup = LocalSetup::default();
+        let mut state = MatchState::default();
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        user_mode.player_characters = [
+            CharacterKind::Cat,
+            CharacterKind::Pig,
+            CharacterKind::Bee,
+            CharacterKind::Chick,
+        ];
+        user_mode.screen = UserModeScreen::CharacterSelect;
+
+        prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+
+        assert_eq!(setup.active_slots(), [true; FIGHTER_COUNT]);
+        assert_eq!(setup.active_bot_count(), 0);
+        assert_eq!(state.active_fighter_count, FIGHTER_COUNT);
+        for fighter_id in 0..FIGHTER_COUNT {
+            assert_eq!(setup.slots[fighter_id].participant, ParticipantKind::Human);
+            assert_eq!(
+                setup.slots[fighter_id].input,
+                LocalInputAssignment::Keyboard(fighter_id)
+            );
+            assert_eq!(
+                setup.slots[fighter_id].character,
+                user_mode.player_characters[fighter_id]
+            );
+        }
+    }
+
+    #[test]
+    fn four_player_default_bindings_are_complete_and_unique() {
+        let bindings = PlayerKeyBindings::default();
+
+        for player in 0..FIGHTER_COUNT {
+            assert!(
+                bindings
+                    .bindings_for_assignment(LocalInputAssignment::Keyboard(player))
+                    .is_some()
+            );
+            for action in ControlAction::ALL {
+                assert!(bindings.key_for(player, action).is_some());
+            }
+        }
+        assert_eq!(bindings.all_keys().len(), FIGHTER_COUNT * 8);
+        assert!(!bindings.has_duplicate_keys());
     }
 
     #[test]
@@ -2615,11 +2776,26 @@ mod tests {
 
         let message = controls_briefing_message(&user_mode, &bindings, false);
 
-        assert!(message.contains("P1 and P2 share this keyboard"));
+        assert!(message.contains("2 players share this keyboard"));
         assert!(message.contains("Arena: Crown Ring"));
-        assert!(message.contains("P1\nMove: Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
-        assert!(message.contains("P2\nMove: A/D/W/S"));
+        assert!(message.contains("P1  Move Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
+        assert!(message.contains("P2  Move A/D/W/S"));
         assert!(message.contains("Loading battle"));
+    }
+
+    #[test]
+    fn controls_briefing_lists_all_four_players() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        let bindings = PlayerKeyBindings::default();
+
+        let message = controls_briefing_message(&user_mode, &bindings, true);
+
+        assert!(message.contains("4 players share this keyboard"));
+        assert!(message.contains("P1  Move"));
+        assert!(message.contains("P2  Move"));
+        assert!(message.contains("P3  Move F/H/R/G"));
+        assert!(message.contains("P4  Move J/L/O/K"));
     }
 
     #[test]
@@ -2684,6 +2860,22 @@ mod tests {
     }
 
     #[test]
+    fn four_player_result_reports_the_last_stock_holder() {
+        let mut state = MatchState::default();
+        state.select_rule(USER_MODE_STOCK_RULE_INDEX);
+        state.set_active_slots([true; FIGHTER_COUNT]);
+        state.reset_for_new_match();
+        state.stocks = [0, 0, 0, 1];
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        user_mode.enter_battle_result(user_mode_result_winner(&state));
+
+        assert_eq!(user_mode.result_winner, Some(3));
+        assert_eq!(result_title_message(&user_mode), "P4 WINS");
+        assert_eq!(result_sfx_kind(&user_mode), Some(CombatSfxKind::ResultWin));
+    }
+
+    #[test]
     fn user_mode_opposite_character_keeps_single_player_duels_1v1() {
         assert_eq!(
             opposite_user_mode_character(CharacterKind::Cat),
@@ -2744,7 +2936,11 @@ mod tests {
         assert_eq!(user_mode.selected_key_target().player, 1);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
 
-        user_mode.move_key_column(-1);
+        user_mode.move_key_column(2);
+        assert_eq!(user_mode.selected_key_target().player, 3);
+        assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
+
+        user_mode.move_key_column(-3);
         assert_eq!(user_mode.selected_key_target().player, 0);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
     }
@@ -2758,12 +2954,12 @@ mod tests {
         user_mode.begin_key_capture();
 
         let result = user_mode
-            .apply_key_capture(&mut bindings, KeyCode::KeyB)
+            .apply_key_capture(&mut bindings, KeyCode::KeyE)
             .unwrap();
 
         assert_eq!(
             bindings.key_for(result.capture.player, result.capture.action),
-            Some(KeyCode::KeyB)
+            Some(KeyCode::KeyE)
         );
         assert_eq!(result.swapped, None);
         assert_eq!(user_mode.key_capture, None);

@@ -451,12 +451,30 @@ impl LocalSetup {
         p1_character: CharacterKind,
         p2_character: CharacterKind,
     ) {
-        self.configure_duel_slots(
-            p1_character,
-            p2_character,
-            ParticipantKind::Human,
-            LocalInputAssignment::Keyboard(1),
-        );
+        let mut characters = std::array::from_fn(character_for_fighter_id);
+        characters[0] = p1_character;
+        characters[1] = p2_character;
+        self.configure_local_players(characters, 2);
+    }
+
+    pub fn configure_local_players(
+        &mut self,
+        characters: [CharacterKind; FIGHTER_COUNT],
+        player_count: usize,
+    ) {
+        let player_count = player_count.clamp(2, FIGHTER_COUNT);
+        for (fighter_id, character) in characters.into_iter().enumerate() {
+            let slot = &mut self.slots[fighter_id];
+            slot.character = character;
+            if fighter_id < player_count {
+                slot.participant = ParticipantKind::Human;
+                slot.input = LocalInputAssignment::Keyboard(fighter_id);
+            } else {
+                slot.participant = ParticipantKind::Closed;
+                slot.input = LocalInputAssignment::Unassigned;
+            }
+        }
+        self.selected_character_fighter = 0;
     }
 
     fn configure_duel_slots(
@@ -1673,6 +1691,35 @@ mod tests {
         assert_eq!(setup.slots[1].participant, ParticipantKind::Human);
         assert_eq!(setup.slots[1].input, LocalInputAssignment::Keyboard(1));
         assert_eq!(setup.slots[2].participant, ParticipantKind::Closed);
+    }
+
+    #[test]
+    fn local_setup_maps_four_players_to_four_keyboard_slots() {
+        let mut setup = LocalSetup::default();
+        let characters = [
+            CharacterKind::Cat,
+            CharacterKind::Pig,
+            CharacterKind::Bee,
+            CharacterKind::Chick,
+        ];
+
+        setup.configure_local_players(characters, FIGHTER_COUNT);
+
+        assert_eq!(setup.active_slots(), [true; FIGHTER_COUNT]);
+        assert_eq!(setup.active_bot_count(), 0);
+        for fighter_id in 0..FIGHTER_COUNT {
+            assert_eq!(setup.slots[fighter_id].participant, ParticipantKind::Human);
+            assert_eq!(
+                setup.slots[fighter_id].input,
+                LocalInputAssignment::Keyboard(fighter_id)
+            );
+            assert_eq!(setup.slots[fighter_id].character, characters[fighter_id]);
+        }
+
+        setup.configure_local_players(characters, 3);
+        assert_eq!(setup.active_slots(), [true, true, true, false]);
+        assert_eq!(setup.slots[3].participant, ParticipantKind::Closed);
+        assert_eq!(setup.slots[3].input, LocalInputAssignment::Unassigned);
     }
 
     #[test]

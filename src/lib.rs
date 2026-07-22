@@ -361,6 +361,13 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
+            hud::sync_hud_fighter_plates
+                .before(hud::update_hud)
+                .in_set(GameSet::Presentation)
+                .run_if(user_mode::gameplay_scene_loaded),
+        )
+        .add_systems(
+            Update,
             user_mode::update_user_mode_controls_ui.in_set(GameSet::Presentation),
         )
         .add_systems(

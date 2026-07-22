@@ -6465,6 +6465,31 @@ mod tests {
     }
 
     #[test]
+    fn player_three_and_four_bindings_produce_movement_and_actions() {
+        for bindings in [
+            PlayerControlBindings::player_three_default(),
+            PlayerControlBindings::player_four_default(),
+        ] {
+            let mut keys = ButtonInput::<KeyCode>::default();
+            keys.press(bindings.right);
+            keys.press(bindings.heavy);
+            keys.press(bindings.jump);
+            let mut dash = DashTapTracker::default();
+            let mut guard = GuardChordTracker::default();
+            let mut input = FighterInput::default();
+
+            collect_bound_player_input(
+                &keys, 1.0, 0.0, bindings, &mut dash, &mut guard, false, &mut input,
+            );
+
+            assert_eq!(input.movement, Vec2::X);
+            assert!(input.jump);
+            assert!(input.raw_heavy_pressed);
+            assert!(input.heavy_held);
+        }
+    }
+
+    #[test]
     fn shift_arrows_do_not_trigger_player_dash() {
         let mut tracker = DashTapTracker::default();
         let mut first = ButtonInput::<KeyCode>::default();

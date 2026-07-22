@@ -67,9 +67,17 @@ Player:
 - X + C: guard / block.
 - While grabbed, X + C plus movement away: escape attempt; X + C: brace against throws.
 
+User Mode Local Multiplayer:
+- Choose single-player or two, three, or four local players from the mode screen.
+- P1: Arrow keys move; Z/X/C/V actions.
+- P2: A/D/W/S move; T/Y/U/I actions.
+- P3: F/H/R/G move; B/N/M/Comma actions.
+- P4: J/L/O/K move; 7/8/9/0 actions.
+- Key Settings exposes all four layouts and swaps duplicate assignments safely.
+
 Native Dev Hotkeys:
 - Shift+U: enter user mode from the dev setup screen.
-- In user mode, choose mode, character, and arena before the controls briefing.
+- In user mode, choose player count, one character per player, and an arena before the controls briefing.
 - F2: toggle map editor while in setup.
 - H: toggle hitbox, hurtbox, item, special, impact-source, reaction, technique-window, and feedback-cue debug overlays.
 - Shift+Up/Down: pan the gameplay camera forward/back.
@@ -138,13 +146,13 @@ must be picked up with grab.
 - Specials add a small projectile, trap, shockwave, and lingering hazard layer with stamina costs, cooldowns, owner grace, and reset cleanup.
 - Arena hazards now include launch pulses, slowing snare fields, and bumper nodes with per-hazard phase offsets that apply neutral shared-impact pressure without awarding ring-out credit.
 - HUD rows tint and show EDGE danger when fighters drift near arena ring-out bounds or fall toward the lower blast plane.
-- Fighters use shared action rules with style tuning for movement, stamina economy, guard pressure, attack timing, throw pressure, and bot range preference. The current demo exposes one GetAmped-style player control layout against one bot.
+- Fighters use shared action rules with style tuning for movement, stamina economy, guard pressure, attack timing, throw pressure, and bot range preference. User mode supports one player against a bot or up to four local keyboard players.
 - Equipped modifiers each affect one move, show effect text/cooldown status in the fighter HUD row, flash on trigger, route a feedback cue, and add a small visual accent.
 - Move, item, special, style, and equipment tuning now live in internal Rust-side definition structs for faster iteration.
 - Match flow now runs through countdown, fighting, time-up, results, reset/rematch, and return-to-setup phases.
 - Rule presets cover timed team score, timed free-for-all score, and stock ring-out matches.
 - Team-score rules now use centralized even-vs-odd team membership and explicit friendly-fire policy to block self/teammate strikes, grabs, item hits, bombs, and specials from awarding damage or ring-out credit.
-- A lightweight local setup shell selects, previews, and applies the mode, arena, one bot opponent, fighter styles, equipment, and replay seed before countdown.
+- A lightweight local setup shell selects, previews, and applies the mode, arena, active fighter slots, fighter styles, equipment, and replay seed before countdown.
 - Local match telemetry tracks ring-outs, uncredited falls, item hits, throw hits, guard breaks, and total damage for result/debug displays.
 - Ring-outs happen when a fighter falls below the arena or gets pushed too far out. The last attacker gets a score point; stock rules also remove lives and can end the match.
 - Bots pick the nearest opponent, move toward them, strafe, attack in range, and sometimes dash.

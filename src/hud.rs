@@ -3,7 +3,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
 use crate::arena_defs::{active_arena_definition, active_arena_index, arena_definitions};
-use crate::characters::{CharacterKind, FighterCharacter, character_label};
+use crate::characters::{
+    CharacterKind, FighterCharacter, character_for_fighter_id, character_label,
+};
 use crate::combat::{HitEffects, ImpactSource};
 use crate::components::{
     AnnouncementText, DebugOverlayPanel, DebugOverlayText, Fighter, FighterAction,
@@ -57,6 +59,11 @@ pub(crate) struct HudNameText {
 
 #[derive(Component)]
 pub(crate) struct HudLifeText {
+    fighter_id: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct HudFighterPlate {
     fighter_id: usize,
 }
 
@@ -478,7 +485,7 @@ fn bottom_plate_row(
         children![
             fighter_plate(
                 0,
-                Color::srgb(0.95, 0.12, 0.11),
+                FIGHTER_COLORS[0],
                 left_portrait.clone(),
                 right_portrait.clone(),
                 bee_portrait.clone(),
@@ -487,7 +494,25 @@ fn bottom_plate_row(
             ),
             fighter_plate(
                 1,
-                Color::srgb(0.12, 0.42, 1.0),
+                FIGHTER_COLORS[1],
+                left_portrait.clone(),
+                right_portrait.clone(),
+                bee_portrait.clone(),
+                penguin_portrait.clone(),
+                chick_portrait.clone()
+            ),
+            fighter_plate(
+                2,
+                FIGHTER_COLORS[2],
+                left_portrait.clone(),
+                right_portrait.clone(),
+                bee_portrait.clone(),
+                penguin_portrait.clone(),
+                chick_portrait.clone()
+            ),
+            fighter_plate(
+                3,
+                FIGHTER_COLORS[3],
                 left_portrait,
                 right_portrait,
                 bee_portrait,
@@ -517,6 +542,7 @@ fn fighter_plate(
             align_items: AlignItems::Center,
             ..default()
         },
+        HudFighterPlate { fighter_id: id },
         BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.9)),
         BorderColor::all(Color::srgb(0.63, 0.61, 0.56)),
         children![
@@ -611,10 +637,28 @@ fn hud_portrait_image(
 }
 
 fn default_hud_character_for_fighter(fighter_id: usize) -> CharacterKind {
-    if fighter_id == 1 {
-        CharacterKind::Pig
-    } else {
-        CharacterKind::Cat
+    character_for_fighter_id(fighter_id)
+}
+
+pub fn sync_hud_fighter_plates(
+    state: Res<MatchState>,
+    user_mode: Res<UserModeState>,
+    mut plates: Query<(&HudFighterPlate, &mut Node)>,
+) {
+    let resources_changed = state.is_changed() || user_mode.is_changed();
+
+    for (plate, mut node) in &mut plates {
+        if !resources_changed && !node.is_added() {
+            continue;
+        }
+        let display = if !user_mode.active() && state.fighter_active(plate.fighter_id) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
     }
 }
 
@@ -1427,6 +1471,49 @@ mod tests {
             hud_portrait_character(CharacterKind::Chick),
             CharacterKind::Chick
         );
+    }
+
+    #[test]
+    fn fighter_hud_plates_follow_all_four_active_slots() {
+        let mut app = App::new();
+        app.insert_resource(MatchState::default());
+        app.insert_resource(LocalSetup::default());
+        app.insert_resource(UserModeState::default());
+        let plates: [Entity; crate::constants::FIGHTER_COUNT] = std::array::from_fn(|fighter_id| {
+            app.world_mut()
+                .spawn((HudFighterPlate { fighter_id }, Node::default()))
+                .id()
+        });
+        app.add_systems(Update, sync_hud_fighter_plates);
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(plates[0]).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Node>(plates[1]).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Node>(plates[2]).unwrap().display,
+            Display::None
+        );
+        assert_eq!(
+            app.world().get::<Node>(plates[3]).unwrap().display,
+            Display::None
+        );
+
+        app.world_mut()
+            .resource_mut::<MatchState>()
+            .set_active_slots([true; crate::constants::FIGHTER_COUNT]);
+        app.update();
+        for plate in plates {
+            assert_eq!(
+                app.world().get::<Node>(plate).unwrap().display,
+                Display::Flex
+            );
+        }
     }
 
     #[test]
