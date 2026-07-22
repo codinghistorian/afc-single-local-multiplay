@@ -282,7 +282,17 @@ pub fn setup_character_move_catalog(mut commands: Commands) {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-pub fn reload_character_move_catalog(mut catalog: ResMut<CharacterMoveCatalog>) {
+pub fn reload_character_move_catalog(
+    time: Res<Time>,
+    mut next_check_at: Local<f32>,
+    mut catalog: ResMut<CharacterMoveCatalog>,
+) {
+    let now = time.elapsed_secs();
+    if now < *next_check_at {
+        return;
+    }
+    *next_check_at = now + 0.5;
+
     let previous_error = catalog.last_error().map(str::to_owned);
     if catalog.reload_if_changed() {
         info!(

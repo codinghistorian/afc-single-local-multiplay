@@ -17,7 +17,11 @@ One-time setup:
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.121
+brew install binaryen
 ```
+
+`binaryen` supplies `wasm-opt`. On non-macOS systems, install Binaryen with the
+platform package manager before building.
 
 Build the static web folder:
 
@@ -32,6 +36,12 @@ python3 -m http.server 8000 --directory web_dist
 ```
 
 Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
+
+## Development documentation
+
+- [Development workflow](docs/development.md)
+- [Runtime architecture](docs/architecture.md)
+- [Performance budgets and profiling](docs/performance.md)
 
 ## Controls
 
@@ -144,8 +154,8 @@ must be picked up with grab.
 
 ## Next Steps
 
-See [docs/prototype_todos.md](docs/prototype_todos.md) for the reference-informed
-combat roadmap and planning backlog.
+Use the [development workflow](docs/development.md) and
+[performance protocol](docs/performance.md) when extending or optimizing the game.
 
 - Continue platform collision tuning for walls, ramps, and ledges.
 - Continue tuning balance, readability, and setup polish from live playtests.

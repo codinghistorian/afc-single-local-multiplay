@@ -524,7 +524,21 @@ pub fn setup_combat_feel_tuning(mut commands: Commands) {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-pub fn reload_combat_feel_tuning(mut tuning: ResMut<CombatFeelTuning>) {
+pub fn reload_combat_feel_tuning(
+    mut tuning: ResMut<CombatFeelTuning>,
+    time: Res<Time>,
+    mut poll_timer: Local<Option<Timer>>,
+) {
+    let should_poll = if let Some(timer) = poll_timer.as_mut() {
+        timer.tick(time.delta()).just_finished()
+    } else {
+        *poll_timer = Some(Timer::from_seconds(0.5, TimerMode::Repeating));
+        true
+    };
+    if !should_poll {
+        return;
+    }
+
     let previous_error = tuning.last_error().map(str::to_owned);
     if tuning.reload_if_changed() {
         info!("Reloaded combat feel tuning from {}", tuning.path.display());

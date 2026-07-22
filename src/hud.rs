@@ -326,6 +326,11 @@ pub(crate) struct DevArenaLabelPanel;
 #[derive(Component)]
 pub(crate) struct DevArenaNameText;
 
+#[derive(Component)]
+pub(crate) struct DevArenaLabelState {
+    arena_index: usize,
+}
+
 fn dev_arena_label() -> impl Bundle {
     (
         GameplayHudPanel,
@@ -348,6 +353,9 @@ fn dev_arena_label() -> impl Bundle {
             text_style(17.0, Color::srgb(1.0, 0.78, 0.28)),
             TextShadow::default(),
             DevArenaNameText,
+            DevArenaLabelState {
+                arena_index: active_arena_index(),
+            },
         )],
     )
 }
@@ -667,6 +675,12 @@ fn meter_row(label: &'static str, color: Color, marker: impl Component) -> impl 
     )
 }
 
+fn set_text_if_changed(text: &mut Text, value: String) {
+    if text.as_str() != value.as_str() {
+        **text = value;
+    }
+}
+
 pub fn update_hud(
     state: Res<MatchState>,
     setup: Res<LocalSetup>,
@@ -716,29 +730,35 @@ pub fn update_hud(
     {
         let mut gameplay_panels = bar_queries.p5();
         for mut node in &mut gameplay_panels {
-            node.display = if user_mode.active() {
+            let display = if user_mode.active() {
                 Display::None
             } else {
                 Display::Flex
             };
+            if node.display != display {
+                node.display = display;
+            }
         }
     }
 
     {
         let mut controls_panels = bar_queries.p4();
         for mut node in &mut controls_panels {
-            node.display = if user_mode.hides_dev_controls() {
+            let display = if user_mode.hides_dev_controls() {
                 Display::None
             } else {
                 Display::Flex
             };
+            if node.display != display {
+                node.display = display;
+            }
         }
     }
 
     {
         let mut timer_text = text_queries.p0();
         for mut text in &mut timer_text {
-            **text = timer_label(&state);
+            set_text_if_changed(&mut text, timer_label(&state));
         }
     }
 
@@ -746,7 +766,7 @@ pub fn update_hud(
         let phase = phase_label(&state, &setup);
         let mut phase_text = text_queries.p5();
         for mut text in &mut phase_text {
-            **text = phase.clone();
+            set_text_if_changed(&mut text, phase.clone());
         }
     }
 
@@ -786,8 +806,11 @@ pub fn update_hud(
                 .iter()
                 .find(|snapshot| snapshot.id == bar.fighter_id)
             {
-                node.width = Val::Percent((snapshot.health / MAX_HEALTH * 100.0).clamp(0.0, 100.0));
-                *background = BackgroundColor(if snapshot.flash > 0.0 {
+                let width = Val::Percent((snapshot.health / MAX_HEALTH * 100.0).clamp(0.0, 100.0));
+                if node.width != width {
+                    node.width = width;
+                }
+                let color = if snapshot.flash > 0.0 {
                     Color::srgb(1.0, 0.9, 0.3)
                 } else if snapshot.ringout_danger > 0.66 {
                     Color::srgb(1.0, 0.38, 0.08)
@@ -795,7 +818,10 @@ pub fn update_hud(
                     Color::srgb(0.95, 0.66, 0.16)
                 } else {
                     snapshot.color
-                });
+                };
+                if background.0 != color {
+                    *background = BackgroundColor(color);
+                }
             }
         }
     }
@@ -807,8 +833,11 @@ pub fn update_hud(
                 .iter()
                 .find(|snapshot| snapshot.id == bar.fighter_id)
             {
-                node.width =
+                let width =
                     Val::Percent((snapshot.stamina / MAX_STAMINA * 100.0).clamp(0.0, 100.0));
+                if node.width != width {
+                    node.width = width;
+                }
             }
         }
     }
@@ -820,11 +849,14 @@ pub fn update_hud(
                 .iter()
                 .find(|snapshot| snapshot.id == portrait.fighter_id)
             {
-                node.display = if portrait.character == hud_portrait_character(snapshot.character) {
+                let display = if portrait.character == hud_portrait_character(snapshot.character) {
                     Display::Flex
                 } else {
                     Display::None
                 };
+                if node.display != display {
+                    node.display = display;
+                }
             }
         }
     }
@@ -836,7 +868,9 @@ pub fn update_hud(
                 .iter()
                 .find(|snapshot| snapshot.id == name.fighter_id)
             {
-                **text = snapshot.name.to_string();
+                if text.as_str() != snapshot.name {
+                    **text = snapshot.name.to_string();
+                }
             }
         }
     }
@@ -846,11 +880,12 @@ pub fn update_hud(
     {
         let mut team_scores = text_queries.p2();
         for (team, mut text) in &mut team_scores {
-            **text = if team.team == 0 {
+            let score = if team.team == 0 {
                 red_score.to_string()
             } else {
                 blue_score.to_string()
             };
+            set_text_if_changed(&mut text, score);
         }
     }
 
@@ -861,7 +896,7 @@ pub fn update_hud(
                 .iter()
                 .find(|snapshot| snapshot.id == life.fighter_id)
             {
-                **text = life_label(snapshot.stock);
+                set_text_if_changed(&mut text, life_label(snapshot.stock));
             }
         }
     }
@@ -869,56 +904,59 @@ pub fn update_hud(
     {
         let mut announcement_texts = text_queries.p4();
         for mut text in &mut announcement_texts {
-            **text = if announcements.timer > 0.0 {
+            let announcement = if announcements.timer > 0.0 {
                 announcements.message.clone()
             } else {
                 phase_message(&state, &snapshots)
             };
+            set_text_if_changed(&mut text, announcement);
         }
     }
 
+    let result_visible = setup_result_panel_visible(&state, editor_active, user_mode.active());
     {
         let mut result_panels = bar_queries.p2();
         for mut node in &mut result_panels {
-            node.display = if setup_result_panel_visible(&state, editor_active, user_mode.active())
-            {
+            let display = if result_visible {
                 Display::Flex
             } else {
                 Display::None
             };
+            if node.display != display {
+                node.display = display;
+            }
         }
     }
 
-    {
+    if result_visible {
         let mut result_texts = text_queries.p6();
         let result = result_screen_message(&state, &setup, &snapshots, &telemetry);
         for mut text in &mut result_texts {
-            **text = result.clone();
+            set_text_if_changed(&mut text, result.clone());
         }
     }
 
     {
         let mut debug_panels = bar_queries.p3();
         for mut node in &mut debug_panels {
-            node.display = if state.debug_hitboxes && !user_mode.active() {
+            let display = if state.debug_hitboxes && !user_mode.active() {
                 Display::Flex
             } else {
                 Display::None
             };
+            if node.display != display {
+                node.display = display;
+            }
         }
     }
 
-    {
-        let debug = if state.debug_hitboxes {
-            debug_overlay_message(
-                &state, &setup, &snapshots, &items, &specials, &hitboxes, &telemetry, &feedback,
-            )
-        } else {
-            String::new()
-        };
+    if state.debug_hitboxes && !user_mode.active() {
+        let debug = debug_overlay_message(
+            &state, &setup, &snapshots, &items, &specials, &hitboxes, &telemetry, &feedback,
+        );
         let mut debug_texts = text_queries.p7();
         for mut text in &mut debug_texts {
-            **text = debug.clone();
+            set_text_if_changed(&mut text, debug.clone());
         }
     }
 }
@@ -926,24 +964,33 @@ pub fn update_hud(
 pub fn update_dev_arena_label(
     user_mode: Res<UserModeState>,
     mut panels: Query<&mut Node, With<DevArenaLabelPanel>>,
-    mut texts: Query<&mut Text, With<DevArenaNameText>>,
+    mut texts: Query<(&mut Text, &mut DevArenaLabelState), With<DevArenaNameText>>,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = &user_mode;
+
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     let show_dev_arena = !user_mode.hides_dev_controls();
     #[cfg(target_arch = "wasm32")]
     let show_dev_arena = false;
 
     for mut node in &mut panels {
-        node.display = if show_dev_arena {
+        let display = if show_dev_arena {
             Display::Flex
         } else {
             Display::None
         };
+        if node.display != display {
+            node.display = display;
+        }
     }
 
-    let label = dev_arena_label_text(active_arena_index());
-    for mut text in &mut texts {
-        **text = label.clone();
+    let arena_index = active_arena_index();
+    for (mut text, mut label_state) in &mut texts {
+        if label_state.arena_index != arena_index {
+            set_text_if_changed(&mut text, dev_arena_label_text(arena_index));
+            label_state.arena_index = arena_index;
+        }
     }
 }
 

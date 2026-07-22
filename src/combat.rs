@@ -2890,6 +2890,51 @@ pub fn update_hitboxes(
     }
 }
 
+const INLINE_FIGHTER_ENTRIES: usize = 4;
+
+struct InlineFighterMap<T> {
+    entries: [Option<(Entity, T)>; INLINE_FIGHTER_ENTRIES],
+    overflow: Vec<(Entity, T)>,
+}
+
+impl<T> Default for InlineFighterMap<T> {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            overflow: Vec::new(),
+        }
+    }
+}
+
+impl<T> InlineFighterMap<T> {
+    fn insert_first(&mut self, fighter: Entity, value: T) {
+        if self.contains_key(fighter) {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.is_none()) {
+            *entry = Some((fighter, value));
+        } else {
+            self.overflow.push((fighter, value));
+        }
+    }
+
+    fn get(&self, fighter: Entity) -> Option<&T> {
+        self.entries
+            .iter()
+            .flatten()
+            .chain(self.overflow.iter())
+            .find_map(|(candidate, value)| (*candidate == fighter).then_some(value))
+    }
+
+    fn contains_key(&self, fighter: Entity) -> bool {
+        self.get(fighter).is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.iter().all(Option::is_none) && self.overflow.is_empty()
+    }
+}
+
 pub fn resolve_hitboxes(
     mut commands: Commands,
     effect_assets: Res<EffectAssets>,
@@ -2920,12 +2965,13 @@ pub fn resolve_hitboxes(
     mut hitstop: ResMut<Hitstop>,
     mut telemetry: ResMut<MatchTelemetry>,
 ) {
-    let mut grab_pairs = Vec::new();
-    let mut ultimate_pairs = Vec::new();
-    let mut ultimate_releases = Vec::new();
-    let mut jump_attackers_landed = Vec::new();
-    let mut confirmed_attackers = Vec::new();
-    let mut penguin_slope_ultimate_recoils = Vec::new();
+    let mut grabbed_victim_by_holder = InlineFighterMap::default();
+    let mut ultimate_victim_by_attacker = InlineFighterMap::default();
+    let mut ultimate_attacker_by_victim = InlineFighterMap::default();
+    let mut ultimate_release_fighters = InlineFighterMap::default();
+    let mut jump_attackers_landed = InlineFighterMap::default();
+    let mut confirmed_attackers = InlineFighterMap::default();
+    let mut penguin_slope_ultimate_recoil = InlineFighterMap::default();
     for (hitbox_entity, mut hitbox, mut hitbox_transform) in &mut hitboxes {
         let (owner_translation, owner_size_multiplier) = {
             let owner_fighters = fighters.p0();
@@ -3003,7 +3049,7 @@ pub fn resolve_hitboxes(
                 action.reaction_recover_ms = None;
                 action.clear_reaction_visual();
                 hitbox.already_hit.push(target_entity);
-                grab_pairs.push((hitbox.owner, target_entity));
+                grabbed_victim_by_holder.insert_first(hitbox.owner, target_entity);
                 consumed_grab = true;
                 break;
             }
@@ -3048,7 +3094,7 @@ pub fn resolve_hitboxes(
                 motor.velocity = Vec3::ZERO;
             }
             hitbox.already_hit.push(target_entity);
-            confirmed_attackers.push(hitbox.owner);
+            confirmed_attackers.insert_first(hitbox.owner, ());
             if let Some(recoil_direction) = penguin_slope_ultimate_attacker_recoil_direction(
                 hitbox.payload_id,
                 guarded,
@@ -3056,21 +3102,23 @@ pub fn resolve_hitboxes(
                 Some(contact_point),
                 hitbox.facing,
             ) {
-                penguin_slope_ultimate_recoils.push((hitbox.owner, recoil_direction));
+                penguin_slope_ultimate_recoil.insert_first(hitbox.owner, recoil_direction);
             }
             if hitbox.payload_id.is_some_and(payload_is_ultimate_catch) {
                 consumed_ultimate_catch = true;
                 if !guarded {
-                    ultimate_pairs.push((hitbox.owner, target_entity));
+                    ultimate_victim_by_attacker.insert_first(hitbox.owner, target_entity);
+                    ultimate_attacker_by_victim.insert_first(target_entity, hitbox.owner);
                 }
                 break;
             }
             if locked_final_victim {
                 ultimate_state.owner = None;
-                ultimate_releases.push((hitbox.owner, target_entity));
+                ultimate_release_fighters.insert_first(hitbox.owner, ());
+                ultimate_release_fighters.insert_first(target_entity, ());
             }
             if hitbox.kind == AttackKind::Jump {
-                jump_attackers_landed.push(hitbox.owner);
+                jump_attackers_landed.insert_first(hitbox.owner, ());
             }
         }
 
@@ -3079,12 +3127,12 @@ pub fn resolve_hitboxes(
         }
     }
 
-    if !grab_pairs.is_empty()
-        || !ultimate_pairs.is_empty()
-        || !ultimate_releases.is_empty()
+    if !grabbed_victim_by_holder.is_empty()
+        || !ultimate_victim_by_attacker.is_empty()
+        || !ultimate_release_fighters.is_empty()
         || !jump_attackers_landed.is_empty()
         || !confirmed_attackers.is_empty()
-        || !penguin_slope_ultimate_recoils.is_empty()
+        || !penguin_slope_ultimate_recoil.is_empty()
     {
         let mut followup_fighters = fighters.p1();
         for (
@@ -3101,23 +3149,17 @@ pub fn resolve_hitboxes(
             _,
         ) in &mut followup_fighters
         {
-            if confirmed_attackers.contains(&entity) {
+            if confirmed_attackers.contains_key(entity) {
                 action.confirmed_hit = true;
             }
-            if let Some((_, recoil_direction)) = penguin_slope_ultimate_recoils
-                .iter()
-                .find(|(attacker, _)| *attacker == entity)
-            {
+            if let Some(recoil_direction) = penguin_slope_ultimate_recoil.get(entity) {
                 apply_penguin_slope_ultimate_attacker_recoil(
                     &mut motor,
                     &mut action,
                     *recoil_direction,
                 );
             }
-            if let Some((_, victim)) = ultimate_pairs
-                .iter()
-                .find(|(attacker, _)| *attacker == entity)
-            {
+            if let Some(victim) = ultimate_victim_by_attacker.get(entity) {
                 let loadout = LoadoutContext::for_character(
                     fighter_character.kind,
                     style.kind,
@@ -3144,8 +3186,7 @@ pub fn resolve_hitboxes(
                 action.clear_reaction_visual();
                 motor.velocity *= 0.1;
             }
-            if let Some((attacker, _)) = ultimate_pairs.iter().find(|(_, victim)| *victim == entity)
-            {
+            if let Some(attacker) = ultimate_attacker_by_victim.get(entity) {
                 ultimate_state.owner = Some(*attacker);
                 action.action = FighterAction::UltimateVictim;
                 action.elapsed = 0.0;
@@ -3161,14 +3202,11 @@ pub fn resolve_hitboxes(
                 action.clear_reaction_visual();
                 motor.velocity = Vec3::ZERO;
             }
-            if ultimate_releases
-                .iter()
-                .any(|(attacker, victim)| *attacker == entity || *victim == entity)
-            {
+            if ultimate_release_fighters.contains_key(entity) {
                 ultimate_state.target = None;
                 ultimate_state.owner = None;
             }
-            if let Some((_, victim)) = grab_pairs.iter().find(|(holder, _)| *holder == entity) {
+            if let Some(victim) = grabbed_victim_by_holder.get(entity) {
                 grab_state.holding = Some(*victim);
                 action.action = FighterAction::GrabHold;
                 action.elapsed = 0.0;
@@ -3184,7 +3222,7 @@ pub fn resolve_hitboxes(
                 action.clear_reaction_visual();
                 motor.velocity *= 0.2;
             }
-            if jump_attackers_landed.contains(&entity) {
+            if jump_attackers_landed.contains_key(entity) {
                 motor.jump_attack_landing_recovery = false;
             }
         }

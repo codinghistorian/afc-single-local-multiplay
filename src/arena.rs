@@ -1461,17 +1461,68 @@ fn append_champions_object_barriers(
     );
 }
 
-fn arena_prop_barriers(arena: &ArenaDefinition) -> impl Iterator<Item = WorldPropBarrier> + '_ {
-    let rendered_props = arena_asset_props_for_definition(arena)
+/// Immutable collision data derived from the geometry rendered for one arena.
+///
+/// Prop profiles are authored in model-local space. Converting them to world space
+/// requires scale and rotation work that used to happen for every ground and side
+/// collision probe. The arena catalog is static, so the converted barriers can be
+/// built once and safely shared by fighters, bots, and tests.
+#[allow(dead_code)]
+pub struct ArenaCollisionWorld {
+    arena_index: usize,
+    prop_barriers: Vec<WorldPropBarrier>,
+}
+
+#[allow(dead_code)]
+impl ArenaCollisionWorld {
+    pub fn arena_index(&self) -> usize {
+        self.arena_index
+    }
+
+    pub fn prop_barrier_count(&self) -> usize {
+        self.prop_barriers.len()
+    }
+}
+
+fn arena_collision_worlds() -> &'static [ArenaCollisionWorld] {
+    static WORLDS: OnceLock<Vec<ArenaCollisionWorld>> = OnceLock::new();
+    WORLDS.get_or_init(|| {
+        arena_definitions()
+            .iter()
+            .enumerate()
+            .map(|(arena_index, arena)| {
+                let mut prop_barriers: Vec<_> = arena_asset_props_for_definition(arena)
+                    .iter()
+                    .copied()
+                    .flat_map(ArenaAssetProp::collision_barriers)
+                    .collect();
+                if arena.visual_theme == ArenaVisualTheme::Crown {
+                    prop_barriers.extend(champions_court_collision_barriers().iter().copied());
+                }
+                ArenaCollisionWorld {
+                    arena_index,
+                    prop_barriers,
+                }
+            })
+            .collect()
+    })
+}
+
+pub fn arena_collision_world(arena: &ArenaDefinition) -> &'static ArenaCollisionWorld {
+    let arena_index = arena_definitions()
         .iter()
-        .copied()
-        .flat_map(ArenaAssetProp::collision_barriers);
-    let court_barriers: &[WorldPropBarrier] = if arena.visual_theme == ArenaVisualTheme::Crown {
-        champions_court_collision_barriers()
-    } else {
-        &[]
-    };
-    rendered_props.chain(court_barriers.iter().copied())
+        .position(|candidate| std::ptr::eq(candidate, arena))
+        .or_else(|| {
+            arena_definitions()
+                .iter()
+                .position(|candidate| candidate.name == arena.name)
+        })
+        .unwrap_or_else(active_arena_index);
+    &arena_collision_worlds()[arena_index]
+}
+
+fn arena_prop_barriers(arena: &ArenaDefinition) -> impl Iterator<Item = WorldPropBarrier> + '_ {
+    arena_collision_world(arena).prop_barriers.iter().copied()
 }
 
 const CROWN_ASSET_PROPS: &[ArenaAssetProp] = &[

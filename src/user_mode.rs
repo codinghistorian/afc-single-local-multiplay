@@ -732,6 +732,9 @@ pub(crate) struct UserModeSelectHintText;
 pub(crate) struct UserModePreviewRoot;
 
 #[derive(Component)]
+pub(crate) struct UserModePreviewCamera;
+
+#[derive(Component)]
 pub(crate) struct UserModePreviewScene {
     character: CharacterKind,
 }
@@ -898,6 +901,7 @@ pub fn setup_user_mode_ui(
         RenderTarget::Image(preview_image.clone().into()),
         Transform::from_translation(preview_origin + Vec3::new(0.0, 1.0, 4.35))
             .looking_at(preview_origin + Vec3::new(0.0, 0.86, 0.0), Vec3::Y),
+        UserModePreviewCamera,
         user_mode_preview_render_layers(),
     ));
 
@@ -1554,6 +1558,9 @@ pub fn sync_user_mode_preview_scene(
     roots: Query<Entity, With<UserModePreviewRoot>>,
     previews: Query<(Entity, &UserModePreviewScene)>,
 ) {
+    if user_mode.screen() != UserModeScreen::CharacterSelect {
+        return;
+    }
     let selected = user_mode.selected_character();
     if previews
         .iter()
@@ -1588,8 +1595,15 @@ pub fn rotate_user_mode_preview(
     time: Res<Time>,
     user_mode: Res<UserModeState>,
     mut previews: Query<&mut Transform, With<UserModePreviewRoot>>,
+    mut cameras: Query<&mut Camera, With<UserModePreviewCamera>>,
 ) {
-    if user_mode.screen() != UserModeScreen::CharacterSelect {
+    let preview_active = user_mode.screen() == UserModeScreen::CharacterSelect;
+    for mut camera in &mut cameras {
+        if camera.is_active != preview_active {
+            camera.is_active = preview_active;
+        }
+    }
+    if !preview_active {
         return;
     }
     let yaw = time.elapsed_secs() * 0.9;

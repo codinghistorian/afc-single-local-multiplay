@@ -1126,16 +1126,7 @@ fn item_swing_config(kind: ItemKind) -> Option<ItemSwingConfig> {
 
 pub fn update_items(
     time: Res<Time>,
-    mut commands: Commands,
-    effect_assets: Res<EffectAssets>,
-    hitstop: Res<Hitstop>,
-    mut feedback: ResMut<HitEffects>,
-    mut announcements: ResMut<MatchAnnouncements>,
     mut items: Query<(&mut ArenaItem, &mut Transform, &mut Visibility)>,
-    mut fighters: Query<
-        (&Fighter, &mut FighterStats, &Transform, &FighterActionState),
-        Without<ArenaItem>,
-    >,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
@@ -1155,14 +1146,6 @@ pub fn update_items(
                 item.pickup_lockout = (item.pickup_lockout - dt).max(0.0);
                 transform.translation.y = item.base_y + (elapsed * 2.8 + item.phase).sin() * 0.08;
                 transform.rotate_y(dt * 1.6);
-                let _ = (
-                    &mut commands,
-                    &effect_assets,
-                    &mut feedback,
-                    &mut announcements,
-                    &mut fighters,
-                    &hitstop,
-                );
             }
             _ => {}
         }
