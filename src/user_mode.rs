@@ -1576,15 +1576,15 @@ pub fn setup_user_mode_ui(
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(12.0),
+                    row_gap: Val::Px(8.0),
                     ..default()
                 },
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("SELECT AN ARENA"),
+                        Text::new("SELECT ARENA"),
                         TextFont {
-                            font_size: 42.0,
+                            font_size: 36.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.95, 0.86, 0.68)),
@@ -1593,8 +1593,8 @@ pub fn setup_user_mode_ui(
                     (
                         UserModeArenaPreviewPanel,
                         Node {
-                            width: Val::Percent(62.0),
-                            max_width: Val::Px(660.0),
+                            width: Val::Percent(58.0),
+                            max_width: Val::Px(600.0),
                             aspect_ratio: Some(1.5),
                             border: UiRect::all(Val::Px(3.0)),
                             padding: UiRect::all(Val::Px(4.0)),
