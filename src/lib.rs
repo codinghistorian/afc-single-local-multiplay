@@ -350,6 +350,7 @@ pub fn build_app() -> App {
                     user_mode::rotate_user_mode_preview,
                     user_mode::update_user_mode_selection_previews,
                     user_mode::update_user_mode_ui,
+                    user_mode::update_user_mode_button_styles,
                 )
                     .chain(),
             )

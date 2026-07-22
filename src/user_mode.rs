@@ -77,6 +77,7 @@ pub enum UserModeScreen {
     Dev,
     Start,
     ModeSelect,
+    PlayerCountSelect,
     KeySettings,
     CharacterSelect,
     ArenaSelect,
@@ -108,48 +109,65 @@ impl UserPlayMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UserModeMenuChoice {
+pub(crate) enum UserModeMainMenuChoice {
     SinglePlayer,
-    TwoPlayers,
-    ThreePlayers,
-    FourPlayers,
-    KeySettings,
+    Multiplayer,
+    Settings,
 }
 
-impl UserModeMenuChoice {
+impl UserModeMainMenuChoice {
     fn previous(self) -> Self {
         match self {
-            Self::SinglePlayer => Self::KeySettings,
-            Self::TwoPlayers => Self::SinglePlayer,
-            Self::ThreePlayers => Self::TwoPlayers,
-            Self::FourPlayers => Self::ThreePlayers,
-            Self::KeySettings => Self::FourPlayers,
+            Self::SinglePlayer => Self::Settings,
+            Self::Multiplayer => Self::SinglePlayer,
+            Self::Settings => Self::Multiplayer,
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::SinglePlayer => Self::TwoPlayers,
-            Self::TwoPlayers => Self::ThreePlayers,
-            Self::ThreePlayers => Self::FourPlayers,
-            Self::FourPlayers => Self::KeySettings,
-            Self::KeySettings => Self::SinglePlayer,
-        }
-    }
-
-    const fn play_mode(self) -> Option<UserPlayMode> {
-        match self {
-            Self::SinglePlayer => Some(UserPlayMode::SinglePlayer),
-            Self::TwoPlayers => Some(UserPlayMode::TwoPlayers),
-            Self::ThreePlayers => Some(UserPlayMode::ThreePlayers),
-            Self::FourPlayers => Some(UserPlayMode::FourPlayers),
-            Self::KeySettings => None,
+            Self::SinglePlayer => Self::Multiplayer,
+            Self::Multiplayer => Self::Settings,
+            Self::Settings => Self::SinglePlayer,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct KeyBindingCapture {
+pub(crate) enum UserModePlayerCountChoice {
+    TwoPlayers,
+    ThreePlayers,
+    FourPlayers,
+}
+
+impl UserModePlayerCountChoice {
+    fn previous(self) -> Self {
+        match self {
+            Self::TwoPlayers => Self::FourPlayers,
+            Self::ThreePlayers => Self::TwoPlayers,
+            Self::FourPlayers => Self::ThreePlayers,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::TwoPlayers => Self::ThreePlayers,
+            Self::ThreePlayers => Self::FourPlayers,
+            Self::FourPlayers => Self::TwoPlayers,
+        }
+    }
+
+    const fn play_mode(self) -> UserPlayMode {
+        match self {
+            Self::TwoPlayers => UserPlayMode::TwoPlayers,
+            Self::ThreePlayers => UserPlayMode::ThreePlayers,
+            Self::FourPlayers => UserPlayMode::FourPlayers,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyBindingCapture {
     player: usize,
     action: ControlAction,
 }
@@ -161,7 +179,7 @@ struct KeyBindingApplyResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UserModeResultChoice {
+pub(crate) enum UserModeResultChoice {
     PlayAgain,
     ChooseCharacter,
 }
@@ -181,11 +199,40 @@ enum UserModeMatchStartFlow {
     BattleStarted,
 }
 
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UserModeUiAction {
+    MainMenu(UserModeMainMenuChoice),
+    PlayerCount(UserModePlayerCountChoice),
+    Previous,
+    Next,
+    PreviousColumn,
+    NextColumn,
+    Confirm,
+    Back,
+    KeyBinding(KeyBindingCapture),
+    Result(UserModeResultChoice),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserModeRoute {
+    None,
+    CharacterPlayerAdvanced,
+    ArenaEntered,
+    ArenaChanged,
+    PrepareMatch,
+    ConfirmBattle,
+    Replay,
+    ChooseCharacter,
+    ControlsBack,
+    ExitToDev,
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct UserModeState {
     screen: UserModeScreen,
     play_mode: UserPlayMode,
-    menu_choice: UserModeMenuChoice,
+    main_menu_choice: UserModeMainMenuChoice,
+    player_count_choice: UserModePlayerCountChoice,
     player_characters: [CharacterKind; FIGHTER_COUNT],
     arena_index: usize,
     character_select_player: usize,
@@ -477,7 +524,8 @@ impl Default for UserModeState {
         Self {
             screen: default_user_mode_screen(),
             play_mode: UserPlayMode::SinglePlayer,
-            menu_choice: UserModeMenuChoice::SinglePlayer,
+            main_menu_choice: UserModeMainMenuChoice::SinglePlayer,
+            player_count_choice: UserModePlayerCountChoice::TwoPlayers,
             player_characters: USER_MODE_DEFAULT_CHARACTERS,
             arena_index: 0,
             character_select_player: 0,
@@ -551,7 +599,8 @@ impl UserModeState {
     fn enter_fresh_mode_select(&mut self) {
         self.screen = UserModeScreen::ModeSelect;
         self.play_mode = UserPlayMode::SinglePlayer;
-        self.menu_choice = UserModeMenuChoice::SinglePlayer;
+        self.main_menu_choice = UserModeMainMenuChoice::SinglePlayer;
+        self.player_count_choice = UserModePlayerCountChoice::TwoPlayers;
         self.player_characters = USER_MODE_DEFAULT_CHARACTERS;
         self.arena_index = 0;
         self.character_select_player = 0;
@@ -582,6 +631,12 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
+    fn enter_player_count_select(&mut self) {
+        self.screen = UserModeScreen::PlayerCountSelect;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
     fn enter_arena_select(&mut self) {
         self.screen = UserModeScreen::ArenaSelect;
         self.key_capture = None;
@@ -590,6 +645,13 @@ impl UserModeState {
 
     fn enter_mode_select(&mut self) {
         self.screen = UserModeScreen::ModeSelect;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    fn return_to_character_select_player(&mut self, player: usize) {
+        self.screen = UserModeScreen::CharacterSelect;
+        self.character_select_player = player.min(self.play_mode.human_player_count() - 1);
         self.key_capture = None;
         self.clear_battle_state();
     }
@@ -724,6 +786,189 @@ impl UserModeState {
     }
 }
 
+fn activate_main_menu_choice(user_mode: &mut UserModeState, choice: UserModeMainMenuChoice) {
+    user_mode.main_menu_choice = choice;
+    match choice {
+        UserModeMainMenuChoice::SinglePlayer => {
+            user_mode.play_mode = UserPlayMode::SinglePlayer;
+            user_mode.enter_character_select();
+        }
+        UserModeMainMenuChoice::Multiplayer => user_mode.enter_player_count_select(),
+        UserModeMainMenuChoice::Settings => user_mode.enter_key_settings(),
+    }
+}
+
+fn activate_player_count_choice(user_mode: &mut UserModeState, choice: UserModePlayerCountChoice) {
+    user_mode.player_count_choice = choice;
+    user_mode.play_mode = choice.play_mode();
+    user_mode.enter_character_select();
+}
+
+fn route_user_mode_action(
+    user_mode: &mut UserModeState,
+    action: UserModeUiAction,
+) -> UserModeRoute {
+    if let UserModeUiAction::Back = action {
+        if user_mode.key_capture.is_some() {
+            user_mode.cancel_key_capture();
+            return UserModeRoute::None;
+        }
+        return match user_mode.screen {
+            UserModeScreen::ModeSelect => {
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                {
+                    UserModeRoute::ExitToDev
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    UserModeRoute::None
+                }
+            }
+            UserModeScreen::PlayerCountSelect | UserModeScreen::KeySettings => {
+                user_mode.enter_mode_select();
+                UserModeRoute::None
+            }
+            UserModeScreen::CharacterSelect if user_mode.character_select_player > 0 => {
+                user_mode.character_select_player -= 1;
+                UserModeRoute::None
+            }
+            UserModeScreen::CharacterSelect => {
+                if user_mode.play_mode.is_single_player() {
+                    user_mode.enter_mode_select();
+                } else {
+                    user_mode.enter_player_count_select();
+                }
+                UserModeRoute::None
+            }
+            UserModeScreen::ArenaSelect => {
+                user_mode.return_to_character_select_player(
+                    user_mode.play_mode.human_player_count().saturating_sub(1),
+                );
+                UserModeRoute::None
+            }
+            UserModeScreen::ControlsBriefing => {
+                user_mode.controls_briefing_seen = false;
+                user_mode.enter_arena_select();
+                UserModeRoute::ControlsBack
+            }
+            _ => UserModeRoute::None,
+        };
+    }
+
+    match (user_mode.screen, action) {
+        (UserModeScreen::ModeSelect, UserModeUiAction::MainMenu(choice)) => {
+            activate_main_menu_choice(user_mode, choice);
+            UserModeRoute::None
+        }
+        (UserModeScreen::ModeSelect, UserModeUiAction::Previous) => {
+            user_mode.main_menu_choice = user_mode.main_menu_choice.previous();
+            UserModeRoute::None
+        }
+        (UserModeScreen::ModeSelect, UserModeUiAction::Next) => {
+            user_mode.main_menu_choice = user_mode.main_menu_choice.next();
+            UserModeRoute::None
+        }
+        (UserModeScreen::ModeSelect, UserModeUiAction::Confirm) => {
+            activate_main_menu_choice(user_mode, user_mode.main_menu_choice);
+            UserModeRoute::None
+        }
+        (UserModeScreen::PlayerCountSelect, UserModeUiAction::PlayerCount(choice)) => {
+            activate_player_count_choice(user_mode, choice);
+            UserModeRoute::None
+        }
+        (UserModeScreen::PlayerCountSelect, UserModeUiAction::Previous) => {
+            user_mode.player_count_choice = user_mode.player_count_choice.previous();
+            UserModeRoute::None
+        }
+        (UserModeScreen::PlayerCountSelect, UserModeUiAction::Next) => {
+            user_mode.player_count_choice = user_mode.player_count_choice.next();
+            UserModeRoute::None
+        }
+        (UserModeScreen::PlayerCountSelect, UserModeUiAction::Confirm) => {
+            activate_player_count_choice(user_mode, user_mode.player_count_choice);
+            UserModeRoute::None
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::Previous) => {
+            user_mode.select_previous();
+            UserModeRoute::None
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::Next) => {
+            user_mode.select_next();
+            UserModeRoute::None
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::Confirm) => {
+            if user_mode.confirm_character_selection() {
+                user_mode.enter_arena_select();
+                UserModeRoute::ArenaEntered
+            } else {
+                UserModeRoute::CharacterPlayerAdvanced
+            }
+        }
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Previous) => {
+            user_mode.select_previous_arena();
+            UserModeRoute::ArenaChanged
+        }
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Next) => {
+            user_mode.select_next_arena();
+            UserModeRoute::ArenaChanged
+        }
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm) => UserModeRoute::PrepareMatch,
+        (UserModeScreen::KeySettings, UserModeUiAction::Previous) => {
+            user_mode.move_key_cursor(-1);
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::Next) => {
+            user_mode.move_key_cursor(1);
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::PreviousColumn) => {
+            user_mode.move_key_column(-1);
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::NextColumn) => {
+            user_mode.move_key_column(1);
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::Confirm) => {
+            user_mode.begin_key_capture();
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::KeyBinding(capture)) => {
+            user_mode.key_settings_cursor = capture.player * ControlAction::ALL.len()
+                + key_settings_action_index(capture.action);
+            user_mode.begin_key_capture();
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
+            UserModeRoute::ConfirmBattle
+        }
+        (UserModeScreen::BattleResult, UserModeUiAction::Previous | UserModeUiAction::Next) => {
+            user_mode.toggle_result_choice();
+            UserModeRoute::None
+        }
+        (UserModeScreen::BattleResult, UserModeUiAction::Result(choice)) => {
+            user_mode.result_choice = choice;
+            match choice {
+                UserModeResultChoice::PlayAgain => UserModeRoute::Replay,
+                UserModeResultChoice::ChooseCharacter => {
+                    user_mode.enter_character_select();
+                    UserModeRoute::ChooseCharacter
+                }
+            }
+        }
+        (UserModeScreen::BattleResult, UserModeUiAction::Confirm) => {
+            match user_mode.result_choice {
+                UserModeResultChoice::PlayAgain => UserModeRoute::Replay,
+                UserModeResultChoice::ChooseCharacter => {
+                    user_mode.enter_character_select();
+                    UserModeRoute::ChooseCharacter
+                }
+            }
+        }
+        _ => UserModeRoute::None,
+    }
+}
+
 #[derive(Component)]
 pub(crate) struct UserModeRoot;
 
@@ -731,7 +976,16 @@ pub(crate) struct UserModeRoot;
 pub(crate) struct UserModeStartPanel;
 
 #[derive(Component)]
-pub(crate) struct UserModeSelectPanel;
+pub(crate) struct UserModeMainMenuPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModePlayerCountPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterSelectPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaSelectPanel;
 
 #[derive(Component)]
 pub(crate) struct UserModeKeySettingsPanel;
@@ -763,16 +1017,13 @@ pub(crate) struct UserModeResultPanel;
 pub(crate) struct UserModeResultText;
 
 #[derive(Component)]
-pub(crate) struct UserModeResultChoiceText;
-
-#[derive(Component)]
 pub(crate) struct UserModeChoiceText;
 
 #[derive(Component)]
-pub(crate) struct UserModeSelectTitleText;
+pub(crate) struct UserModeCharacterTitleText;
 
 #[derive(Component)]
-pub(crate) struct UserModeSelectHintText;
+pub(crate) struct UserModeBackButton;
 
 #[derive(Component)]
 pub(crate) struct UserModeCharacterPreview;
@@ -816,6 +1067,70 @@ fn apply_user_mode_preview_render_layers(
             .entity(descendant)
             .insert(user_mode_preview_render_layers());
     }
+}
+
+fn user_mode_action_button(
+    label: impl Into<String>,
+    action: UserModeUiAction,
+    width: Val,
+    height: f32,
+    font_size: f32,
+) -> impl Bundle {
+    (
+        Button,
+        action,
+        Node {
+            width,
+            height: Val::Px(height),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        children![(
+            Text::new(label),
+            TextFont {
+                font_size,
+                ..default()
+            },
+            TextColor(Color::srgb(0.95, 0.86, 0.68)),
+            TextShadow::default(),
+            TextLayout::new_with_justify(Justify::Center),
+        )],
+    )
+}
+
+fn user_mode_back_button() -> impl Bundle {
+    (
+        Button,
+        UserModeBackButton,
+        UserModeUiAction::Back,
+        Node {
+            display: Display::None,
+            position_type: PositionType::Absolute,
+            left: Val::Px(28.0),
+            top: Val::Px(24.0),
+            width: Val::Px(112.0),
+            height: Val::Px(44.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        children![(
+            Text::new("BACK"),
+            TextFont {
+                font_size: 19.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.95, 0.86, 0.68)),
+        )],
+    )
 }
 
 fn key_settings_column(player: usize) -> impl Bundle {
@@ -870,14 +1185,19 @@ fn key_settings_column(player: usize) -> impl Bundle {
 
 fn key_settings_row(player: usize, action: ControlAction) -> impl Bundle {
     (
+        Button,
+        UserModeUiAction::KeyBinding(KeyBindingCapture { player, action }),
         Node {
             height: Val::Px(USER_MODE_KEY_ROW_HEIGHT),
             min_height: Val::Px(USER_MODE_KEY_ROW_HEIGHT),
             max_height: Val::Px(USER_MODE_KEY_ROW_HEIGHT),
             align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(1.0)),
             padding: UiRect::axes(Val::Px(8.0), Val::Px(0.0)),
             ..default()
         },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.3, 0.29, 0.26)),
         children![(
             UserModeKeySettingsRowText { player, action },
             Text::new(""),
@@ -1051,7 +1371,7 @@ pub fn setup_user_mode_ui(
                 ],
             ),
             (
-                UserModeSelectPanel,
+                UserModeMainMenuPanel,
                 Node {
                     display: Display::None,
                     width: Val::Percent(100.0),
@@ -1059,16 +1379,124 @@ pub fn setup_user_mode_ui(
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(18.0),
+                    row_gap: Val::Px(14.0),
                     ..default()
                 },
                 Pickable::IGNORE,
                 children![
                     (
-                        UserModeSelectTitleText,
-                        Text::new("SELECT A CHARACTER"),
+                        Text::new("ANIMAL FIGHTER CLUB"),
                         TextFont {
                             font_size: 46.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    user_mode_action_button(
+                        "SINGLE PLAYER",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::SinglePlayer),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "MULTIPLAYER",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "SETTINGS",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Settings),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    (
+                        Text::new("Up/Down or W/S choose  |  Enter confirm"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
+                ],
+            ),
+            (
+                UserModePlayerCountPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(14.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        Text::new("MULTIPLAYER"),
+                        TextFont {
+                            font_size: 46.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    user_mode_action_button(
+                        "2 PLAYERS",
+                        UserModeUiAction::PlayerCount(UserModePlayerCountChoice::TwoPlayers),
+                        Val::Px(300.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "3 PLAYERS",
+                        UserModeUiAction::PlayerCount(UserModePlayerCountChoice::ThreePlayers),
+                        Val::Px(300.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "4 PLAYERS",
+                        UserModeUiAction::PlayerCount(UserModePlayerCountChoice::FourPlayers),
+                        Val::Px(300.0),
+                        58.0,
+                        24.0,
+                    ),
+                    (
+                        Text::new("Up/Down or W/S choose  |  Enter confirm  |  Esc back"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
+                ],
+            ),
+            (
+                UserModeCharacterSelectPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(14.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        UserModeCharacterTitleText,
+                        Text::new("P1 SELECT A CHARACTER"),
+                        TextFont {
+                            font_size: 42.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.95, 0.86, 0.68)),
@@ -1078,17 +1506,95 @@ pub fn setup_user_mode_ui(
                         UserModeCharacterPreview,
                         ImageNode::new(preview_image),
                         Node {
-                            width: Val::Px(310.0),
-                            height: Val::Px(310.0),
+                            width: Val::Px(290.0),
+                            height: Val::Px(290.0),
                             ..default()
                         },
                     ),
                     (
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(18.0),
+                            ..default()
+                        },
+                        children![
+                            user_mode_action_button(
+                                "<",
+                                UserModeUiAction::Previous,
+                                Val::Px(64.0),
+                                54.0,
+                                34.0
+                            ),
+                            (
+                                UserModeChoiceText,
+                                Text::new(character_select_message(CharacterKind::Cat)),
+                                TextFont {
+                                    font_size: USER_MODE_CHOICE_FONT_SIZE,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.96, 0.92, 0.82)),
+                                TextShadow::default(),
+                                TextLayout::new_with_justify(Justify::Center),
+                                Node {
+                                    min_width: Val::Px(240.0),
+                                    ..default()
+                                },
+                            ),
+                            user_mode_action_button(
+                                ">",
+                                UserModeUiAction::Next,
+                                Val::Px(64.0),
+                                54.0,
+                                34.0
+                            ),
+                        ],
+                    ),
+                    user_mode_action_button(
+                        "SELECT",
+                        UserModeUiAction::Confirm,
+                        Val::Px(240.0),
+                        54.0,
+                        22.0
+                    ),
+                    (
+                        Text::new("Left/Right or Q/E choose  |  Enter confirm  |  Esc back"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
+                ],
+            ),
+            (
+                UserModeArenaSelectPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(12.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        Text::new("SELECT AN ARENA"),
+                        TextFont {
+                            font_size: 42.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    (
                         UserModeArenaPreviewPanel,
                         Node {
-                            display: Display::None,
-                            width: Val::Percent(68.0),
-                            max_width: Val::Px(720.0),
+                            width: Val::Percent(62.0),
+                            max_width: Val::Px(660.0),
                             aspect_ratio: Some(1.5),
                             border: UiRect::all(Val::Px(3.0)),
                             padding: UiRect::all(Val::Px(4.0)),
@@ -1106,21 +1612,55 @@ pub fn setup_user_mode_ui(
                         )],
                     ),
                     (
-                        UserModeChoiceText,
-                        Text::new(character_select_message(CharacterKind::Cat)),
-                        TextFont {
-                            font_size: USER_MODE_CHOICE_FONT_SIZE,
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(18.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.96, 0.92, 0.82)),
-                        TextShadow::default(),
-                        TextLayout::new_with_justify(Justify::Center),
+                        children![
+                            user_mode_action_button(
+                                "<",
+                                UserModeUiAction::Previous,
+                                Val::Px(64.0),
+                                54.0,
+                                34.0
+                            ),
+                            (
+                                UserModeChoiceText,
+                                Text::new(arena_select_message(0)),
+                                TextFont {
+                                    font_size: USER_MODE_CHOICE_FONT_SIZE,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.96, 0.92, 0.82)),
+                                TextShadow::default(),
+                                TextLayout::new_with_justify(Justify::Center),
+                                Node {
+                                    min_width: Val::Px(300.0),
+                                    ..default()
+                                },
+                            ),
+                            user_mode_action_button(
+                                ">",
+                                UserModeUiAction::Next,
+                                Val::Px(64.0),
+                                54.0,
+                                34.0
+                            ),
+                        ],
+                    ),
+                    user_mode_action_button(
+                        "START MATCH",
+                        UserModeUiAction::Confirm,
+                        Val::Px(260.0),
+                        54.0,
+                        22.0
                     ),
                     (
-                        UserModeSelectHintText,
-                        Text::new("Left/Right or Q/E choose  |  Enter start"),
+                        Text::new("Left/Right or Q/E choose  |  Enter confirm  |  Esc back"),
                         TextFont {
-                            font_size: 20.0,
+                            font_size: 18.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.68, 0.66, 0.62)),
@@ -1217,6 +1757,13 @@ pub fn setup_user_mode_ui(
                         TextColor(Color::srgb(0.92, 0.88, 0.78)),
                         TextLayout::new_with_justify(Justify::Center),
                     ),
+                    user_mode_action_button(
+                        "FIGHT",
+                        UserModeUiAction::Confirm,
+                        Val::Px(240.0),
+                        54.0,
+                        22.0,
+                    ),
                 ],
             ),
             (
@@ -1244,14 +1791,27 @@ pub fn setup_user_mode_ui(
                         TextShadow::default(),
                     ),
                     (
-                        UserModeResultChoiceText,
-                        Text::new(result_choice_message(UserModeResultChoice::PlayAgain)),
-                        TextFont {
-                            font_size: 30.0,
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(18.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.96, 0.92, 0.82)),
-                        TextShadow::default(),
+                        children![
+                            user_mode_action_button(
+                                "PLAY AGAIN",
+                                UserModeUiAction::Result(UserModeResultChoice::PlayAgain),
+                                Val::Px(240.0),
+                                58.0,
+                                23.0,
+                            ),
+                            user_mode_action_button(
+                                "CHOOSE CHARACTER",
+                                UserModeUiAction::Result(UserModeResultChoice::ChooseCharacter),
+                                Val::Px(280.0),
+                                58.0,
+                                23.0,
+                            ),
+                        ],
                     ),
                     (
                         Text::new("Left/Right choose  |  Enter confirm"),
@@ -1263,6 +1823,7 @@ pub fn setup_user_mode_ui(
                     ),
                 ],
             ),
+            user_mode_back_button(),
         ],
     ));
     if let Some(ui_camera) = ui_camera {
@@ -1273,6 +1834,7 @@ pub fn setup_user_mode_ui(
 pub fn handle_user_mode_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
+    action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
     asset_server: Res<AssetServer>,
     mut user_mode: ResMut<UserModeState>,
     mut key_bindings: ResMut<PlayerKeyBindings>,
@@ -1323,7 +1885,10 @@ pub fn handle_user_mode_input(
     #[cfg(target_arch = "wasm32")]
     if matches!(
         user_mode.screen,
-        UserModeScreen::ModeSelect | UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect
+        UserModeScreen::ModeSelect
+            | UserModeScreen::PlayerCountSelect
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
     ) {
         if let Some(config) = take_web_match_config() {
             user_mode.play_mode = config.play_mode;
@@ -1339,111 +1904,83 @@ pub fn handle_user_mode_input(
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        if keys.just_pressed(KeyCode::Escape) && user_mode.screen != UserModeScreen::KeySettings {
-            stop_user_mode_music(&mut commands, &music);
-            reset_user_mode_presentation(
-                &mut virtual_time,
-                &mut screen_look,
-                &mut screen_transition,
-            );
-            user_mode.exit_to_dev();
-            announcements.show("Dev setup", 0.8);
+    let pointer_action = action_buttons.iter().find_map(|(interaction, action)| {
+        (*interaction == Interaction::Pressed).then_some(*action)
+    });
+
+    if user_mode.key_capture.is_some() {
+        if pointer_action == Some(UserModeUiAction::Back) || keys.just_pressed(KeyCode::Escape) {
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
             return;
         }
-    }
-
-    if user_mode.screen == UserModeScreen::ModeSelect {
-        if select_previous_pressed(&keys) {
-            user_mode.menu_choice = user_mode.menu_choice.previous();
-        }
-        if select_next_pressed(&keys) {
-            user_mode.menu_choice = user_mode.menu_choice.next();
-        }
-        if keys.just_pressed(KeyCode::Enter) {
-            if let Some(play_mode) = user_mode.menu_choice.play_mode() {
-                user_mode.play_mode = play_mode;
-                user_mode.enter_character_select();
-            } else {
-                user_mode.enter_key_settings();
-            }
-        }
-        return;
-    }
-
-    if user_mode.screen == UserModeScreen::KeySettings {
-        if user_mode.key_capture.is_some() {
-            if keys.just_pressed(KeyCode::Escape) {
-                user_mode.cancel_key_capture();
-                return;
-            }
-            if let Some(key) = keys.get_just_pressed().next().copied() {
-                match user_mode.apply_key_capture(&mut key_bindings, key) {
-                    Ok(result) => {
-                        let message = if let Some(swapped) = result.swapped {
-                            format!(
-                                "P{} {}: {:?} (swapped P{} {})",
-                                result.capture.player + 1,
-                                result.capture.action.label(),
-                                key,
-                                swapped.player + 1,
-                                swapped.action.label()
-                            )
-                        } else {
-                            format!(
-                                "P{} {}: {:?}",
-                                result.capture.player + 1,
-                                result.capture.action.label(),
-                                key
-                            )
-                        };
-                        announcements.show(message, 1.0);
-                    }
-                    Err("reserved") => announcements.show("Reserved key", 1.0),
-                    _ => announcements.show("Cannot bind key", 1.0),
+        if let Some(key) = keys.get_just_pressed().next().copied() {
+            match user_mode.apply_key_capture(&mut key_bindings, key) {
+                Ok(result) => {
+                    let message = if let Some(swapped) = result.swapped {
+                        format!(
+                            "P{} {}: {:?} (swapped P{} {})",
+                            result.capture.player + 1,
+                            result.capture.action.label(),
+                            key,
+                            swapped.player + 1,
+                            swapped.action.label()
+                        )
+                    } else {
+                        format!(
+                            "P{} {}: {:?}",
+                            result.capture.player + 1,
+                            result.capture.action.label(),
+                            key
+                        )
+                    };
+                    announcements.show(message, 1.0);
                 }
+                Err("reserved") => announcements.show("Reserved key", 1.0),
+                _ => announcements.show("Cannot bind key", 1.0),
             }
-            return;
-        }
-        if keys.just_pressed(KeyCode::Escape) {
-            user_mode.enter_mode_select();
-            return;
-        }
-        if keys.just_pressed(KeyCode::KeyR) {
-            *key_bindings = PlayerKeyBindings::default();
-            announcements.show("Controls reset", 1.0);
-        }
-        if keys.just_pressed(KeyCode::ArrowUp) {
-            user_mode.move_key_cursor(-1);
-        }
-        if keys.just_pressed(KeyCode::ArrowDown) {
-            user_mode.move_key_cursor(1);
-        }
-        if keys.just_pressed(KeyCode::ArrowLeft) {
-            user_mode.move_key_column(-1);
-        }
-        if keys.just_pressed(KeyCode::ArrowRight) {
-            user_mode.move_key_column(1);
-        }
-        if keys.just_pressed(KeyCode::Enter) {
-            user_mode.begin_key_capture();
         }
         return;
     }
 
-    if user_mode.screen == UserModeScreen::ControlsBriefing {
-        let local_start_requested = keys.just_pressed(KeyCode::Enter)
-            || keys.just_pressed(KeyCode::Space)
-            || buttons.just_pressed(MouseButton::Left);
-        #[cfg(target_arch = "wasm32")]
-        let web_start_requested = web_battle_start_signal_requested();
-        #[cfg(not(target_arch = "wasm32"))]
-        let web_start_requested = false;
+    if user_mode.screen == UserModeScreen::KeySettings && keys.just_pressed(KeyCode::KeyR) {
+        *key_bindings = PlayerKeyBindings::default();
+        announcements.show("Controls reset", 1.0);
+    }
 
-        let start_requested = local_start_requested || web_start_requested;
+    #[cfg(target_arch = "wasm32")]
+    let web_start_requested =
+        user_mode.screen == UserModeScreen::ControlsBriefing && web_battle_start_signal_requested();
+    #[cfg(not(target_arch = "wasm32"))]
+    let web_start_requested = false;
 
-        if start_requested {
+    let action = pointer_action
+        .or_else(|| keyboard_user_mode_action(&user_mode, &keys))
+        .or_else(|| web_start_requested.then_some(UserModeUiAction::Confirm));
+    let Some(action) = action else {
+        return;
+    };
+
+    let route = route_user_mode_action(&mut user_mode, action);
+    match route {
+        UserModeRoute::None => {}
+        UserModeRoute::CharacterPlayerAdvanced => announcements.show(
+            format!(
+                "P{} choose character",
+                user_mode.character_select_player + 1
+            ),
+            0.9,
+        ),
+        UserModeRoute::ArenaEntered => {
+            set_active_arena_index(user_mode.arena_index);
+            announcements.show("Choose arena", 0.9);
+        }
+        UserModeRoute::ArenaChanged => set_active_arena_index(user_mode.arena_index),
+        UserModeRoute::PrepareMatch => {
+            stop_user_mode_music(&mut commands, &music);
+            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+        }
+        UserModeRoute::ConfirmBattle => {
             if gameplay_scene.ready_for_battle() {
                 #[cfg(target_arch = "wasm32")]
                 if web_start_requested {
@@ -1461,77 +1998,44 @@ pub fn handle_user_mode_input(
                 announcements.show("Loading battle", 0.7);
             }
         }
-        return;
-    }
-
-    if user_mode.screen == UserModeScreen::BattleResult {
-        if !user_mode.result_menu_ready {
-            return;
-        }
-        if select_previous_pressed(&keys) || select_next_pressed(&keys) {
-            user_mode.toggle_result_choice();
-        }
-        if keys.just_pressed(KeyCode::Enter) {
+        UserModeRoute::Replay => {
             reset_user_mode_presentation(
                 &mut virtual_time,
                 &mut screen_look,
                 &mut screen_transition,
             );
-            match user_mode.result_choice {
-                UserModeResultChoice::PlayAgain => {
-                    let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-                    announce_user_mode_match_flow(flow, &setup, &mut announcements);
-                }
-                UserModeResultChoice::ChooseCharacter => {
-                    state.return_to_setup();
-                    user_mode.enter_mode_select();
-                    stop_user_mode_music(&mut commands, &music);
-                    start_user_mode_menu_music(&mut commands, &asset_server);
-                    announcements.show("", 0.0);
-                }
-            }
-        }
-        return;
-    }
-
-    if user_mode.screen == UserModeScreen::CharacterSelect {
-        if select_previous_pressed(&keys) {
-            user_mode.select_previous();
-        }
-        if select_next_pressed(&keys) {
-            user_mode.select_next();
-        }
-        if keys.just_pressed(KeyCode::Enter) {
-            if !user_mode.confirm_character_selection() {
-                announcements.show(
-                    format!(
-                        "P{} choose character",
-                        user_mode.character_select_player + 1
-                    ),
-                    0.9,
-                );
-                return;
-            }
-            user_mode.enter_arena_select();
-            set_active_arena_index(user_mode.arena_index);
-            announcements.show("Choose arena", 0.9);
-        }
-        return;
-    }
-
-    if user_mode.screen == UserModeScreen::ArenaSelect {
-        if select_previous_pressed(&keys) {
-            user_mode.select_previous_arena();
-            set_active_arena_index(user_mode.arena_index);
-        }
-        if select_next_pressed(&keys) {
-            user_mode.select_next_arena();
-            set_active_arena_index(user_mode.arena_index);
-        }
-        if keys.just_pressed(KeyCode::Enter) {
-            stop_user_mode_music(&mut commands, &music);
             let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
             announce_user_mode_match_flow(flow, &setup, &mut announcements);
+        }
+        UserModeRoute::ChooseCharacter => {
+            reset_user_mode_presentation(
+                &mut virtual_time,
+                &mut screen_look,
+                &mut screen_transition,
+            );
+            state.return_to_setup();
+            stop_user_mode_music(&mut commands, &music);
+            start_user_mode_menu_music(&mut commands, &asset_server);
+            announcements.show("", 0.0);
+        }
+        UserModeRoute::ControlsBack => {
+            state.return_to_setup();
+            stop_user_mode_music(&mut commands, &music);
+            start_user_mode_menu_music(&mut commands, &asset_server);
+            announcements.show("Choose arena", 0.8);
+        }
+        UserModeRoute::ExitToDev => {
+            #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+            {
+                stop_user_mode_music(&mut commands, &music);
+                reset_user_mode_presentation(
+                    &mut virtual_time,
+                    &mut screen_look,
+                    &mut screen_transition,
+                );
+                user_mode.exit_to_dev();
+                announcements.show("Dev setup", 0.8);
+            }
         }
     }
 }
@@ -1826,140 +2330,54 @@ pub fn update_user_mode_ui(
     user_mode: Res<UserModeState>,
     bindings: Res<PlayerKeyBindings>,
     mut roots: Query<(&mut Node, &mut BackgroundColor), With<UserModeRoot>>,
-    mut start_panels: Query<
-        &mut Node,
+    mut back_buttons: Query<&mut Node, (With<UserModeBackButton>, Without<UserModeRoot>)>,
+    mut panels: Query<
         (
-            With<UserModeStartPanel>,
+            &mut Node,
+            Option<&UserModeStartPanel>,
+            Option<&UserModeMainMenuPanel>,
+            Option<&UserModePlayerCountPanel>,
+            Option<&UserModeCharacterSelectPanel>,
+            Option<&UserModeArenaSelectPanel>,
+            Option<&UserModeKeySettingsPanel>,
+            Option<&UserModeResultPanel>,
+        ),
+        (
             Without<UserModeRoot>,
-            Without<UserModeSelectPanel>,
-            Without<UserModeKeySettingsPanel>,
-            Without<UserModeControlsPanel>,
-            Without<UserModeResultPanel>,
+            Without<UserModeBackButton>,
+            Or<(
+                With<UserModeStartPanel>,
+                With<UserModeMainMenuPanel>,
+                With<UserModePlayerCountPanel>,
+                With<UserModeCharacterSelectPanel>,
+                With<UserModeArenaSelectPanel>,
+                With<UserModeKeySettingsPanel>,
+                With<UserModeResultPanel>,
+            )>,
         ),
     >,
-    mut select_panels: Query<
-        &mut Node,
+    mut texts: Query<
         (
-            With<UserModeSelectPanel>,
-            Without<UserModeRoot>,
-            Without<UserModeStartPanel>,
-            Without<UserModeKeySettingsPanel>,
-            Without<UserModeControlsPanel>,
+            &mut Text,
+            Option<&UserModeChoiceText>,
+            Option<&UserModeCharacterTitleText>,
+            Option<&UserModeKeySettingsPromptText>,
+            Option<&UserModeKeySettingsRowText>,
+            Option<&UserModeResultText>,
+            Option<&mut TextColor>,
         ),
-    >,
-    mut key_settings_panels: Query<
-        &mut Node,
         (
-            With<UserModeKeySettingsPanel>,
-            Without<UserModeRoot>,
-            Without<UserModeStartPanel>,
-            Without<UserModeSelectPanel>,
-            Without<UserModeControlsPanel>,
-            Without<UserModeResultPanel>,
-        ),
-    >,
-    mut result_panels: Query<
-        &mut Node,
-        (
-            With<UserModeResultPanel>,
-            Without<UserModeRoot>,
-            Without<UserModeStartPanel>,
-            Without<UserModeSelectPanel>,
-            Without<UserModeKeySettingsPanel>,
-            Without<UserModeControlsPanel>,
-        ),
-    >,
-    mut choices: Query<
-        &mut Text,
-        (
-            With<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeKeySettingsRowText>,
             Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-            Without<UserModeResultChoiceText>,
-        ),
-    >,
-    mut select_titles: Query<
-        &mut Text,
-        (
-            With<UserModeSelectTitleText>,
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeKeySettingsRowText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-            Without<UserModeResultChoiceText>,
-        ),
-    >,
-    mut select_hints: Query<
-        &mut Text,
-        (
-            With<UserModeSelectHintText>,
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeKeySettingsRowText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-            Without<UserModeResultChoiceText>,
-        ),
-    >,
-    mut key_settings_prompts: Query<
-        &mut Text,
-        (
-            With<UserModeKeySettingsPromptText>,
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsRowText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-            Without<UserModeResultChoiceText>,
-        ),
-    >,
-    mut key_settings_rows: Query<
-        (&UserModeKeySettingsRowText, &mut Text, &mut TextColor),
-        (
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-            Without<UserModeResultChoiceText>,
+            Or<(
+                With<UserModeChoiceText>,
+                With<UserModeCharacterTitleText>,
+                With<UserModeKeySettingsPromptText>,
+                With<UserModeKeySettingsRowText>,
+                With<UserModeResultText>,
+            )>,
         ),
     >,
     mut key_settings_scrolls: Query<(&UserModeKeySettingsScroll, &mut ScrollPosition)>,
-    mut result_titles: Query<
-        &mut Text,
-        (
-            With<UserModeResultText>,
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeKeySettingsRowText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultChoiceText>,
-        ),
-    >,
-    mut result_choices: Query<
-        &mut Text,
-        (
-            With<UserModeResultChoiceText>,
-            Without<UserModeChoiceText>,
-            Without<UserModeSelectTitleText>,
-            Without<UserModeSelectHintText>,
-            Without<UserModeKeySettingsPromptText>,
-            Without<UserModeKeySettingsRowText>,
-            Without<UserModeControlsText>,
-            Without<UserModeResultText>,
-        ),
-    >,
 ) {
     for (mut node, mut background) in &mut roots {
         node.display = if user_mode.active() {
@@ -1971,64 +2389,61 @@ pub fn update_user_mode_ui(
         *background = BackgroundColor(Color::srgba(0.0, 0.0, 0.0, alpha));
     }
 
-    let start_visible = user_mode.screen() == UserModeScreen::Start;
-    let select_visible = matches!(
-        user_mode.screen(),
-        UserModeScreen::ModeSelect | UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect
-    );
     let key_settings_visible = user_mode.screen() == UserModeScreen::KeySettings;
     let result_visible =
         user_mode.screen() == UserModeScreen::BattleResult && user_mode.result_menu_ready;
-    for mut node in &mut start_panels {
-        node.display = if start_visible {
+    let back_visible = matches!(
+        user_mode.screen(),
+        UserModeScreen::PlayerCountSelect
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::KeySettings
+            | UserModeScreen::ControlsBriefing
+    );
+    for mut node in &mut back_buttons {
+        node.display = if back_visible {
             Display::Flex
         } else {
             Display::None
         };
     }
-    for mut node in &mut select_panels {
-        node.display = if select_visible {
+    for (mut node, start, main, player_count, character, arena, keys, result) in &mut panels {
+        let visible = (start.is_some() && user_mode.screen() == UserModeScreen::Start)
+            || (main.is_some() && user_mode.screen() == UserModeScreen::ModeSelect)
+            || (player_count.is_some() && user_mode.screen() == UserModeScreen::PlayerCountSelect)
+            || (character.is_some() && user_mode.screen() == UserModeScreen::CharacterSelect)
+            || (arena.is_some() && user_mode.screen() == UserModeScreen::ArenaSelect)
+            || (keys.is_some() && key_settings_visible)
+            || (result.is_some() && result_visible);
+        node.display = if visible {
             Display::Flex
         } else {
             Display::None
         };
     }
-    for mut node in &mut key_settings_panels {
-        node.display = if key_settings_visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
-    for mut node in &mut result_panels {
-        node.display = if result_visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
-    for mut text in &mut choices {
-        **text = user_mode_choice_message(&user_mode);
-    }
-    for mut text in &mut select_titles {
-        **text = user_mode_select_title_message(&user_mode);
-    }
-    for mut text in &mut select_hints {
-        **text = user_mode_select_hint_message(&user_mode);
-    }
-    for mut text in &mut key_settings_prompts {
-        **text = key_settings_prompt_message(&user_mode);
-    }
+
     let selected_key_target = user_mode.selected_key_target();
-    for (row, mut text, mut color) in &mut key_settings_rows {
-        let key = bindings
-            .key_for(row.player, row.action)
-            .expect("valid player binding");
-        let selected = key_settings_visible
-            && row.player == selected_key_target.player
-            && row.action == selected_key_target.action;
-        **text = key_settings_row_message(row.action, key, selected);
-        *color = key_settings_row_color(selected);
+    for (mut text, choice, character_title, prompt, row, result, color) in &mut texts {
+        if choice.is_some() {
+            **text = user_mode_choice_message(&user_mode);
+        } else if character_title.is_some() {
+            **text = character_select_title_message(&user_mode);
+        } else if prompt.is_some() {
+            **text = key_settings_prompt_message(&user_mode);
+        } else if let Some(row) = row {
+            let key = bindings
+                .key_for(row.player, row.action)
+                .expect("valid player binding");
+            let selected = key_settings_visible
+                && row.player == selected_key_target.player
+                && row.action == selected_key_target.action;
+            **text = key_settings_row_message(row.action, key, selected);
+            if let Some(mut color) = color {
+                *color = key_settings_row_color(selected);
+            }
+        } else if result.is_some() {
+            **text = result_title_message(&user_mode);
+        }
     }
     for (scroll, mut scroll_position) in &mut key_settings_scrolls {
         if key_settings_visible {
@@ -2043,11 +2458,56 @@ pub fn update_user_mode_ui(
             scroll_position.0 = Vec2::ZERO;
         }
     }
-    for mut text in &mut result_titles {
-        **text = result_title_message(&user_mode);
+}
+
+fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction) -> bool {
+    match action {
+        UserModeUiAction::MainMenu(choice) => {
+            user_mode.screen == UserModeScreen::ModeSelect && user_mode.main_menu_choice == choice
+        }
+        UserModeUiAction::PlayerCount(choice) => {
+            user_mode.screen == UserModeScreen::PlayerCountSelect
+                && user_mode.player_count_choice == choice
+        }
+        UserModeUiAction::KeyBinding(capture) => {
+            user_mode.screen == UserModeScreen::KeySettings
+                && user_mode.selected_key_target() == capture
+        }
+        UserModeUiAction::Result(choice) => {
+            user_mode.screen == UserModeScreen::BattleResult && user_mode.result_choice == choice
+        }
+        _ => false,
     }
-    for mut text in &mut result_choices {
-        **text = result_choice_message(user_mode.result_choice);
+}
+
+pub fn update_user_mode_button_styles(
+    user_mode: Res<UserModeState>,
+    mut buttons: Query<
+        (
+            &Interaction,
+            &UserModeUiAction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        (With<Button>, Without<UserModeRoot>),
+    >,
+) {
+    for (interaction, action, mut background, mut border) in &mut buttons {
+        let selected = user_mode_action_selected(&user_mode, *action);
+        let (background_color, border_color) = match interaction {
+            Interaction::Pressed => (Color::srgb(0.42, 0.31, 0.13), Color::srgb(1.0, 0.86, 0.48)),
+            Interaction::Hovered => (Color::srgb(0.19, 0.16, 0.1), Color::srgb(0.94, 0.78, 0.42)),
+            Interaction::None if selected => (
+                Color::srgb(0.13, 0.105, 0.06),
+                Color::srgb(0.86, 0.69, 0.35),
+            ),
+            Interaction::None => (
+                Color::srgba(0.055, 0.055, 0.065, 0.94),
+                Color::srgb(0.42, 0.4, 0.35),
+            ),
+        };
+        *background = BackgroundColor(background_color);
+        *border = BorderColor::all(border_color);
     }
 }
 
@@ -2075,6 +2535,7 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
     match user_mode.screen() {
         UserModeScreen::Start
         | UserModeScreen::ModeSelect
+        | UserModeScreen::PlayerCountSelect
         | UserModeScreen::KeySettings
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
@@ -2089,6 +2550,76 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
 fn user_mode_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyU)
         && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight))
+}
+
+fn vertical_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW)
+}
+
+fn vertical_next_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS)
+}
+
+fn keyboard_user_mode_action(
+    user_mode: &UserModeState,
+    keys: &ButtonInput<KeyCode>,
+) -> Option<UserModeUiAction> {
+    if keys.just_pressed(KeyCode::Escape) {
+        return Some(UserModeUiAction::Back);
+    }
+
+    match user_mode.screen {
+        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect => {
+            if vertical_previous_pressed(keys) {
+                Some(UserModeUiAction::Previous)
+            } else if vertical_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect => {
+            if select_previous_pressed(keys) {
+                Some(UserModeUiAction::Previous)
+            } else if select_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::KeySettings => {
+            if keys.just_pressed(KeyCode::ArrowUp) {
+                Some(UserModeUiAction::Previous)
+            } else if keys.just_pressed(KeyCode::ArrowDown) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::ArrowLeft) {
+                Some(UserModeUiAction::PreviousColumn)
+            } else if keys.just_pressed(KeyCode::ArrowRight) {
+                Some(UserModeUiAction::NextColumn)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::ControlsBriefing => (keys.just_pressed(KeyCode::Enter)
+            || keys.just_pressed(KeyCode::Space))
+        .then_some(UserModeUiAction::Confirm),
+        UserModeScreen::BattleResult if user_mode.result_menu_ready => {
+            if select_previous_pressed(keys) || select_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -2118,56 +2649,24 @@ fn previous_user_mode_character(character: CharacterKind) -> CharacterKind {
 }
 
 fn character_select_message(selected: CharacterKind) -> String {
-    USER_MODE_SELECTABLE_CHARACTERS
-        .iter()
-        .map(|character| {
-            let label = character_label(*character).to_ascii_uppercase();
-            if selected == *character {
-                format!("> {label} <")
-            } else {
-                format!("  {label}  ")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("        ")
-}
-
-fn mode_select_message(choice: UserModeMenuChoice) -> String {
-    fn label(selected: bool, text: &str) -> String {
-        if selected {
-            format!("> {} <", text.to_ascii_uppercase())
-        } else {
-            format!("  {text}  ")
-        }
-    }
-
-    let single = label(choice == UserModeMenuChoice::SinglePlayer, "Single Player");
-    let two = label(choice == UserModeMenuChoice::TwoPlayers, "Two Players");
-    let three = label(choice == UserModeMenuChoice::ThreePlayers, "Three Players");
-    let four = label(choice == UserModeMenuChoice::FourPlayers, "Four Players");
-    let keys = label(choice == UserModeMenuChoice::KeySettings, "Key Settings");
-    format!("{single}        {two}        {three}\n{four}        {keys}")
+    let index = user_mode_character_index(selected);
+    format!(
+        "{}\n{} / {}",
+        character_label(selected).to_ascii_uppercase(),
+        index + 1,
+        USER_MODE_SELECTABLE_CHARACTERS.len()
+    )
 }
 
 fn arena_select_message(selected_index: usize) -> String {
     let arenas = arena_definitions();
     let selected_index = selected_index.min(arenas.len().saturating_sub(1));
-    arenas
-        .iter()
-        .enumerate()
-        .map(|(index, arena)| {
-            let label = arena.name.to_ascii_uppercase();
-            if index == selected_index {
-                format!("> {label} <")
-            } else {
-                format!("  {label}  ")
-            }
-        })
-        .collect::<Vec<_>>()
-        .chunks(4)
-        .map(|row| row.join("   "))
-        .collect::<Vec<_>>()
-        .join("\n")
+    format!(
+        "{}\n{} / {}",
+        arenas[selected_index].name.to_ascii_uppercase(),
+        selected_index + 1,
+        arenas.len()
+    )
 }
 
 fn arena_preview_camera_transform(selected_index: usize) -> Transform {
@@ -2179,37 +2678,19 @@ fn arena_preview_camera_transform(selected_index: usize) -> Transform {
     .looking_at(Vec3::Y * 0.6, Vec3::Y)
 }
 
-fn user_mode_select_title_message(user_mode: &UserModeState) -> String {
-    match user_mode.screen {
-        UserModeScreen::ModeSelect => "ANIMAL FIGHTER CLUB".to_string(),
-        UserModeScreen::CharacterSelect => "SELECT A CHARACTER".to_string(),
-        UserModeScreen::ArenaSelect => "SELECT AN ARENA".to_string(),
-        _ => "ANIMAL FIGHTER CLUB".to_string(),
-    }
-}
-
-fn user_mode_select_hint_message(user_mode: &UserModeState) -> String {
-    match user_mode.screen {
-        UserModeScreen::ModeSelect => "Left/Right or Q/E choose  |  Enter confirm".to_string(),
-        UserModeScreen::CharacterSelect => "Left/Right or Q/E choose  |  Enter confirm".to_string(),
-        UserModeScreen::ArenaSelect => "Left/Right or Q/E choose map  |  Enter start".to_string(),
-        _ => "Enter confirm".to_string(),
-    }
-}
-
 fn user_mode_choice_message(user_mode: &UserModeState) -> String {
     match user_mode.screen {
-        UserModeScreen::ModeSelect => mode_select_message(user_mode.menu_choice),
-        UserModeScreen::CharacterSelect => {
-            let player = format!("P{}", user_mode.character_select_player + 1);
-            format!(
-                "{player} CHOOSE\n{}",
-                character_select_message(user_mode.selected_character())
-            )
-        }
+        UserModeScreen::CharacterSelect => character_select_message(user_mode.selected_character()),
         UserModeScreen::ArenaSelect => arena_select_message(user_mode.arena_index),
-        _ => character_select_message(user_mode.selected_character()),
+        _ => String::new(),
     }
+}
+
+fn character_select_title_message(user_mode: &UserModeState) -> String {
+    format!(
+        "P{} SELECT A CHARACTER",
+        user_mode.character_select_player + 1
+    )
 }
 
 fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
@@ -2361,20 +2842,6 @@ fn result_sfx_kind(user_mode: &UserModeState) -> Option<CombatSfxKind> {
     }
 
     user_mode.result_winner.map(|_| CombatSfxKind::ResultWin)
-}
-
-fn result_choice_message(choice: UserModeResultChoice) -> String {
-    let play_again = if choice == UserModeResultChoice::PlayAgain {
-        "> PLAY AGAIN <"
-    } else {
-        "  Play Again  "
-    };
-    let choose_character = if choice == UserModeResultChoice::ChooseCharacter {
-        "> CHOOSE CHARACTER <"
-    } else {
-        "  Choose Character  "
-    };
-    format!("{play_again}        {choose_character}")
 }
 
 fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
@@ -2579,42 +3046,196 @@ mod tests {
         user_mode.enter_fresh_mode_select();
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
         assert_eq!(user_mode.play_mode, UserPlayMode::SinglePlayer);
-        assert_eq!(user_mode.menu_choice, UserModeMenuChoice::SinglePlayer);
+        assert_eq!(
+            user_mode.main_menu_choice,
+            UserModeMainMenuChoice::SinglePlayer
+        );
+        assert_eq!(
+            user_mode.player_count_choice,
+            UserModePlayerCountChoice::TwoPlayers
+        );
         assert!(!user_mode.controls_briefing_seen);
     }
 
     #[test]
-    fn mode_select_cycles_through_all_local_player_counts() {
+    fn main_menu_cycles_and_wraps_three_vertical_choices() {
         let choices = [
-            UserModeMenuChoice::SinglePlayer,
-            UserModeMenuChoice::TwoPlayers,
-            UserModeMenuChoice::ThreePlayers,
-            UserModeMenuChoice::FourPlayers,
-            UserModeMenuChoice::KeySettings,
+            UserModeMainMenuChoice::SinglePlayer,
+            UserModeMainMenuChoice::Multiplayer,
+            UserModeMainMenuChoice::Settings,
         ];
-        let mut choice = UserModeMenuChoice::SinglePlayer;
+        let mut choice = UserModeMainMenuChoice::SinglePlayer;
         for expected in choices.into_iter().skip(1) {
             choice = choice.next();
             assert_eq!(choice, expected);
         }
-        assert_eq!(choice.next(), UserModeMenuChoice::SinglePlayer);
+        assert_eq!(choice.next(), UserModeMainMenuChoice::SinglePlayer);
         assert_eq!(
-            UserModeMenuChoice::FourPlayers.play_mode(),
-            Some(UserPlayMode::FourPlayers)
+            UserModeMainMenuChoice::SinglePlayer.previous(),
+            UserModeMainMenuChoice::Settings
         );
     }
 
     #[test]
-    fn mode_select_copy_keeps_five_choices_in_two_readable_rows() {
-        let message = mode_select_message(UserModeMenuChoice::FourPlayers);
+    fn player_count_cycles_wraps_and_maps_to_unchanged_play_modes() {
+        let mut choice = UserModePlayerCountChoice::TwoPlayers;
+        choice = choice.next();
+        assert_eq!(choice, UserModePlayerCountChoice::ThreePlayers);
+        choice = choice.next();
+        assert_eq!(choice, UserModePlayerCountChoice::FourPlayers);
+        assert_eq!(choice.next(), UserModePlayerCountChoice::TwoPlayers);
+        assert_eq!(
+            UserModePlayerCountChoice::TwoPlayers.previous(),
+            UserModePlayerCountChoice::FourPlayers
+        );
+        assert_eq!(
+            UserModePlayerCountChoice::FourPlayers.play_mode(),
+            UserPlayMode::FourPlayers
+        );
+    }
 
-        assert_eq!(message.lines().count(), 2);
-        assert!(message.contains("Single Player"));
-        assert!(message.contains("Two Players"));
-        assert!(message.contains("Three Players"));
-        assert!(message.contains("> FOUR PLAYERS <"));
-        assert!(message.contains("Key Settings"));
-        assert!(message.lines().all(|line| line.chars().count() <= 70));
+    #[test]
+    fn main_menu_and_player_count_actions_route_to_staged_screens() {
+        let mut single = UserModeState::default();
+        single.enter_mode_select();
+        route_user_mode_action(
+            &mut single,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::SinglePlayer),
+        );
+        assert_eq!(single.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(single.play_mode, UserPlayMode::SinglePlayer);
+
+        let mut multiplayer = UserModeState::default();
+        multiplayer.enter_mode_select();
+        route_user_mode_action(
+            &mut multiplayer,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+        );
+        assert_eq!(multiplayer.screen(), UserModeScreen::PlayerCountSelect);
+        assert_eq!(
+            multiplayer.player_count_choice,
+            UserModePlayerCountChoice::TwoPlayers
+        );
+
+        for (choice, play_mode) in [
+            (
+                UserModePlayerCountChoice::TwoPlayers,
+                UserPlayMode::TwoPlayers,
+            ),
+            (
+                UserModePlayerCountChoice::ThreePlayers,
+                UserPlayMode::ThreePlayers,
+            ),
+            (
+                UserModePlayerCountChoice::FourPlayers,
+                UserPlayMode::FourPlayers,
+            ),
+        ] {
+            let mut state = multiplayer.clone();
+            route_user_mode_action(&mut state, UserModeUiAction::PlayerCount(choice));
+            assert_eq!(state.screen(), UserModeScreen::CharacterSelect);
+            assert_eq!(state.play_mode, play_mode);
+        }
+
+        let mut settings = UserModeState::default();
+        settings.enter_mode_select();
+        route_user_mode_action(
+            &mut settings,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Settings),
+        );
+        assert_eq!(settings.screen(), UserModeScreen::KeySettings);
+    }
+
+    #[test]
+    fn single_and_multiplayer_character_actions_confirm_each_player_in_order() {
+        for mode in [
+            UserPlayMode::SinglePlayer,
+            UserPlayMode::TwoPlayers,
+            UserPlayMode::ThreePlayers,
+            UserPlayMode::FourPlayers,
+        ] {
+            let mut user_mode = UserModeState::default();
+            user_mode.play_mode = mode;
+            user_mode.enter_character_select();
+            let player_count = mode.human_player_count();
+
+            for player in 0..player_count {
+                assert_eq!(user_mode.character_select_player, player);
+                let route = route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+                if player + 1 < player_count {
+                    assert_eq!(route, UserModeRoute::CharacterPlayerAdvanced);
+                } else {
+                    assert_eq!(route, UserModeRoute::ArenaEntered);
+                }
+            }
+            assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+        }
+    }
+
+    #[test]
+    fn hierarchical_back_visits_each_parent_and_previous_player() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_player_count_select();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        user_mode.enter_key_settings();
+        user_mode.begin_key_capture();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
+        assert_eq!(user_mode.key_capture, None);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        user_mode.return_to_character_select_player(3);
+        for previous_player in (0..3).rev() {
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+            assert_eq!(user_mode.character_select_player, previous_player);
+        }
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::PlayerCountSelect);
+
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        user_mode.enter_character_select();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        user_mode.play_mode = UserPlayMode::ThreePlayers;
+        user_mode.enter_arena_select();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(user_mode.character_select_player, 2);
+    }
+
+    #[test]
+    fn controls_back_preserves_arena_and_requests_clean_menu_music_restore() {
+        let mut user_mode = UserModeState::default();
+        user_mode.arena_index = 7;
+        user_mode.enter_controls_briefing();
+
+        let route = route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+
+        assert_eq!(route, UserModeRoute::ControlsBack);
+        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+        assert_eq!(user_mode.arena_index, 7);
+        assert!(!user_mode.controls_briefing_seen);
+    }
+
+    #[test]
+    fn keyboard_vertical_menu_actions_support_arrows_and_w_s() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_mode_select();
+        for (key, expected) in [
+            (KeyCode::ArrowUp, UserModeUiAction::Previous),
+            (KeyCode::KeyW, UserModeUiAction::Previous),
+            (KeyCode::ArrowDown, UserModeUiAction::Next),
+            (KeyCode::KeyS, UserModeUiAction::Next),
+        ] {
+            let mut keys = ButtonInput::default();
+            keys.press(key);
+            assert_eq!(keyboard_user_mode_action(&user_mode, &keys), Some(expected));
+        }
     }
 
     #[test]
@@ -2659,6 +3280,17 @@ mod tests {
     }
 
     #[test]
+    fn character_selector_copy_only_exposes_focused_choice_and_counter() {
+        let message = character_select_message(CharacterKind::Bee);
+
+        assert_eq!(message, "BEE\n3 / 5");
+        assert!(!message.contains("CAT"));
+        assert!(!message.contains("PIG"));
+        assert!(!message.contains("PENGUIN"));
+        assert!(!message.contains("CHICK"));
+    }
+
+    #[test]
     fn arena_selection_cycles_through_available_maps() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_arena_select();
@@ -2674,14 +3306,12 @@ mod tests {
     }
 
     #[test]
-    fn arena_select_message_lists_maps_in_readable_rows() {
+    fn arena_selector_copy_only_exposes_focused_choice_and_counter() {
         let message = arena_select_message(5);
 
-        assert!(message.contains("> BUMPER ALLEY <"));
-        assert!(message.contains("CROWN RING"));
-        assert!(message.contains("POWDER KEG COURT"));
-        assert_eq!(message.lines().count(), 3);
-        assert!(message.lines().all(|line| line.chars().count() <= 80));
+        assert_eq!(message, "BUMPER ALLEY\n6 / 10");
+        assert!(!message.contains("CROWN RING"));
+        assert!(!message.contains("POWDER KEG COURT"));
     }
 
     #[test]
@@ -2719,6 +3349,9 @@ mod tests {
         user_mode.enter_mode_select();
         assert!(user_mode.blocks_dev_input());
         assert!(user_mode.hides_dev_controls());
+
+        user_mode.enter_player_count_select();
+        assert!(user_mode.blocks_dev_input());
 
         user_mode.enter_arena_select();
         assert!(user_mode.blocks_dev_input());
@@ -3029,6 +3662,99 @@ mod tests {
             UserModeResultChoice::ChooseCharacter
         );
         assert_eq!(result_title_message(&user_mode), "YOU LOSE");
+    }
+
+    #[test]
+    fn pointer_actions_share_routing_for_rows_arrows_confirm_back_keys_and_results() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_mode_select();
+
+        route_user_mode_action(
+            &mut user_mode,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::PlayerCountSelect);
+        route_user_mode_action(
+            &mut user_mode,
+            UserModeUiAction::PlayerCount(UserModePlayerCountChoice::TwoPlayers),
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+
+        let first_character = user_mode.selected_character();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_ne!(user_mode.selected_character(), first_character);
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::CharacterPlayerAdvanced
+        );
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::ArenaEntered
+        );
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Previous),
+            UserModeRoute::ArenaChanged
+        );
+
+        user_mode.enter_key_settings();
+        let capture = KeyBindingCapture {
+            player: 2,
+            action: ControlAction::Heavy,
+        };
+        route_user_mode_action(&mut user_mode, UserModeUiAction::KeyBinding(capture));
+        assert_eq!(user_mode.key_capture, Some(capture));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.key_capture, None);
+
+        user_mode.player_count_choice = UserModePlayerCountChoice::TwoPlayers;
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_battle_result(Some(0));
+        user_mode.result_menu_ready = true;
+        assert_eq!(
+            route_user_mode_action(
+                &mut user_mode,
+                UserModeUiAction::Result(UserModeResultChoice::ChooseCharacter),
+            ),
+            UserModeRoute::ChooseCharacter
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(user_mode.character_select_player, 0);
+        assert_eq!(user_mode.play_mode, UserPlayMode::TwoPlayers);
+        assert_eq!(
+            user_mode.player_count_choice,
+            UserModePlayerCountChoice::TwoPlayers
+        );
+    }
+
+    #[test]
+    fn button_selection_state_tracks_keyboard_focus_for_each_clickable_row_group() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_mode_select();
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::SinglePlayer)
+        ));
+
+        user_mode.enter_player_count_select();
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::PlayerCount(UserModePlayerCountChoice::TwoPlayers)
+        ));
+
+        user_mode.enter_key_settings();
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::KeyBinding(KeyBindingCapture {
+                player: 0,
+                action: ControlAction::Left,
+            })
+        ));
+
+        user_mode.enter_battle_result(Some(0));
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::Result(UserModeResultChoice::PlayAgain)
+        ));
     }
 
     #[test]
