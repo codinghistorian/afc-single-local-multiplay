@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::characters::CharacterKind;
 use crate::components::FighterAction;
 use crate::reactions::ReactionFamilyId;
+use crate::simulation::TickTimer;
 use crate::styles::FighterStyleKind;
 use crate::techniques::AttackShapeId;
 
@@ -14,7 +15,14 @@ pub enum EquipmentKind {
     HeavySeal,
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub const EQUIPMENT_KINDS: [EquipmentKind; 4] = [
     EquipmentKind::DashCoil,
     EquipmentKind::AerialSpur,
@@ -32,7 +40,7 @@ pub const DEFAULT_FIGHTER_EQUIPMENT: [EquipmentKind; 4] = [
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FighterEquipment {
     pub kind: EquipmentKind,
-    pub cooldown: f32,
+    pub cooldown: TickTimer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +232,7 @@ impl FighterEquipment {
     pub fn new(kind: EquipmentKind) -> Self {
         Self {
             kind,
-            cooldown: 0.0,
+            cooldown: TickTimer::ZERO,
         }
     }
 }
@@ -255,7 +263,14 @@ pub fn equipment_identity(kind: EquipmentKind) -> EquipmentTuning {
     equipment_tuning(kind)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn next_equipment_kind(kind: EquipmentKind) -> EquipmentKind {
     let index = EQUIPMENT_KINDS
         .iter()
@@ -398,7 +413,7 @@ fn source_matches_loadout(source: LoadoutModifierSource, context: LoadoutContext
 
 #[allow(dead_code)]
 pub fn equipment_status_label(equipment: &FighterEquipment) -> String {
-    if equipment.cooldown <= 0.0 {
+    if !equipment.cooldown.active() {
         format!(
             "{} Ready ({})",
             equipment_label(equipment.kind),
@@ -408,16 +423,15 @@ pub fn equipment_status_label(equipment: &FighterEquipment) -> String {
         format!(
             "{} {:.1}s ({})",
             equipment_label(equipment.kind),
-            equipment.cooldown,
+            equipment.cooldown.as_seconds(),
             equipment_effect_label(equipment.kind)
         )
     }
 }
 
-pub fn tick_equipment_cooldowns(time: Res<Time>, mut equipment: Query<&mut FighterEquipment>) {
-    let dt = time.delta_secs();
+pub fn tick_equipment_cooldowns(mut equipment: Query<&mut FighterEquipment>) {
     for mut equipment in &mut equipment {
-        equipment.cooldown = (equipment.cooldown - dt).max(0.0);
+        equipment.cooldown.tick();
     }
 }
 

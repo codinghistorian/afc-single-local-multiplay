@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050607" />
+    <title>Animal Fighter Club</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #050607;
+      }
+
+      body {
+        display: grid;
+        place-items: stretch;
+      }
+
+      #bevy-canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+        outline: none;
+        background: #050607;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="bevy-canvas" tabindex="0"></canvas>
+    <script type="module">
+      import init from "./pkg/ffc_prototype.js";
+
+      const canvas = document.getElementById("bevy-canvas");
+      const focusCanvas = () => {
+        try {
+          canvas.focus({ preventScroll: true });
+        } catch {
+          canvas.focus();
+        }
+      };
+
+      window.addEventListener("click", focusCanvas, { passive: true });
+      window.addEventListener("touchstart", focusCanvas, { passive: true });
+
+      init().then(focusCanvas);
+    </script>
+  </body>
+</html>

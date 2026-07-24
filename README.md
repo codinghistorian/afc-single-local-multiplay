@@ -10,6 +10,93 @@ cargo run
 
 The window opens at 1280x720.
 
+## Steam online multiplayer
+
+The first online milestone is native Steam listen play for private and
+friends-only lobbies, with up to four fighter seats. One Steam peer may own
+multiple local couch seats. Public discovery, mid-match joining, host migration,
+ranked/trusted results, and hosted dedicated Steam servers are intentionally
+disabled for this release scope.
+
+Compile and test the Steam-enabled client without requiring a signed-in account:
+
+```bash
+cargo build --locked --no-default-features --features native,steam-net
+cargo test --locked --no-default-features --features native,steam-net
+```
+
+Run a development client through Steam with the game's assigned non-zero App ID:
+
+```bash
+AFC_STEAM_APP_ID=<REAL_AFC_APP_ID> \
+  cargo run --locked --no-default-features --features native,steam-net
+```
+
+That command is not a release candidate. The exact shipping feature selection is:
+
+```bash
+AFC_BUILD_ID=<IMMUTABLE_RELEASE_LABEL> \
+AFC_STEAM_APP_ID=<REAL_AFC_APP_ID> \
+  cargo build --locked --release --no-default-features --features shipping \
+  --bin ffc-prototype
+```
+
+Use [Native release packaging](docs/release-packaging.md), not the raw binary, to
+produce a candidate. `scripts/release.py audit-source` requires an exact clean
+commit; the platform jobs then run `stage`, `verify`, and `archive`. The sealed
+candidate contains a deterministic `release-identity.json`,
+`release-manifest.json`, `SHA256SUMS`, the player binary, tracked runtime assets,
+and the one matching Steam API redistributable. Run
+`python3 scripts/release.py <command> --help` for the portable CLI contract.
+
+The protected manual
+[release-candidate workflow](.github/workflows/release-candidate.yml) builds
+Windows x86-64, Linux x86-64 inside the policy-pinned Steam Linux Runtime 4 SDK,
+and a universal x86-64/arm64 macOS application. It re-extracts and verifies all
+three archives, requires identical release identities, and generates
+preview-only SteamPipe VDF evidence. It does not sign, notarize, upload to Steam,
+or make a branch live. The real App/depot IDs, production signing, Steamworks
+Partner runtime selection, upload, and physical two-account/device checks remain
+separate release gates.
+
+Shipping builds fail at compile time when the release label or App ID is missing
+or invalid, when App ID 480 is selected, or when the exact `shipping` feature
+composition is not used. `ffc-prototype --release-identity` prints the compiled
+product, compatibility, content, protocol, release-label, shipping, and App-ID
+identity without starting Bevy or Steam. A runtime App ID remains available for
+development, but when a binary contains a compiled App ID the two values must
+match. Before Bevy or the Steam client is initialized, a release executable
+performs Steam's relaunch check and exits immediately when Steam accepts the
+relaunch request.
+
+For explicit development against Valve's Spacewar test App ID only:
+
+```bash
+AFC_STEAM_APP_ID=480 AFC_STEAM_DEV_SPACEWAR_480=1 cargo run --features steam-net
+```
+
+App ID 480 fails closed unless that opt-in is present, and the opt-in is rejected
+for every other App ID. The default build does not link Steam and displays an
+unavailable Online route while retaining local/offline play. Ship the complete
+`assets/steam_input/` directory beside the native depot payload. The depot must
+also include the Steamworks SDK redistributable loadable by the executable
+(`steam_api64.dll` on 64-bit Windows, `libsteam_api.so` on Linux, or
+the universal `libsteam_api.dylib` in the macOS application bundle). The release
+tool accepts exactly one matching `steamworks-sys-*/out/` redistributable and
+validates its architecture. Verify a cold launch on every depot OS, and never
+ship a development `steam_appid.txt`; Steam supplies the real App ID at launch.
+
+Release builds cold-boot at the player-facing title; development `cargo run`
+builds retain the dev sandbox, where **Shift+U** opens that title flow. Choose
+**Online**, then create a private or friends-only lobby, configure couch
+seats/loadouts/teams, ready all peers, and let the owner start. Invite launch,
+result confirmation, rematch, return-to-lobby,
+disconnect/reconnect, and clean leave are part of the same guarded lifecycle.
+Keyboard, pointer, Steam Deck, and Steam Input controller actions share this
+flow. Real-account/SDR and physical-controller acceptance must still be recorded
+for each release candidate; see
+[Steam release acceptance](docs/steam-release-acceptance.md).
+
 ## Web build
 
 One-time setup:
@@ -43,6 +130,8 @@ Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
 - [Runtime architecture](docs/architecture.md)
 - [Multiplayer architecture and delivery plan](docs/multiplayer-architecture.md)
 - [Performance budgets and profiling](docs/performance.md)
+- [Native release packaging](docs/release-packaging.md)
+- [Steam release acceptance record](docs/steam-release-acceptance.md)
 
 ## Controls
 

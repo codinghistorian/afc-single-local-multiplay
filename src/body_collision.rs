@@ -14,7 +14,11 @@ pub struct FighterBodyBox {
 }
 
 impl FighterBodyBox {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     pub fn corners(self) -> [Vec3; 8] {
         let right = self.right * self.half_extents.x;
         let up = Vec3::Y * self.half_extents.y;
@@ -44,7 +48,8 @@ pub fn fighter_body_box(
     let local_center = (min + max) * 0.5 * scale;
     let half_extents = (max - min) * 0.5 * scale;
     let forward = normalized_planar_facing(facing);
-    let right = Vec3::new(forward.z, 0.0, -forward.x).normalize_or_zero();
+    let right =
+        crate::canonical_math::vec3_normalize_or_zero(Vec3::new(forward.z, 0.0, -forward.x));
 
     FighterBodyBox {
         center: root_position
@@ -73,10 +78,10 @@ pub fn body_box_separation(a: FighterBodyBox, b: FighterBodyBox) -> Option<Vec2>
     let mut smallest_axis = Vec2::X;
 
     for axis in axes {
-        if axis.length_squared() <= 0.0001 {
+        if crate::canonical_math::vec2_length_squared(axis) <= 0.0001 {
             continue;
         }
-        let axis = axis.normalize();
+        let axis = crate::canonical_math::vec2_normalize_or_zero(axis);
         let distance = center_delta.dot(axis);
         let overlap =
             body_projection_radius(a, axis) + body_projection_radius(b, axis) - distance.abs();
@@ -116,9 +121,9 @@ fn body_boxes_overlap_xz(a: FighterBodyBox, b: FighterBodyBox) -> bool {
     ];
     let center_delta = body_center_xz(a) - body_center_xz(b);
     axes.into_iter()
-        .filter(|axis| axis.length_squared() > 0.0001)
+        .filter(|axis| crate::canonical_math::vec2_length_squared(*axis) > 0.0001)
         .all(|axis| {
-            let axis = axis.normalize();
+            let axis = crate::canonical_math::vec2_normalize_or_zero(axis);
             center_delta.dot(axis).abs()
                 < body_projection_radius(a, axis) + body_projection_radius(b, axis)
         })
@@ -130,7 +135,10 @@ pub fn sphere_body_box_contact(
     body: FighterBodyBox,
 ) -> Option<Vec3> {
     let contact = closest_point_on_body_box(sphere_center, body);
-    (contact.distance_squared(sphere_center) <= sphere_radius * sphere_radius).then_some(contact)
+    debug_assert!(sphere_radius >= 0.0);
+    (crate::canonical_math::vec3_distance_squared(contact, sphere_center)
+        <= sphere_radius * sphere_radius)
+        .then_some(contact)
 }
 
 fn closest_point_on_body_box(point: Vec3, body: FighterBodyBox) -> Vec3 {
@@ -153,7 +161,7 @@ fn body_projection_radius(body: FighterBodyBox, axis: Vec2) -> f32 {
 }
 
 fn body_axis_xz(axis: Vec3) -> Vec2 {
-    Vec2::new(axis.x, axis.z).normalize_or_zero()
+    crate::canonical_math::vec2_normalize_or_zero(Vec2::new(axis.x, axis.z))
 }
 
 fn body_center_xz(body: FighterBodyBox) -> Vec2 {
@@ -162,8 +170,8 @@ fn body_center_xz(body: FighterBodyBox) -> Vec2 {
 
 fn normalized_planar_facing(facing: Vec3) -> Vec3 {
     let planar = Vec3::new(facing.x, 0.0, facing.z);
-    if planar.length_squared() > 0.0001 {
-        planar.normalize()
+    if crate::canonical_math::vec3_length_squared(planar) > 0.0001 {
+        crate::canonical_math::vec3_normalize_or_zero(planar)
     } else {
         Vec3::Z
     }

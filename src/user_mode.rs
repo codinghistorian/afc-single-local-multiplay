@@ -2,11 +2,11 @@ use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::scene::SceneInstanceReady;
-use bevy::time::{Real, Virtual};
+use bevy::time::Real;
 use bevy::ui::UiTargetCamera;
 
 use crate::arena::ARENA_PREVIEW_RENDER_LAYER;
-use crate::arena_defs::{active_arena_index, arena_definitions, set_active_arena_index};
+use crate::arena_defs::{ActiveArena, arena_definitions};
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
 use crate::characters::{
@@ -18,6 +18,18 @@ use crate::components::{BotBrain, ControlAction, Controller, Fighter, PlayerKeyB
 use crate::constants::FIGHTER_COUNT;
 use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
+};
+use crate::match_presentation::{
+    MatchPresentationPolicy, MatchPresentationTransient, PresentationMusicTrack,
+    PresentationResultSfx, PresentedResultSfxHistory,
+};
+use crate::native_online::NativeOnlineRuntime;
+use crate::native_online_app::{NativeOnlineApplication, OverlayUnavailableSurface};
+use crate::online_client::{EmbeddedOnlineClientPhase, EmbeddedOnlineClientStatus};
+use crate::online_failure::{OnlineFailureCode, OnlineRecoveryAction};
+use crate::release_identity::current_release_identity;
+use crate::steam_platform::{
+    MAX_STEAM_INPUT_CONTROLLERS, SteamInputSnapshot, SteamMenuAction, SteamMenuInputMask,
 };
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
@@ -72,11 +84,50 @@ const USER_MODE_KEY_LIST_HEIGHT: f32 = USER_MODE_KEY_ROW_HEIGHT * USER_MODE_KEY_
 #[cfg(target_arch = "wasm32")]
 const WEB_BATTLE_WARMUP_SECS: f32 = 2.0;
 
+/// Client-only visual time scaling.
+///
+/// This intentionally does not modify Bevy's global `Time<Virtual>` resource:
+/// the fixed simulation clock is accumulated from virtual time, so changing it
+/// would slow the authority/network timeline. Presentation systems that need
+/// the result-screen effect opt into this scale explicitly.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct PresentationTimeScale(f32);
+
+impl Default for PresentationTimeScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl PresentationTimeScale {
+    pub fn set(&mut self, scale: f32) {
+        self.0 = if scale.is_finite() && scale >= 0.0 {
+            scale
+        } else {
+            1.0
+        };
+    }
+
+    pub fn reset(&mut self) {
+        self.0 = 1.0;
+    }
+
+    #[cfg(test)]
+    pub const fn value(self) -> f32 {
+        self.0
+    }
+
+    pub fn scale_delta(self, delta_seconds: f32) -> f32 {
+        delta_seconds * self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserModeScreen {
     Dev,
     Start,
     ModeSelect,
+    Online,
     PlayerCountSelect,
     KeySettings,
     CharacterSelect,
@@ -111,7 +162,8 @@ impl UserPlayMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UserModeMainMenuChoice {
     SinglePlayer,
-    Multiplayer,
+    LocalMultiplayer,
+    Online,
     Settings,
 }
 
@@ -119,15 +171,17 @@ impl UserModeMainMenuChoice {
     fn previous(self) -> Self {
         match self {
             Self::SinglePlayer => Self::Settings,
-            Self::Multiplayer => Self::SinglePlayer,
-            Self::Settings => Self::Multiplayer,
+            Self::LocalMultiplayer => Self::SinglePlayer,
+            Self::Online => Self::LocalMultiplayer,
+            Self::Settings => Self::Online,
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::SinglePlayer => Self::Multiplayer,
-            Self::Multiplayer => Self::Settings,
+            Self::SinglePlayer => Self::LocalMultiplayer,
+            Self::LocalMultiplayer => Self::Online,
+            Self::Online => Self::Settings,
             Self::Settings => Self::SinglePlayer,
         }
     }
@@ -209,6 +263,7 @@ pub(crate) enum UserModeUiAction {
     NextColumn,
     Confirm,
     Back,
+    ControllerBack,
     KeyBinding(KeyBindingCapture),
     Result(UserModeResultChoice),
 }
@@ -224,7 +279,16 @@ enum UserModeRoute {
     Replay,
     ChooseCharacter,
     ControlsBack,
+    ReturnToStart,
+    #[cfg(not(target_arch = "wasm32"))]
     ExitToDev,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserModeControllerIntent {
+    None,
+    Dispatch(UserModeUiAction),
+    OpenBindings(usize),
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -246,6 +310,12 @@ pub struct UserModeState {
     result_menu_ready: bool,
     result_choice: UserModeResultChoice,
     result_winner: Option<usize>,
+    controller_menu_held: [SteamMenuInputMask; MAX_STEAM_INPUT_CONTROLLERS],
+    controller_menu_screen: Option<UserModeScreen>,
+    pending_controller_action: Option<UserModeUiAction>,
+    /// Monotonic local request identity. Rendered `MatchState` may still show
+    /// the prior projected result when a rematch is requested.
+    match_request_revision: u64,
 }
 
 #[derive(Resource)]
@@ -300,7 +370,15 @@ pub fn should_spawn_web_gameplay_scene() -> bool {
     false
 }
 
+#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+pub fn should_spawn_web_gameplay_scene() -> bool {
+    false
+}
+
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn mark_web_gameplay_scene_loaded() {}
+
+#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
 pub fn mark_web_gameplay_scene_loaded() {}
 
 #[cfg(target_arch = "wasm32")]
@@ -539,6 +617,10 @@ impl Default for UserModeState {
             result_menu_ready: false,
             result_choice: UserModeResultChoice::PlayAgain,
             result_winner: None,
+            controller_menu_held: [SteamMenuInputMask::NONE; MAX_STEAM_INPUT_CONTROLLERS],
+            controller_menu_screen: None,
+            pending_controller_action: None,
+            match_request_revision: 0,
         }
     }
 }
@@ -549,9 +631,18 @@ fn default_user_mode_screen() -> UserModeScreen {
         UserModeScreen::ModeSelect
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     {
+        native_user_mode_initial_screen(cfg!(debug_assertions))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const fn native_user_mode_initial_screen(debug_build: bool) -> UserModeScreen {
+    if debug_build {
         UserModeScreen::Dev
+    } else {
+        UserModeScreen::Start
     }
 }
 
@@ -562,6 +653,45 @@ impl UserModeState {
 
     pub fn screen(&self) -> UserModeScreen {
         self.screen
+    }
+
+    /// Places an automated graphical performance fixture in the same direct
+    /// dev sandbox used by local gameplay, without disabling gameplay HUD,
+    /// camera, arena audio, VFX, or simulation. This only removes menu-flow
+    /// churn; the performance plugin calls it solely when a scenario is named.
+    pub(crate) fn force_performance_dev_mode(&mut self) {
+        self.screen = UserModeScreen::Dev;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    pub fn online_active(&self) -> bool {
+        self.screen == UserModeScreen::Online
+    }
+
+    pub(crate) fn enter_online(&mut self) {
+        self.screen = UserModeScreen::Online;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    pub(crate) fn leave_online(&mut self) {
+        if self.screen == UserModeScreen::Online {
+            self.enter_mode_select();
+        }
+    }
+
+    /// True while the player-facing match flow needs a canonical online/local
+    /// authority session. Dev sandbox play deliberately remains on the direct
+    /// local schedule.
+    pub fn network_match_requested(&self) -> bool {
+        self.battle_music_pending
+            || self.battle_active
+            || self.screen == UserModeScreen::BattleResult
+    }
+
+    pub const fn match_request_revision(&self) -> u64 {
+        self.match_request_revision
     }
 
     pub fn selected_character(&self) -> CharacterKind {
@@ -591,7 +721,7 @@ impl UserModeState {
             .then_some(USER_MODE_PLAYER_FIGHTER_ID)
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
     pub fn blocks_practice_health_refill(&self) -> bool {
         self.battle_active || self.screen == UserModeScreen::BattleResult
     }
@@ -608,6 +738,56 @@ impl UserModeState {
         self.key_capture = None;
         self.controls_briefing_seen = false;
         self.clear_battle_state();
+    }
+
+    fn return_to_start(&mut self) {
+        self.screen = UserModeScreen::Start;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    fn take_pending_controller_action(&mut self) -> Option<UserModeUiAction> {
+        self.pending_controller_action.take()
+    }
+
+    fn controller_menu_intent(
+        &mut self,
+        steam_input: SteamInputSnapshot,
+    ) -> UserModeControllerIntent {
+        let screen_changed = self.controller_menu_screen != Some(self.screen);
+        if screen_changed {
+            self.controller_menu_screen = Some(self.screen);
+        }
+
+        let mut pressed = SteamMenuInputMask::NONE;
+        let mut binding_ordinal = None;
+        for local_ordinal in 0..MAX_STEAM_INPUT_CONTROLLERS {
+            let controller = steam_input.controllers[local_ordinal];
+            let held = controller.menu_held;
+            if screen_changed {
+                self.controller_menu_held[local_ordinal] = held;
+                continue;
+            }
+            let just_pressed = held.without(self.controller_menu_held[local_ordinal]);
+            self.controller_menu_held[local_ordinal] = held;
+            pressed = pressed.union(just_pressed);
+            if binding_ordinal.is_none()
+                && controller.connected()
+                && just_pressed.contains(SteamMenuAction::OpenBindings)
+            {
+                binding_ordinal = Some(local_ordinal);
+            }
+        }
+
+        if screen_changed {
+            return UserModeControllerIntent::None;
+        }
+        if let Some(local_ordinal) = binding_ordinal {
+            return UserModeControllerIntent::OpenBindings(local_ordinal);
+        }
+        controller_user_mode_action(self, pressed)
+            .map(UserModeControllerIntent::Dispatch)
+            .unwrap_or(UserModeControllerIntent::None)
     }
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -676,6 +856,29 @@ impl UserModeState {
         self.result_menu_ready = false;
         self.result_choice = UserModeResultChoice::PlayAgain;
         self.result_winner = winner;
+    }
+
+    /// Presents a failed embedded authority as a terminal match outcome while
+    /// retaining the current request revision. Existing result actions remain
+    /// the only recovery path: Play Again creates a fresh revision and Choose
+    /// Character explicitly cancels this request before a later new match.
+    pub(crate) fn present_embedded_authority_failure(&mut self) {
+        self.enter_battle_result(None);
+        self.battle_music_pending = false;
+        self.battle_bot_ai_pending = false;
+        self.battle_active = false;
+        self.result_elapsed = USER_MODE_RESULT_MENU_DELAY_SECS;
+        self.result_menu_ready = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_embedded_match_for_test(&mut self) {
+        self.match_request_revision = self
+            .match_request_revision
+            .checked_add(1)
+            .expect("test match request revision exhausted");
+        self.controls_briefing_seen = true;
+        self.exit_to_battle();
     }
 
     fn tick_battle_result(&mut self, dt: f32) -> bool {
@@ -793,7 +996,8 @@ fn activate_main_menu_choice(user_mode: &mut UserModeState, choice: UserModeMain
             user_mode.play_mode = UserPlayMode::SinglePlayer;
             user_mode.enter_character_select();
         }
-        UserModeMainMenuChoice::Multiplayer => user_mode.enter_player_count_select(),
+        UserModeMainMenuChoice::LocalMultiplayer => user_mode.enter_player_count_select(),
+        UserModeMainMenuChoice::Online => user_mode.enter_online(),
         UserModeMainMenuChoice::Settings => user_mode.enter_key_settings(),
     }
 }
@@ -804,10 +1008,97 @@ fn activate_player_count_choice(user_mode: &mut UserModeState, choice: UserModeP
     user_mode.enter_character_select();
 }
 
+fn controller_user_mode_action(
+    user_mode: &UserModeState,
+    pressed: SteamMenuInputMask,
+) -> Option<UserModeUiAction> {
+    if pressed.contains(SteamMenuAction::Back) {
+        return match user_mode.screen {
+            UserModeScreen::ModeSelect => Some(UserModeUiAction::ControllerBack),
+            UserModeScreen::Dev | UserModeScreen::Start | UserModeScreen::Online => None,
+            _ => Some(UserModeUiAction::Back),
+        };
+    }
+    if user_mode.key_capture.is_some() {
+        return None;
+    }
+
+    let up = pressed.contains(SteamMenuAction::Up);
+    let down = pressed.contains(SteamMenuAction::Down);
+    let left = pressed.contains(SteamMenuAction::Left);
+    let right = pressed.contains(SteamMenuAction::Right);
+    let accept = pressed.contains(SteamMenuAction::Accept);
+
+    match user_mode.screen {
+        UserModeScreen::Start => accept.then_some(UserModeUiAction::Confirm),
+        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect => {
+            let previous = up || left;
+            let next = down || right;
+            if previous ^ next {
+                Some(if previous {
+                    UserModeUiAction::Previous
+                } else {
+                    UserModeUiAction::Next
+                })
+            } else {
+                accept.then_some(UserModeUiAction::Confirm)
+            }
+        }
+        UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect => {
+            let previous = left || up;
+            let next = right || down;
+            if previous ^ next {
+                Some(if previous {
+                    UserModeUiAction::Previous
+                } else {
+                    UserModeUiAction::Next
+                })
+            } else {
+                accept.then_some(UserModeUiAction::Confirm)
+            }
+        }
+        UserModeScreen::KeySettings => {
+            if up ^ down {
+                Some(if up {
+                    UserModeUiAction::Previous
+                } else {
+                    UserModeUiAction::Next
+                })
+            } else if left ^ right {
+                Some(if left {
+                    UserModeUiAction::PreviousColumn
+                } else {
+                    UserModeUiAction::NextColumn
+                })
+            } else {
+                // Steam controller remapping is owned by the Steam binding
+                // panel; accepting here would start a keyboard-only capture.
+                None
+            }
+        }
+        UserModeScreen::ControlsBriefing => accept.then_some(UserModeUiAction::Confirm),
+        UserModeScreen::BattleResult if user_mode.result_menu_ready => {
+            if left ^ right || up ^ down {
+                Some(UserModeUiAction::Next)
+            } else {
+                accept.then_some(UserModeUiAction::Confirm)
+            }
+        }
+        UserModeScreen::Dev | UserModeScreen::Online | UserModeScreen::BattleResult => None,
+    }
+}
+
 fn route_user_mode_action(
     user_mode: &mut UserModeState,
-    action: UserModeUiAction,
+    mut action: UserModeUiAction,
 ) -> UserModeRoute {
+    if action == UserModeUiAction::ControllerBack {
+        if user_mode.screen == UserModeScreen::ModeSelect {
+            user_mode.return_to_start();
+            return UserModeRoute::ReturnToStart;
+        }
+        action = UserModeUiAction::Back;
+    }
     if let UserModeUiAction::Back = action {
         if user_mode.key_capture.is_some() {
             user_mode.cancel_key_capture();
@@ -822,6 +1113,10 @@ fn route_user_mode_action(
                 #[cfg(target_arch = "wasm32")]
                 {
                     UserModeRoute::None
+                }
+                #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+                {
+                    UserModeRoute::ExitToDev
                 }
             }
             UserModeScreen::PlayerCountSelect | UserModeScreen::KeySettings => {
@@ -974,6 +1269,9 @@ pub(crate) struct UserModeRoot;
 
 #[derive(Component)]
 pub(crate) struct UserModeStartPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeReleaseIdentityText;
 
 #[derive(Component)]
 pub(crate) struct UserModeMainMenuPanel;
@@ -1210,6 +1508,10 @@ fn key_settings_row(player: usize, action: ControlAction) -> impl Bundle {
     )
 }
 
+fn user_mode_release_identity_text() -> String {
+    current_release_identity().short_ui_label()
+}
+
 pub fn setup_user_mode_ui(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -1222,6 +1524,8 @@ pub fn setup_user_mode_ui(
     #[cfg(target_arch = "wasm32")]
     let preview_view_format = None;
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    let preview_view_format = Some(TextureFormat::Rgba8UnormSrgb);
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     let preview_view_format = Some(TextureFormat::Rgba8UnormSrgb);
 
     let preview_image = Image::new_target_texture(
@@ -1361,12 +1665,21 @@ pub fn setup_user_mode_ui(
                         TextShadow::default(),
                     ),
                     (
-                        Text::new("Click or press Enter to start"),
+                        Text::new("Press A / Enter or click to start"),
                         TextFont {
                             font_size: 28.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.82, 0.78, 0.68)),
+                    ),
+                    (
+                        UserModeReleaseIdentityText,
+                        Text::new(user_mode_release_identity_text()),
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.5, 0.49, 0.46)),
                     ),
                 ],
             ),
@@ -1401,8 +1714,15 @@ pub fn setup_user_mode_ui(
                         24.0,
                     ),
                     user_mode_action_button(
-                        "MULTIPLAYER",
-                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+                        "LOCAL MULTIPLAYER",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::LocalMultiplayer),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "ONLINE",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Online),
                         Val::Px(340.0),
                         58.0,
                         24.0,
@@ -1415,7 +1735,7 @@ pub fn setup_user_mode_ui(
                         24.0,
                     ),
                     (
-                        Text::new("Up/Down or W/S choose  |  Enter confirm"),
+                        Text::new("D-pad or W/S choose  |  A / Enter confirm  |  B back"),
                         TextFont {
                             font_size: 18.0,
                             ..default()
@@ -1831,6 +2151,36 @@ pub fn setup_user_mode_ui(
     }
 }
 
+/// Samples Steam's current menu-action values into an edge-latched user-mode
+/// action. The online menu maintains an independent latch because its focus
+/// model and screen transitions are separate from the local shell.
+pub fn sample_user_mode_steam_input(
+    time: Res<Time<Real>>,
+    mut runtime: NonSendMut<NativeOnlineRuntime>,
+    mut online_application: NonSendMut<NativeOnlineApplication>,
+    mut user_mode: ResMut<UserModeState>,
+) {
+    user_mode.pending_controller_action = None;
+    match user_mode.controller_menu_intent(runtime.steam_input_snapshot()) {
+        UserModeControllerIntent::Dispatch(action) => {
+            user_mode.pending_controller_action = Some(action);
+        }
+        UserModeControllerIntent::OpenBindings(local_ordinal) if !user_mode.online_active() => {
+            if let Ok(status) = runtime.show_steam_input_binding_panel(local_ordinal) {
+                let now_ms = time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                online_application.observe_overlay_request(
+                    OverlayUnavailableSurface::ControllerBindings,
+                    status,
+                    now_ms,
+                );
+            }
+        }
+        // The online application owns this call while its panel is visible;
+        // both latches still observe every frame to prevent transition bleed.
+        UserModeControllerIntent::OpenBindings(_) | UserModeControllerIntent::None => {}
+    }
+}
+
 pub fn handle_user_mode_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -1840,18 +2190,21 @@ pub fn handle_user_mode_input(
     mut key_bindings: ResMut<PlayerKeyBindings>,
     mut setup: ResMut<LocalSetup>,
     mut state: ResMut<MatchState>,
+    mut active_arena: ResMut<ActiveArena>,
     gameplay_scene: Res<UserModeGameplayScene>,
     mut announcements: ResMut<MatchAnnouncements>,
     music: Query<Entity, With<UserModeMusic>>,
-    mut virtual_time: ResMut<Time<Virtual>>,
+    mut presentation_time_scale: ResMut<PresentationTimeScale>,
     mut screen_look: ResMut<ScreenLook>,
     mut screen_transition: ResMut<ScreenLookTransition>,
     mut commands: Commands,
 ) {
+    let controller_action = user_mode.take_pending_controller_action();
     if user_mode.screen == UserModeScreen::Start {
         if keys.just_pressed(KeyCode::Enter)
             || keys.just_pressed(KeyCode::Space)
             || buttons.just_pressed(MouseButton::Left)
+            || controller_action == Some(UserModeUiAction::Confirm)
         {
             user_mode.enter_fresh_mode_select();
             start_user_mode_menu_music(&mut commands, &asset_server);
@@ -1864,7 +2217,7 @@ pub fn handle_user_mode_input(
         if !user_mode.blocks_dev_input() && user_mode_pressed(&keys) {
             stop_user_mode_music(&mut commands, &music);
             reset_user_mode_presentation(
-                &mut virtual_time,
+                &mut presentation_time_scale,
                 &mut screen_look,
                 &mut screen_transition,
             );
@@ -1899,6 +2252,7 @@ pub fn handle_user_mode_input(
             }
             stop_user_mode_music(&mut commands, &music);
             let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            active_arena.select(state.arena_index);
             announce_user_mode_match_flow(flow, &setup, &mut announcements);
             return;
         }
@@ -1909,7 +2263,10 @@ pub fn handle_user_mode_input(
     });
 
     if user_mode.key_capture.is_some() {
-        if pointer_action == Some(UserModeUiAction::Back) || keys.just_pressed(KeyCode::Escape) {
+        if pointer_action == Some(UserModeUiAction::Back)
+            || keys.just_pressed(KeyCode::Escape)
+            || controller_action == Some(UserModeUiAction::Back)
+        {
             route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
             return;
         }
@@ -1955,6 +2312,7 @@ pub fn handle_user_mode_input(
 
     let action = pointer_action
         .or_else(|| keyboard_user_mode_action(&user_mode, &keys))
+        .or(controller_action)
         .or_else(|| web_start_requested.then_some(UserModeUiAction::Confirm));
     let Some(action) = action else {
         return;
@@ -1971,13 +2329,14 @@ pub fn handle_user_mode_input(
             0.9,
         ),
         UserModeRoute::ArenaEntered => {
-            set_active_arena_index(user_mode.arena_index);
+            active_arena.select(user_mode.arena_index);
             announcements.show("Choose arena", 0.9);
         }
-        UserModeRoute::ArenaChanged => set_active_arena_index(user_mode.arena_index),
+        UserModeRoute::ArenaChanged => active_arena.select(user_mode.arena_index),
         UserModeRoute::PrepareMatch => {
             stop_user_mode_music(&mut commands, &music);
             let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            active_arena.select(state.arena_index);
             announce_user_mode_match_flow(flow, &setup, &mut announcements);
         }
         UserModeRoute::ConfirmBattle => {
@@ -2000,16 +2359,17 @@ pub fn handle_user_mode_input(
         }
         UserModeRoute::Replay => {
             reset_user_mode_presentation(
-                &mut virtual_time,
+                &mut presentation_time_scale,
                 &mut screen_look,
                 &mut screen_transition,
             );
             let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            active_arena.select(state.arena_index);
             announce_user_mode_match_flow(flow, &setup, &mut announcements);
         }
         UserModeRoute::ChooseCharacter => {
             reset_user_mode_presentation(
-                &mut virtual_time,
+                &mut presentation_time_scale,
                 &mut screen_look,
                 &mut screen_transition,
             );
@@ -2024,12 +2384,22 @@ pub fn handle_user_mode_input(
             start_user_mode_menu_music(&mut commands, &asset_server);
             announcements.show("Choose arena", 0.8);
         }
+        UserModeRoute::ReturnToStart => {
+            stop_user_mode_music(&mut commands, &music);
+            reset_user_mode_presentation(
+                &mut presentation_time_scale,
+                &mut screen_look,
+                &mut screen_transition,
+            );
+            announcements.show("", 0.0);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         UserModeRoute::ExitToDev => {
             #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
             {
                 stop_user_mode_music(&mut commands, &music);
                 reset_user_mode_presentation(
-                    &mut virtual_time,
+                    &mut presentation_time_scale,
                     &mut screen_look,
                     &mut screen_transition,
                 );
@@ -2078,21 +2448,28 @@ pub fn sync_web_battle_status(
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub fn sync_web_battle_status() {}
 
+#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+pub fn sync_web_battle_status() {}
+
 pub fn sync_user_mode_battle_result(
     time: Res<Time<Real>>,
-    mut virtual_time: ResMut<Time<Virtual>>,
+    mut presentation_time_scale: ResMut<PresentationTimeScale>,
     mut user_mode: ResMut<UserModeState>,
     mut feedback: ResMut<HitEffects>,
     state: Res<MatchState>,
     mut screen_look: ResMut<ScreenLook>,
     mut screen_transition: ResMut<ScreenLookTransition>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     if user_mode.battle_active
         && state.phase == MatchPhase::Results
         && user_mode.screen != UserModeScreen::BattleResult
     {
         user_mode.enter_battle_result(user_mode_result_winner(&state));
-        virtual_time.set_relative_speed(USER_MODE_DEATH_SLOW_MOTION_SCALE);
+        presentation_time_scale.set(USER_MODE_DEATH_SLOW_MOTION_SCALE);
         begin_screen_look_transition(
             &mut screen_look,
             &mut screen_transition,
@@ -2102,7 +2479,7 @@ pub fn sync_user_mode_battle_result(
     }
 
     if user_mode.tick_battle_result(time.delta_secs()) {
-        virtual_time.set_relative_speed(1.0);
+        presentation_time_scale.reset();
         if let Some(kind) = result_sfx_kind(&user_mode) {
             feedback.push_combat_sfx(CombatSfxCue::new(
                 kind,
@@ -2119,7 +2496,11 @@ pub fn sync_user_mode_battle_music(
     state: Res<MatchState>,
     arena_music: Query<(Entity, &ArenaMusic)>,
     mut commands: Commands,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     if user_mode.battle_music_pending && state.phase == MatchPhase::Fighting {
         reconcile_arena_music(
             &mut commands,
@@ -2142,9 +2523,14 @@ pub fn sync_user_mode_battle_music(
 pub fn sync_dev_mode_music(
     asset_server: Res<AssetServer>,
     user_mode: Res<UserModeState>,
+    active_arena: Res<ActiveArena>,
     arena_music: Query<(Entity, &ArenaMusic)>,
     mut commands: Commands,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     if !dev_mode_music_enabled(&user_mode) {
         return;
     }
@@ -2153,7 +2539,7 @@ pub fn sync_dev_mode_music(
         &mut commands,
         &asset_server,
         &arena_music,
-        active_arena_index(),
+        active_arena.index(),
     );
 }
 
@@ -2162,7 +2548,11 @@ pub fn sync_user_mode_battle_bot(
     state: Res<MatchState>,
     scene: Res<UserModeGameplayScene>,
     mut bots: Query<(&Fighter, &mut BotBrain)>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     if !user_mode.battle_bot_ai_pending
         || user_mode.play_mode != UserPlayMode::SinglePlayer
         || state.phase != MatchPhase::Fighting
@@ -2185,7 +2575,11 @@ pub fn sync_user_mode_controllers(
     user_mode: Res<UserModeState>,
     setup: Res<LocalSetup>,
     mut fighters: Query<(Entity, &Fighter, &mut Controller, Has<BotBrain>)>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     if !user_mode.battle_active && !user_mode.battle_music_pending {
         return;
     }
@@ -2328,6 +2722,7 @@ pub fn sync_user_mode_ui_camera(
 
 pub fn update_user_mode_ui(
     user_mode: Res<UserModeState>,
+    embedded_online: Res<EmbeddedOnlineClientStatus>,
     bindings: Res<PlayerKeyBindings>,
     mut roots: Query<(&mut Node, &mut BackgroundColor), With<UserModeRoot>>,
     mut back_buttons: Query<&mut Node, (With<UserModeBackButton>, Without<UserModeRoot>)>,
@@ -2442,7 +2837,8 @@ pub fn update_user_mode_ui(
                 *color = key_settings_row_color(selected);
             }
         } else if result.is_some() {
-            **text = result_title_message(&user_mode);
+            **text = embedded_authority_failure_title(&embedded_online)
+                .unwrap_or_else(|| result_title_message(&user_mode));
         }
     }
     for (scroll, mut scroll_position) in &mut key_settings_scrolls {
@@ -2458,6 +2854,36 @@ pub fn update_user_mode_ui(
             scroll_position.0 = Vec2::ZERO;
         }
     }
+}
+
+fn embedded_authority_failure_title(status: &EmbeddedOnlineClientStatus) -> Option<String> {
+    if status.phase != EmbeddedOnlineClientPhase::Failed {
+        return None;
+    }
+    let failure = status.failure?;
+    debug_assert_eq!(
+        failure.recovery,
+        OnlineRecoveryAction::Retry,
+        "embedded authority failure UI currently exposes Play Again"
+    );
+    let (title, reason) = match failure.code {
+        OnlineFailureCode::InternalFailure => (
+            "MATCH COULD NOT START",
+            "The local match authority could not start safely.",
+        ),
+        OnlineFailureCode::AuthorityLost => (
+            "MATCH ENDED",
+            "The local match authority stopped; gameplay did not continue locally.",
+        ),
+        OnlineFailureCode::SynchronizationFailed => {
+            ("MATCH ENDED", "The match could not synchronize safely.")
+        }
+        _ => (
+            "MATCH ENDED",
+            "The match authority ended the session safely.",
+        ),
+    };
+    Some(format!("{title}\n{reason}\nPLAY AGAIN or choose character"))
 }
 
 fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction) -> bool {
@@ -2542,11 +2968,11 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::ControlsBriefing => 1.0,
         UserModeScreen::BattleResult if user_mode.result_menu_ready => 0.58,
         UserModeScreen::BattleResult => 0.0,
-        UserModeScreen::Dev => 0.0,
+        UserModeScreen::Dev | UserModeScreen::Online => 0.0,
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
 fn user_mode_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyU)
         && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight))
@@ -2766,7 +3192,7 @@ fn controls_briefing_message(
 
 fn controls_player_message(player: usize, bindings: &PlayerKeyBindings) -> String {
     format!(
-        "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
+        "P{}\nMove: {}/{}/{}/{}\nHold Aim / Tap Grab: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -2781,7 +3207,7 @@ fn controls_player_message(player: usize, bindings: &PlayerKeyBindings) -> Strin
 
 fn controls_player_compact_message(player: usize, bindings: &PlayerKeyBindings) -> String {
     format!(
-        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}",
+        "P{}  Move {}/{}/{}/{}  |  Hold Aim / Tap Grab {}  |  Heavy {}  |  Light {}  |  Jump {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -2867,9 +3293,68 @@ fn start_arena_music(commands: &mut Commands, asset_server: &AssetServer, arena_
     commands.spawn((
         UserModeMusic,
         ArenaMusic { arena_index },
+        MatchPresentationTransient,
         AudioPlayer::new(asset_server.load(user_mode_battle_music_path(arena_index))),
         PlaybackSettings::LOOP,
     ));
+}
+
+pub fn sync_online_match_presentation_audio(
+    policy: Res<MatchPresentationPolicy>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
+    asset_server: Res<AssetServer>,
+    menu_music: Query<Entity, (With<UserModeMusic>, Without<ArenaMusic>)>,
+    arena_music: Query<(Entity, &ArenaMusic)>,
+    mut feedback: ResMut<HitEffects>,
+    mut result_history: ResMut<PresentedResultSfxHistory>,
+    mut commands: Commands,
+) {
+    if *simulation_drive != crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
+
+    match policy.music {
+        PresentationMusicTrack::None => {
+            for entity in &menu_music {
+                commands.entity(entity).despawn();
+            }
+            stop_arena_music(&mut commands, &arena_music);
+        }
+        PresentationMusicTrack::Menu => {
+            stop_arena_music(&mut commands, &arena_music);
+            let mut kept = false;
+            for entity in &menu_music {
+                if kept {
+                    commands.entity(entity).despawn();
+                } else {
+                    kept = true;
+                }
+            }
+            if !kept {
+                start_user_mode_menu_music(&mut commands, &asset_server);
+            }
+        }
+        PresentationMusicTrack::Arena(arena_index) => {
+            for entity in &menu_music {
+                commands.entity(entity).despawn();
+            }
+            reconcile_arena_music(&mut commands, &asset_server, &arena_music, arena_index);
+        }
+    }
+
+    if let Some((key, result)) = policy.result_sfx
+        && result_history.mark_if_new(key)
+    {
+        let kind = match result {
+            PresentationResultSfx::Victory => CombatSfxKind::ResultWin,
+            PresentationResultSfx::Defeat => CombatSfxKind::ResultLose,
+        };
+        feedback.push_combat_sfx(CombatSfxCue::new(
+            kind,
+            Vec3::ZERO,
+            USER_MODE_RESULT_SFX_PRIORITY,
+        ));
+    }
 }
 
 fn dev_mode_music_enabled(user_mode: &UserModeState) -> bool {
@@ -2966,7 +3451,6 @@ fn prepare_user_mode_match(
     state.apply_local_setup(setup);
     state.replay_seed = setup.replay_seed;
     state.reset_requested = false;
-    set_active_arena_index(state.arena_index);
     if user_mode.controls_briefing_seen {
         confirm_user_mode_match_start(user_mode, state);
         UserModeMatchStartFlow::BattleStarted
@@ -2977,16 +3461,20 @@ fn prepare_user_mode_match(
 }
 
 fn confirm_user_mode_match_start(user_mode: &mut UserModeState, state: &mut MatchState) {
+    user_mode.match_request_revision = user_mode
+        .match_request_revision
+        .checked_add(1)
+        .expect("local match request revision exhausted");
     state.request_rematch();
     user_mode.exit_to_battle();
 }
 
 fn reset_user_mode_presentation(
-    virtual_time: &mut Time<Virtual>,
+    presentation_time_scale: &mut PresentationTimeScale,
     screen_look: &mut ScreenLook,
     screen_transition: &mut ScreenLookTransition,
 ) {
-    virtual_time.set_relative_speed(1.0);
+    presentation_time_scale.reset();
     begin_screen_look_transition(
         screen_look,
         screen_transition,
@@ -3031,6 +3519,51 @@ fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
 mod tests {
     use super::*;
     use crate::components::{LocalInputAssignment, ParticipantKind};
+    use crate::steam_platform::{SteamInputControllerId, SteamInputControllerSnapshot};
+
+    fn steam_menu_snapshot(
+        local_ordinal: usize,
+        actions: &[SteamMenuAction],
+    ) -> SteamInputSnapshot {
+        let mut menu_held = SteamMenuInputMask::NONE;
+        for action in actions {
+            menu_held.insert(*action);
+        }
+        let mut snapshot = SteamInputSnapshot::default();
+        snapshot.controllers[local_ordinal] = SteamInputControllerSnapshot {
+            controller_id: SteamInputControllerId::new(local_ordinal as u64 + 1),
+            menu_held,
+            ..default()
+        };
+        snapshot
+    }
+
+    #[test]
+    fn presentation_scale_is_local_clamped_and_resettable() {
+        let mut scale = PresentationTimeScale::default();
+        assert_eq!(scale.scale_delta(0.5), 0.5);
+
+        scale.set(0.22);
+        assert!((scale.scale_delta(0.5) - 0.11).abs() < f32::EPSILON);
+        scale.set(f32::NAN);
+        assert_eq!(scale.value(), 1.0);
+        scale.set(-1.0);
+        assert_eq!(scale.value(), 1.0);
+
+        scale.set(0.0);
+        assert_eq!(scale.scale_delta(1.0), 0.0);
+        scale.reset();
+        assert_eq!(scale.value(), 1.0);
+    }
+
+    #[test]
+    fn title_release_identity_is_constructed_from_the_compiled_identity() {
+        let identity = current_release_identity();
+        let label = user_mode_release_identity_text();
+        assert_eq!(label, identity.short_ui_label());
+        assert!(label.starts_with(&format!("v{} • ", identity.product_version)));
+        assert!(label.ends_with(&identity.compatibility_build_id[..12]));
+    }
 
     #[test]
     fn shift_u_enters_user_mode() {
@@ -3057,11 +3590,170 @@ mod tests {
         assert!(!user_mode.controls_briefing_seen);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn main_menu_cycles_and_wraps_three_vertical_choices() {
+    fn native_release_cold_boot_uses_player_facing_start_screen() {
+        assert_eq!(
+            native_user_mode_initial_screen(false),
+            UserModeScreen::Start
+        );
+        assert_eq!(native_user_mode_initial_screen(true), UserModeScreen::Dev);
+    }
+
+    #[test]
+    fn performance_mode_hides_menu_flow_without_disabling_dev_gameplay() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        user_mode.battle_active = true;
+        user_mode.force_performance_dev_mode();
+        assert_eq!(user_mode.screen(), UserModeScreen::Dev);
+        assert!(!user_mode.active());
+        assert!(!user_mode.battle_active);
+        assert!(!user_mode.battle_music_pending);
+    }
+
+    #[test]
+    fn embedded_authority_failure_replay_is_an_explicit_new_match_revision() {
+        let mut user_mode = UserModeState::default();
+        let mut setup = LocalSetup::default();
+        let mut state = MatchState::default();
+        user_mode.controls_briefing_seen = true;
+        confirm_user_mode_match_start(&mut user_mode, &mut state);
+        assert_eq!(user_mode.match_request_revision(), 1);
+
+        user_mode.present_embedded_authority_failure();
+        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
+        assert!(user_mode.result_menu_ready);
+        assert!(user_mode.network_match_requested());
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::Replay
+        );
+        assert_eq!(
+            user_mode.match_request_revision(),
+            1,
+            "selecting replay alone cannot mutate the failed request"
+        );
+
+        assert_eq!(
+            prepare_user_mode_match(&mut user_mode, &mut setup, &mut state),
+            UserModeMatchStartFlow::BattleStarted
+        );
+        assert_eq!(user_mode.match_request_revision(), 2);
+        assert!(user_mode.network_match_requested());
+    }
+
+    #[test]
+    fn steam_controller_cold_boot_reaches_online_with_edge_latched_focus() {
+        let mut user_mode = UserModeState::default();
+        user_mode.screen = UserModeScreen::Start;
+
+        assert_eq!(
+            user_mode.controller_menu_intent(SteamInputSnapshot::default()),
+            UserModeControllerIntent::None
+        );
+        let accept = steam_menu_snapshot(0, &[SteamMenuAction::Accept]);
+        assert_eq!(
+            user_mode.controller_menu_intent(accept),
+            UserModeControllerIntent::Dispatch(UserModeUiAction::Confirm)
+        );
+        assert_eq!(
+            user_mode.controller_menu_intent(accept),
+            UserModeControllerIntent::None,
+            "a held face button must not repeat"
+        );
+
+        user_mode.enter_fresh_mode_select();
+        assert_eq!(
+            user_mode.controller_menu_intent(accept),
+            UserModeControllerIntent::None,
+            "the Start accept must be primed across the screen transition"
+        );
+        assert_eq!(
+            user_mode.controller_menu_intent(SteamInputSnapshot::default()),
+            UserModeControllerIntent::None
+        );
+
+        let down = steam_menu_snapshot(0, &[SteamMenuAction::Down]);
+        assert_eq!(
+            user_mode.controller_menu_intent(down),
+            UserModeControllerIntent::Dispatch(UserModeUiAction::Next)
+        );
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(
+            user_mode.main_menu_choice,
+            UserModeMainMenuChoice::LocalMultiplayer
+        );
+        assert_eq!(
+            user_mode.controller_menu_intent(down),
+            UserModeControllerIntent::None
+        );
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+        assert_eq!(
+            user_mode.controller_menu_intent(down),
+            UserModeControllerIntent::Dispatch(UserModeUiAction::Next)
+        );
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.main_menu_choice, UserModeMainMenuChoice::Online);
+
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+        assert_eq!(
+            user_mode.controller_menu_intent(accept),
+            UserModeControllerIntent::Dispatch(UserModeUiAction::Confirm)
+        );
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::Online);
+    }
+
+    #[test]
+    fn steam_controller_back_returns_to_start_without_transition_cascade() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_online();
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+
+        let back = steam_menu_snapshot(0, &[SteamMenuAction::Back]);
+        user_mode.leave_online();
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+        assert_eq!(
+            user_mode.controller_menu_intent(back),
+            UserModeControllerIntent::None,
+            "the Back that left Online must not also leave Mode Select"
+        );
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+        assert_eq!(
+            user_mode.controller_menu_intent(back),
+            UserModeControllerIntent::Dispatch(UserModeUiAction::ControllerBack)
+        );
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::ControllerBack),
+            UserModeRoute::ReturnToStart
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::Start);
+    }
+
+    #[test]
+    fn steam_controller_binding_intent_preserves_requesting_ordinal() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_mode_select();
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+
+        let bindings = steam_menu_snapshot(3, &[SteamMenuAction::OpenBindings]);
+        assert_eq!(
+            user_mode.controller_menu_intent(bindings),
+            UserModeControllerIntent::OpenBindings(3)
+        );
+        assert_eq!(
+            user_mode.controller_menu_intent(bindings),
+            UserModeControllerIntent::None
+        );
+    }
+
+    #[test]
+    fn main_menu_cycles_and_wraps_four_vertical_choices() {
         let choices = [
             UserModeMainMenuChoice::SinglePlayer,
-            UserModeMainMenuChoice::Multiplayer,
+            UserModeMainMenuChoice::LocalMultiplayer,
+            UserModeMainMenuChoice::Online,
             UserModeMainMenuChoice::Settings,
         ];
         let mut choice = UserModeMainMenuChoice::SinglePlayer;
@@ -3109,13 +3801,21 @@ mod tests {
         multiplayer.enter_mode_select();
         route_user_mode_action(
             &mut multiplayer,
-            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::LocalMultiplayer),
         );
         assert_eq!(multiplayer.screen(), UserModeScreen::PlayerCountSelect);
         assert_eq!(
             multiplayer.player_count_choice,
             UserModePlayerCountChoice::TwoPlayers
         );
+
+        let mut online = UserModeState::default();
+        online.enter_mode_select();
+        route_user_mode_action(
+            &mut online,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Online),
+        );
+        assert_eq!(online.screen(), UserModeScreen::Online);
 
         for (choice, play_mode) in [
             (
@@ -3598,7 +4298,7 @@ mod tests {
         assert!(message.contains("Defeat the bot"));
         assert!(message.contains("Arena: Crown Ring"));
         assert!(message.contains("Move: Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
-        assert!(message.contains("Aim: Z"));
+        assert!(message.contains("Hold Aim / Tap Grab: Z"));
         assert!(message.contains("Heavy / Throw: X"));
         assert!(message.contains("Light / Pickup / Item: C"));
         assert!(message.contains("Jump: V"));
@@ -3671,7 +4371,7 @@ mod tests {
 
         route_user_mode_action(
             &mut user_mode,
-            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::LocalMultiplayer),
         );
         assert_eq!(user_mode.screen(), UserModeScreen::PlayerCountSelect);
         route_user_mode_action(

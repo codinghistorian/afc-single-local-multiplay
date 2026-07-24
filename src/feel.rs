@@ -1,10 +1,23 @@
-use std::{
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::path::Path;
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use std::fs;
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
+use std::{path::PathBuf, time::SystemTime};
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -20,7 +33,8 @@ use crate::{
     },
 };
 
-const COMBAT_FEEL_PATH: &str = "assets/feel/combat_overrides.ron";
+pub(crate) const COMBAT_FEEL_PATH: &str = "assets/feel/combat_overrides.ron";
+const EMBEDDED_COMBAT_FEEL: &str = include_str!("../assets/feel/combat_overrides.ron");
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
@@ -221,20 +235,94 @@ impl Default for ActionPoseOverride {
 #[derive(Resource, Clone, Debug)]
 pub struct CombatFeelTuning {
     overrides: CombatFeelFile,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     path: PathBuf,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     last_modified: Option<SystemTime>,
     last_error: Option<String>,
 }
 
 impl Default for CombatFeelTuning {
     fn default() -> Self {
-        Self::load_initial(COMBAT_FEEL_PATH)
+        initial_combat_feel_tuning(Path::new(COMBAT_FEEL_PATH))
     }
 }
 
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn initial_combat_feel_tuning(path: &Path) -> CombatFeelTuning {
+    match load_combat_feel_file(path) {
+        Ok((overrides, modified)) => CombatFeelTuning {
+            overrides,
+            path: path.to_path_buf(),
+            last_modified: modified,
+            last_error: None,
+        },
+        Err(error) => CombatFeelTuning {
+            overrides: CombatFeelFile::default(),
+            path: path.to_path_buf(),
+            last_modified: None,
+            last_error: Some(error),
+        },
+    }
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn initial_combat_feel_tuning(_path: &Path) -> CombatFeelTuning {
+    CombatFeelTuning::from_embedded_gameplay()
+        .expect("the embedded combat feel tuning must remain valid")
+}
+
 impl CombatFeelTuning {
+    /// Constructs the immutable tuning used by online authority and prediction
+    /// worlds. Native loose-file loading and hot reload remain available only
+    /// to the rendered developer sandbox.
+    pub(crate) fn from_embedded_gameplay() -> Result<Self, String> {
+        Ok(Self {
+            overrides: parse_combat_feel(EMBEDDED_COMBAT_FEEL)?,
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
+            path: PathBuf::from(COMBAT_FEEL_PATH),
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
+            last_modified: None,
+            last_error: None,
+        })
+    }
+
     #[cfg(test)]
     pub fn from_overrides(overrides: CombatFeelFile) -> Self {
         Self {
@@ -245,25 +333,11 @@ impl CombatFeelTuning {
         }
     }
 
-    fn load_initial(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        match load_combat_feel_file(&path) {
-            Ok((overrides, modified)) => Self {
-                overrides,
-                path,
-                last_modified: modified,
-                last_error: None,
-            },
-            Err(error) => Self {
-                overrides: CombatFeelFile::default(),
-                path,
-                last_modified: None,
-                last_error: Some(error),
-            },
-        }
-    }
-
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     fn reload_if_changed(&mut self) -> bool {
         let modified = match fs::metadata(&self.path).and_then(|metadata| metadata.modified()) {
             Ok(modified) => Some(modified),
@@ -454,6 +528,11 @@ impl CombatFeelTuning {
         self.last_error.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn authored_file_for_test(&self) -> &CombatFeelFile {
+        &self.overrides
+    }
+
     fn reaction_override(&self, id: ReactionFamilyId) -> Option<&ReactionOverride> {
         self.overrides
             .reactions
@@ -523,12 +602,20 @@ pub fn setup_combat_feel_tuning(mut commands: Commands) {
     commands.insert_resource(tuning);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn reload_combat_feel_tuning(
     mut tuning: ResMut<CombatFeelTuning>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
     time: Res<Time>,
     mut poll_timer: Local<Option<Timer>>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     let should_poll = if let Some(timer) = poll_timer.as_mut() {
         timer.tick(time.delta()).just_finished()
     } else {
@@ -549,30 +636,114 @@ pub fn reload_combat_feel_tuning(
     }
 }
 
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(test, all(feature = "dev-hot-reload", not(feature = "shipping")))
+))]
 fn load_combat_feel_file(path: &Path) -> Result<(CombatFeelFile, Option<SystemTime>), String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        let contents = include_str!("../assets/feel/combat_overrides.ron");
-        let overrides: CombatFeelFile =
-            ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        return Ok((overrides, None));
+    if !path.exists() {
+        return Ok((CombatFeelFile::default(), None));
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        if !path.exists() {
-            return Ok((CombatFeelFile::default(), None));
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let overrides = parse_combat_feel(&contents)?;
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| error.to_string())?;
+    Ok((overrides, Some(modified)))
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+fn load_combat_feel_file(_path: &Path) -> Result<(CombatFeelFile, Option<SystemTime>), String> {
+    Ok((parse_combat_feel(EMBEDDED_COMBAT_FEEL)?, None))
+}
+
+fn parse_combat_feel(contents: &str) -> Result<CombatFeelFile, String> {
+    let file: CombatFeelFile =
+        ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
+    validate_combat_feel(&file)?;
+    Ok(file)
+}
+
+fn validate_combat_feel(file: &CombatFeelFile) -> Result<(), String> {
+    fn finite(context: &str, field: &str, value: Option<f32>) -> Result<(), String> {
+        if value.is_some_and(|value| !value.is_finite()) {
+            return Err(format!("{context}.{field} must be finite"));
         }
-
-        let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        let overrides: CombatFeelFile =
-            ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        let modified = fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .map_err(|error| error.to_string())?;
-        Ok((overrides, Some(modified)))
+        Ok(())
     }
+
+    fn window(context: &str, start: Option<u32>, end: Option<u32>) -> Result<(), String> {
+        if start.is_none() && end.is_some() {
+            return Err(format!("{context} has an end without a start"));
+        }
+        if start.zip(end).is_some_and(|(start, end)| start > end) {
+            return Err(format!("{context} starts after it ends"));
+        }
+        Ok(())
+    }
+
+    for override_def in &file.reactions {
+        let context = format!("reaction.{:?}", override_def.id);
+        for (field, value) in [
+            ("horizontal_scale", override_def.horizontal_scale),
+            ("vertical_scale", override_def.vertical_scale),
+            (
+                "landing_horizontal_damping",
+                override_def.landing_horizontal_damping,
+            ),
+        ] {
+            finite(&context, field, value)?;
+        }
+    }
+    for override_def in &file.payloads {
+        let context = format!("payload.{:?}", override_def.id);
+        for (field, value) in [
+            ("power", override_def.power),
+            ("str_scale", override_def.str_scale),
+            ("damage", override_def.damage),
+            ("knockback", override_def.knockback),
+            ("vertical_knockback", override_def.vertical_knockback),
+            ("hitstop_scale", override_def.hitstop_scale),
+            ("shake_scale", override_def.shake_scale),
+        ] {
+            finite(&context, field, value)?;
+        }
+    }
+    for override_def in &file.techniques {
+        let context = format!("technique.{:?}", override_def.id);
+        window(
+            &format!("{context}.cancel_window"),
+            override_def.cancel_start_ms,
+            override_def.cancel_end_ms,
+        )?;
+        window(
+            &format!("{context}.branch_window"),
+            override_def.branch_start_ms,
+            override_def.branch_end_ms,
+        )?;
+        for event in &override_def.events {
+            let event_context = format!("{context}.event.{:?}", event.key);
+            finite(&event_context, "forward", event.forward)?;
+            finite(&event_context, "lift", event.lift)?;
+        }
+    }
+    for override_def in &file.poses {
+        let context = format!("pose.{:?}", override_def.action);
+        for (field, value) in [
+            ("pitch", override_def.pitch),
+            ("yaw", override_def.yaw),
+            ("roll", override_def.roll),
+        ] {
+            finite(&context, field, value)?;
+        }
+        if let Some(scale) = override_def.scale {
+            for (axis, value) in ["x", "y", "z"].into_iter().zip(scale) {
+                finite(&context, &format!("scale_{axis}"), Some(value))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_landing_aftermath_override(
@@ -640,6 +811,75 @@ mod tests {
             technique_definition_by_id,
         },
     };
+
+    #[test]
+    fn embedded_gameplay_tuning_is_valid_and_has_no_reload_state() {
+        let tuning = CombatFeelTuning::from_embedded_gameplay().unwrap();
+        let parsed = parse_combat_feel(EMBEDDED_COMBAT_FEEL).unwrap();
+
+        assert_eq!(tuning.authored_file_for_test(), &parsed);
+        assert_eq!(tuning.path.as_path(), Path::new(COMBAT_FEEL_PATH));
+        assert_eq!(tuning.last_modified, None);
+        assert_eq!(tuning.last_error(), None);
+    }
+
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
+    #[test]
+    fn immutable_tuning_ignores_a_hostile_loose_file() {
+        let path = std::env::temp_dir().join(format!(
+            "afc-combat-feel-{}-{}.ron",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "this loose tuning must never be parsed").unwrap();
+
+        let tuning = initial_combat_feel_tuning(&path);
+        let embedded = CombatFeelTuning::from_embedded_gameplay().unwrap();
+
+        assert_eq!(
+            tuning.authored_file_for_test(),
+            embedded.authored_file_for_test()
+        );
+        assert_eq!(tuning.last_modified, None);
+        assert_eq!(tuning.last_error(), None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn combat_feel_validation_rejects_non_finite_values_and_partial_windows() {
+        let non_finite = CombatFeelFile {
+            payloads: vec![PayloadOverride {
+                damage: Some(f32::NAN),
+                ..default()
+            }],
+            ..default()
+        };
+        assert!(
+            validate_combat_feel(&non_finite)
+                .unwrap_err()
+                .contains("must be finite")
+        );
+
+        let partial_window = CombatFeelFile {
+            techniques: vec![TechniqueOverride {
+                cancel_end_ms: Some(10),
+                ..default()
+            }],
+            ..default()
+        };
+        assert!(
+            validate_combat_feel(&partial_window)
+                .unwrap_err()
+                .contains("end without a start")
+        );
+    }
 
     #[test]
     fn committed_combat_feel_file_parses() {

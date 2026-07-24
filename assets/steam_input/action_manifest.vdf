@@ -1,0 +1,110 @@
+"Action Manifest"
+{
+    "major_revision"                    "1"
+    "minor_revision"                    "0"
+    "major_revision_affects_xinput"     "0"
+    "major_revision_affects_mousekb"    "0"
+
+    // Official per-device configurations are exported from the Steam Input
+    // configurator after the production AppID is assigned, then listed here.
+    "configurations"
+    {
+        "controller_neptune"
+        {
+            "0"
+            {
+                "path" "steam_deck_default.vdf"
+            }
+        }
+        "controller_generic"
+        {
+            "0"
+            {
+                "path" "generic_gamepad_default.vdf"
+            }
+        }
+        "controller_xbox360"       { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_xboxone"       { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_xboxelite"     { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_ps3"           { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_ps4"           { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_ps5"           { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_ps5_edge"      { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_switch_pro"    { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_switch2_pro"   { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_switch_joycon_pair" { "0" { "path" "generic_gamepad_default.vdf" } }
+        "controller_mobile_touch"  { "0" { "path" "generic_gamepad_default.vdf" } }
+    }
+
+    "actions"
+    {
+        "Gameplay"
+        {
+            "title" "#Set_Gameplay"
+
+            "StickPadGyro"
+            {
+                "Move"
+                {
+                    "title"      "#Action_Move"
+                    "input_mode" "joystick_move"
+                }
+            }
+
+            "Button"
+            {
+                "Left"          "#Action_Left"
+                "Right"         "#Action_Right"
+                "Up"            "#Action_Up"
+                "Down"          "#Action_Down"
+                "AimGrab"       "#Action_AimGrab"
+                "Heavy"         "#Action_Heavy"
+                "Light"         "#Action_Light"
+                "Jump"          "#Action_Jump"
+                "MenuBack"      "#Action_MenuBack"
+                "MenuBindings"  "#Action_MenuBindings"
+            }
+        }
+
+        "Menu"
+        {
+            "title" "#Set_Menu"
+
+            "Button"
+            {
+                "MenuAccept"    "#Action_MenuAccept"
+                "MenuBack"      "#Action_MenuBack"
+                "MenuUp"        "#Action_MenuUp"
+                "MenuDown"      "#Action_MenuDown"
+                "MenuLeft"      "#Action_MenuLeft"
+                "MenuRight"     "#Action_MenuRight"
+                "MenuBindings"  "#Action_MenuBindings"
+            }
+        }
+    }
+
+    "localization"
+    {
+        "english"
+        {
+            "Set_Gameplay"          "Gameplay"
+            "Set_Menu"              "Menus"
+            "Action_Move"           "Move"
+            "Action_Left"           "Move / Dash Left"
+            "Action_Right"          "Move / Dash Right"
+            "Action_Up"             "Move / Dash Up"
+            "Action_Down"           "Move / Dash Down"
+            "Action_AimGrab"        "Aim / Grab"
+            "Action_Heavy"          "Heavy Attack"
+            "Action_Light"          "Light Attack"
+            "Action_Jump"           "Jump"
+            "Action_MenuAccept"     "Menu Accept"
+            "Action_MenuBack"       "Menu Back"
+            "Action_MenuUp"         "Menu Up"
+            "Action_MenuDown"       "Menu Down"
+            "Action_MenuLeft"       "Menu Left"
+            "Action_MenuRight"      "Menu Right"
+            "Action_MenuBindings"   "Controller Layout"
+        }
+    }
+}

@@ -1,35 +1,81 @@
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::arena::ArenaCannonBomb;
+use crate::arena_defs::ActiveArena;
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::arena_defs::arena_definitions;
-use crate::arena_defs::{active_arena_definition, set_active_arena_index};
 use crate::bee_skills::ActiveBeeSkill;
 use crate::bot::default_bot_brain_for_fighter;
 use crate::characters::{
     CharacterKind, CharacterMoveCatalog, FighterCharacter, character_for_fighter_id,
     character_scene_model,
 };
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::characters::{character_label, next_character_kind, previous_character_kind};
+use crate::chick_skills::ActiveChickSkill;
 use crate::combat::{HitEffects, ImpactSource};
 use crate::components::{
     BotBrain, Controller, Fighter, FighterAction, FighterActionState, FighterGrabState,
     FighterInput, FighterInventory, FighterMotor, FighterSceneModel, FighterSpecialState,
-    FighterStats, Hitbox, LocalInputAssignment, ParticipantKind, PlayerSlotId,
+    FighterStats, Hitbox, LocalInputAssignment, ParticipantKind, PlayerSlotId, SimPosition,
 };
 #[cfg(test)]
 use crate::constants::MATCH_SECONDS;
 use crate::constants::{FIGHTER_COUNT, MAX_HEALTH, MAX_STAMINA, STOCK_LIVES, TIME_UP_SECONDS};
+use crate::determinism::FighterId;
+use crate::ecs_identity::{StableEntityCommands, StableSimEntity, despawn_stable};
 use crate::effects::VisualEffect;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::equipment::next_equipment_kind;
 use crate::equipment::{DEFAULT_FIGHTER_EQUIPMENT, EquipmentKind, FighterEquipment};
-use crate::items::{ArenaItem, ItemAssets, item_scale};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::interpolation::SimPoseSnapRequest;
+use crate::items::{ArenaItem, ItemAssets, reset_items_for_arena};
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::map_editor::{MapEditorState, map_editor_allows_setup_input};
 use crate::penguin_skills::{ActivePenguinSkill, ActivePenguinSurface};
+use crate::sim_event::{
+    MatchLifecycleEvent, SimEvent, SimEventKind, SimEventSource, TickEventBuffer,
+};
+use crate::simulation::TickTimer;
+use crate::simulation::{SIM_HZ, seconds_to_ticks_ceil};
 use crate::specials::ActiveSpecial;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::styles::next_style_kind;
 use crate::styles::{DEFAULT_FIGHTER_STYLES, FighterStyle, FighterStyleKind};
 use crate::user_mode::UserModeState;
@@ -184,25 +230,53 @@ fn apply_setup_loadout(
             equipment.kind = slot.equipment;
         }
     }
-    equipment.cooldown = 0.0;
+    equipment.cooldown.clear();
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn match_reset_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyR) && !input_modifier_pressed(keys)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn dev_arena_cycle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyA) && shift_pressed(keys)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn input_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys)
         || keys.pressed(KeyCode::ControlLeft)
@@ -213,17 +287,38 @@ fn input_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
         || keys.pressed(KeyCode::SuperRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn dev_character_cycle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyP) && shift_pressed(keys)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn setup_rule_hotkeys_active(phase: MatchPhase) -> bool {
     phase == MatchPhase::Setup
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn cycle_dev_arena(setup: &mut LocalSetup, state: &mut MatchState, arena_count: usize) -> usize {
     let arena_count = arena_count.max(1);
     setup.arena_index = state.arena_index.min(arena_count - 1);
@@ -233,7 +328,14 @@ fn cycle_dev_arena(setup: &mut LocalSetup, state: &mut MatchState, arena_count: 
     state.arena_index
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn cycle_dev_player_character(setup: &mut LocalSetup) -> CharacterKind {
     setup.selected_character_fighter = 0;
     setup.cycle_character(0);
@@ -352,19 +454,40 @@ impl LocalSetup {
         self.rule_index = index.min(RULE_PRESETS.len() - 1);
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_arena(&mut self, arena_count: usize) {
         let arena_count = arena_count.max(1);
         self.arena_index = (self.arena_index + 1) % arena_count;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_arena_previous(&mut self, arena_count: usize) {
         let arena_count = arena_count.max(1);
         self.arena_index = (self.arena_index + arena_count - 1) % arena_count;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_bot_count(&mut self) {
         if let Some(slot) = self.slot_mut(1) {
             slot.participant = ParticipantKind::Bot;
@@ -378,7 +501,14 @@ impl LocalSetup {
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_style(&mut self, fighter_id: usize) {
         if let Some(slot) = self.slot_mut(fighter_id) {
             slot.style = next_style_kind(slot.style);
@@ -391,14 +521,28 @@ impl LocalSetup {
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_character(&mut self, fighter_id: usize) {
         if let Some(slot) = self.slot_mut(fighter_id) {
             slot.character = next_character_kind(slot.character);
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_character_previous(&mut self, fighter_id: usize) {
         if let Some(slot) = self.slot_mut(fighter_id) {
             slot.character = previous_character_kind(slot.character);
@@ -416,7 +560,14 @@ impl LocalSetup {
             .unwrap_or(0)
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_selected_character_fighter(&mut self) {
         let start = self.selected_character_fighter();
         for offset in 1..=FIGHTER_COUNT {
@@ -497,14 +648,28 @@ impl LocalSetup {
         self.selected_character_fighter = 0;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn cycle_equipment(&mut self, fighter_id: usize) {
         if let Some(slot) = self.slot_mut(fighter_id) {
             slot.equipment = next_equipment_kind(slot.equipment);
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     pub fn advance_replay_seed(&mut self) -> u64 {
         self.replay_seed = next_replay_seed(self.replay_seed);
         self.replay_seed
@@ -519,10 +684,20 @@ pub enum MatchPhaseEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingoutResolution {
-    pub awarded_to: Option<usize>,
+    pub awarded_to: Option<FighterId>,
     pub remaining_stock: Option<i32>,
     pub eliminated: bool,
     pub match_finished: bool,
+}
+
+impl RingoutResolution {
+    #[cfg(test)]
+    const NONE: Self = Self {
+        awarded_to: None,
+        remaining_stock: None,
+        eliminated: false,
+        match_finished: false,
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,11 +706,112 @@ pub enum LifeLossCause {
     Knockout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LifeLossRecord {
+    pub victim: FighterId,
+    pub attacker: Option<FighterId>,
+    pub cause: LifeLossCause,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifeLossBatchPushError {
+    VictimNotParticipating { victim: FighterId },
+    DuplicateVictim { victim: FighterId },
+}
+
+/// Canonical result of evaluating the roster after a committed stock-loss batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StockMatchOutcome {
+    #[default]
+    Undecided,
+    Draw,
+    FighterWinner(FighterId),
+    TeamWinner(TeamId),
+}
+
+impl StockMatchOutcome {
+    pub const fn is_decided(self) -> bool {
+        !matches!(self, Self::Undecided)
+    }
+}
+
+/// The eligibility facts used by one life-loss batch.
+///
+/// Credits deliberately consult this frozen view instead of the incrementally
+/// mutated stock array. A fighter who loses their final stock in the batch may
+/// therefore still receive credit for another same-tick loss they caused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LifeLossParticipationSnapshot {
+    participating: [bool; FIGHTER_COUNT],
+    stocks: [i32; FIGHTER_COUNT],
+    teams: [TeamId; FIGHTER_COUNT],
+    uses_stocks: bool,
+    team_scoring: bool,
+    friendly_fire: bool,
+}
+
+impl LifeLossParticipationSnapshot {
+    fn capture(state: &MatchState) -> Self {
+        Self {
+            participating: std::array::from_fn(|fighter_id| {
+                state.fighter_can_participate(fighter_id)
+            }),
+            stocks: state.stocks,
+            teams: state.teams,
+            uses_stocks: state.rules.uses_stocks(),
+            team_scoring: state.rules.team_scoring,
+            friendly_fire: state.rules.friendly_fire,
+        }
+    }
+
+    pub const fn fighter_can_participate(self, fighter: FighterId) -> bool {
+        self.participating[fighter.index()]
+    }
+
+    fn credit_allowed(self, victim: FighterId, attacker: FighterId) -> bool {
+        if attacker == victim
+            || !self.fighter_can_participate(victim)
+            || !self.fighter_can_participate(attacker)
+        {
+            return false;
+        }
+        !self.team_scoring
+            || self.friendly_fire
+            || self.teams[attacker.index()] != self.teams[victim.index()]
+    }
+}
+
+/// Fixed-capacity, fighter-ID-addressed collection of same-tick life losses.
+///
+/// The roster limit supplies the capacity, so collection never allocates. Slots
+/// are committed by [`FighterId::ALL`] order regardless of ECS entity or
+/// insertion order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LifeLossBatch {
+    participation: LifeLossParticipationSnapshot,
+    losses: [Option<LifeLossRecord>; FIGHTER_COUNT],
+    len: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LifeLossBatchResolution {
+    losses: [Option<RingoutResolution>; FIGHTER_COUNT],
+    pub outcome: StockMatchOutcome,
+    /// True only for the commit that changed the match into Results.
+    pub result_finalized: bool,
+}
+
+impl LifeLossBatchResolution {
+    pub const fn for_fighter(&self, fighter: FighterId) -> Option<RingoutResolution> {
+        self.losses[fighter.index()]
+    }
+}
+
 #[derive(Resource)]
 pub struct MatchState {
-    pub timer: f32,
+    pub timer_ticks: u32,
     pub phase: MatchPhase,
-    pub phase_timer: f32,
+    pub phase_timer_ticks: u32,
     pub rules: MatchRules,
     pub rule_index: usize,
     pub arena_index: usize,
@@ -546,6 +822,140 @@ pub struct MatchState {
     pub replay_seed: u64,
     pub debug_hitboxes: bool,
     pub reset_requested: bool,
+}
+
+impl LifeLossBatch {
+    pub fn new(state: &MatchState) -> Self {
+        Self {
+            participation: LifeLossParticipationSnapshot::capture(state),
+            losses: [None; FIGHTER_COUNT],
+            len: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn push(
+        &mut self,
+        victim: FighterId,
+        attacker: Option<FighterId>,
+        cause: LifeLossCause,
+    ) -> Result<(), LifeLossBatchPushError> {
+        if !self.participation.fighter_can_participate(victim) {
+            return Err(LifeLossBatchPushError::VictimNotParticipating { victim });
+        }
+        let slot = &mut self.losses[victim.index()];
+        if slot.is_some() {
+            return Err(LifeLossBatchPushError::DuplicateVictim { victim });
+        }
+        *slot = Some(LifeLossRecord {
+            victim,
+            attacker,
+            cause,
+        });
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Applies every stock decrement, then every valid score credit, and only
+    /// then transitions the match to Results. The award callback runs in victim
+    /// FighterId order and is the only integration point needed by ECS stats.
+    pub fn commit(
+        self,
+        state: &mut MatchState,
+        mut award_credit: impl FnMut(FighterId),
+    ) -> LifeLossBatchResolution {
+        let mut losses = [None; FIGHTER_COUNT];
+
+        for victim in FighterId::ALL {
+            let Some(record) = self.losses[victim.index()] else {
+                continue;
+            };
+            let awarded_to = record
+                .attacker
+                .filter(|attacker| self.participation.credit_allowed(victim, *attacker));
+            let remaining_stock = self.participation.uses_stocks.then(|| {
+                let stock = self.participation.stocks[victim.index()]
+                    .saturating_sub(1)
+                    .max(0);
+                state.stocks[victim.index()] = stock;
+                stock
+            });
+            losses[victim.index()] = Some(RingoutResolution {
+                awarded_to,
+                remaining_stock,
+                eliminated: remaining_stock == Some(0),
+                match_finished: false,
+            });
+        }
+
+        // Score mutations must precede result finalization. In a mutual final-
+        // stock loss, both still-valid pre-batch attackers receive their credit.
+        for victim in FighterId::ALL {
+            if let Some(attacker) = losses[victim.index()].and_then(|loss| loss.awarded_to) {
+                award_credit(attacker);
+            }
+        }
+
+        let outcome = if self.is_empty() || !self.participation.uses_stocks {
+            StockMatchOutcome::Undecided
+        } else {
+            state.stock_match_outcome()
+        };
+        let result_finalized = outcome.is_decided()
+            && !matches!(state.phase, MatchPhase::Results | MatchPhase::Resetting);
+        if result_finalized {
+            state.phase = MatchPhase::Results;
+            state.phase_timer_ticks = 0;
+        }
+        if outcome.is_decided() {
+            for loss in losses.iter_mut().flatten() {
+                loss.match_finished = true;
+            }
+        }
+
+        LifeLossBatchResolution {
+            losses,
+            outcome,
+            result_finalized,
+        }
+    }
+}
+
+fn stock_match_outcome(state: &MatchState) -> StockMatchOutcome {
+    if state.rules.team_scoring {
+        let mut survivor = None;
+        for fighter in FighterId::ALL {
+            if !state.fighter_can_participate(fighter.index()) {
+                continue;
+            }
+            let team = state.teams[fighter.index()];
+            match survivor {
+                None => survivor = Some(team),
+                Some(existing) if existing == team => {}
+                Some(_) => return StockMatchOutcome::Undecided,
+            }
+        }
+        return survivor.map_or(StockMatchOutcome::Draw, StockMatchOutcome::TeamWinner);
+    }
+
+    let mut survivor = None;
+    for fighter in FighterId::ALL {
+        if !state.fighter_can_participate(fighter.index()) {
+            continue;
+        }
+        if survivor.is_some() {
+            return StockMatchOutcome::Undecided;
+        }
+        survivor = Some(fighter);
+    }
+    survivor.map_or(StockMatchOutcome::Draw, StockMatchOutcome::FighterWinner)
 }
 
 #[derive(Resource, Clone)]
@@ -617,16 +1027,26 @@ pub const DEFAULT_REPLAY_SEED: u64 = 0xFFC0_0001;
 
 #[derive(Resource, Default)]
 pub struct Hitstop {
-    pub remaining: f32,
+    pub remaining_ticks: u32,
 }
 
 impl Hitstop {
     pub fn active(&self) -> bool {
-        self.remaining > 0.0
+        self.remaining_ticks > 0
     }
 
-    pub fn trigger(&mut self, duration: f32) {
-        self.remaining = self.remaining.max(duration);
+    pub fn trigger(&mut self, duration_seconds: f32) {
+        self.remaining_ticks = self
+            .remaining_ticks
+            .max(seconds_to_ticks_ceil(duration_seconds));
+    }
+
+    pub fn clear(&mut self) {
+        self.remaining_ticks = 0;
+    }
+
+    fn advance_tick(&mut self) {
+        self.remaining_ticks = self.remaining_ticks.saturating_sub(1);
     }
 }
 
@@ -648,9 +1068,9 @@ impl Default for MatchState {
         let rules = RULE_PRESETS[0];
         let active_slots = LocalSetup::default().active_slots();
         Self {
-            timer: rules.time_limit.unwrap_or(0.0),
+            timer_ticks: match_timer_ticks(rules),
             phase: MatchPhase::Setup,
-            phase_timer: 0.0,
+            phase_timer_ticks: 0,
             rules,
             rule_index: 0,
             arena_index: 0,
@@ -674,7 +1094,7 @@ impl MatchState {
         self.rules.label
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
     pub fn select_rule(&mut self, index: usize) {
         self.rule_index = index.min(RULE_PRESETS.len() - 1);
         self.rules = RULE_PRESETS[self.rule_index];
@@ -686,22 +1106,26 @@ impl MatchState {
     pub fn request_rematch(&mut self) {
         self.reset_requested = true;
         self.phase = MatchPhase::Resetting;
-        self.phase_timer = 0.0;
+        self.phase_timer_ticks = 0;
     }
 
     pub fn return_to_setup(&mut self) {
         self.phase = MatchPhase::Setup;
-        self.phase_timer = 0.0;
+        self.phase_timer_ticks = 0;
         self.reset_requested = false;
-        self.timer = self.rules.time_limit.unwrap_or(0.0);
+        self.timer_ticks = match_timer_ticks(self.rules);
     }
 
     pub fn reset_for_new_match(&mut self) {
-        self.timer = self.rules.time_limit.unwrap_or(0.0);
+        self.timer_ticks = match_timer_ticks(self.rules);
         self.phase = MatchPhase::Fighting;
-        self.phase_timer = 0.0;
+        self.phase_timer_ticks = 0;
         self.stocks = stock_array(self.rules);
         self.reset_requested = false;
+    }
+
+    pub fn timer_seconds_ceil(&self) -> u32 {
+        self.timer_ticks.div_ceil(SIM_HZ as u32)
     }
 
     pub fn apply_local_setup(&mut self, setup: &LocalSetup) {
@@ -754,33 +1178,28 @@ impl MatchState {
         attacker_id != target_id && !self.fighters_share_team(attacker_id, target_id)
     }
 
-    pub fn ringout_credit_allowed(&self, victim_id: usize, attacker_id: usize) -> bool {
-        attacker_id < FIGHTER_COUNT
-            && attacker_id != victim_id
-            && self.combat_target_allowed_for_state(attacker_id, victim_id)
-    }
-
     pub fn advance_replay_seed(&mut self) -> u64 {
         self.replay_seed = next_replay_seed(self.replay_seed);
         self.replay_seed
     }
 
-    pub fn advance_phase(&mut self, dt: f32) -> Option<MatchPhaseEvent> {
+    /// Advances authoritative match clocks by exactly one canonical simulation tick.
+    pub fn advance_phase(&mut self) -> Option<MatchPhaseEvent> {
         match self.phase {
             MatchPhase::Setup => {}
             MatchPhase::Fighting => {
                 if self.rules.uses_timer() {
-                    self.timer = (self.timer - dt).max(0.0);
-                    if self.timer == 0.0 {
+                    self.timer_ticks = self.timer_ticks.saturating_sub(1);
+                    if self.timer_ticks == 0 {
                         self.phase = MatchPhase::TimeUp;
-                        self.phase_timer = TIME_UP_SECONDS;
+                        self.phase_timer_ticks = seconds_to_ticks_ceil(TIME_UP_SECONDS);
                         return Some(MatchPhaseEvent::TimeUp);
                     }
                 }
             }
             MatchPhase::TimeUp => {
-                self.phase_timer = (self.phase_timer - dt).max(0.0);
-                if self.phase_timer == 0.0 {
+                self.phase_timer_ticks = self.phase_timer_ticks.saturating_sub(1);
+                if self.phase_timer_ticks == 0 {
                     self.phase = MatchPhase::Results;
                     return Some(MatchPhaseEvent::Results);
                 }
@@ -790,50 +1209,30 @@ impl MatchState {
         None
     }
 
+    #[cfg(test)]
     pub fn record_ringout(
         &mut self,
-        victim_id: usize,
-        attacker_id: Option<usize>,
+        victim_id: FighterId,
+        attacker_id: Option<FighterId>,
     ) -> RingoutResolution {
         self.record_life_loss(victim_id, attacker_id, LifeLossCause::RingOut)
     }
 
+    #[cfg(test)]
     pub fn record_life_loss(
         &mut self,
-        victim_id: usize,
-        attacker_id: Option<usize>,
-        _cause: LifeLossCause,
+        victim_id: FighterId,
+        attacker_id: Option<FighterId>,
+        cause: LifeLossCause,
     ) -> RingoutResolution {
-        let awarded_to =
-            attacker_id.filter(|attacker| self.ringout_credit_allowed(victim_id, *attacker));
-        let mut remaining_stock = None;
-        let mut eliminated = false;
-        let mut match_finished = false;
-
-        if self.rules.uses_stocks() && victim_id < FIGHTER_COUNT {
-            let stock = (self.stocks[victim_id] - 1).max(0);
-            self.stocks[victim_id] = stock;
-            remaining_stock = Some(stock);
-            eliminated = stock == 0;
-            let active_fighters = self
-                .stocks
-                .iter()
-                .enumerate()
-                .filter(|(fighter_id, stock)| self.fighter_active(*fighter_id) && **stock > 0)
-                .count();
-            if active_fighters <= 1 {
-                self.phase = MatchPhase::Results;
-                self.phase_timer = 0.0;
-                match_finished = true;
-            }
+        let mut batch = LifeLossBatch::new(self);
+        if batch.push(victim_id, attacker_id, cause).is_err() {
+            return RingoutResolution::NONE;
         }
-
-        RingoutResolution {
-            awarded_to,
-            remaining_stock,
-            eliminated,
-            match_finished,
-        }
+        batch
+            .commit(self, |_| {})
+            .for_fighter(victim_id)
+            .unwrap_or(RingoutResolution::NONE)
     }
 
     pub fn fighter_eliminated(&self, fighter_id: usize) -> bool {
@@ -852,10 +1251,23 @@ impl MatchState {
             .then_some(())
             .and_then(|_| self.stocks.get(fighter_id).copied())
     }
+
+    /// Evaluates only the canonical stock-survivor rule. Timed/score fallbacks
+    /// remain undecided so callers can apply their ruleset-specific tiebreak.
+    pub fn stock_match_outcome(&self) -> StockMatchOutcome {
+        if !self.rules.uses_stocks() {
+            return StockMatchOutcome::Undecided;
+        }
+        stock_match_outcome(self)
+    }
 }
 
 fn stock_array(rules: MatchRules) -> [i32; FIGHTER_COUNT] {
     [rules.starting_stocks.unwrap_or(0); FIGHTER_COUNT]
+}
+
+fn match_timer_ticks(rules: MatchRules) -> u32 {
+    rules.time_limit.map_or(0, seconds_to_ticks_ceil)
 }
 
 fn active_slot_count(active_slots: [bool; FIGHTER_COUNT]) -> usize {
@@ -894,11 +1306,32 @@ pub fn match_accepts_gameplay(state: Res<MatchState>) -> bool {
     state.is_fighting()
 }
 
+#[derive(SystemParam)]
+pub struct GlobalInputSimulationBoundary<'w, 's> {
+    active_arena: ResMut<'w, ActiveArena>,
+    stable_entities: StableEntityCommands<'w, 's>,
+    simulation_drive: Res<'w, crate::simulation::SimulationDriveMode>,
+}
+
 pub fn handle_global_input(
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))] keys: Res<ButtonInput<KeyCode>>,
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))] editor: Option<
-        Res<MapEditorState>,
-    >,
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
+    keys: Res<ButtonInput<KeyCode>>,
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
+    editor: Option<Res<MapEditorState>>,
     user_mode: Res<UserModeState>,
     gameplay_scene: Option<Res<crate::user_mode::UserModeGameplayScene>>,
     mut setup: ResMut<LocalSetup>,
@@ -920,53 +1353,101 @@ pub fn handle_global_input(
             &mut FighterCharacter,
             &mut FighterStyle,
             &mut FighterEquipment,
+            &mut SimPosition,
             &mut Transform,
             &mut Visibility,
         ),
         &mut Controller,
         Has<BotBrain>,
     )>,
-    hitboxes: Query<Entity, With<Hitbox>>,
+    hitboxes: Query<(Entity, &StableSimEntity), With<Hitbox>>,
     specials: Query<
-        Entity,
+        (Entity, &StableSimEntity),
         Or<(
             With<ActiveSpecial>,
             With<ActiveBeeSkill>,
+            With<ActiveChickSkill>,
             With<ActivePenguinSkill>,
             With<ActivePenguinSurface>,
+            With<ArenaCannonBomb>,
         )>,
     >,
     effects: Query<Entity, With<VisualEffect>>,
-    mut items: Query<
-        (
-            &mut ArenaItem,
-            &mut Transform,
-            &mut Visibility,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &mut SceneRoot,
-        ),
-        Without<Fighter>,
-    >,
+    mut items: Query<(Entity, &StableSimEntity, &mut ArenaItem)>,
     item_assets: Option<Res<ItemAssets>>,
-    mut commands: Commands,
+    simulation_boundary: GlobalInputSimulationBoundary,
     mut hitstop: ResMut<Hitstop>,
     mut announcements: ResMut<MatchAnnouncements>,
 ) {
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    let GlobalInputSimulationBoundary {
+        mut active_arena,
+        stable_entities,
+        simulation_drive,
+    } = simulation_boundary;
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
+    let StableEntityCommands {
+        mut commands,
+        mut identities,
+    } = stable_entities;
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     let dev_input_blocked = user_mode.blocks_dev_input();
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    )))]
     let dev_input_blocked = true;
     let starting_from_setup = state.phase == MatchPhase::Setup;
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     let rematch_pressed = !dev_input_blocked && match_reset_pressed(&keys);
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    )))]
     let rematch_pressed = false;
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     let setup_from_results_pressed = !dev_input_blocked
         && state.phase == MatchPhase::Results
         && keys.just_pressed(KeyCode::Enter);
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked && keys.just_pressed(KeyCode::KeyH) {
             state.debug_hitboxes = !state.debug_hitboxes;
@@ -977,7 +1458,14 @@ pub fn handle_global_input(
         return;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked
             && state.phase == MatchPhase::Setup
@@ -987,14 +1475,28 @@ pub fn handle_global_input(
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked && state.is_fighting() && dev_arena_cycle_pressed(&keys) {
             cycle_dev_arena(&mut setup, &mut state, arena_definitions().len());
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked
             && state.is_fighting()
@@ -1005,7 +1507,15 @@ pub fn handle_global_input(
             for (
                 _entity,
                 (fighter, _stats, _motor, _input, _action, _inventory, _grab_state),
-                (_special_state, mut character, _style, _equipment, _transform, _visibility),
+                (
+                    _special_state,
+                    mut character,
+                    _style,
+                    _equipment,
+                    _position,
+                    _transform,
+                    _visibility,
+                ),
                 _controller,
                 _has_bot_brain,
             ) in &mut fighters
@@ -1022,7 +1532,14 @@ pub fn handle_global_input(
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked && setup_rule_hotkeys_active(state.phase) {
             for (key, index) in [
@@ -1038,45 +1555,44 @@ pub fn handle_global_input(
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     if setup_from_results_pressed {
         setup.rule_index = state.rule_index;
         setup.arena_index = state.arena_index;
         setup.replay_seed = state.replay_seed;
         state.return_to_setup();
         state.apply_local_setup(&setup);
-        hitstop.remaining = 0.0;
+        hitstop.clear();
         announcements.show("Setup - adjust or press Enter", 1.2);
-        set_active_arena_index(setup.arena_index);
-        let arena = active_arena_definition();
+        active_arena.select(setup.arena_index);
+        let arena = active_arena.definition();
         let Some(item_assets) = item_assets.as_ref() else {
             return;
         };
 
-        for entity in &hitboxes {
-            commands.entity(entity).despawn();
+        for (entity, stable) in &hitboxes {
+            despawn_stable(&mut commands, &mut identities, entity, *stable);
         }
-        for entity in &specials {
-            commands.entity(entity).despawn();
+        for (entity, stable) in &specials {
+            despawn_stable(&mut commands, &mut identities, entity, *stable);
         }
         for entity in &effects {
             commands.entity(entity).despawn();
         }
-        for (index, (mut item, mut transform, mut visibility, mut material, mut scene_root)) in
-            (&mut items).into_iter().enumerate()
-        {
-            if let Some(anchor) = arena.item_anchors.get(index) {
-                item.retarget_for_anchor(anchor.kind, anchor.position, anchor.phase);
-                transform.translation = item.anchor;
-                transform.scale = item_scale(item.kind);
-                material.0 = item_assets.material_for(item.kind, false);
-                scene_root.0 = item_assets.scene_for(item.kind);
-                *visibility = Visibility::Visible;
-            } else {
-                item.deactivate_for_match();
-                *visibility = Visibility::Hidden;
-            }
-        }
+        reset_items_for_arena(
+            &mut commands,
+            &mut identities,
+            &mut items,
+            item_assets,
+            arena,
+        );
 
         for (
             entity,
@@ -1094,6 +1610,7 @@ pub fn handle_global_input(
                 mut character,
                 mut style,
                 mut equipment,
+                mut position,
                 mut transform,
                 mut visibility,
             ),
@@ -1112,20 +1629,20 @@ pub fn handle_global_input(
             fighter.spawn = arena.spawn_points[fighter.id];
             stats.health = MAX_HEALTH;
             stats.stamina = MAX_STAMINA;
-            stats.health_refill_timer = 0.0;
-            stats.item_speed_timer = 0.0;
-            stats.item_giant_timer = 0.0;
+            stats.health_refill_timer.clear();
+            stats.item_speed_timer.clear();
+            stats.item_giant_timer.clear();
             stats.score = 0;
             stats.last_attacker = None;
-            stats.invulnerability = 0.0;
-            stats.respawn_timer = 0.0;
+            stats.invulnerability.clear();
+            stats.respawn_timer.clear();
             stats.hud_flash = 0.0;
             *input = FighterInput::default();
             inventory.held = None;
             grab_state.holding = None;
             grab_state.held_by = None;
-            grab_state.regrab_lockout = 0.0;
-            special_state.cooldown = 0.0;
+            grab_state.regrab_lockout.clear();
+            special_state.cooldown.clear();
             apply_setup_loadout(
                 fighter.id,
                 &setup,
@@ -1143,22 +1660,21 @@ pub fn handle_global_input(
             motor.jump_attack_landing_recovery = false;
             motor.bee_air_dash_motion_active = false;
             motor.bee_air_dash_shot_available = false;
-            motor.ledge_grace_timer = 0.0;
-            motor.landing_stick_timer = 0.0;
-            motor.jump_takeoff_timer = 0.0;
-            motor.impact_speed_limit_timer = 0.0;
+            motor.ledge_grace_timer.clear();
+            motor.landing_stick_timer.clear();
+            motor.jump_takeoff_timer.clear();
+            motor.impact_speed_limit_timer.clear();
             motor.impact_speed_limit = 0.0;
-            transform.translation = fighter.spawn;
-            transform.rotation = Quat::IDENTITY;
+            reset_fighter_pose(&fighter, &mut position, &mut transform);
             if state.fighter_active(fighter.id) {
                 action.action = FighterAction::Idle;
-                action.elapsed = 0.0;
+                action.elapsed.reset();
                 action.hitbox_spawned = false;
                 action.queued_combo = false;
                 action.queued_technique = None;
                 action.queued_button = None;
                 action.buffered_button = None;
-                action.buffered_button_elapsed = 0.0;
+                action.buffered_button_elapsed.reset();
                 action.timeline_events_fired = 0;
                 action.reaction_getup_ms = None;
                 action.reaction_recover_ms = None;
@@ -1166,25 +1682,33 @@ pub fn handle_global_input(
                 *visibility = Visibility::Visible;
             } else {
                 action.action = FighterAction::RingOut;
-                action.elapsed = 0.0;
+                action.elapsed.reset();
                 action.hitbox_spawned = false;
                 action.queued_combo = false;
                 action.queued_technique = None;
                 action.queued_button = None;
                 action.buffered_button = None;
-                action.buffered_button_elapsed = 0.0;
+                action.buffered_button_elapsed.reset();
                 action.timeline_events_fired = 0;
                 action.reaction_getup_ms = None;
                 action.reaction_recover_ms = None;
                 action.clear_reaction_visual();
-                stats.respawn_timer = f32::INFINITY;
+                stats.respawn_timer = TickTimer::INDEFINITE;
                 *visibility = Visibility::Hidden;
             }
         }
+        commands.insert_resource(SimPoseSnapRequest::requested());
         return;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked && state.phase == MatchPhase::Setup {
             if keys.just_pressed(KeyCode::Tab) {
@@ -1224,7 +1748,7 @@ pub fn handle_global_input(
                 } else {
                     setup.cycle_arena(arena_count);
                 }
-                set_active_arena_index(setup.arena_index);
+                active_arena.select(setup.arena_index);
                 announcements.show(
                     format!(
                         "Arena: {}",
@@ -1266,6 +1790,7 @@ pub fn handle_global_input(
                     mut character,
                     mut style,
                     mut equipment,
+                    _position,
                     _transform,
                     mut visibility,
                 ),
@@ -1291,20 +1816,27 @@ pub fn handle_global_input(
                 if state.fighter_active(fighter.id) {
                     if action.action == FighterAction::RingOut {
                         action.action = FighterAction::Idle;
-                        action.elapsed = 0.0;
+                        action.elapsed.reset();
                     }
                     *visibility = Visibility::Visible;
                 } else {
                     *input = FighterInput::default();
                     action.action = FighterAction::RingOut;
-                    action.elapsed = 0.0;
+                    action.elapsed.reset();
                     *visibility = Visibility::Hidden;
                 }
             }
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     {
         if !dev_input_blocked
             && state.phase == MatchPhase::Setup
@@ -1315,12 +1847,19 @@ pub fn handle_global_input(
             state.arena_index = setup.arena_index;
             state.apply_local_setup(&setup);
             state.replay_seed = setup.replay_seed;
-            set_active_arena_index(state.arena_index);
+            active_arena.select(state.arena_index);
             state.request_rematch();
         }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     if rematch_pressed {
         state.request_rematch();
     }
@@ -1351,40 +1890,40 @@ pub fn handle_global_input(
     state.replay_seed = replay_seed;
     state.reset_for_new_match();
     telemetry.reset_for_seed(replay_seed);
-    hitstop.remaining = 0.0;
+    hitstop.clear();
     announcements.show("Fight!", 0.9);
-    set_active_arena_index(state.arena_index);
-    let arena = active_arena_definition();
+    active_arena.select(state.arena_index);
+    let arena = active_arena.definition();
 
-    for entity in &hitboxes {
-        commands.entity(entity).despawn();
+    for (entity, stable) in &hitboxes {
+        despawn_stable(&mut commands, &mut identities, entity, *stable);
     }
-    for entity in &specials {
-        commands.entity(entity).despawn();
+    for (entity, stable) in &specials {
+        despawn_stable(&mut commands, &mut identities, entity, *stable);
     }
     for entity in &effects {
         commands.entity(entity).despawn();
     }
-    for (index, (mut item, mut transform, mut visibility, mut material, mut scene_root)) in
-        (&mut items).into_iter().enumerate()
-    {
-        if let Some(anchor) = arena.item_anchors.get(index) {
-            item.retarget_for_anchor(anchor.kind, anchor.position, anchor.phase);
-            transform.translation = item.anchor;
-            transform.scale = item_scale(item.kind);
-            material.0 = item_assets.material_for(item.kind, false);
-            scene_root.0 = item_assets.scene_for(item.kind);
-            *visibility = Visibility::Visible;
-        } else {
-            item.deactivate_for_match();
-            *visibility = Visibility::Hidden;
-        }
-    }
+    reset_items_for_arena(
+        &mut commands,
+        &mut identities,
+        &mut items,
+        item_assets,
+        arena,
+    );
 
     for (
         entity,
         (mut fighter, mut stats, mut motor, mut input, mut action, mut inventory, mut grab_state),
-        (mut special_state, mut character, mut style, mut equipment, mut transform, mut visibility),
+        (
+            mut special_state,
+            mut character,
+            mut style,
+            mut equipment,
+            mut position,
+            mut transform,
+            mut visibility,
+        ),
         mut controller,
         has_bot_brain,
     ) in &mut fighters
@@ -1400,20 +1939,20 @@ pub fn handle_global_input(
         fighter.spawn = arena.spawn_points[fighter.id];
         stats.health = MAX_HEALTH;
         stats.stamina = MAX_STAMINA;
-        stats.health_refill_timer = 0.0;
-        stats.item_speed_timer = 0.0;
-        stats.item_giant_timer = 0.0;
+        stats.health_refill_timer.clear();
+        stats.item_speed_timer.clear();
+        stats.item_giant_timer.clear();
         stats.score = 0;
         stats.last_attacker = None;
-        stats.invulnerability = 0.0;
-        stats.respawn_timer = 0.0;
+        stats.invulnerability.clear();
+        stats.respawn_timer.clear();
         stats.hud_flash = 0.0;
         *input = FighterInput::default();
         inventory.held = None;
         grab_state.holding = None;
         grab_state.held_by = None;
-        grab_state.regrab_lockout = 0.0;
-        special_state.cooldown = 0.0;
+        grab_state.regrab_lockout.clear();
+        special_state.cooldown.clear();
         apply_setup_loadout(
             fighter.id,
             &setup,
@@ -1423,18 +1962,18 @@ pub fn handle_global_input(
         );
         if !state.fighter_active(fighter.id) {
             action.action = FighterAction::RingOut;
-            action.elapsed = 0.0;
+            action.elapsed.reset();
             action.hitbox_spawned = false;
             action.queued_combo = false;
             action.queued_technique = None;
             action.queued_button = None;
             action.buffered_button = None;
-            action.buffered_button_elapsed = 0.0;
+            action.buffered_button_elapsed.reset();
             action.timeline_events_fired = 0;
             action.reaction_getup_ms = None;
             action.reaction_recover_ms = None;
             action.clear_reaction_visual();
-            stats.respawn_timer = f32::INFINITY;
+            stats.respawn_timer = TickTimer::INDEFINITE;
             motor.velocity = Vec3::ZERO;
             motor.grounded = true;
             motor.knockdown_on_land = false;
@@ -1445,24 +1984,23 @@ pub fn handle_global_input(
             motor.jump_attack_landing_recovery = false;
             motor.bee_air_dash_motion_active = false;
             motor.bee_air_dash_shot_available = false;
-            motor.ledge_grace_timer = 0.0;
-            motor.landing_stick_timer = 0.0;
-            motor.jump_takeoff_timer = 0.0;
-            motor.impact_speed_limit_timer = 0.0;
+            motor.ledge_grace_timer.clear();
+            motor.landing_stick_timer.clear();
+            motor.jump_takeoff_timer.clear();
+            motor.impact_speed_limit_timer.clear();
             motor.impact_speed_limit = 0.0;
-            transform.translation = fighter.spawn;
-            transform.rotation = Quat::IDENTITY;
+            reset_fighter_pose(&fighter, &mut position, &mut transform);
             *visibility = Visibility::Hidden;
             continue;
         }
         action.action = FighterAction::Idle;
-        action.elapsed = 0.0;
+        action.elapsed.reset();
         action.hitbox_spawned = false;
         action.queued_combo = false;
         action.queued_technique = None;
         action.queued_button = None;
         action.buffered_button = None;
-        action.buffered_button_elapsed = 0.0;
+        action.buffered_button_elapsed.reset();
         action.timeline_events_fired = 0;
         action.reaction_getup_ms = None;
         action.reaction_recover_ms = None;
@@ -1477,15 +2015,21 @@ pub fn handle_global_input(
         motor.jump_attack_landing_recovery = false;
         motor.bee_air_dash_motion_active = false;
         motor.bee_air_dash_shot_available = false;
-        motor.ledge_grace_timer = 0.0;
-        motor.landing_stick_timer = 0.0;
-        motor.jump_takeoff_timer = 0.0;
-        motor.impact_speed_limit_timer = 0.0;
+        motor.ledge_grace_timer.clear();
+        motor.landing_stick_timer.clear();
+        motor.jump_takeoff_timer.clear();
+        motor.impact_speed_limit_timer.clear();
         motor.impact_speed_limit = 0.0;
-        transform.translation = fighter.spawn;
-        transform.rotation = Quat::IDENTITY;
+        reset_fighter_pose(&fighter, &mut position, &mut transform);
         *visibility = Visibility::Visible;
     }
+    commands.insert_resource(SimPoseSnapRequest::requested());
+}
+
+fn reset_fighter_pose(fighter: &Fighter, position: &mut SimPosition, transform: &mut Transform) {
+    position.translation = fighter.spawn;
+    transform.translation = fighter.spawn;
+    transform.rotation = Quat::IDENTITY;
 }
 
 pub fn sync_setup_character_scene_models(
@@ -1507,30 +2051,46 @@ pub fn sync_setup_character_scene_models(
     }
 }
 
-pub fn tick_match_timer(
-    time: Res<Time>,
-    mut state: ResMut<MatchState>,
-    mut announcements: ResMut<MatchAnnouncements>,
-    mut feedback: ResMut<HitEffects>,
-) {
-    if let Some(event) = state.advance_phase(time.delta_secs()) {
-        match event {
-            MatchPhaseEvent::TimeUp => {
-                announcements.show("Time up", 1.1);
-                feedback.push_feedback_cue("match_timeup", ImpactSource::MatchFlow, 22);
-            }
-            MatchPhaseEvent::Results => {
-                announcements.show("Results - press R", 1.4);
-                feedback.push_feedback_cue("match_results", ImpactSource::MatchFlow, 28);
-            }
-        }
+pub fn tick_match_timer(mut state: ResMut<MatchState>, mut sim_events: ResMut<TickEventBuffer>) {
+    if let Some(event) = state.advance_phase() {
+        let event = match event {
+            MatchPhaseEvent::TimeUp => MatchLifecycleEvent::TimeUp,
+            MatchPhaseEvent::Results => MatchLifecycleEvent::Results,
+        };
+        let _ = sim_events.emit(
+            SimEventSource::Match,
+            SimEventKind::MatchLifecycle { event },
+        );
     }
 }
 
-pub fn tick_hitstop(time: Res<Time>, mut hitstop: ResMut<Hitstop>) {
-    if hitstop.remaining > 0.0 {
-        hitstop.remaining = (hitstop.remaining - time.delta_secs()).max(0.0);
+/// Presents canonical match lifecycle/result facts after rollback routing.
+/// Returns `true` only for a recognized match event, allowing the shared event
+/// consumer to skip combat-sidecar lookup for it.
+pub fn present_match_event(
+    event: SimEvent,
+    announcements: Option<&mut MatchAnnouncements>,
+    feedback: &mut HitEffects,
+) -> bool {
+    let (message, duration, cue, priority) = match event.kind {
+        SimEventKind::MatchLifecycle {
+            event: MatchLifecycleEvent::TimeUp,
+        } => ("Time up", 1.1, "match_timeup", 22),
+        SimEventKind::MatchLifecycle {
+            event: MatchLifecycleEvent::Results,
+        }
+        | SimEventKind::MatchResult { .. } => ("Results - press R", 1.4, "match_results", 28),
+        _ => return false,
+    };
+    if let Some(announcements) = announcements {
+        announcements.show(message, duration);
     }
+    feedback.push_feedback_cue(cue, ImpactSource::MatchFlow, priority);
+    true
+}
+
+pub fn tick_hitstop(mut hitstop: ResMut<Hitstop>) {
+    hitstop.advance_tick();
 }
 
 pub fn tick_announcements(time: Res<Time>, mut announcements: ResMut<MatchAnnouncements>) {
@@ -1548,6 +2108,19 @@ mod tests {
     use crate::components::{
         BotBrain, Controller, Fighter, LocalInputAssignment, ParticipantKind, PlayerSlotId,
     };
+
+    #[derive(Resource, Default)]
+    struct HitstopProbe {
+        active_after_tick: bool,
+    }
+
+    fn fighter_id(index: u8) -> FighterId {
+        FighterId::new(index).expect("test fighter ID is in the fixed roster")
+    }
+
+    fn observe_hitstop_after_tick(hitstop: Res<Hitstop>, mut probe: ResMut<HitstopProbe>) {
+        probe.active_after_tick = hitstop.active();
+    }
 
     fn reconcile_test_system(
         mut commands: Commands,
@@ -1751,6 +2324,25 @@ mod tests {
     }
 
     #[test]
+    fn cross_arena_rematch_resets_canonical_and_render_pose_together() {
+        let previous_spawn = arena_definitions()[0].spawn_points[0];
+        let next_spawn = arena_definitions()[1].spawn_points[0];
+        assert_ne!(previous_spawn, next_spawn);
+
+        let mut fighter = test_fighter(0);
+        fighter.spawn = next_spawn;
+        let mut position = SimPosition::new(previous_spawn);
+        let mut transform =
+            Transform::from_translation(previous_spawn).with_rotation(Quat::from_rotation_y(0.75));
+
+        reset_fighter_pose(&fighter, &mut position, &mut transform);
+
+        assert_eq!(position.translation, next_spawn);
+        assert_eq!(transform.translation, next_spawn);
+        assert_eq!(transform.rotation, Quat::IDENTITY);
+    }
+
+    #[test]
     fn reconcile_human_and_closed_slots_remove_stale_bot_brain() {
         for participant in [ParticipantKind::Human, ParticipantKind::Closed] {
             let mut setup = LocalSetup::default();
@@ -1905,19 +2497,126 @@ mod tests {
         state.reset_for_new_match();
         assert_eq!(state.phase, MatchPhase::Fighting);
         assert_eq!(state.arena_index, 1);
-        assert_eq!(
-            state.advance_phase(MATCH_SECONDS),
-            Some(MatchPhaseEvent::TimeUp)
-        );
+        assert_eq!(state.timer_ticks, seconds_to_ticks_ceil(MATCH_SECONDS));
+        for _ in 1..seconds_to_ticks_ceil(MATCH_SECONDS) {
+            assert_eq!(state.advance_phase(), None);
+        }
+        assert_eq!(state.advance_phase(), Some(MatchPhaseEvent::TimeUp));
         assert_eq!(state.phase, MatchPhase::TimeUp);
         assert_eq!(
-            state.advance_phase(TIME_UP_SECONDS),
-            Some(MatchPhaseEvent::Results)
+            state.phase_timer_ticks,
+            seconds_to_ticks_ceil(TIME_UP_SECONDS)
         );
+        for _ in 1..seconds_to_ticks_ceil(TIME_UP_SECONDS) {
+            assert_eq!(state.advance_phase(), None);
+        }
+        assert_eq!(state.advance_phase(), Some(MatchPhaseEvent::Results));
         assert_eq!(state.phase, MatchPhase::Results);
         state.return_to_setup();
         assert_eq!(state.phase, MatchPhase::Setup);
         assert!(!state.reset_requested);
+    }
+
+    #[test]
+    fn overlapping_hitstop_triggers_keep_the_longest_remaining_duration() {
+        let mut hitstop = Hitstop::default();
+
+        hitstop.trigger(0.12);
+        hitstop.trigger(0.04);
+        assert_eq!(hitstop.remaining_ticks, seconds_to_ticks_ceil(0.12));
+
+        hitstop.trigger(0.2);
+        assert_eq!(hitstop.remaining_ticks, seconds_to_ticks_ceil(0.2));
+        assert!(hitstop.active());
+    }
+
+    #[test]
+    fn hitstop_tick_clamps_to_zero_before_chained_same_frame_systems() {
+        let mut app = App::new();
+        app.insert_resource(Hitstop { remaining_ticks: 1 })
+            .init_resource::<HitstopProbe>()
+            .add_systems(Update, (tick_hitstop, observe_hitstop_after_tick).chain());
+
+        app.update();
+
+        assert_eq!(app.world().resource::<Hitstop>().remaining_ticks, 0);
+        assert!(!app.world().resource::<HitstopProbe>().active_after_tick);
+    }
+
+    #[test]
+    fn match_timer_continues_advancing_during_hitstop() {
+        let mut state = MatchState::default();
+        state.rules.time_limit = Some(10.0);
+        state.reset_for_new_match();
+
+        let mut app = App::new();
+        app.insert_resource(state)
+            .insert_resource(Hitstop {
+                remaining_ticks: seconds_to_ticks_ceil(0.5),
+            })
+            .init_resource::<TickEventBuffer>()
+            .add_systems(FixedUpdate, (tick_hitstop, tick_match_timer).chain());
+
+        app.world_mut().run_schedule(FixedUpdate);
+
+        let state = app.world().resource::<MatchState>();
+        assert_eq!(state.timer_ticks, seconds_to_ticks_ceil(10.0) - 1);
+        assert_eq!(
+            app.world().resource::<Hitstop>().remaining_ticks,
+            seconds_to_ticks_ceil(0.5) - 1
+        );
+    }
+
+    #[test]
+    fn match_phase_presentation_is_an_ordered_simulation_fact() {
+        let mut state = MatchState::default();
+        state.rules.time_limit = Some(1.0 / SIM_HZ as f32);
+        state.reset_for_new_match();
+        let mut app = App::new();
+        app.insert_resource(state)
+            .insert_resource(TickEventBuffer::new(crate::simulation::SimTick(9)))
+            .add_systems(FixedUpdate, tick_match_timer);
+
+        app.world_mut().run_schedule(FixedUpdate);
+
+        let events = app.world().resource::<TickEventBuffer>();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.iter().next().map(|event| event.kind),
+            Some(SimEventKind::MatchLifecycle {
+                event: MatchLifecycleEvent::TimeUp
+            })
+        ));
+        assert!(!app.world().contains_resource::<MatchAnnouncements>());
+        assert!(!app.world().contains_resource::<HitEffects>());
+    }
+
+    #[test]
+    fn match_event_presentation_is_client_only_and_semantically_checked() {
+        let mut announcements = MatchAnnouncements::default();
+        let mut feedback = HitEffects::default();
+        let event = SimEvent {
+            id: crate::sim_event::SimEventId {
+                tick: crate::simulation::SimTick(11),
+                source: SimEventSource::Match,
+                ordinal: 0,
+            },
+            kind: SimEventKind::MatchLifecycle {
+                event: MatchLifecycleEvent::Results,
+            },
+        };
+
+        assert!(present_match_event(
+            event,
+            Some(&mut announcements),
+            &mut feedback
+        ));
+        assert_eq!(announcements.message, "Results - press R");
+        assert_eq!(announcements.timer, 1.4);
+        assert_eq!(
+            feedback.cue_label().as_deref(),
+            Some("match_results MatchFlow p28")
+        );
     }
 
     #[test]
@@ -1978,13 +2677,15 @@ mod tests {
         state.reset_for_new_match();
         state.phase = MatchPhase::Fighting;
 
-        let first = state.record_life_loss(1, Some(0), LifeLossCause::Knockout);
-        assert_eq!(first.awarded_to, Some(0));
+        let first =
+            state.record_life_loss(fighter_id(1), Some(fighter_id(0)), LifeLossCause::Knockout);
+        assert_eq!(first.awarded_to, Some(fighter_id(0)));
         assert_eq!(first.remaining_stock, Some(STOCK_LIVES - 1));
         assert!(!first.eliminated);
 
         state.stocks = [1, 1, 0, 0];
-        let final_ko = state.record_life_loss(1, Some(0), LifeLossCause::Knockout);
+        let final_ko =
+            state.record_life_loss(fighter_id(1), Some(fighter_id(0)), LifeLossCause::Knockout);
         assert!(final_ko.eliminated);
         assert!(final_ko.match_finished);
         assert_eq!(state.phase, MatchPhase::Results);
@@ -1997,13 +2698,13 @@ mod tests {
         state.reset_for_new_match();
         state.phase = MatchPhase::Fighting;
 
-        let first = state.record_ringout(1, Some(0));
-        assert_eq!(first.awarded_to, Some(0));
+        let first = state.record_ringout(fighter_id(1), Some(fighter_id(0)));
+        assert_eq!(first.awarded_to, Some(fighter_id(0)));
         assert_eq!(first.remaining_stock, Some(STOCK_LIVES - 1));
         assert!(!first.eliminated);
 
         state.stocks = [1, 1, 0, 0];
-        let final_ringout = state.record_ringout(1, Some(0));
+        let final_ringout = state.record_ringout(fighter_id(1), Some(fighter_id(0)));
         assert!(final_ringout.eliminated);
         assert!(final_ringout.match_finished);
         assert_eq!(state.phase, MatchPhase::Results);
@@ -2017,20 +2718,83 @@ mod tests {
         state.phase = MatchPhase::Fighting;
         state.stocks = [1, 1, 0, STOCK_LIVES];
 
-        let final_ringout = state.record_ringout(1, Some(0));
+        let final_ringout = state.record_ringout(fighter_id(1), Some(fighter_id(0)));
 
         assert!(final_ringout.match_finished);
-        assert_eq!(final_ringout.awarded_to, Some(0));
+        assert_eq!(final_ringout.awarded_to, Some(fighter_id(0)));
         assert_eq!(state.phase, MatchPhase::Results);
     }
 
     #[test]
-    fn team_ringout_credit_rejects_teammates_and_invalid_attackers() {
+    fn simultaneous_final_stock_batch_draws_and_credits_from_pre_batch_snapshot() {
+        let mut state = MatchState::default();
+        state.select_rule(2);
+        state.reset_for_new_match();
+        state.set_active_slots([true, true, false, false]);
+        state.stocks = [1, 1, 0, 0];
+
+        // Reverse insertion is intentional: commit order is always FighterId.
+        let mut batch = LifeLossBatch::new(&state);
+        batch
+            .push(fighter_id(1), Some(fighter_id(0)), LifeLossCause::RingOut)
+            .unwrap();
+        batch
+            .push(fighter_id(0), Some(fighter_id(1)), LifeLossCause::RingOut)
+            .unwrap();
+        let mut credits = [0_u8; FIGHTER_COUNT];
+        let mut credit_order = [None; FIGHTER_COUNT];
+        let mut credit_count = 0_usize;
+        let resolution = batch.commit(&mut state, |attacker| {
+            credits[attacker.index()] += 1;
+            credit_order[credit_count] = Some(attacker);
+            credit_count += 1;
+        });
+
+        assert_eq!(state.stocks, [0, 0, 0, 0]);
+        assert_eq!(state.phase, MatchPhase::Results);
+        assert_eq!(credits, [1, 1, 0, 0]);
+        assert_eq!(
+            credit_order,
+            [Some(fighter_id(1)), Some(fighter_id(0)), None, None,]
+        );
+        assert_eq!(resolution.outcome, StockMatchOutcome::Draw);
+        assert!(resolution.result_finalized);
+        assert_eq!(
+            resolution.for_fighter(fighter_id(0)),
+            Some(RingoutResolution {
+                awarded_to: Some(fighter_id(1)),
+                remaining_stock: Some(0),
+                eliminated: true,
+                match_finished: true,
+            })
+        );
+        assert_eq!(
+            resolution.for_fighter(fighter_id(1)),
+            Some(RingoutResolution {
+                awarded_to: Some(fighter_id(0)),
+                remaining_stock: Some(0),
+                eliminated: true,
+                match_finished: true,
+            })
+        );
+    }
+
+    #[test]
+    fn team_ringout_credit_rejects_teammates() {
         let mut state = MatchState::default();
 
-        assert_eq!(state.record_ringout(2, Some(0)).awarded_to, None);
-        assert_eq!(state.record_ringout(1, Some(0)).awarded_to, Some(0));
-        assert_eq!(state.record_ringout(1, Some(usize::MAX)).awarded_to, None);
+        assert_eq!(
+            state
+                .record_ringout(fighter_id(2), Some(fighter_id(0)))
+                .awarded_to,
+            None
+        );
+        assert_eq!(
+            state
+                .record_ringout(fighter_id(1), Some(fighter_id(0)))
+                .awarded_to,
+            Some(fighter_id(0))
+        );
     }
 
     #[test]
@@ -2045,7 +2809,7 @@ mod tests {
         };
         let mut equipment = FighterEquipment {
             kind: EquipmentKind::DashCoil,
-            cooldown: 2.0,
+            cooldown: TickTimer::from_seconds_ceil(2.0),
         };
 
         apply_setup_loadout(0, &setup, &mut character, &mut style, &mut equipment);
@@ -2053,6 +2817,6 @@ mod tests {
         assert_eq!(character.kind, CharacterKind::Panda);
         assert_eq!(style.kind, FighterStyleKind::Catalyst);
         assert_eq!(equipment.kind, EquipmentKind::HeavySeal);
-        assert_eq!(equipment.cooldown, 0.0);
+        assert_eq!(equipment.cooldown, TickTimer::ZERO);
     }
 }

@@ -1,61 +1,245 @@
+#![cfg_attr(test, allow(dead_code))]
+
 use bevy::gltf::GltfAssetLabel;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use bevy::window::PrimaryWindow;
 use serde::{Deserialize, Serialize};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use std::fs;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use std::path::{Path, PathBuf};
 
 use crate::arena::ArenaGeometry;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-use crate::arena_defs::active_arena_definition;
-use crate::arena_defs::active_arena_index;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::arena_defs::ActiveArena;
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::camera::ArenaCamera;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::constants::{ARENA_RADIUS, ARENA_TOP_Y};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::game_state::{MatchPhase, MatchState};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
+use crate::simulation::SimulationDriveMode;
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::user_mode::UserModeState;
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const ARENA_ASSET_ROOT: &str = "assets/arena";
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const OVERLAY_ROOT: &str = "assets/maps/overlays";
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const SNAP_VALUES: [f32; 4] = [0.5, 1.0, 0.25, 0.0];
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const ROTATE_STEP: f32 = std::f32::consts::FRAC_PI_8;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const SCALE_STEP: f32 = 0.1;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const MIN_SCALE: f32 = 0.15;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const MAX_SCALE: f32 = 4.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const SELECT_RADIUS: f32 = 1.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const UNDO_LIMIT: usize = 64;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_PAN_SPEED: f32 = 8.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_DRAG_ZOOM: f32 = 0.004;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_SCROLL_LINE_ZOOM: f32 = 0.12;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_SCROLL_PIXEL_ZOOM: f32 = 0.004;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_ROTATE_SPEED: f32 = 1.6;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_MIN_ZOOM: f32 = 0.55;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const EDITOR_CAMERA_MAX_ZOOM: f32 = 2.2;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const ASSET_PALETTE_SIZE: usize = 9;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -73,7 +257,14 @@ impl MapObjectDef {
             .with_scale(Vec3::splat(self.scale))
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     fn flat_position(&self) -> Vec2 {
         Vec2::new(self.position[0], self.position[2])
     }
@@ -97,7 +288,11 @@ impl MapOverlayDef {
 #[derive(Component)]
 pub struct MapOverlayObject;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
 #[derive(Resource)]
 pub struct MapOverlayState {
     loaded_arena_index: Option<usize>,
@@ -105,42 +300,87 @@ pub struct MapOverlayState {
     spawned_entities: Vec<Entity>,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
 impl Default for MapOverlayState {
     fn default() -> Self {
         Self {
             loaded_arena_index: None,
-            overlay: MapOverlayDef::empty(active_arena_index()),
+            overlay: MapOverlayDef::empty(0),
             spawned_entities: Vec::new(),
         }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn setup_map_overlay(mut commands: Commands) {
-    commands.insert_resource(MapOverlayState::default());
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+pub fn setup_map_overlay(mut commands: Commands, active_arena: Res<ActiveArena>) {
+    let mut state = MapOverlayState::default();
+    state.overlay = MapOverlayDef::empty(active_arena.index());
+    commands.insert_resource(state);
 }
 
 #[derive(Component)]
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub struct MapEditorPreview;
 
 #[derive(Component)]
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub struct MapEditorPanel;
 
 #[derive(Component)]
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub struct MapEditorText;
 
 #[derive(Resource)]
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub struct MapEditorPreviewAssets {
     ghost_material: Handle<StandardMaterial>,
 }
 
 #[derive(Resource)]
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub struct MapEditorState {
     pub active: bool,
     catalog: Vec<String>,
@@ -165,7 +405,14 @@ pub struct MapEditorState {
     status: String,
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 impl MapEditorState {
     fn new(catalog: Vec<String>) -> Self {
         Self {
@@ -179,7 +426,7 @@ impl MapEditorState {
             preview_scale: 1.0,
             snap_index: 0,
             loaded_arena_index: None,
-            overlay: MapOverlayDef::empty(active_arena_index()),
+            overlay: MapOverlayDef::empty(0),
             spawned_entities: Vec::new(),
             preview_entity: None,
             preview_asset_path: None,
@@ -248,8 +495,19 @@ impl MapEditorState {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-pub fn setup_map_editor(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
+pub fn setup_map_editor(
+    mut commands: Commands,
+    active_arena: Res<ActiveArena>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let ghost_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.28, 0.78, 1.0, 0.34),
         emissive: LinearRgba::rgb(0.0, 0.09, 0.13),
@@ -258,10 +516,19 @@ pub fn setup_map_editor(mut commands: Commands, mut materials: ResMut<Assets<Sta
         ..default()
     });
     commands.insert_resource(MapEditorPreviewAssets { ghost_material });
-    commands.insert_resource(MapEditorState::new(scan_arena_asset_catalog()));
+    let mut state = MapEditorState::new(scan_arena_asset_catalog());
+    state.overlay = MapOverlayDef::empty(active_arena.index());
+    commands.insert_resource(state);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn setup_map_editor_ui(mut commands: Commands) {
     commands.spawn((
         Node {
@@ -290,13 +557,26 @@ pub fn setup_map_editor_ui(mut commands: Commands) {
     ));
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn toggle_map_editor(
     keys: Res<ButtonInput<KeyCode>>,
     match_state: Res<MatchState>,
     user_mode: Res<UserModeState>,
+    simulation_drive: Res<SimulationDriveMode>,
     mut editor: ResMut<MapEditorState>,
 ) {
+    if *simulation_drive == SimulationDriveMode::ExternalProjection {
+        editor.active = false;
+        editor.selected_object = None;
+        return;
+    }
     if match_state.phase != MatchPhase::Setup || user_mode.blocks_dev_input() {
         editor.active = false;
         editor.selected_object = None;
@@ -314,13 +594,18 @@ pub fn toggle_map_editor(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn sync_map_overlay_visuals(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    active_arena: Res<ActiveArena>,
     mut editor: ResMut<MapEditorState>,
 ) {
-    let arena_index = active_arena_index();
+    let arena_index = active_arena.index();
     if editor.loaded_arena_index == Some(arena_index) {
         return;
     }
@@ -354,13 +639,18 @@ pub fn sync_map_overlay_visuals(
     editor.dirty = false;
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
 pub fn sync_map_overlay_visuals(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    active_arena: Res<ActiveArena>,
     mut overlay_state: ResMut<MapOverlayState>,
 ) {
-    let arena_index = active_arena_index();
+    let arena_index = active_arena.index();
     if overlay_state.loaded_arena_index == Some(arena_index) {
         return;
     }
@@ -381,7 +671,14 @@ pub fn sync_map_overlay_visuals(
     overlay_state.loaded_arena_index = Some(arena_index);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn map_editor_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -391,10 +688,16 @@ pub fn map_editor_input(
     cameras: Query<(&Camera, &GlobalTransform), With<ArenaCamera>>,
     match_state: Res<MatchState>,
     user_mode: Res<UserModeState>,
+    simulation_drive: Res<SimulationDriveMode>,
     asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut editor: ResMut<MapEditorState>,
 ) {
+    if *simulation_drive == SimulationDriveMode::ExternalProjection {
+        editor.active = false;
+        editor.selected_object = None;
+        return;
+    }
     if user_mode.blocks_dev_input() {
         editor.active = false;
         editor.selected_object = None;
@@ -482,7 +785,14 @@ pub fn map_editor_input(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn update_map_editor_ui(
     editor: Res<MapEditorState>,
     mut panels: Query<&mut Node, With<MapEditorPanel>>,
@@ -544,7 +854,14 @@ pub fn update_map_editor_ui(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn draw_map_editor_gizmos(editor: Res<MapEditorState>, mut gizmos: Gizmos) {
     if !editor.active {
         return;
@@ -578,7 +895,14 @@ pub fn draw_map_editor_gizmos(editor: Res<MapEditorState>, mut gizmos: Gizmos) {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn sync_map_editor_preview(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -631,10 +955,18 @@ pub fn sync_map_editor_preview(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn update_map_editor_camera(
     editor: Res<MapEditorState>,
     match_state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
     mut cameras: Query<&mut Transform, With<ArenaCamera>>,
 ) {
     if !editor.active || match_state.phase != MatchPhase::Setup {
@@ -642,20 +974,38 @@ pub fn update_map_editor_camera(
     }
 
     let focus = editor_camera_focus(editor.camera_focus);
-    let position =
-        editor_camera_position(editor.camera_focus, editor.camera_zoom, editor.camera_yaw);
+    let position = editor_camera_position(
+        editor.camera_focus,
+        editor.camera_zoom,
+        editor.camera_yaw,
+        active_arena.definition().camera_offset,
+    );
     for mut camera in &mut cameras {
         camera.translation = position;
         camera.look_at(focus + Vec3::Y * 0.6, Vec3::Y);
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn map_editor_allows_setup_input(editor: Option<Res<MapEditorState>>) -> bool {
     !editor.as_ref().is_some_and(|state| state.active())
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn place_selected_asset(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -686,7 +1036,14 @@ fn place_selected_asset(
     editor.status = format!("Placed object {index}");
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn select_nearest_object(editor: &mut MapEditorState) {
     let cursor = Vec2::new(editor.preview_position.x, editor.preview_position.z);
     let selected = editor
@@ -713,7 +1070,14 @@ fn select_nearest_object(editor: &mut MapEditorState) {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn delete_selected_object(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -752,7 +1116,14 @@ fn delete_selected_object(
     editor.status = format!("Deleted object {index}");
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn rotate_selection_or_preview(editor: &mut MapEditorState, delta: f32, commands: &mut Commands) {
     if let Some(index) = editor.selected_object
         && index < editor.overlay.objects.len()
@@ -769,7 +1140,14 @@ fn rotate_selection_or_preview(editor: &mut MapEditorState, delta: f32, commands
     editor.preview_yaw += delta;
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn scale_selection_or_preview(editor: &mut MapEditorState, delta: f32, commands: &mut Commands) {
     if let Some(index) = editor.selected_object
         && let Some(current_scale) = editor.overlay.objects.get(index).map(|object| object.scale)
@@ -790,7 +1168,14 @@ fn scale_selection_or_preview(editor: &mut MapEditorState, delta: f32, commands:
     editor.preview_scale = (editor.preview_scale + delta).clamp(MIN_SCALE, MAX_SCALE);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn update_spawned_transform(
     commands: &mut Commands,
     entity: Option<&Entity>,
@@ -840,7 +1225,14 @@ fn spawn_overlay_object(
         .id()
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn preview_object_def(editor: &MapEditorState) -> Option<MapObjectDef> {
     Some(MapObjectDef {
         asset_path: editor.selected_asset_path()?.to_string(),
@@ -854,7 +1246,14 @@ fn preview_object_def(editor: &MapEditorState) -> Option<MapObjectDef> {
     })
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn despawn_map_preview(
     commands: &mut Commands,
     editor: &mut MapEditorState,
@@ -870,7 +1269,14 @@ fn despawn_map_preview(
     editor.preview_asset_path = None;
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_preview_material_recursive(
     entity: Entity,
     child_query: &Query<&Children>,
@@ -888,7 +1294,14 @@ fn apply_preview_material_recursive(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn cursor_floor_position(
     windows: &Query<&Window, With<PrimaryWindow>>,
     cameras: &Query<(&Camera, &GlobalTransform), With<ArenaCamera>>,
@@ -905,7 +1318,14 @@ fn cursor_floor_position(
     )
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn update_editor_camera_controls(
     time: &Time,
     keys: &ButtonInput<KeyCode>,
@@ -922,7 +1342,14 @@ fn update_editor_camera_controls(
     apply_editor_camera_zoom_drag(editor, cursor, editor_camera_zoom_drag_active(keys, mouse));
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn update_editor_camera_keyboard_controls(
     editor: &mut MapEditorState,
     keys: &ButtonInput<KeyCode>,
@@ -940,7 +1367,14 @@ fn update_editor_camera_keyboard_controls(
     false
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn editor_camera_pan_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
     let mut direction = Vec2::ZERO;
     let shift = shift_pressed(keys);
@@ -959,7 +1393,14 @@ fn editor_camera_pan_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
     direction
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn editor_camera_rotation_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     if !shift_pressed(keys) {
         return 0.0;
@@ -975,17 +1416,38 @@ fn editor_camera_rotation_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     direction
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn editor_camera_reset_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys) && keys.just_pressed(KeyCode::KeyR)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn editor_camera_zoom_drag_active(
     keys: &ButtonInput<KeyCode>,
     mouse: &ButtonInput<MouseButton>,
@@ -993,7 +1455,14 @@ fn editor_camera_zoom_drag_active(
     mouse.pressed(MouseButton::Middle) || (mouse.pressed(MouseButton::Right) && shift_pressed(keys))
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_editor_camera_pan(editor: &mut MapEditorState, direction: Vec2, dt: f32) {
     if direction == Vec2::ZERO {
         return;
@@ -1005,7 +1474,14 @@ fn apply_editor_camera_pan(editor: &mut MapEditorState, direction: Vec2, dt: f32
     editor.camera_focus = clamp_camera_focus(editor.camera_focus);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn camera_relative_pan_direction(direction: Vec2, yaw: f32) -> Vec2 {
     let (sin, cos) = (-yaw).sin_cos();
     Vec2::new(
@@ -1014,7 +1490,14 @@ fn camera_relative_pan_direction(direction: Vec2, yaw: f32) -> Vec2 {
     )
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_editor_camera_scroll_zoom(editor: &mut MapEditorState, scroll_zoom: f32) {
     if scroll_zoom.abs() <= f32::EPSILON {
         return;
@@ -1024,7 +1507,14 @@ fn apply_editor_camera_scroll_zoom(editor: &mut MapEditorState, scroll_zoom: f32
         (editor.camera_zoom + scroll_zoom).clamp(EDITOR_CAMERA_MIN_ZOOM, EDITOR_CAMERA_MAX_ZOOM);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_editor_camera_rotation(editor: &mut MapEditorState, direction: f32, dt: f32) {
     if direction.abs() <= f32::EPSILON {
         return;
@@ -1034,7 +1524,14 @@ fn apply_editor_camera_rotation(editor: &mut MapEditorState, direction: f32, dt:
         .rem_euclid(std::f32::consts::TAU);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_editor_camera_zoom_drag(
     editor: &mut MapEditorState,
     cursor: Option<Vec2>,
@@ -1058,7 +1555,14 @@ fn apply_editor_camera_zoom_drag(
     editor.camera_drag_cursor = Some(cursor);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn reset_editor_camera(editor: &mut MapEditorState) {
     editor.camera_focus = Vec2::ZERO;
     editor.camera_zoom = 1.0;
@@ -1066,7 +1570,14 @@ fn reset_editor_camera(editor: &mut MapEditorState) {
     editor.camera_drag_cursor = None;
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn clamp_camera_focus(focus: Vec2) -> Vec2 {
     if focus.length() <= ARENA_RADIUS {
         return focus;
@@ -1074,18 +1585,38 @@ fn clamp_camera_focus(focus: Vec2) -> Vec2 {
     focus.normalize_or_zero() * ARENA_RADIUS
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn editor_camera_focus(focus: Vec2) -> Vec3 {
     Vec3::new(focus.x, 0.0, focus.y)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-fn editor_camera_position(focus: Vec2, zoom: f32, yaw: f32) -> Vec3 {
-    editor_camera_focus(focus)
-        + Quat::from_rotation_y(yaw) * active_arena_definition().camera_offset * zoom
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
+fn editor_camera_position(focus: Vec2, zoom: f32, yaw: f32, camera_offset: Vec3) -> Vec3 {
+    editor_camera_focus(focus) + Quat::from_rotation_y(yaw) * camera_offset * zoom
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn mouse_wheel_zoom_delta(event: &MouseWheel) -> f32 {
     let scale = match event.unit {
         MouseScrollUnit::Line => EDITOR_CAMERA_SCROLL_LINE_ZOOM,
@@ -1094,7 +1625,14 @@ fn mouse_wheel_zoom_delta(event: &MouseWheel) -> f32 {
     event.y * scale
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn snap_position(position: Vec3, snap: f32) -> Vec3 {
     if snap <= 0.0 {
         return position;
@@ -1106,7 +1644,14 @@ pub fn snap_position(position: Vec3, snap: f32) -> Vec3 {
     )
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn clamp_to_arena(position: Vec3) -> Vec3 {
     let flat = Vec2::new(position.x, position.z);
     if flat.length() <= ARENA_RADIUS {
@@ -1116,13 +1661,27 @@ fn clamp_to_arena(position: Vec3) -> Vec3 {
     Vec3::new(clamped.x, position.y, clamped.y)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn save_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyS)
         && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn undo_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::KeyZ)
         && (keys.pressed(KeyCode::SuperLeft)
@@ -1131,7 +1690,14 @@ fn undo_pressed(keys: &ButtonInput<KeyCode>) -> bool {
             || keys.pressed(KeyCode::ControlRight))
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn push_undo_snapshot(editor: &mut MapEditorState) {
     if editor.undo_stack.last() == Some(&editor.overlay) {
         return;
@@ -1143,7 +1709,14 @@ fn push_undo_snapshot(editor: &mut MapEditorState) {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn restore_last_overlay(editor: &mut MapEditorState) -> bool {
     let Some(previous) = editor.undo_stack.pop() else {
         editor.status = "Nothing to undo".to_string();
@@ -1157,7 +1730,14 @@ fn restore_last_overlay(editor: &mut MapEditorState) -> bool {
     true
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn undo_editor_action(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -1175,45 +1755,104 @@ fn undo_editor_action(
     }
 }
 
-fn load_overlay(arena_index: usize) -> Result<MapOverlayDef, String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let contents = match arena_index {
-            0 => include_str!("../assets/maps/overlays/arena_0.ron"),
-            1 => include_str!("../assets/maps/overlays/arena_1.ron"),
-            2 => include_str!("../assets/maps/overlays/arena_2.ron"),
-            3 => include_str!("../assets/maps/overlays/arena_3.ron"),
-            4 => include_str!("../assets/maps/overlays/arena_4.ron"),
-            5 => include_str!("../assets/maps/overlays/arena_5.ron"),
-            6 => include_str!("../assets/maps/overlays/arena_6.ron"),
-            7 => include_str!("../assets/maps/overlays/arena_7.ron"),
-            8 => include_str!("../assets/maps/overlays/arena_8.ron"),
-            9 => include_str!("../assets/maps/overlays/arena_9.ron"),
-            _ => return Ok(MapOverlayDef::empty(arena_index)),
-        };
-        let mut overlay: MapOverlayDef =
-            ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        overlay.arena_index = arena_index;
-        return Ok(overlay);
-    }
-
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        let path = overlay_path(arena_index);
-        if !path.exists() {
-            return Ok(MapOverlayDef::empty(arena_index));
-        }
-
-        let contents =
-            fs::read_to_string(&path).map_err(|error| format!("Load failed: {error}"))?;
-        let mut overlay: MapOverlayDef =
-            ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        overlay.arena_index = arena_index;
-        Ok(overlay)
-    }
+#[cfg(any(
+    test,
+    not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))
+))]
+fn embedded_overlay_contents(arena_index: usize) -> Option<&'static str> {
+    Some(match arena_index {
+        0 => include_str!("../assets/maps/overlays/arena_0.ron"),
+        1 => include_str!("../assets/maps/overlays/arena_1.ron"),
+        2 => include_str!("../assets/maps/overlays/arena_2.ron"),
+        3 => include_str!("../assets/maps/overlays/arena_3.ron"),
+        4 => include_str!("../assets/maps/overlays/arena_4.ron"),
+        5 => include_str!("../assets/maps/overlays/arena_5.ron"),
+        6 => include_str!("../assets/maps/overlays/arena_6.ron"),
+        7 => include_str!("../assets/maps/overlays/arena_7.ron"),
+        8 => include_str!("../assets/maps/overlays/arena_8.ron"),
+        9 => include_str!("../assets/maps/overlays/arena_9.ron"),
+        _ => return None,
+    })
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))
+))]
+fn load_embedded_overlay(arena_index: usize) -> Result<MapOverlayDef, String> {
+    let Some(contents) = embedded_overlay_contents(arena_index) else {
+        return Ok(MapOverlayDef::empty(arena_index));
+    };
+    parse_overlay(contents, arena_index)
+}
+
+fn parse_overlay(contents: &str, arena_index: usize) -> Result<MapOverlayDef, String> {
+    let mut overlay: MapOverlayDef =
+        ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
+    overlay.arena_index = arena_index;
+    Ok(overlay)
+}
+
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn load_overlay(arena_index: usize) -> Result<MapOverlayDef, String> {
+    load_overlay_from_path(arena_index, &overlay_path(arena_index))
+}
+
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn load_overlay_from_path(arena_index: usize, path: &Path) -> Result<MapOverlayDef, String> {
+    if !path.exists() {
+        return Ok(MapOverlayDef::empty(arena_index));
+    }
+
+    let contents = fs::read_to_string(path).map_err(|error| format!("Load failed: {error}"))?;
+    parse_overlay(&contents, arena_index)
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn load_overlay(arena_index: usize) -> Result<MapOverlayDef, String> {
+    configured_immutable_overlay(arena_index, None)
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn configured_immutable_overlay(
+    arena_index: usize,
+    _loose_contents: Option<&str>,
+) -> Result<MapOverlayDef, String> {
+    load_embedded_overlay(arena_index)
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn save_overlay(overlay: &MapOverlayDef) -> Result<(), String> {
     let path = overlay_path(overlay.arena_index);
     if let Some(parent) = path.parent() {
@@ -1226,12 +1865,26 @@ fn save_overlay(overlay: &MapOverlayDef) -> Result<(), String> {
     fs::write(path, contents).map_err(|error| error.to_string())
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn overlay_path(arena_index: usize) -> PathBuf {
     Path::new(OVERLAY_ROOT).join(format!("arena_{arena_index}.ron"))
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn scan_arena_asset_catalog() -> Vec<String> {
     let mut assets = Vec::new();
     collect_glb_assets(Path::new(ARENA_ASSET_ROOT), &mut assets);
@@ -1239,18 +1892,39 @@ pub fn scan_arena_asset_catalog() -> Vec<String> {
     assets
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn asset_palette_offset_for(index: usize) -> usize {
     (index / ASSET_PALETTE_SIZE) * ASSET_PALETTE_SIZE
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn asset_display_name(path: &str) -> String {
     let leaf = path.rsplit('/').next().unwrap_or(path);
     leaf.strip_suffix(".glb").unwrap_or(leaf).replace('_', " ")
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn asset_palette_lines(catalog: &[String], selected_asset: usize, palette_offset: usize) -> String {
     if catalog.is_empty() {
         return "AVAILABLE OBJECTS\n  <no GLB assets found under assets/arena>".to_string();
@@ -1273,7 +1947,14 @@ fn asset_palette_lines(catalog: &[String], selected_asset: usize, palette_offset
     lines.join("\n")
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn collect_glb_assets(root: &Path, assets: &mut Vec<String>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -1298,6 +1979,34 @@ fn collect_glb_assets(root: &Path, assets: &mut Vec<String>) {
 mod tests {
     use super::*;
 
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
+    #[test]
+    fn external_projection_forces_map_editor_closed() {
+        let mut app = App::new();
+        let mut editor = MapEditorState::new(Vec::new());
+        editor.active = true;
+        editor.selected_object = Some(0);
+        app.insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(MatchState::default())
+            .insert_resource(UserModeState::default())
+            .insert_resource(SimulationDriveMode::ExternalProjection)
+            .insert_resource(editor)
+            .add_systems(Update, toggle_map_editor);
+
+        app.update();
+
+        let editor = app.world().resource::<MapEditorState>();
+        assert!(!editor.active);
+        assert_eq!(editor.selected_object, None);
+    }
+
     #[test]
     fn overlay_roundtrips_through_ron() {
         let overlay = MapOverlayDef {
@@ -1313,6 +2022,50 @@ mod tests {
         let ron = ron::ser::to_string(&overlay).unwrap();
         let restored: MapOverlayDef = ron::from_str(&ron).unwrap();
         assert_eq!(restored, overlay);
+    }
+
+    #[test]
+    fn embedded_overlays_match_every_checked_in_ron_file() {
+        for arena_index in 0..10 {
+            let embedded = load_embedded_overlay(arena_index).unwrap();
+            let authored_contents = fs::read_to_string(overlay_path(arena_index)).unwrap();
+            let authored = parse_overlay(&authored_contents, arena_index).unwrap();
+
+            assert_eq!(embedded, authored, "arena {arena_index}");
+        }
+    }
+
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
+    #[test]
+    fn immutable_overlay_ignores_loose_contents() {
+        let hostile_overlay = MapOverlayDef {
+            arena_index: 0,
+            objects: vec![MapObjectDef {
+                asset_path: "hostile.glb".to_owned(),
+                position: [99.0, 99.0, 99.0],
+                yaw: 3.0,
+                scale: 99.0,
+            }],
+        };
+        let hostile = ron::ser::to_string(&hostile_overlay).unwrap();
+
+        let configured = configured_immutable_overlay(0, Some(&hostile)).unwrap();
+        let embedded = load_embedded_overlay(0).unwrap();
+
+        assert_eq!(configured, embedded);
+        assert_ne!(configured, hostile_overlay);
+    }
+
+    #[test]
+    fn embedded_overlay_unknown_arena_is_empty() {
+        assert_eq!(
+            load_embedded_overlay(usize::MAX).unwrap(),
+            MapOverlayDef::empty(usize::MAX)
+        );
     }
 
     #[test]
@@ -1480,8 +2233,9 @@ mod tests {
         apply_editor_camera_rotation(&mut editor, 1.0, 0.5);
         assert!(editor.camera_yaw > 0.0);
 
-        let base = editor_camera_position(Vec2::ZERO, 1.0, 0.0);
-        let rotated = editor_camera_position(Vec2::ZERO, 1.0, editor.camera_yaw);
+        let camera_offset = crate::arena_defs::arena_definitions()[0].camera_offset;
+        let base = editor_camera_position(Vec2::ZERO, 1.0, 0.0, camera_offset);
+        let rotated = editor_camera_position(Vec2::ZERO, 1.0, editor.camera_yaw, camera_offset);
         assert_ne!(rotated.x, base.x);
         assert!((rotated.y - base.y).abs() < 0.001);
     }

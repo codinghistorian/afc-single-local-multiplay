@@ -2,21 +2,44 @@
 name = "ffc-prototype"
 version = "0.1.0"
 edition = "2024"
+default-run = "ffc-prototype"
+autobins = false
+
+[[bin]]
+name = "ffc-prototype"
+path = "src/main.rs"
+
+[[bin]]
+name = "afc-dedicated"
+path = "src/bin/afc-dedicated.rs"
+
+[[bin]]
+name = "afc-multiplayer-profile"
+path = "src/bin/afc-multiplayer-profile.rs"
+required-features = ["perf-alloc"]
 
 [features]
-default = ["native"]
+default = ["native", "dev-hot-reload"]
 native = [
-    "bevy/file_watcher",
     "bevy/bevy_gilrs",
     "bevy/x11",
     "bevy/wayland",
 ]
+dev-hot-reload = ["native", "bevy/file_watcher"]
 web = ["bevy/webgl2"]
-perf = []
+perf = ["dep:libc"]
+# Allocation counters replace the process allocator and therefore stay out of
+# ordinary graphical timing/RSS captures. The render-free multiplayer profiler
+# explicitly opts into this feature.
+perf-alloc = ["perf"]
 trace = ["perf", "bevy/trace_tracy"]
+native-net = ["dep:crossbeam-channel", "dep:lightyear"]
+steam-net = ["native-net", "lightyear/steam", "dep:steamworks"]
+shipping = ["native", "steam-net"]
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = [
+arrayvec = "0.7"
+bevy = { version = "=0.18.1", default-features = false, features = [
     "std",
     "async_executor",
     "multi_threaded",
@@ -46,8 +69,22 @@ bevy = { version = "0.18", default-features = false, features = [
     "vorbis",
     "wav",
 ] }
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 ron = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libm = { version = "=0.2.16", default-features = false, features = ["force-soft-floats"] }
+libc = { version = "0.2", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+lightyear = { version = "=0.26.4", default-features = false, optional = true, features = [
+    "std",
+    "client",
+    "server",
+    "udp",
+    "netcode",
+    "crossbeam",
+] }
+steamworks = { version = "=0.12.2", optional = true, default-features = false, features = ["raw-bindings"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

@@ -106,8 +106,7 @@ impl LocalPropBarrier {
 }
 
 fn rotate(point: Vec2, yaw: f32) -> Vec2 {
-    let cos = yaw.cos();
-    let sin = yaw.sin();
+    let (cos, sin) = crate::canonical_math::collision_yaw_basis(yaw);
     Vec2::new(cos * point.x - sin * point.y, sin * point.x + cos * point.y)
 }
 

@@ -5,9 +5,11 @@ use crate::constants::{
     FIGHTER_COUNT, GUARD_COUNTER_WINDOW, ITEM_COFFEE_SPEED_MULTIPLIER,
     ITEM_GIANT_DAMAGE_TAKEN_MULTIPLIER, ITEM_GIANT_SIZE_MULTIPLIER, MAX_HEALTH, MAX_STAMINA,
 };
+use crate::determinism::{FighterHitMask, FighterId, SimEntityId};
 use crate::effects::HitImpactEffectId;
 use crate::equipment::EquipmentKind;
 use crate::reactions::{QueuedAftermath, ReactionFamilyId};
+use crate::simulation::{ElapsedTicks, TickTimer};
 use crate::styles::FighterStyleKind;
 use crate::techniques::{
     AttackPayloadId, AttackShapeId, DamageElement, DamageProfileId, TechniqueButton, TechniqueId,
@@ -21,21 +23,50 @@ pub struct Fighter {
     pub spawn: Vec3,
 }
 
+/// Canonical world-space position for rollback-owned simulation entities.
+///
+/// Rendering may copy this value into a Bevy [`Transform`], interpolate that
+/// copy, and freely change its rotation or scale. Authoritative systems,
+/// snapshots, and hashes must use this component instead so presentation can
+/// never feed state back into simulation.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct SimPosition {
+    pub translation: Vec3,
+}
+
+impl SimPosition {
+    pub const fn new(translation: Vec3) -> Self {
+        Self { translation }
+    }
+}
+
+impl From<Vec3> for SimPosition {
+    fn from(translation: Vec3) -> Self {
+        Self::new(translation)
+    }
+}
+
 #[derive(Component)]
 pub struct FighterStats {
     pub health: f32,
     pub stamina: f32,
     pub score: i32,
-    pub last_attacker: Option<usize>,
-    pub invulnerability: f32,
-    pub health_refill_timer: f32,
-    pub respawn_timer: f32,
+    /// Stable fighter-slot relationship used for ring-out/KO credit.
+    ///
+    /// This must never contain a Bevy entity or an unchecked collection index:
+    /// it is rollback state and is serialized in canonical snapshots.
+    pub last_attacker: Option<FighterId>,
+    pub invulnerability: TickTimer,
+    pub health_refill_timer: TickTimer,
+    pub respawn_timer: TickTimer,
+    /// Render/HUD feedback only. Fixed simulation and semantic-event emission
+    /// must never branch on this value.
     pub hud_flash: f32,
     pub element_carry: Option<DamageElement>,
     pub element_carry_strength: f32,
-    pub element_carry_timer: f32,
-    pub item_speed_timer: f32,
-    pub item_giant_timer: f32,
+    pub element_carry_timer: TickTimer,
+    pub item_speed_timer: TickTimer,
+    pub item_giant_timer: TickTimer,
 }
 
 impl Default for FighterStats {
@@ -45,22 +76,22 @@ impl Default for FighterStats {
             stamina: MAX_STAMINA,
             score: 0,
             last_attacker: None,
-            invulnerability: 0.0,
-            health_refill_timer: 0.0,
-            respawn_timer: 0.0,
+            invulnerability: TickTimer::ZERO,
+            health_refill_timer: TickTimer::ZERO,
+            respawn_timer: TickTimer::ZERO,
             hud_flash: 0.0,
             element_carry: None,
             element_carry_strength: 0.0,
-            element_carry_timer: 0.0,
-            item_speed_timer: 0.0,
-            item_giant_timer: 0.0,
+            element_carry_timer: TickTimer::ZERO,
+            item_speed_timer: TickTimer::ZERO,
+            item_giant_timer: TickTimer::ZERO,
         }
     }
 }
 
 impl FighterStats {
     pub fn item_speed_multiplier(&self) -> f32 {
-        if self.item_speed_timer > 0.0 {
+        if self.item_speed_timer.active() {
             ITEM_COFFEE_SPEED_MULTIPLIER
         } else {
             1.0
@@ -68,7 +99,7 @@ impl FighterStats {
     }
 
     pub fn item_size_multiplier(&self) -> f32 {
-        if self.item_giant_timer > 0.0 {
+        if self.item_giant_timer.active() {
             ITEM_GIANT_SIZE_MULTIPLIER
         } else {
             1.0
@@ -76,7 +107,7 @@ impl FighterStats {
     }
 
     pub fn item_damage_taken_multiplier(&self) -> f32 {
-        if self.item_giant_timer > 0.0 {
+        if self.item_giant_timer.active() {
             ITEM_GIANT_DAMAGE_TAKEN_MULTIPLIER
         } else {
             1.0
@@ -93,28 +124,27 @@ pub struct FighterMotor {
     pub landing_aftermath: Option<QueuedAftermath>,
     pub air_attack_used: bool,
     pub queued_air_attack: Option<TechniqueButton>,
-    pub queued_air_attack_timer: f32,
+    pub queued_air_attack_timer: TickTimer,
     pub jump_attack_landing_recovery: bool,
     pub bee_air_dash_motion_active: bool,
     pub bee_air_dash_shot_available: bool,
-    pub ledge_grace_timer: f32,
-    pub landing_stick_timer: f32,
-    pub jump_takeoff_timer: f32,
+    pub ledge_grace_timer: TickTimer,
+    pub landing_stick_timer: TickTimer,
+    pub jump_takeoff_timer: TickTimer,
     pub reaction_bounces: u8,
     pub pig_air_meat_slam_air_hits: u8,
-    pub dash_trail_timer: f32,
-    pub dash_slide_timer: f32,
-    pub dash_jump_carry_timer: f32,
+    pub dash_slide_timer: TickTimer,
+    pub dash_jump_carry_timer: TickTimer,
     pub dash_jump_carry_speed_limit: f32,
-    pub impact_speed_limit_timer: f32,
+    pub impact_speed_limit_timer: TickTimer,
     pub impact_speed_limit: f32,
     pub penguin_ice_slide_direction: Option<Vec3>,
     pub penguin_ice_slide_speed: f32,
-    pub guard_active_timer: f32,
-    pub guard_cooldown_timer: f32,
-    pub guard_start_buffer_timer: f32,
+    pub guard_active_timer: ElapsedTicks,
+    pub guard_cooldown_timer: TickTimer,
+    pub guard_start_buffer_timer: TickTimer,
     pub guard_was_requested: bool,
-    pub guard_counter_window_timer: f32,
+    pub guard_counter_window_timer: TickTimer,
     pub guard_counter_source: Option<Vec3>,
     pub guard_counter_buffered: bool,
 }
@@ -129,28 +159,27 @@ impl Default for FighterMotor {
             landing_aftermath: None,
             air_attack_used: false,
             queued_air_attack: None,
-            queued_air_attack_timer: 0.0,
+            queued_air_attack_timer: TickTimer::ZERO,
             jump_attack_landing_recovery: false,
             bee_air_dash_motion_active: false,
             bee_air_dash_shot_available: false,
-            ledge_grace_timer: 0.0,
-            landing_stick_timer: 0.0,
-            jump_takeoff_timer: 0.0,
+            ledge_grace_timer: TickTimer::ZERO,
+            landing_stick_timer: TickTimer::ZERO,
+            jump_takeoff_timer: TickTimer::ZERO,
             reaction_bounces: 0,
             pig_air_meat_slam_air_hits: 0,
-            dash_trail_timer: 0.0,
-            dash_slide_timer: 0.0,
-            dash_jump_carry_timer: 0.0,
+            dash_slide_timer: TickTimer::ZERO,
+            dash_jump_carry_timer: TickTimer::ZERO,
             dash_jump_carry_speed_limit: 0.0,
-            impact_speed_limit_timer: 0.0,
+            impact_speed_limit_timer: TickTimer::ZERO,
             impact_speed_limit: 0.0,
             penguin_ice_slide_direction: None,
             penguin_ice_slide_speed: 0.0,
-            guard_active_timer: 0.0,
-            guard_cooldown_timer: 0.0,
-            guard_start_buffer_timer: 0.0,
+            guard_active_timer: ElapsedTicks::ZERO,
+            guard_cooldown_timer: TickTimer::ZERO,
+            guard_start_buffer_timer: TickTimer::ZERO,
             guard_was_requested: false,
-            guard_counter_window_timer: 0.0,
+            guard_counter_window_timer: TickTimer::ZERO,
             guard_counter_source: None,
             guard_counter_buffered: false,
         }
@@ -159,12 +188,12 @@ impl Default for FighterMotor {
 
 impl FighterMotor {
     pub fn open_guard_counter_window(&mut self, source: Vec3) {
-        self.guard_counter_window_timer = GUARD_COUNTER_WINDOW;
+        self.guard_counter_window_timer = TickTimer::from_seconds_ceil(GUARD_COUNTER_WINDOW);
         self.guard_counter_source = Some(source);
     }
 
     pub fn clear_guard_counter_window(&mut self) {
-        self.guard_counter_window_timer = 0.0;
+        self.guard_counter_window_timer.clear();
         self.guard_counter_source = None;
         self.guard_counter_buffered = false;
     }
@@ -192,52 +221,52 @@ pub struct FighterInput {
 /// Refresh-only directional input modifier applied after every input producer.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct DrunkStatus {
-    pub remaining: f32,
-    pub bubble_timer: f32,
-    pub bubble_phase: f32,
+    pub remaining: TickTimer,
 }
 
 impl Default for DrunkStatus {
     fn default() -> Self {
         Self {
-            remaining: 0.0,
-            bubble_timer: 0.0,
-            bubble_phase: 0.0,
+            remaining: TickTimer::ZERO,
         }
     }
 }
 
 impl DrunkStatus {
     pub fn refresh(&mut self) {
-        self.remaining = self.remaining.max(crate::constants::DRUNK_DURATION);
+        self.remaining.set_max(TickTimer::from_seconds_ceil(
+            crate::constants::DRUNK_DURATION,
+        ));
     }
 
     pub fn active(&self) -> bool {
-        self.remaining > 0.0
+        self.remaining.active()
     }
 }
 
 #[derive(Component, Default)]
 pub struct FighterInventory {
-    pub held: Option<Entity>,
+    /// Canonical item relationship. Bevy `Entity` handles are resolved through
+    /// `SimulationIdentityAllocator` only at the ECS access boundary.
+    pub held: Option<SimEntityId>,
 }
 
 #[derive(Component, Default)]
 pub struct FighterGrabState {
-    pub holding: Option<Entity>,
-    pub held_by: Option<Entity>,
-    pub regrab_lockout: f32,
+    pub holding: Option<FighterId>,
+    pub held_by: Option<FighterId>,
+    pub regrab_lockout: TickTimer,
 }
 
 #[derive(Component, Default)]
 pub struct FighterSpecialState {
-    pub cooldown: f32,
+    pub cooldown: TickTimer,
 }
 
 #[derive(Component, Default)]
 pub struct FighterUltimateState {
-    pub target: Option<Entity>,
-    pub owner: Option<Entity>,
+    pub target: Option<FighterId>,
+    pub owner: Option<FighterId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -639,13 +668,13 @@ pub enum FighterAction {
 #[derive(Component)]
 pub struct FighterActionState {
     pub action: FighterAction,
-    pub elapsed: f32,
+    pub elapsed: ElapsedTicks,
     pub hitbox_spawned: bool,
     pub queued_combo: bool,
     pub queued_technique: Option<TechniqueId>,
     pub queued_button: Option<TechniqueButton>,
     pub buffered_button: Option<TechniqueButton>,
-    pub buffered_button_elapsed: f32,
+    pub buffered_button_elapsed: ElapsedTicks,
     pub confirmed_hit: bool,
     pub technique_id: Option<TechniqueId>,
     pub cancel_window_open: bool,
@@ -654,8 +683,10 @@ pub struct FighterActionState {
     pub reaction_getup_ms: Option<u32>,
     pub reaction_recover_ms: Option<u32>,
     pub reaction_family: Option<ReactionFamilyId>,
+    /// Render-pose handedness only. Canonical reaction family and motion own
+    /// all gameplay/event decisions.
     pub reaction_visual_side: f32,
-    pub charge_elapsed: f32,
+    pub charge_elapsed: ElapsedTicks,
     pub charge_release_requested: bool,
 }
 
@@ -675,13 +706,13 @@ impl Default for FighterActionState {
     fn default() -> Self {
         Self {
             action: FighterAction::Idle,
-            elapsed: 0.0,
+            elapsed: ElapsedTicks::ZERO,
             hitbox_spawned: false,
             queued_combo: false,
             queued_technique: None,
             queued_button: None,
             buffered_button: None,
-            buffered_button_elapsed: 0.0,
+            buffered_button_elapsed: ElapsedTicks::ZERO,
             confirmed_hit: false,
             technique_id: None,
             cancel_window_open: false,
@@ -691,7 +722,7 @@ impl Default for FighterActionState {
             reaction_recover_ms: None,
             reaction_family: None,
             reaction_visual_side: 1.0,
-            charge_elapsed: 0.0,
+            charge_elapsed: ElapsedTicks::ZERO,
             charge_release_requested: false,
         }
     }
@@ -738,18 +769,17 @@ pub enum BotMovementPlan {
 #[derive(Component)]
 pub struct BotBrain {
     pub behavior: BotBehaviorMode,
-    pub decision_timer: f32,
-    pub movement_plan_timer: f32,
-    pub dash_timer: f32,
-    pub attack_timer: f32,
+    pub decision_timer: TickTimer,
+    pub movement_plan_timer: TickTimer,
+    pub dash_timer: TickTimer,
+    pub attack_timer: TickTimer,
     pub strafe_sign: f32,
     pub movement_plan: BotMovementPlan,
 }
 
 #[derive(Component)]
 pub struct Hitbox {
-    pub owner: Entity,
-    pub owner_id: usize,
+    pub owner: FighterId,
     pub kind: AttackKind,
     pub payload_id: Option<AttackPayloadId>,
     pub attacker_character: Option<CharacterKind>,
@@ -769,9 +799,9 @@ pub struct Hitbox {
     pub guardable: bool,
     pub base_radius: f32,
     pub radius: f32,
-    pub lifetime: f32,
-    pub elapsed: f32,
-    pub total_lifetime: f32,
+    pub lifetime: TickTimer,
+    pub elapsed: ElapsedTicks,
+    pub total_lifetime: u32,
     pub spawn_origin: Vec3,
     pub facing: Vec3,
     pub base_range: f32,
@@ -781,7 +811,7 @@ pub struct Hitbox {
     pub parented: bool,
     pub path: &'static [[f32; 3]],
     pub expires_on_owner_landing: bool,
-    pub landing_linger: f32,
+    pub landing_linger: TickTimer,
     pub landing_linger_started: bool,
     pub ground_path_end: bool,
     pub ground_path_clearance: f32,
@@ -789,7 +819,7 @@ pub struct Hitbox {
     pub hitstop_scale: f32,
     pub shake_scale: f32,
     pub feedback_priority_bonus: u8,
-    pub already_hit: Vec<Entity>,
+    pub already_hit: FighterHitMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

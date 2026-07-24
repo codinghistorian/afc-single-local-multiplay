@@ -6,6 +6,7 @@ use std::f32::consts::PI;
 use crate::constants::{POP_BOMB_BLAST_MESH_RADIUS, POP_BOMB_BLAST_VISUAL_END_SCALE};
 use crate::reactions::ReactionFamilyId;
 use crate::techniques::{DamageElement, FeedbackPhase};
+use crate::user_mode::PresentationTimeScale;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
@@ -46,6 +47,10 @@ pub(crate) struct MachineScratchFollow {
 
 #[derive(Resource, Default)]
 pub struct EffectAssets {
+    /// False for canonical/headless worlds. A default resource deliberately
+    /// carries no render capability, so fixed simulation systems may share the
+    /// same call sites without creating presentation-only entities.
+    presentation_enabled: bool,
     spark_mesh: Handle<Mesh>,
     puff_mesh: Handle<Mesh>,
     column_mesh: Handle<Mesh>,
@@ -69,6 +74,20 @@ pub struct EffectAssets {
     fire_punch_blue: Handle<StandardMaterial>,
     alcohol: Handle<StandardMaterial>,
     alcohol_bubble: Handle<StandardMaterial>,
+}
+
+impl EffectAssets {
+    pub const fn presentation_enabled(&self) -> bool {
+        self.presentation_enabled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn presentation_enabled_for_test() -> Self {
+        Self {
+            presentation_enabled: true,
+            ..default()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1793,6 +1812,9 @@ pub fn spawn_light_fire_punch(
     visual_side: f32,
     palette: FirePunchPalette,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let (translation, direction) = light_fire_punch_anchor(position, facing, visual_side);
     let start_scale = Vec3::new(1.22, 1.02, 0.96);
     let end_scale = Vec3::new(0.16, 0.12, 0.2);
@@ -1848,6 +1870,9 @@ fn spawn_feedback_burst(
     facing: Vec3,
     burst: FeedbackBurstDef,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let facing = facing.normalize_or_zero();
     let forward = if facing.length_squared() > 0.0 {
         facing
@@ -2026,6 +2051,7 @@ pub fn setup_effect_assets(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let assets = EffectAssets {
+        presentation_enabled: true,
         spark_mesh: meshes.add(Cone::new(0.12, 0.42)),
         puff_mesh: meshes.add(Sphere::new(0.18).mesh().uv(12, 6)),
         column_mesh: meshes.add(Cylinder::new(0.36, 1.0)),
@@ -2360,6 +2386,7 @@ fn fire_punch_effect_material(
 
 pub fn update_effects(
     time: Res<Time>,
+    presentation_time_scale: Res<PresentationTimeScale>,
     mut commands: Commands,
     mut effects: Query<(
         Entity,
@@ -2369,7 +2396,7 @@ pub fn update_effects(
     )>,
     targets: Query<&Transform, Without<VisualEffect>>,
 ) {
-    let dt = time.delta_secs();
+    let dt = presentation_time_scale.scale_delta(time.delta_secs());
     for (entity, mut effect, mut transform, follow) in &mut effects {
         effect.age += dt;
         if effect.age >= effect.lifetime {
@@ -2409,6 +2436,9 @@ pub fn spawn_burning_fighter_effect(
     fighter_entity: Entity,
     duration: f32,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let flame_offsets = [
         Vec3::new(-0.24, 0.18, 0.12),
         Vec3::new(0.22, 0.28, -0.1),
@@ -2493,6 +2523,9 @@ pub fn spawn_machine_scratch(
     fighter_entity: Entity,
     fighter_position: Vec3,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     for bank in 0..2 {
         let angle = if bank == 0 { -0.72 } else { 0.72 };
         for index in 0..3 {
@@ -2557,6 +2590,9 @@ pub fn spawn_element_hit_spark(
     heavy: bool,
     scale: f32,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let profile = element_spark_profile(element);
     let heavy = heavy || profile.heavy_bias;
     let scale = scale.clamp(0.65, 1.65);
@@ -2600,6 +2636,9 @@ pub fn spawn_element_hit_spark(
 }
 
 pub fn spawn_guard_flash(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     commands.spawn((
         Mesh3d(assets.ring_mesh.clone()),
         MeshMaterial3d(assets.cyan.clone()),
@@ -2622,6 +2661,9 @@ pub fn spawn_dash_trail(
     position: Vec3,
     facing: Vec3,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let yaw = facing.x.atan2(facing.z);
     commands.spawn((
         Mesh3d(assets.trail_mesh.clone()),
@@ -2642,6 +2684,9 @@ pub fn spawn_dash_trail(
 }
 
 pub fn spawn_dust_puff(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     for i in 0..5 {
         let angle = i as f32 / 5.0 * PI * 2.0;
         let dir = Vec3::new(angle.cos(), 0.18, angle.sin()).normalize();
@@ -2668,6 +2713,9 @@ pub fn spawn_aftermath_pulse(
     position: Vec3,
     family: ReactionFamilyId,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let (material, lifetime, end_scale) = match family {
         ReactionFamilyId::GroundedDownGetup => (assets.orange.clone(), 0.42, 2.05),
         ReactionFamilyId::GroundBounceDown => (assets.red.clone(), 0.48, 2.45),
@@ -2695,6 +2743,9 @@ pub fn spawn_aftermath_pulse(
 }
 
 pub fn spawn_ringout_burst(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     commands.spawn((
         Mesh3d(assets.ring_mesh.clone()),
         MeshMaterial3d(assets.red.clone()),
@@ -2713,6 +2764,9 @@ pub fn spawn_ringout_burst(commands: &mut Commands, assets: &EffectAssets, posit
 }
 
 pub fn spawn_respawn_column(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     commands.spawn((
         Mesh3d(assets.column_mesh.clone()),
         MeshMaterial3d(assets.white.clone()),
@@ -2730,6 +2784,9 @@ pub fn spawn_respawn_column(commands: &mut Commands, assets: &EffectAssets, posi
 }
 
 pub fn spawn_pop_bomb_blast(commands: &mut Commands, assets: &EffectAssets, position: Vec3) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     commands.spawn((
         Mesh3d(assets.blast_mesh.clone()),
         MeshMaterial3d(assets.orange.clone()),
@@ -2753,6 +2810,9 @@ pub fn spawn_alcohol_spray(
     position: Vec3,
     phase: f32,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     commands.spawn((
         Mesh3d(assets.ring_mesh.clone()),
         MeshMaterial3d(assets.alcohol.clone()),
@@ -2798,6 +2858,9 @@ pub fn spawn_drunk_bubble(
     fighter_id: usize,
     phase: f32,
 ) {
+    if !assets.presentation_enabled() {
+        return;
+    }
     let seed = fighter_id as f32 * 1.73 + phase * 2.41;
     let offset = Vec3::new(
         (seed * 1.7).sin() * 0.28,
@@ -2824,6 +2887,44 @@ pub fn spawn_drunk_bubble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn_effect_probe(mut commands: Commands, assets: Res<EffectAssets>) {
+        spawn_feedback_package(
+            &mut commands,
+            &assets,
+            Vec3::ZERO,
+            Vec3::Z,
+            FeedbackPackageId::GenericImpact,
+        );
+        spawn_guard_flash(&mut commands, &assets, Vec3::ZERO);
+        spawn_dust_puff(&mut commands, &assets, Vec3::ZERO);
+        spawn_drunk_bubble(&mut commands, &assets, Vec3::ZERO, 0, 0.0);
+    }
+
+    #[test]
+    fn default_effect_assets_are_a_headless_no_op() {
+        let mut app = App::new();
+        app.init_resource::<EffectAssets>()
+            .add_systems(Update, spawn_effect_probe);
+        app.update();
+
+        let mut effects = app.world_mut().query::<&VisualEffect>();
+        assert_eq!(effects.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn presentation_enabled_effect_assets_spawn_the_same_probe() {
+        let mut app = App::new();
+        app.insert_resource(EffectAssets {
+            presentation_enabled: true,
+            ..EffectAssets::default()
+        })
+        .add_systems(Update, spawn_effect_probe);
+        app.update();
+
+        let mut effects = app.world_mut().query::<&VisualEffect>();
+        assert!(effects.iter(app.world()).count() > 0);
+    }
 
     #[test]
     fn element_spark_profiles_make_damage_metadata_read_visually() {

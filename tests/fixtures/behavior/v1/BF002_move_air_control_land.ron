@@ -1,0 +1,796 @@
+(
+    schema_version: 1,
+    contract_version: 5,
+    id: 2,
+    name: "BF002_move_air_control_land",
+    classification: Preserve,
+    setup: (
+        arena: 0,
+        rules: 1,
+        seed: 2948636674,
+        slots: [
+            (
+                occupied: true,
+                character: 0,
+                style: 1,
+                equipment: 1,
+                team: 0,
+            ),
+            (
+                occupied: true,
+                character: 1,
+                style: 0,
+                equipment: 0,
+                team: 1,
+            ),
+            (
+                occupied: false,
+                character: 3,
+                style: 2,
+                equipment: 2,
+                team: 0,
+            ),
+            (
+                occupied: false,
+                character: 4,
+                style: 0,
+                equipment: 3,
+                team: 1,
+            ),
+        ],
+    ),
+    duration_ticks: 120,
+    restore_tick: 55,
+    stop_on_result: false,
+    checkpoint_ticks: [
+        1,
+        12,
+        30,
+        55,
+        80,
+        120,
+    ],
+    raw_spans: [
+        (
+            fighter: 0,
+            start_tick: 1,
+            end_tick: 40,
+            movement: (127, 0),
+            held: 2,
+        ),
+    ],
+    raw_edges: [
+        (
+            fighter: 0,
+            tick: 1,
+            pressed: 130,
+            released: 128,
+        ),
+        (
+            fighter: 0,
+            tick: 41,
+            pressed: 0,
+            released: 2,
+        ),
+    ],
+    action_spans: [],
+    action_edges: [],
+    expected: Some((
+        hashes: [
+            (
+                tick: 1,
+                hash: "e1000ae9187c17a5",
+            ),
+            (
+                tick: 2,
+                hash: "4cc4fffba197521e",
+            ),
+            (
+                tick: 3,
+                hash: "8b181292b40b26d1",
+            ),
+            (
+                tick: 4,
+                hash: "c13ee1dec532014a",
+            ),
+            (
+                tick: 5,
+                hash: "e65b6770e8e8a372",
+            ),
+            (
+                tick: 6,
+                hash: "2eab09eeaed087b9",
+            ),
+            (
+                tick: 7,
+                hash: "851efaa6aabcf0dc",
+            ),
+            (
+                tick: 8,
+                hash: "d70a16475d36eb90",
+            ),
+            (
+                tick: 9,
+                hash: "e1a631cc92280b93",
+            ),
+            (
+                tick: 10,
+                hash: "d499f0728b3d9d4f",
+            ),
+            (
+                tick: 11,
+                hash: "7163064ca97c18d3",
+            ),
+            (
+                tick: 12,
+                hash: "de308b64662ea2b8",
+            ),
+            (
+                tick: 13,
+                hash: "994240e3a013e9b0",
+            ),
+            (
+                tick: 14,
+                hash: "479072aaa45b7fcf",
+            ),
+            (
+                tick: 15,
+                hash: "1cc2708947589541",
+            ),
+            (
+                tick: 16,
+                hash: "46bd0d25aef2350f",
+            ),
+            (
+                tick: 17,
+                hash: "8e5c594ff7dbe456",
+            ),
+            (
+                tick: 18,
+                hash: "ea2dc4491c50643d",
+            ),
+            (
+                tick: 19,
+                hash: "c03fde5c54505716",
+            ),
+            (
+                tick: 20,
+                hash: "095bc140289e423c",
+            ),
+            (
+                tick: 21,
+                hash: "eb797a415679e0e2",
+            ),
+            (
+                tick: 22,
+                hash: "7178ec7d98f0e269",
+            ),
+            (
+                tick: 23,
+                hash: "4bc71a54504800ba",
+            ),
+            (
+                tick: 24,
+                hash: "7feba0a250c50b76",
+            ),
+            (
+                tick: 25,
+                hash: "1d8c935867fa8ad0",
+            ),
+            (
+                tick: 26,
+                hash: "98fe847ed0a0acef",
+            ),
+            (
+                tick: 27,
+                hash: "7d578dd5f25714ec",
+            ),
+            (
+                tick: 28,
+                hash: "a3d49a29ef776f96",
+            ),
+            (
+                tick: 29,
+                hash: "728f85ae3df5378d",
+            ),
+            (
+                tick: 30,
+                hash: "6be2ccf9b72daf4d",
+            ),
+            (
+                tick: 31,
+                hash: "20fa52d5ee1dc93e",
+            ),
+            (
+                tick: 32,
+                hash: "a99a5b10daf5583c",
+            ),
+            (
+                tick: 33,
+                hash: "4ea8b2cfc18fd8b5",
+            ),
+            (
+                tick: 34,
+                hash: "5f0815afeb04ab88",
+            ),
+            (
+                tick: 35,
+                hash: "cc6c828b31c0b927",
+            ),
+            (
+                tick: 36,
+                hash: "13e1bd0db9ca272d",
+            ),
+            (
+                tick: 37,
+                hash: "fb4f65df2819b006",
+            ),
+            (
+                tick: 38,
+                hash: "eab7c2419ba66a60",
+            ),
+            (
+                tick: 39,
+                hash: "3296962ad6808e09",
+            ),
+            (
+                tick: 40,
+                hash: "110d16bf7abb93ae",
+            ),
+            (
+                tick: 41,
+                hash: "735d8ba396039f66",
+            ),
+            (
+                tick: 42,
+                hash: "34a25596944bab4b",
+            ),
+            (
+                tick: 43,
+                hash: "89681c9e3b80816b",
+            ),
+            (
+                tick: 44,
+                hash: "77b9b681b932c955",
+            ),
+            (
+                tick: 45,
+                hash: "0469e595964c728b",
+            ),
+            (
+                tick: 46,
+                hash: "e5955532dc0a7bab",
+            ),
+            (
+                tick: 47,
+                hash: "127ced323b9a95bf",
+            ),
+            (
+                tick: 48,
+                hash: "6e0c21018fee0c85",
+            ),
+            (
+                tick: 49,
+                hash: "e304d1ba278103f5",
+            ),
+            (
+                tick: 50,
+                hash: "5f48c121aa62a848",
+            ),
+            (
+                tick: 51,
+                hash: "693238fade086caa",
+            ),
+            (
+                tick: 52,
+                hash: "b0f0cb06d2a2e769",
+            ),
+            (
+                tick: 53,
+                hash: "a102dac755ad9e1e",
+            ),
+            (
+                tick: 54,
+                hash: "808a3a98d7828efd",
+            ),
+            (
+                tick: 55,
+                hash: "453fb9ba86c45785",
+            ),
+            (
+                tick: 56,
+                hash: "bd8870649bea3a7d",
+            ),
+            (
+                tick: 57,
+                hash: "f6139053d6fef615",
+            ),
+            (
+                tick: 58,
+                hash: "ff9559c6b9cd95a5",
+            ),
+            (
+                tick: 59,
+                hash: "8f6125f7dd3351b5",
+            ),
+            (
+                tick: 60,
+                hash: "60254831c750c545",
+            ),
+            (
+                tick: 61,
+                hash: "0e5d823850ea7cc5",
+            ),
+            (
+                tick: 62,
+                hash: "9f91dcb7d69cb7dd",
+            ),
+            (
+                tick: 63,
+                hash: "2541ca2a4db3fee5",
+            ),
+            (
+                tick: 64,
+                hash: "5565b5548067263d",
+            ),
+            (
+                tick: 65,
+                hash: "9114a57346b81505",
+            ),
+            (
+                tick: 66,
+                hash: "5fd0d249b921b975",
+            ),
+            (
+                tick: 67,
+                hash: "c5a895b348e77395",
+            ),
+            (
+                tick: 68,
+                hash: "765f54377ec090f5",
+            ),
+            (
+                tick: 69,
+                hash: "e2fc2ca17ce79ef5",
+            ),
+            (
+                tick: 70,
+                hash: "2f8de63b50f4b95d",
+            ),
+            (
+                tick: 71,
+                hash: "c6c852844b521e05",
+            ),
+            (
+                tick: 72,
+                hash: "e1a9144c4c2e8fdd",
+            ),
+            (
+                tick: 73,
+                hash: "bc507809d14b5595",
+            ),
+            (
+                tick: 74,
+                hash: "1810e282d7b2b685",
+            ),
+            (
+                tick: 75,
+                hash: "e9b36d5fbb554e55",
+            ),
+            (
+                tick: 76,
+                hash: "f784457c46315545",
+            ),
+            (
+                tick: 77,
+                hash: "2728b352fdac8be5",
+            ),
+            (
+                tick: 78,
+                hash: "b8c96c1180c96bfd",
+            ),
+            (
+                tick: 79,
+                hash: "831fd006a22f8465",
+            ),
+            (
+                tick: 80,
+                hash: "ac3109ebbd4035dd",
+            ),
+            (
+                tick: 81,
+                hash: "3271559734d8ec65",
+            ),
+            (
+                tick: 82,
+                hash: "172dd09bc7c27575",
+            ),
+            (
+                tick: 83,
+                hash: "0de4651fcfe425b5",
+            ),
+            (
+                tick: 84,
+                hash: "ab13ad156e816ed5",
+            ),
+            (
+                tick: 85,
+                hash: "b9955ee604c9e1f5",
+            ),
+            (
+                tick: 86,
+                hash: "8de18b0c65b894bd",
+            ),
+            (
+                tick: 87,
+                hash: "63af2856762a6345",
+            ),
+            (
+                tick: 88,
+                hash: "32566f7c17377a3d",
+            ),
+            (
+                tick: 89,
+                hash: "0f5a292173202955",
+            ),
+            (
+                tick: 90,
+                hash: "f7389abb392ccda5",
+            ),
+            (
+                tick: 91,
+                hash: "63147ed1bcb15475",
+            ),
+            (
+                tick: 92,
+                hash: "ca2716b146f56a85",
+            ),
+            (
+                tick: 93,
+                hash: "218026135ea9efc5",
+            ),
+            (
+                tick: 94,
+                hash: "f4a25445fc5b049d",
+            ),
+            (
+                tick: 95,
+                hash: "4938f6fde4c184a5",
+            ),
+            (
+                tick: 96,
+                hash: "3995d1054f20013d",
+            ),
+            (
+                tick: 97,
+                hash: "10a7b7e2903033c5",
+            ),
+            (
+                tick: 98,
+                hash: "0d000c2ccbed25f5",
+            ),
+            (
+                tick: 99,
+                hash: "ed90bf6bf7ea9115",
+            ),
+            (
+                tick: 100,
+                hash: "557754508c47e475",
+            ),
+            (
+                tick: 101,
+                hash: "02b376d86d3192b5",
+            ),
+            (
+                tick: 102,
+                hash: "a7755da920a8c5dd",
+            ),
+            (
+                tick: 103,
+                hash: "08080f2a0904c7c5",
+            ),
+            (
+                tick: 104,
+                hash: "9e9359910787015d",
+            ),
+            (
+                tick: 105,
+                hash: "29146b5a43ed67d5",
+            ),
+            (
+                tick: 106,
+                hash: "25479eac0e140145",
+            ),
+            (
+                tick: 107,
+                hash: "9d3d0e097b548d55",
+            ),
+            (
+                tick: 108,
+                hash: "4e9185a4e5dbee85",
+            ),
+            (
+                tick: 109,
+                hash: "d45d567358973e25",
+            ),
+            (
+                tick: 110,
+                hash: "256b94f70a0c27fd",
+            ),
+            (
+                tick: 111,
+                hash: "d54888cd1b2e7da5",
+            ),
+            (
+                tick: 112,
+                hash: "6bdd5b79d217171d",
+            ),
+            (
+                tick: 113,
+                hash: "3ab4922ea7f9e665",
+            ),
+            (
+                tick: 114,
+                hash: "66f3957f3249acf5",
+            ),
+            (
+                tick: 115,
+                hash: "59c00c2fc277b675",
+            ),
+            (
+                tick: 116,
+                hash: "04e8e9a05b51cc15",
+            ),
+            (
+                tick: 117,
+                hash: "8828e697a359ef35",
+            ),
+            (
+                tick: 118,
+                hash: "7555d34263f3517d",
+            ),
+            (
+                tick: 119,
+                hash: "1deaff0394f20805",
+            ),
+            (
+                tick: 120,
+                hash: "cc63ac2d728b93fd",
+            ),
+        ],
+        checkpoints: [
+            (
+                tick: 1,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14736, 2291, 11469),
+                        velocity: (616, 26897, 0),
+                        grounded: false,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 2,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 12,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-13945, 6322, 11469),
+                        velocity: (7392, 16404, 0),
+                        grounded: false,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 2,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 30,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-9972, 7801, 11469),
+                        velocity: (18480, -6378, 0),
+                        grounded: false,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 2,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 55,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-4421, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 80,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-4421, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 120,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-4421, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+        ],
+        event_ticks: [
+            (
+                tick: 47,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(47), source: Fighter(FighterId(0)), ordinal: 0 }, kind: FighterLifecycle { fighter: FighterId(0), event: Landed } }",
+                ],
+            ),
+        ],
+        final_tick: 120,
+        final_result: "Pending",
+    )),
+)

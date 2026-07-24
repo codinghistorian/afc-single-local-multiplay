@@ -9,7 +9,14 @@ pub enum FighterStyleKind {
     Catalyst,
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub const FIGHTER_STYLE_KINDS: [FighterStyleKind; 3] = [
     FighterStyleKind::Anchor,
     FighterStyleKind::Vector,
@@ -190,7 +197,14 @@ pub fn style_label(kind: FighterStyleKind) -> &'static str {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn next_style_kind(kind: FighterStyleKind) -> FighterStyleKind {
     let index = FIGHTER_STYLE_KINDS
         .iter()

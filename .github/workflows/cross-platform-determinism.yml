@@ -1,0 +1,68 @@
+name: Cross-platform determinism
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "build.rs"
+      - "src/**"
+      - "tests/**"
+      - ".github/workflows/cross-platform-determinism.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frozen-determinism-contracts:
+    name: Frozen contracts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install Linux audio headers
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libasound2-dev libudev-dev libwayland-dev libx11-dev libxi-dev
+          libxkbcommon-dev pkg-config
+      - name: Verify frozen full-simulation tape (debug profile)
+        run: >-
+          cargo test --locked --lib
+          headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result
+          -- --exact
+      - name: Verify versioned behavior-fixture corpus (debug profile)
+        run: >-
+          cargo test --locked --lib
+          headless::behavior_fixtures::checked_in_behavior_fixtures_match_production_simulation
+          -- --exact
+      - name: Verify compact authored-content matrix (debug profile)
+        run: >-
+          cargo test --locked --lib
+          headless::tests::compact_all_content_matrix_matches_frozen_hashes
+          -- --exact
+      - name: Verify frozen full-simulation tape (release profile)
+        run: >-
+          cargo test --locked --release --lib
+          headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result
+          -- --exact
+      - name: Verify versioned behavior-fixture corpus (release profile)
+        run: >-
+          cargo test --locked --release --lib
+          headless::behavior_fixtures::checked_in_behavior_fixtures_match_production_simulation
+          -- --exact
+      - name: Verify compact authored-content matrix (release profile)
+        run: >-
+          cargo test --locked --release --lib
+          headless::tests::compact_all_content_matrix_matches_frozen_hashes
+          -- --exact

@@ -1,52 +1,165 @@
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::time::Real;
 use serde::{Deserialize, Serialize};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use std::fs;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use std::path::{Path, PathBuf};
 
-use crate::arena_defs::active_arena_definition;
+use crate::arena_defs::ActiveArena;
+#[cfg(test)]
+use crate::arena_defs::arena_definitions;
 use crate::combat::HitEffects;
 use crate::components::{Fighter, FighterAction, FighterActionState};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use crate::constants::ARENA_RADIUS;
 use crate::constants::CAMERA_FOLLOW_RATE;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use crate::game_state::MatchAnnouncements;
 use crate::game_state::MatchState;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use crate::map_editor::MapEditorState;
-use crate::user_mode::UserModeState;
+use crate::user_mode::{PresentationTimeScale, UserModeState};
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_PAN_SPEED: f32 = 8.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_ROTATE_SPEED: f32 = 1.6;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_HEIGHT_SPEED: f32 = 8.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_SCROLL_LINE_ZOOM: f32 = 0.12;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_SCROLL_PIXEL_ZOOM: f32 = 0.004;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_MIN_ZOOM: f32 = 0.55;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_MAX_ZOOM: f32 = 2.2;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_MIN_HEIGHT_OFFSET: f32 = -6.0;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 const GAMEPLAY_CAMERA_MAX_HEIGHT_OFFSET: f32 = 8.0;
 const GAMEPLAY_CAMERA_SHAKE_DECAY_PER_SEC: f32 = 1.8;
 const GAMEPLAY_CAMERA_SHAKE_FREQUENCY: f32 = 72.0;
 const GAMEPLAY_CAMERA_SHAKE_SECONDARY_SCALE: f32 = 1.37;
 const GAMEPLAY_CAMERA_SHAKE_TRANSLATION_SCALE: f32 = 0.34;
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))
+))]
+const EMBEDDED_SINGLE_PLAYER_CAMERA_PRESET: &str =
+    include_str!("../assets/camera/single_player_camera.ron");
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 const SINGLE_PLAYER_CAMERA_PRESET_PATH: &str = "assets/camera/single_player_camera.ron";
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 const DEV_PLAYER_CAMERA_TARGET_ID: usize = 0;
 
 #[derive(Component)]
@@ -59,11 +172,23 @@ pub struct UiCamera;
 pub enum ScreenLook {
     Default,
     NoirCrime,
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     Comedy,
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     Family,
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     Romance,
 }
 
@@ -73,7 +198,11 @@ impl Default for ScreenLook {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 impl ScreenLook {
     fn next(self) -> Self {
         match self {
@@ -119,7 +248,14 @@ impl Default for GameplayCameraControl {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 impl GameplayCameraControl {
     fn reset(&mut self) {
         *self = Self::default();
@@ -142,7 +278,14 @@ impl Default for SinglePlayerCameraPreset {
 }
 
 impl SinglePlayerCameraPreset {
-    #[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     fn new(control: GameplayCameraControl, follow_player: bool) -> Self {
         Self {
             control,
@@ -177,12 +320,20 @@ impl SinglePlayerCameraMode {
         Self { follow_player }
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     fn toggle_follow_player(&mut self) {
         self.follow_player = !self.follow_player;
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     fn announcement(self) -> &'static str {
         if self.follow_player {
             "Single-player follow camera: On"
@@ -284,7 +435,7 @@ impl ScreenLookTransition {
     }
 }
 
-pub fn setup_camera(mut commands: Commands) {
+pub fn setup_camera(mut commands: Commands, active_arena: Res<ActiveArena>) {
     let single_player_preset = load_single_player_camera_preset();
     commands.insert_resource(SinglePlayerCameraMode::new(
         single_player_preset.follow_player(),
@@ -297,7 +448,7 @@ pub fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         ColorGrading::default(),
-        Transform::from_translation(active_arena_definition().camera_offset)
+        Transform::from_translation(active_arena.definition().camera_offset)
             .looking_at(Vec3::ZERO, Vec3::Y),
         ArenaCamera,
     ));
@@ -313,7 +464,11 @@ pub fn setup_camera(mut commands: Commands) {
     ));
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn update_gameplay_camera_controls(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -340,19 +495,34 @@ pub fn update_gameplay_camera_controls(
     );
 }
 
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn load_single_player_camera_preset() -> SinglePlayerCameraPreset {
-    #[cfg(target_arch = "wasm32")]
-    {
-        single_player_camera_preset_from_contents(Some(include_str!(
-            "../assets/camera/single_player_camera.ron"
-        )))
-    }
+    let contents = fs::read_to_string(single_player_camera_preset_path()).ok();
+    single_player_camera_preset_from_contents(contents.as_deref())
+}
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        let contents = fs::read_to_string(single_player_camera_preset_path()).ok();
-        single_player_camera_preset_from_contents(contents.as_deref())
-    }
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn load_single_player_camera_preset() -> SinglePlayerCameraPreset {
+    configured_immutable_single_player_camera_preset(None)
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn configured_immutable_single_player_camera_preset(
+    _loose_contents: Option<&str>,
+) -> SinglePlayerCameraPreset {
+    single_player_camera_preset_from_contents(Some(EMBEDDED_SINGLE_PLAYER_CAMERA_PRESET))
 }
 
 fn single_player_camera_preset_from_contents(contents: Option<&str>) -> SinglePlayerCameraPreset {
@@ -362,7 +532,11 @@ fn single_player_camera_preset_from_contents(contents: Option<&str>) -> SinglePl
         .unwrap_or_default()
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn load_single_player_camera_preset_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     editor: Option<Res<MapEditorState>>,
@@ -384,7 +558,11 @@ pub fn load_single_player_camera_preset_hotkey(
     announcements.show("Single-player camera loaded", 1.0);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn toggle_single_player_camera_follow_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     editor: Option<Res<MapEditorState>>,
@@ -404,7 +582,11 @@ pub fn toggle_single_player_camera_follow_hotkey(
     announcements.show(mode.announcement(), 1.0);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn save_single_player_camera_preset_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     editor: Option<Res<MapEditorState>>,
@@ -429,7 +611,11 @@ pub fn save_single_player_camera_preset_hotkey(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn save_single_player_camera_preset_to_disk(
     preset: SinglePlayerCameraPreset,
 ) -> Result<(), String> {
@@ -442,7 +628,14 @@ fn save_single_player_camera_preset_to_disk(
     fs::write(path, contents).map_err(|error| error.to_string())
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn single_player_camera_preset_contents(
     preset: SinglePlayerCameraPreset,
 ) -> Result<String, String> {
@@ -451,7 +644,14 @@ fn single_player_camera_preset_contents(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_single_player_camera_preset(
     control: &mut GameplayCameraControl,
     mode: &mut SinglePlayerCameraMode,
@@ -461,12 +661,20 @@ fn apply_single_player_camera_preset(
     *mode = SinglePlayerCameraMode::new(preset.follow_player());
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn single_player_camera_preset_path() -> PathBuf {
     Path::new(SINGLE_PLAYER_CAMERA_PRESET_PATH).to_path_buf()
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn apply_screen_look_to_cameras(
     screen_look: ScreenLook,
     cameras: &mut Query<&mut ColorGrading, With<ArenaCamera>>,
@@ -536,7 +744,11 @@ fn screen_look_color_grading(screen_look: ScreenLook) -> ColorGrading {
             midtones: color_grading_section(0.32, 1.25, 1.0, 0.92, -0.01),
             highlights: color_grading_section(0.45, 1.15, 1.0, 1.05, 0.0),
         },
-        #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+        #[cfg(all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        ))]
         ScreenLook::Comedy => ColorGrading {
             global: ColorGradingGlobal {
                 exposure: 0.15,
@@ -549,7 +761,11 @@ fn screen_look_color_grading(screen_look: ScreenLook) -> ColorGrading {
             midtones: color_grading_section(1.18, 0.86, 1.0, 1.08, 0.02),
             highlights: color_grading_section(1.1, 0.84, 1.0, 1.12, 0.0),
         },
-        #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+        #[cfg(all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        ))]
         ScreenLook::Family => ColorGrading {
             global: ColorGradingGlobal {
                 exposure: 0.1,
@@ -562,7 +778,11 @@ fn screen_look_color_grading(screen_look: ScreenLook) -> ColorGrading {
             midtones: color_grading_section(1.12, 0.9, 1.0, 1.06, 0.015),
             highlights: color_grading_section(1.08, 0.88, 0.98, 1.16, 0.0),
         },
-        #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+        #[cfg(all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        ))]
         ScreenLook::Romance => ColorGrading {
             global: ColorGradingGlobal {
                 exposure: 0.06,
@@ -660,7 +880,11 @@ fn color_grading_section(
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn toggle_camera_action_effects(
     keys: Res<ButtonInput<KeyCode>>,
     editor: Option<Res<MapEditorState>>,
@@ -697,6 +921,7 @@ pub fn toggle_camera_action_effects(
 
 pub fn follow_camera(
     time: Res<Time>,
+    presentation_time_scale: Res<PresentationTimeScale>,
     mut effects: ResMut<HitEffects>,
     mut camera_action_effects: ResMut<CameraActionEffects>,
     state: Res<MatchState>,
@@ -704,6 +929,7 @@ pub fn follow_camera(
     single_player_preset: Res<SinglePlayerCameraPreset>,
     single_player_mode: Res<SinglePlayerCameraMode>,
     user_mode: Res<UserModeState>,
+    active_arena: Res<ActiveArena>,
     mut cameras: Query<&mut Transform, With<ArenaCamera>>,
     fighters: Query<(&Fighter, &Transform, &FighterActionState), Without<ArenaCamera>>,
 ) {
@@ -716,11 +942,19 @@ pub fn follow_camera(
     let user_single_player_target_id = user_mode.single_player_camera_target_id();
     let user_follow_target_id =
         gameplay_camera_user_follow_target_id(user_single_player_target_id, &single_player_mode);
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     let follow_target_id = user_follow_target_id.or_else(|| {
         gameplay_camera_native_dev_follow_target_id(user_mode.active(), &single_player_mode)
     });
-    #[cfg(not(all(feature = "native", not(target_arch = "wasm32"))))]
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
     let follow_target_id = user_follow_target_id;
     let follow_target_present = gameplay_camera_target_present(&samples, follow_target_id);
     let center = gameplay_camera_center_for_samples(&samples, follow_target_id);
@@ -734,8 +968,13 @@ pub fn follow_camera(
         gameplay_camera_control_for_follow_target(camera_control, follow_target_present);
 
     let focus = gameplay_camera_focus(center, &camera_control);
-    let target = gameplay_camera_target(center, farthest, &camera_control);
-    let dt = time.delta_secs();
+    let target = gameplay_camera_target(
+        center,
+        farthest,
+        active_arena.definition().camera_offset,
+        &camera_control,
+    );
+    let dt = presentation_time_scale.scale_delta(time.delta_secs());
 
     effects.shake = decayed_camera_shake(effects.shake, dt);
     let shake = if camera_action_effects.enabled {
@@ -844,7 +1083,11 @@ fn gameplay_camera_user_follow_target_id(
     user_single_player_target_id
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn gameplay_camera_native_dev_follow_target_id(
     user_mode_active: bool,
     mode: &SinglePlayerCameraMode,
@@ -899,7 +1142,14 @@ fn gameplay_camera_follow_alpha(dt: f32) -> f32 {
     1.0 - (-CAMERA_FOLLOW_RATE * dt).exp()
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn gameplay_camera_pan_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
     if !shift_pressed(keys) || command_or_control_pressed(keys) {
         return Vec2::ZERO;
@@ -915,7 +1165,14 @@ fn gameplay_camera_pan_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
     direction
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn gameplay_camera_height_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     if !shift_pressed(keys) || !command_or_control_pressed(keys) {
         return 0.0;
@@ -931,7 +1188,14 @@ fn gameplay_camera_height_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     direction
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn gameplay_camera_rotation_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     if !shift_pressed(keys) {
         return 0.0;
@@ -947,39 +1211,88 @@ fn gameplay_camera_rotation_direction(keys: &ButtonInput<KeyCode>) -> f32 {
     direction
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn command_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn command_or_control_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     command_pressed(keys)
         || keys.pressed(KeyCode::ControlLeft)
         || keys.pressed(KeyCode::ControlRight)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn camera_reset_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys) && keys.just_pressed(KeyCode::KeyR)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn single_player_camera_load_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys) && command_or_control_pressed(keys) && keys.just_pressed(KeyCode::KeyL)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn single_player_camera_save_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys) && command_or_control_pressed(keys) && keys.just_pressed(KeyCode::KeyS)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn single_player_camera_follow_toggle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     shift_pressed(keys) && command_or_control_pressed(keys) && keys.just_pressed(KeyCode::KeyF)
 }
@@ -992,7 +1305,14 @@ pub fn camera_relative_direction(direction: Vec2, yaw: f32) -> Vec2 {
     )
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn update_gameplay_camera_control(
     control: &mut GameplayCameraControl,
     keys: &ButtonInput<KeyCode>,
@@ -1015,7 +1335,14 @@ fn update_gameplay_camera_control(
     apply_gameplay_camera_scroll_zoom(control, gameplay_camera_scroll_zoom(keys, scroll_zoom));
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_gameplay_camera_pan(control: &mut GameplayCameraControl, direction: Vec2, dt: f32) {
     if direction == Vec2::ZERO {
         return;
@@ -1026,7 +1353,14 @@ fn apply_gameplay_camera_pan(control: &mut GameplayCameraControl, direction: Vec
     control.focus_offset = clamp_camera_focus_offset(control.focus_offset);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_gameplay_camera_rotation(control: &mut GameplayCameraControl, direction: f32, dt: f32) {
     if direction.abs() <= f32::EPSILON {
         return;
@@ -1036,7 +1370,14 @@ fn apply_gameplay_camera_rotation(control: &mut GameplayCameraControl, direction
         .rem_euclid(std::f32::consts::TAU);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_gameplay_camera_height(control: &mut GameplayCameraControl, direction: f32, dt: f32) {
     if direction.abs() <= f32::EPSILON {
         return;
@@ -1049,7 +1390,14 @@ fn apply_gameplay_camera_height(control: &mut GameplayCameraControl, direction: 
         );
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn gameplay_camera_scroll_zoom(keys: &ButtonInput<KeyCode>, scroll_zoom: f32) -> f32 {
     if shift_pressed(keys) {
         scroll_zoom
@@ -1058,7 +1406,14 @@ fn gameplay_camera_scroll_zoom(keys: &ButtonInput<KeyCode>, scroll_zoom: f32) ->
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn apply_gameplay_camera_scroll_zoom(control: &mut GameplayCameraControl, scroll_zoom: f32) {
     if scroll_zoom.abs() <= f32::EPSILON {
         return;
@@ -1068,7 +1423,14 @@ fn apply_gameplay_camera_scroll_zoom(control: &mut GameplayCameraControl, scroll
         (control.zoom + scroll_zoom).clamp(GAMEPLAY_CAMERA_MIN_ZOOM, GAMEPLAY_CAMERA_MAX_ZOOM);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn mouse_wheel_zoom_delta(event: &MouseWheel) -> f32 {
     let scale = match event.unit {
         MouseScrollUnit::Line => GAMEPLAY_CAMERA_SCROLL_LINE_ZOOM,
@@ -1077,7 +1439,14 @@ fn mouse_wheel_zoom_delta(event: &MouseWheel) -> f32 {
     event.y * scale
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn clamp_camera_focus_offset(offset: Vec2) -> Vec2 {
     if offset.length() <= ARENA_RADIUS {
         return offset;
@@ -1089,10 +1458,14 @@ fn gameplay_camera_focus(center: Vec3, control: &GameplayCameraControl) -> Vec3 
     center + Vec3::new(control.focus_offset.x, 0.0, control.focus_offset.y)
 }
 
-fn gameplay_camera_target(center: Vec3, farthest: f32, control: &GameplayCameraControl) -> Vec3 {
+fn gameplay_camera_target(
+    center: Vec3,
+    farthest: f32,
+    arena_camera_offset: Vec3,
+    control: &GameplayCameraControl,
+) -> Vec3 {
     let zoom = (farthest - 4.0).max(0.0) * 0.33;
-    let mut offset =
-        (active_arena_definition().camera_offset + Vec3::new(0.0, zoom * 0.6, zoom)) * control.zoom;
+    let mut offset = (arena_camera_offset + Vec3::new(0.0, zoom * 0.6, zoom)) * control.zoom;
     offset.y += control.height_offset;
     gameplay_camera_focus(center, control) + Quat::from_rotation_y(control.yaw) * offset
 }
@@ -1156,6 +1529,41 @@ mod tests {
             single_player_camera_preset_from_contents(Some("not valid ron")),
             SinglePlayerCameraPreset::default()
         );
+    }
+
+    #[test]
+    fn embedded_single_player_camera_preset_matches_checked_in_file() {
+        let authored = std::fs::read_to_string("assets/camera/single_player_camera.ron").unwrap();
+
+        assert_eq!(
+            single_player_camera_preset_from_contents(Some(EMBEDDED_SINGLE_PLAYER_CAMERA_PRESET)),
+            single_player_camera_preset_from_contents(Some(&authored))
+        );
+    }
+
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
+    #[test]
+    fn immutable_camera_preset_ignores_loose_contents() {
+        let hostile = "(
+            focus_offset: (42.0, -42.0),
+            yaw: 2.5,
+            zoom: 2.0,
+            height_offset: 7.0,
+            follow_player: false,
+        )";
+        let hostile_preset = single_player_camera_preset_from_contents(Some(hostile));
+        assert_ne!(hostile_preset, SinglePlayerCameraPreset::default());
+
+        let configured = configured_immutable_single_player_camera_preset(Some(hostile));
+        let embedded =
+            single_player_camera_preset_from_contents(Some(EMBEDDED_SINGLE_PLAYER_CAMERA_PRESET));
+
+        assert_eq!(configured, embedded);
+        assert_ne!(configured, hostile_preset);
     }
 
     #[test]
@@ -1324,9 +1732,9 @@ mod tests {
         };
         let center = Vec3::new(1.0, 0.0, 3.0);
         let focus = gameplay_camera_focus(center, &control);
-        let target = gameplay_camera_target(center, 4.0, &control);
-        let expected_target =
-            focus + Quat::from_rotation_y(control.yaw) * active_arena_definition().camera_offset;
+        let camera_offset = arena_definitions()[0].camera_offset;
+        let target = gameplay_camera_target(center, 4.0, camera_offset, &control);
+        let expected_target = focus + Quat::from_rotation_y(control.yaw) * camera_offset;
 
         assert_vec3_close(focus, Vec3::new(3.0, 0.0, 2.0), 0.001);
         assert_vec3_close(target, expected_target, 0.001);
@@ -1464,7 +1872,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     #[test]
     fn gameplay_camera_native_dev_follow_target_falls_back_outside_user_mode() {
         assert_eq!(
@@ -1554,10 +1966,11 @@ mod tests {
     fn gameplay_camera_target_distance_scales_with_zoom() {
         let center = Vec3::ZERO;
         let mut control = GameplayCameraControl::default();
-        let normal_distance = gameplay_camera_target(center, 4.0, &control).length();
+        let camera_offset = arena_definitions()[0].camera_offset;
+        let normal_distance = gameplay_camera_target(center, 4.0, camera_offset, &control).length();
 
         control.zoom = 1.6;
-        let zoomed_distance = gameplay_camera_target(center, 4.0, &control).length();
+        let zoomed_distance = gameplay_camera_target(center, 4.0, camera_offset, &control).length();
 
         assert!(zoomed_distance > normal_distance);
     }
@@ -1566,10 +1979,11 @@ mod tests {
     fn gameplay_camera_target_height_offset_changes_vertical_position() {
         let center = Vec3::ZERO;
         let mut control = GameplayCameraControl::default();
-        let normal_target = gameplay_camera_target(center, 4.0, &control);
+        let camera_offset = arena_definitions()[0].camera_offset;
+        let normal_target = gameplay_camera_target(center, 4.0, camera_offset, &control);
 
         control.height_offset = 3.0;
-        let raised_target = gameplay_camera_target(center, 4.0, &control);
+        let raised_target = gameplay_camera_target(center, 4.0, camera_offset, &control);
 
         assert_vec3_close(raised_target, normal_target + Vec3::Y * 3.0, 0.001);
     }

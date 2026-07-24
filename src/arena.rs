@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use bevy::camera::visibility::RenderLayers;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::EulerRot;
@@ -6,25 +7,33 @@ use bevy::scene::SceneInstanceReady;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use std::fs;
+use std::mem::size_of;
+use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::arena_barriers::ArenaBarrierDefinition;
 use crate::arena_defs::{
-    ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
-    ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, CRANK_PIPE_VISUAL_SCALE,
-    PlatformDefinition, active_arena_definition, active_arena_index, arena_definitions,
+    ActiveArena, ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape,
+    ArenaHazardDefinition, ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme,
+    CRANK_PIPE_VISUAL_SCALE, CRANK_YARD_ARENA_INDEX, PlatformDefinition, arena_definitions,
 };
 use crate::arena_prop_colliders::{
     LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
 };
 use crate::camera::ArenaCamera;
 use crate::combat::{
-    DamageDefenderProfile, HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource,
-    NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
+    CombatPresentationIntentJournal, ImpactFeedbackIntensity, ImpactOutcome, ImpactProfile,
+    ImpactSource, NEUTRAL_IMPACT_OWNER_ID, can_receive_impact, impact_profile,
 };
 use crate::components::{
     Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterStats,
+    SimPosition,
 };
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
@@ -32,12 +41,32 @@ use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
+use crate::contact_arbitration::{
+    ContactBuffer, ContactFlags, ContactOutcomeKind, ContactPhase, ContactRecord, ContactSourceId,
+    ContactSourceKind,
+};
+use crate::determinism::{
+    DEFAULT_F32_QUANTIZATION, FighterId, SimEntityId, SimEntityKind, dequantize_f32, quantize_f32,
+};
+use crate::ecs_identity::{
+    SIM_ENTITY_POOL_CAPACITIES, StableEntityCommands, StableSimEntity, despawn_stable,
+    try_spawn_stable,
+};
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
-use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
-use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
+use crate::game_state::{Hitstop, MatchState};
 use crate::reactions::ReactionFamilyId;
-use crate::styles::FighterStyle;
+use crate::rollback::RollbackEventDiscard;
+use crate::sim_event::{
+    EventEmitError, MAX_SIM_EVENTS_PER_TICK, SIM_EVENT_HISTORY_TICKS, SimEventId,
+};
+use crate::simulation::{
+    ElapsedTicks, SIM_DT_SECONDS, SimTick, TickTimer, milliseconds_to_ticks_ceil,
+    seconds_to_ticks_ceil,
+};
+use crate::snapshot::{
+    ARENA_PAYLOAD_BYTES, ArenaRuntimeSnapshot, FighterPipeSnapshot, QuantizedVec3,
+};
 use crate::techniques::DamageElement;
 
 const ARENA_HAZARD_PULSE_DAMAGE: f32 = 7.0;
@@ -53,11 +82,13 @@ const ARENA_HAZARD_CAMPFIRE_BURN_SECONDS: f32 = 1.35;
 const ARENA_HAZARD_SAW_DAMAGE: f32 = 5.0;
 const ARENA_HAZARD_SAW_KNOCKBACK: f32 = 12.0;
 const ARENA_HAZARD_SAW_LAUNCH: f32 = 4.8;
-const PIPE_ENTRY_DWELL_SECONDS: f32 = 0.25;
 const PIPE_ENTER_SECONDS: f32 = 0.32;
 const PIPE_TRAVEL_SECONDS: f32 = 0.12;
 const PIPE_EXIT_SECONDS: f32 = 0.34;
-const PIPE_REENTRY_COOLDOWN_SECONDS: f32 = 0.9;
+const PIPE_ENTRY_DWELL_TICKS: u32 = milliseconds_to_ticks_ceil(250);
+const PIPE_ENTER_END_TICKS: u32 = milliseconds_to_ticks_ceil(320);
+const PIPE_HIDDEN_END_TICKS: u32 = milliseconds_to_ticks_ceil(440);
+const PIPE_TRANSIT_END_TICKS: u32 = milliseconds_to_ticks_ceil(780);
 const PIPE_SINK_DEPTH: f32 = 1.15;
 const PIPE_EXIT_CLEARANCE_RADIUS: f32 = 1.05;
 const PIPE_EXIT_HOP_SPEED: f32 = 3.2;
@@ -67,16 +98,20 @@ const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
-const CRANK_YARD_ARENA_INDEX: usize = 3;
 const VENT_SPIRAL_ARENA_INDEX: usize = 4;
 const POWDER_KEG_ARENA_INDEX: usize = 9;
 const CRANK_SAW_VISUAL_Y: f32 = ARENA_TOP_Y + 0.72;
 const CRANK_LEVER_POSITION: Vec3 = Vec3::new(6.7, ARENA_TOP_Y, 1.7);
 const CRANK_LEVER_ATTACK_RADIUS: f32 = 1.85;
-const POWDER_CANNON_INTERVAL_SECONDS: f32 = 2.6;
 const POWDER_CANNON_BOMB_DAMAGE: f32 = 9.0;
 const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
 const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+const EMBEDDED_CHAMPIONS_COURT_RON: &str = include_str!("../arts/champions_court.ron");
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
@@ -89,6 +124,37 @@ pub(crate) const ARENA_PREVIEW_RENDER_LAYER: usize = 21;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+/// One non-rendering root marker is spawned for each arena-visual generation.
+/// It gives graphical performance fixtures an exact scene identity to await;
+/// regular arena teardown removes it alongside the other geometry roots.
+#[derive(Component)]
+pub(crate) struct ArenaSceneReadyMarker {
+    arena_index: usize,
+    generation: u64,
+}
+
+impl ArenaSceneReadyMarker {
+    pub(crate) const fn arena_index(&self) -> usize {
+        self.arena_index
+    }
+
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// Copies the canonical match arena into the per-world lookup resource at the
+/// tick boundary. Every authoritative system in a step therefore observes one
+/// immutable selection, and separate authority worlds cannot affect each other.
+pub fn sync_active_arena_from_match_state(
+    state: Res<MatchState>,
+    mut active_arena: ResMut<ActiveArena>,
+) {
+    if active_arena.index() != state.arena_index {
+        active_arena.select(state.arena_index);
+    }
+}
 
 fn arena_geometry_render_layers() -> RenderLayers {
     RenderLayers::from_layers(&[0, ARENA_PREVIEW_RENDER_LAYER])
@@ -185,9 +251,59 @@ pub(crate) struct CrankLeverVisual {
 
 #[derive(Component)]
 pub(crate) struct ArenaCannonBomb {
-    velocity: Vec3,
-    lifetime: f32,
+    pub(crate) velocity: Vec3,
+    pub(crate) lifetime: TickTimer,
 }
+
+const ARENA_ORDNANCE_ENTITY_CAPACITY: usize =
+    SIM_ENTITY_POOL_CAPACITIES[SimEntityKind::ArenaOrdnance.code() as usize] as usize;
+
+/// Fixed handoff for cannon sources whose frozen geometry requires a
+/// post-resolution despawn. It is rebuilt before every advancing cannon tick
+/// and intentionally does not participate in snapshots.
+#[derive(Resource, Default)]
+pub struct ArenaOrdnanceContactFrame {
+    tick: Option<SimTick>,
+    detonations: [Option<SimEntityId>; ARENA_ORDNANCE_ENTITY_CAPACITY],
+    detonation_len: usize,
+}
+
+impl ArenaOrdnanceContactFrame {
+    fn begin_tick(&mut self, tick: SimTick) {
+        for source in &mut self.detonations[..self.detonation_len] {
+            *source = None;
+        }
+        self.tick = Some(tick);
+        self.detonation_len = 0;
+    }
+
+    fn cancel_tick(&mut self) {
+        self.tick = None;
+        self.detonation_len = 0;
+    }
+
+    fn record_detonation(&mut self, source: SimEntityId) {
+        if self.detonations[..self.detonation_len].contains(&Some(source))
+            || self.detonation_len == self.detonations.len()
+        {
+            return;
+        }
+        self.detonations[self.detonation_len] = Some(source);
+        self.detonation_len += 1;
+    }
+
+    fn detonations(&self) -> impl Iterator<Item = SimEntityId> + '_ {
+        self.detonations[..self.detonation_len]
+            .iter()
+            .flatten()
+            .copied()
+    }
+}
+
+/// Render-only child of an authoritative cannon bomb. Keeping mesh rotation on
+/// this child prevents render-rate animation from mutating canonical transforms.
+#[derive(Component)]
+pub(crate) struct ArenaCannonBombVisual;
 
 #[derive(Component)]
 pub struct ArenaVentRotor {
@@ -225,21 +341,21 @@ pub struct ArenaVentUfoBeam {
 
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ArenaFighterBurn {
-    remaining: f32,
-    duration: f32,
+    remaining_seconds: f32,
+    duration_seconds: f32,
 }
 
 impl ArenaFighterBurn {
     fn new(duration: f32) -> Self {
         Self {
-            remaining: duration,
-            duration,
+            remaining_seconds: duration,
+            duration_seconds: duration,
         }
     }
 
     pub fn visual_amount(self) -> f32 {
-        let fade = (self.remaining / self.duration.max(0.01)).clamp(0.0, 1.0);
-        let flicker = 0.76 + (self.remaining * 19.0).sin().abs() * 0.24;
+        let fade = (self.remaining_seconds / self.duration_seconds.max(0.01)).clamp(0.0, 1.0);
+        let flicker = 0.76 + (self.remaining_seconds * 19.0).sin().abs() * 0.24;
         fade.sqrt() * flicker
     }
 }
@@ -248,13 +364,13 @@ impl ArenaFighterBurn {
 enum FighterPipeState {
     Ready {
         candidate: Option<usize>,
-        dwell: f32,
-        cooldown: f32,
+        dwell_ticks: u32,
+        cooldown: TickTimer,
     },
     Transit {
         source: usize,
         destination: usize,
-        elapsed: f32,
+        elapsed: ElapsedTicks,
         entry_y: f32,
         base_scale: Vec3,
     },
@@ -264,8 +380,8 @@ impl Default for FighterPipeState {
     fn default() -> Self {
         Self::Ready {
             candidate: None,
-            dwell: 0.0,
-            cooldown: 0.0,
+            dwell_ticks: 0,
+            cooldown: TickTimer::ZERO,
         }
     }
 }
@@ -277,7 +393,7 @@ pub struct ArenaPipeState {
 }
 
 impl ArenaPipeState {
-    fn new(arena_index: usize) -> Self {
+    pub(crate) fn new(arena_index: usize) -> Self {
         Self {
             arena_index,
             fighters: [FighterPipeState::default(); FIGHTER_COUNT],
@@ -301,6 +417,30 @@ impl ArenaPipeState {
                 } if *source == endpoint || *destination == endpoint
             )
         })
+    }
+
+    /// Render-only root scale for an active canonical pipe transit.
+    /// Position and completion remain fixed-step state; callers may project
+    /// this value into a Bevy `Transform` without feeding it back.
+    pub(crate) fn fighter_transit_visual_scale(
+        &self,
+        fighter: FighterId,
+        pipe_pair: Option<ArenaPipePairDefinition>,
+    ) -> Option<Vec3> {
+        let pipe_pair = pipe_pair?;
+        let FighterPipeState::Transit {
+            source,
+            destination,
+            elapsed,
+            entry_y,
+            base_scale,
+        } = self.fighters[fighter.index()]
+        else {
+            return None;
+        };
+        Some(
+            pipe_transit_sample(pipe_pair, source, destination, elapsed, entry_y, base_scale).scale,
+        )
     }
 }
 
@@ -437,25 +577,55 @@ struct ChampionsCourtLight {
 #[derive(Resource)]
 pub struct ArenaScene {
     index: usize,
+    generation: u64,
+}
+
+impl ArenaScene {
+    const INITIAL_GENERATION: u64 = 1;
+
+    fn new(index: usize) -> Self {
+        Self {
+            index,
+            generation: Self::INITIAL_GENERATION,
+        }
+    }
+
+    pub(crate) const fn index(&self) -> usize {
+        self.index
+    }
+
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn rebuild(&mut self, index: usize) -> u64 {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .expect("arena render generation exhausted");
+        self.index = index;
+        self.generation = generation;
+        self.generation
+    }
 }
 
 #[derive(Resource)]
 pub struct ArenaHazardState {
     arena_index: usize,
-    elapsed: f32,
-    hit_cooldowns: Vec<[f32; FIGHTER_COUNT]>,
+    elapsed: ElapsedTicks,
+    hit_cooldowns: Vec<[TickTimer; FIGHTER_COUNT]>,
     crank_saws_stopped: bool,
-    crank_lever_toggle_cooldown: f32,
+    crank_lever_toggle_cooldown: TickTimer,
 }
 
 impl ArenaHazardState {
-    fn new(arena_index: usize, hazard_count: usize) -> Self {
+    pub(crate) fn new(arena_index: usize, hazard_count: usize) -> Self {
         Self {
             arena_index,
-            elapsed: 0.0,
-            hit_cooldowns: vec![[0.0; FIGHTER_COUNT]; hazard_count],
+            elapsed: ElapsedTicks::ZERO,
+            hit_cooldowns: vec![[TickTimer::ZERO; FIGHTER_COUNT]; hazard_count],
             crank_saws_stopped: false,
-            crank_lever_toggle_cooldown: 0.0,
+            crank_lever_toggle_cooldown: TickTimer::ZERO,
         }
     }
 
@@ -467,37 +637,200 @@ impl ArenaHazardState {
         *self = Self::new(arena_index, hazard_count);
     }
 
-    fn tick_cooldowns(&mut self, dt: f32) {
+    fn tick_cooldowns(&mut self) {
         for hazard_cooldowns in &mut self.hit_cooldowns {
             for cooldown in hazard_cooldowns {
-                *cooldown = (*cooldown - dt).max(0.0);
+                cooldown.tick();
             }
         }
     }
 
     pub fn elapsed(&self) -> f32 {
+        self.elapsed.as_seconds()
+    }
+
+    pub fn elapsed_ticks(&self) -> ElapsedTicks {
         self.elapsed
     }
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub(crate) struct ArenaOrdnanceAssets {
     bomb_mesh: Handle<Mesh>,
     bomb_material: Handle<StandardMaterial>,
 }
 
+/// Arena-only visual punctuation paired with an authoritative impact event.
+///
+/// The impact itself is represented by the compact semantic `HitConfirmed` or
+/// `Guarded` event. This sidecar carries only renderer-facing data that is not
+/// allowed into snapshots or state hashes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ArenaImpactAccent {
+    None,
+    CampfireBurn { duration_seconds: f32 },
+    MachineScratch { position: Vec3 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ArenaPresentationIntent {
+    pub event_id: SimEventId,
+    pub victim: FighterId,
+    pub outcome: ImpactOutcome,
+    pub accent: ArenaImpactAccent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ArenaPresentationIntentSlot {
+    tick: SimTick,
+    len: u16,
+    occupied: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArenaPresentationIntentMetrics {
+    pub recorded: u64,
+    pub replaced: u64,
+    pub rejected: u64,
+    pub discarded: u64,
+}
+
+/// Fixed-capacity rollback sidecar for arena impact presentation.
+///
+/// Storage is allocated once, indexed by canonical tick and event ordinal, and
+/// rejects invalid ordinals. A render stall therefore cannot grow memory, and
+/// correction can discard speculative intents without touching simulation.
+#[derive(Resource, Clone, Debug)]
+pub struct ArenaPresentationIntentJournal {
+    slots: [ArenaPresentationIntentSlot; SIM_EVENT_HISTORY_TICKS],
+    intents: Box<[Option<ArenaPresentationIntent>]>,
+    len: usize,
+    metrics: ArenaPresentationIntentMetrics,
+}
+
+impl Default for ArenaPresentationIntentJournal {
+    fn default() -> Self {
+        Self {
+            slots: [ArenaPresentationIntentSlot::default(); SIM_EVENT_HISTORY_TICKS],
+            intents: vec![None; SIM_EVENT_HISTORY_TICKS * MAX_SIM_EVENTS_PER_TICK]
+                .into_boxed_slice(),
+            len: 0,
+            metrics: ArenaPresentationIntentMetrics::default(),
+        }
+    }
+}
+
+impl ArenaPresentationIntentJournal {
+    const fn slot_index(tick: SimTick) -> usize {
+        tick.0 as usize % SIM_EVENT_HISTORY_TICKS
+    }
+
+    const fn slot_offset(slot: usize) -> usize {
+        slot * MAX_SIM_EVENTS_PER_TICK
+    }
+
+    #[cfg(test)]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    #[cfg(test)]
+    pub const fn capacity(&self) -> usize {
+        SIM_EVENT_HISTORY_TICKS * MAX_SIM_EVENTS_PER_TICK
+    }
+
+    #[cfg(test)]
+    pub const fn metrics(&self) -> ArenaPresentationIntentMetrics {
+        self.metrics
+    }
+
+    pub(crate) fn record(&mut self, intent: ArenaPresentationIntent) -> Result<(), EventEmitError> {
+        let ordinal = usize::from(intent.event_id.ordinal);
+        if ordinal >= MAX_SIM_EVENTS_PER_TICK {
+            self.metrics.rejected = self.metrics.rejected.saturating_add(1);
+            return Err(EventEmitError::CapacityExceeded {
+                capacity: MAX_SIM_EVENTS_PER_TICK,
+            });
+        }
+
+        let slot_index = Self::slot_index(intent.event_id.tick);
+        let offset = Self::slot_offset(slot_index);
+        let slot = &mut self.slots[slot_index];
+        if slot.occupied && slot.tick != intent.event_id.tick {
+            for entry in &mut self.intents[offset..offset + MAX_SIM_EVENTS_PER_TICK] {
+                *entry = None;
+            }
+            self.len = self.len.saturating_sub(usize::from(slot.len));
+        }
+        if !slot.occupied || slot.tick != intent.event_id.tick {
+            *slot = ArenaPresentationIntentSlot {
+                tick: intent.event_id.tick,
+                len: 0,
+                occupied: true,
+            };
+        }
+
+        let entry = &mut self.intents[offset + ordinal];
+        if entry.is_some() {
+            self.metrics.replaced = self.metrics.replaced.saturating_add(1);
+        } else {
+            slot.len += 1;
+            self.len += 1;
+        }
+        *entry = Some(intent);
+        self.metrics.recorded = self.metrics.recorded.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn get(&self, event_id: SimEventId) -> Option<ArenaPresentationIntent> {
+        let ordinal = usize::from(event_id.ordinal);
+        if ordinal >= MAX_SIM_EVENTS_PER_TICK {
+            return None;
+        }
+        let slot_index = Self::slot_index(event_id.tick);
+        let slot = self.slots[slot_index];
+        if !slot.occupied || slot.tick != event_id.tick {
+            return None;
+        }
+        self.intents[Self::slot_offset(slot_index) + ordinal]
+            .filter(|intent| intent.event_id == event_id)
+    }
+
+    pub fn discard_after(&mut self, retained_through: SimTick) {
+        for slot_index in 0..SIM_EVENT_HISTORY_TICKS {
+            let slot = self.slots[slot_index];
+            if !slot.occupied || slot.tick <= retained_through {
+                continue;
+            }
+            let offset = Self::slot_offset(slot_index);
+            for entry in &mut self.intents[offset..offset + MAX_SIM_EVENTS_PER_TICK] {
+                *entry = None;
+            }
+            self.slots[slot_index] = ArenaPresentationIntentSlot::default();
+            self.len = self.len.saturating_sub(usize::from(slot.len));
+            self.metrics.discarded = self.metrics.discarded.saturating_add(u64::from(slot.len));
+        }
+    }
+}
+
+impl RollbackEventDiscard for ArenaPresentationIntentJournal {
+    fn discard_after(&mut self, retained_through: SimTick) {
+        Self::discard_after(self, retained_through);
+    }
+}
+
 #[derive(Resource)]
 pub(crate) struct PowderKegCannonState {
     arena_index: usize,
-    fire_timer: f32,
+    fire_timer: TickTimer,
     next_cannon: usize,
 }
 
 impl PowderKegCannonState {
-    fn new(arena_index: usize) -> Self {
+    pub(crate) fn new(arena_index: usize) -> Self {
         Self {
             arena_index,
-            fire_timer: 0.8,
+            fire_timer: TickTimer::from_millis_ceil(800),
             next_cannon: 0,
         }
     }
@@ -509,22 +842,428 @@ impl PowderKegCannonState {
     }
 }
 
+const ARENA_ROLLBACK_PAYLOAD_VERSION: u8 = 1;
+const MAX_ROLLBACK_ARENA_HAZARDS: usize = 3;
+const ARENA_DEVICE_CRANK_SAWS_STOPPED: u64 = 1 << 0;
+const PIPE_SNAPSHOT_TRANSIT: u8 = 1 << 0;
+const PIPE_SNAPSHOT_READY_CANDIDATE: u8 = 1 << 1;
+const NO_PIPE_ENDPOINT: u16 = u16::MAX;
+const ARENA_PAYLOAD_HEADER_BYTES: usize = 4;
+const ARENA_PAYLOAD_HAZARD_BYTES: usize =
+    MAX_ROLLBACK_ARENA_HAZARDS * FIGHTER_COUNT * size_of::<u32>();
+const ARENA_PAYLOAD_LEVER_OFFSET: usize = ARENA_PAYLOAD_HEADER_BYTES + ARENA_PAYLOAD_HAZARD_BYTES;
+const ARENA_PAYLOAD_USED_BYTES: usize = ARENA_PAYLOAD_LEVER_OFFSET + size_of::<u32>();
+
+const _: () = assert!(ARENA_PAYLOAD_USED_BYTES <= ARENA_PAYLOAD_BYTES);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArenaRuntimeSnapshotError {
+    MissingResource(&'static str),
+    ArenaIndexMismatch {
+        resource: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    TooManyHazards {
+        count: usize,
+        maximum: usize,
+    },
+    HazardCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    UnsupportedPayloadVersion(u8),
+    NonCanonicalPayloadPadding,
+    InvalidLogicalDeviceFlags(u64),
+    InvalidPipeFlags(u8),
+    InvalidPipeEndpoint(u16),
+    InvalidPipePair,
+    InvalidPipePadding,
+    InconsistentArenaClock,
+    InconsistentHazardAggregate {
+        fighter: usize,
+        expected: u32,
+        actual: u32,
+    },
+}
+
+impl core::fmt::Display for ArenaRuntimeSnapshotError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "arena rollback snapshot failed: {self:?}")
+    }
+}
+
+impl std::error::Error for ArenaRuntimeSnapshotError {}
+
+pub(crate) struct ArenaRuntimeRestorePlan {
+    hazard: ArenaHazardState,
+    pipes: ArenaPipeState,
+    cannon: PowderKegCannonState,
+}
+
+fn arena_resource<'a, T: Resource>(
+    world: &'a World,
+    name: &'static str,
+) -> Result<&'a T, ArenaRuntimeSnapshotError> {
+    world
+        .get_resource::<T>()
+        .ok_or(ArenaRuntimeSnapshotError::MissingResource(name))
+}
+
+fn verify_arena_index(
+    resource: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), ArenaRuntimeSnapshotError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArenaRuntimeSnapshotError::ArenaIndexMismatch {
+            resource,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn write_payload_u32(payload: &mut [u8; ARENA_PAYLOAD_BYTES], offset: usize, value: u32) {
+    payload[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_payload_u32(payload: &[u8; ARENA_PAYLOAD_BYTES], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        payload[offset..offset + size_of::<u32>()]
+            .try_into()
+            .expect("fixed arena payload offset is in bounds"),
+    )
+}
+
+fn capture_pipe_snapshot(state: FighterPipeState) -> FighterPipeSnapshot {
+    match state {
+        FighterPipeState::Ready {
+            candidate,
+            dwell_ticks,
+            cooldown,
+        } => FighterPipeSnapshot {
+            flags: if candidate.is_some() {
+                PIPE_SNAPSHOT_READY_CANDIDATE
+            } else {
+                0
+            },
+            entry_endpoint: candidate.map_or(NO_PIPE_ENDPOINT, |value| value as u16),
+            exit_endpoint: NO_PIPE_ENDPOINT,
+            dwell_ticks,
+            cooldown_ticks: cooldown.remaining(),
+            transit_ticks: 0,
+            entry_position: QuantizedVec3::default(),
+        },
+        FighterPipeState::Transit {
+            source,
+            destination,
+            elapsed,
+            entry_y,
+            base_scale,
+        } => FighterPipeSnapshot {
+            flags: PIPE_SNAPSHOT_TRANSIT,
+            entry_endpoint: source as u16,
+            exit_endpoint: destination as u16,
+            dwell_ticks: 0,
+            cooldown_ticks: 0,
+            transit_ticks: elapsed.get(),
+            // Pipe transit scale is canonical and uniform. These three fields
+            // store entry Y, uniform base scale, and reserved zero respectively.
+            entry_position: QuantizedVec3 {
+                x: quantize_f32(entry_y, DEFAULT_F32_QUANTIZATION),
+                y: quantize_f32(base_scale.x, DEFAULT_F32_QUANTIZATION),
+                z: 0,
+            },
+        },
+    }
+}
+
+fn restore_pipe_snapshot(
+    snapshot: FighterPipeSnapshot,
+    has_pipe_pair: bool,
+) -> Result<FighterPipeState, ArenaRuntimeSnapshotError> {
+    if snapshot.flags & !(PIPE_SNAPSHOT_TRANSIT | PIPE_SNAPSHOT_READY_CANDIDATE) != 0 {
+        return Err(ArenaRuntimeSnapshotError::InvalidPipeFlags(snapshot.flags));
+    }
+    if snapshot.flags & PIPE_SNAPSHOT_TRANSIT != 0 {
+        if !has_pipe_pair {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipePair);
+        }
+        if snapshot.flags != PIPE_SNAPSHOT_TRANSIT
+            || snapshot.entry_endpoint > 1
+            || snapshot.exit_endpoint > 1
+            || snapshot.entry_endpoint == snapshot.exit_endpoint
+        {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipeEndpoint(
+                snapshot.entry_endpoint.max(snapshot.exit_endpoint),
+            ));
+        }
+        if snapshot.dwell_ticks != 0
+            || snapshot.cooldown_ticks != 0
+            || snapshot.entry_position.z != 0
+        {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipePadding);
+        }
+        let base_scale = dequantize_f32(snapshot.entry_position.y, DEFAULT_F32_QUANTIZATION);
+        if base_scale <= 0.0 {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipePadding);
+        }
+        return Ok(FighterPipeState::Transit {
+            source: usize::from(snapshot.entry_endpoint),
+            destination: usize::from(snapshot.exit_endpoint),
+            elapsed: ElapsedTicks::from_ticks(snapshot.transit_ticks),
+            entry_y: dequantize_f32(snapshot.entry_position.x, DEFAULT_F32_QUANTIZATION),
+            base_scale: Vec3::splat(base_scale),
+        });
+    }
+
+    if snapshot.exit_endpoint != NO_PIPE_ENDPOINT
+        || snapshot.transit_ticks != 0
+        || snapshot.entry_position != QuantizedVec3::default()
+    {
+        return Err(ArenaRuntimeSnapshotError::InvalidPipePadding);
+    }
+    let candidate = if snapshot.flags & PIPE_SNAPSHOT_READY_CANDIDATE != 0 {
+        if !has_pipe_pair || snapshot.entry_endpoint > 1 {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipeEndpoint(
+                snapshot.entry_endpoint,
+            ));
+        }
+        Some(usize::from(snapshot.entry_endpoint))
+    } else {
+        if snapshot.entry_endpoint != NO_PIPE_ENDPOINT {
+            return Err(ArenaRuntimeSnapshotError::InvalidPipePadding);
+        }
+        None
+    };
+    Ok(FighterPipeState::Ready {
+        candidate,
+        dwell_ticks: snapshot.dwell_ticks,
+        cooldown: TickTimer::from_ticks(snapshot.cooldown_ticks),
+    })
+}
+
+/// Captures the private arena runtime resources without exposing or duplicating
+/// them in the live simulation world.
+pub(crate) fn capture_arena_runtime_snapshot(
+    world: &World,
+) -> Result<ArenaRuntimeSnapshot, ArenaRuntimeSnapshotError> {
+    let active = *arena_resource::<ActiveArena>(world, "ActiveArena")?;
+    let arena_index = active.index();
+    let hazard = arena_resource::<ArenaHazardState>(world, "ArenaHazardState")?;
+    let pipes = arena_resource::<ArenaPipeState>(world, "ArenaPipeState")?;
+    let cannon = arena_resource::<PowderKegCannonState>(world, "PowderKegCannonState")?;
+    verify_arena_index("ArenaHazardState", arena_index, hazard.arena_index)?;
+    verify_arena_index("ArenaPipeState", arena_index, pipes.arena_index)?;
+    verify_arena_index("PowderKegCannonState", arena_index, cannon.arena_index)?;
+
+    let hazard_count = hazard.hit_cooldowns.len();
+    if hazard_count > MAX_ROLLBACK_ARENA_HAZARDS {
+        return Err(ArenaRuntimeSnapshotError::TooManyHazards {
+            count: hazard_count,
+            maximum: MAX_ROLLBACK_ARENA_HAZARDS,
+        });
+    }
+    let mut payload = [0; ARENA_PAYLOAD_BYTES];
+    payload[0] = ARENA_ROLLBACK_PAYLOAD_VERSION;
+    payload[1] = arena_index as u8;
+    payload[2] = hazard_count as u8;
+    let mut aggregate = [0; FIGHTER_COUNT];
+    for (hazard_index, cooldowns) in hazard.hit_cooldowns.iter().enumerate() {
+        for (fighter, cooldown) in cooldowns.iter().enumerate() {
+            let ticks = cooldown.remaining();
+            aggregate[fighter] = aggregate[fighter].max(ticks);
+            let offset = ARENA_PAYLOAD_HEADER_BYTES
+                + (hazard_index * FIGHTER_COUNT + fighter) * size_of::<u32>();
+            write_payload_u32(&mut payload, offset, ticks);
+        }
+    }
+    write_payload_u32(
+        &mut payload,
+        ARENA_PAYLOAD_LEVER_OFFSET,
+        hazard.crank_lever_toggle_cooldown.remaining(),
+    );
+    let elapsed = hazard.elapsed.get();
+    Ok(ArenaRuntimeSnapshot {
+        arena_ticks: u64::from(elapsed),
+        hazard_clock_ticks: elapsed,
+        logical_device_flags: if hazard.crank_saws_stopped {
+            ARENA_DEVICE_CRANK_SAWS_STOPPED
+        } else {
+            0
+        },
+        per_fighter_hazard_cooldowns: aggregate,
+        cannon_fire_cooldown_ticks: cannon.fire_timer.remaining(),
+        cannon_index: cannon.next_cannon as u8,
+        pipes: pipes.fighters.map(capture_pipe_snapshot),
+        payload,
+    })
+}
+
+pub(crate) fn prepare_arena_runtime_restore(
+    world: &World,
+    snapshot: &ArenaRuntimeSnapshot,
+) -> Result<ArenaRuntimeRestorePlan, ArenaRuntimeSnapshotError> {
+    let active = *arena_resource::<ActiveArena>(world, "ActiveArena")?;
+    let arena_index = active.index();
+    if snapshot.payload[0] != ARENA_ROLLBACK_PAYLOAD_VERSION {
+        return Err(ArenaRuntimeSnapshotError::UnsupportedPayloadVersion(
+            snapshot.payload[0],
+        ));
+    }
+    verify_arena_index(
+        "snapshot payload",
+        arena_index,
+        usize::from(snapshot.payload[1]),
+    )?;
+    let expected_hazards = active.definition().hazards.len();
+    let hazard_count = usize::from(snapshot.payload[2]);
+    if hazard_count != expected_hazards {
+        return Err(ArenaRuntimeSnapshotError::HazardCountMismatch {
+            expected: expected_hazards,
+            actual: hazard_count,
+        });
+    }
+    if hazard_count > MAX_ROLLBACK_ARENA_HAZARDS {
+        return Err(ArenaRuntimeSnapshotError::TooManyHazards {
+            count: hazard_count,
+            maximum: MAX_ROLLBACK_ARENA_HAZARDS,
+        });
+    }
+    if snapshot.payload[3] != 0
+        || snapshot.payload[ARENA_PAYLOAD_USED_BYTES..]
+            .iter()
+            .any(|byte| *byte != 0)
+    {
+        return Err(ArenaRuntimeSnapshotError::NonCanonicalPayloadPadding);
+    }
+    if snapshot.logical_device_flags & !ARENA_DEVICE_CRANK_SAWS_STOPPED != 0 {
+        return Err(ArenaRuntimeSnapshotError::InvalidLogicalDeviceFlags(
+            snapshot.logical_device_flags,
+        ));
+    }
+    if snapshot.arena_ticks != u64::from(snapshot.hazard_clock_ticks) {
+        return Err(ArenaRuntimeSnapshotError::InconsistentArenaClock);
+    }
+
+    let mut hit_cooldowns = vec![[TickTimer::ZERO; FIGHTER_COUNT]; hazard_count];
+    let mut aggregate = [0; FIGHTER_COUNT];
+    for (hazard_index, cooldowns) in hit_cooldowns.iter_mut().enumerate() {
+        for (fighter, cooldown) in cooldowns.iter_mut().enumerate() {
+            let offset = ARENA_PAYLOAD_HEADER_BYTES
+                + (hazard_index * FIGHTER_COUNT + fighter) * size_of::<u32>();
+            let ticks = read_payload_u32(&snapshot.payload, offset);
+            *cooldown = TickTimer::from_ticks(ticks);
+            aggregate[fighter] = aggregate[fighter].max(ticks);
+        }
+    }
+    for (fighter, (expected, actual)) in aggregate
+        .into_iter()
+        .zip(snapshot.per_fighter_hazard_cooldowns)
+        .enumerate()
+    {
+        if expected != actual {
+            return Err(ArenaRuntimeSnapshotError::InconsistentHazardAggregate {
+                fighter,
+                expected,
+                actual,
+            });
+        }
+    }
+    let has_pipe_pair = active.definition().pipe_pair.is_some();
+    let mut restored_pipes = [FighterPipeState::default(); FIGHTER_COUNT];
+    for (destination, source) in restored_pipes.iter_mut().zip(snapshot.pipes) {
+        *destination = restore_pipe_snapshot(source, has_pipe_pair)?;
+    }
+    if snapshot.cannon_index > 1 {
+        return Err(ArenaRuntimeSnapshotError::InvalidPipePadding);
+    }
+
+    Ok(ArenaRuntimeRestorePlan {
+        hazard: ArenaHazardState {
+            arena_index,
+            elapsed: ElapsedTicks::from_ticks(snapshot.hazard_clock_ticks),
+            hit_cooldowns,
+            crank_saws_stopped: snapshot.logical_device_flags & ARENA_DEVICE_CRANK_SAWS_STOPPED
+                != 0,
+            crank_lever_toggle_cooldown: TickTimer::from_ticks(read_payload_u32(
+                &snapshot.payload,
+                ARENA_PAYLOAD_LEVER_OFFSET,
+            )),
+        },
+        pipes: ArenaPipeState {
+            arena_index,
+            fighters: restored_pipes,
+        },
+        cannon: PowderKegCannonState {
+            arena_index,
+            fire_timer: TickTimer::from_ticks(snapshot.cannon_fire_cooldown_ticks),
+            next_cannon: usize::from(snapshot.cannon_index),
+        },
+    })
+}
+
+pub(crate) fn commit_arena_runtime_restore(world: &mut World, plan: ArenaRuntimeRestorePlan) {
+    world.insert_resource(plan.hazard);
+    world.insert_resource(plan.pipes);
+    world.insert_resource(plan.cannon);
+}
+
+/// Installs the authoritative arena selection and its rollback-relevant runtime
+/// resources in a bare simulation [`World`]. This deliberately does not create
+/// [`ArenaScene`], [`ArenaGeometry`], render assets, lights, or any other
+/// presentation state, so dedicated and in-process authority worlds can share
+/// the exact gameplay bootstrap without an asset server or renderer.
+///
+/// Repeating the call for the currently selected arena preserves live runtime
+/// state. Selecting a different arena resets all arena-local clocks, cooldowns,
+/// pipe transits, and cannon sequencing to that arena's deterministic defaults.
+pub fn bootstrap_canonical_arena_runtime(world: &mut World, arena_index: usize) -> ActiveArena {
+    let mut selected = world
+        .get_resource::<ActiveArena>()
+        .copied()
+        .unwrap_or_default();
+    selected.select(arena_index);
+    world.insert_resource(selected);
+
+    let selected_index = selected.index();
+    let hazard_count = selected.definition().hazards.len();
+    if let Some(mut state) = world.get_resource_mut::<ArenaHazardState>() {
+        state.sync_to_arena(selected_index, hazard_count);
+    } else {
+        world.insert_resource(ArenaHazardState::new(selected_index, hazard_count));
+    }
+    if let Some(mut state) = world.get_resource_mut::<ArenaPipeState>() {
+        state.sync_to_arena(selected_index);
+    } else {
+        world.insert_resource(ArenaPipeState::new(selected_index));
+    }
+    if let Some(mut state) = world.get_resource_mut::<PowderKegCannonState>() {
+        state.sync_to_arena(selected_index);
+    } else {
+        world.insert_resource(PowderKegCannonState::new(selected_index));
+    }
+
+    selected
+}
+
 pub fn setup_arena(
     mut commands: Commands,
+    active_arena: Res<ActiveArena>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let arena = active_arena_definition();
-    commands.insert_resource(ArenaScene {
-        index: active_arena_index(),
-    });
-    commands.insert_resource(ArenaHazardState::new(
-        active_arena_index(),
-        arena.hazards.len(),
-    ));
-    commands.insert_resource(ArenaPipeState::new(active_arena_index()));
-    commands.insert_resource(PowderKegCannonState::new(active_arena_index()));
+    let arena_index = active_arena.index();
+    let arena = active_arena.definition();
+    let generation = ArenaScene::INITIAL_GENERATION;
+    commands.insert_resource(ArenaScene::new(arena_index));
+    commands.insert_resource(ArenaHazardState::new(arena_index, arena.hazards.len()));
+    commands.insert_resource(ArenaPipeState::new(arena_index));
+    commands.insert_resource(PowderKegCannonState::new(arena_index));
     commands.insert_resource(ArenaOrdnanceAssets {
         bomb_mesh: meshes.add(Sphere::new(0.34).mesh().uv(14, 8)),
         bomb_material: materials.add(StandardMaterial {
@@ -535,28 +1274,48 @@ pub fn setup_arena(
             ..default()
         }),
     });
-    spawn_arena_geometry(&mut commands, &asset_server, &mut meshes, &mut materials);
+    spawn_arena_geometry(
+        &mut commands,
+        &asset_server,
+        &mut meshes,
+        &mut materials,
+        arena_index,
+        generation,
+        arena,
+    );
     spawn_arena_lights(&mut commands);
 }
 
 pub fn sync_arena_visuals(
     mut commands: Commands,
+    active_arena: Res<ActiveArena>,
     mut scene: ResMut<ArenaScene>,
-    geometry: Query<Entity, With<ArenaGeometry>>,
+    geometry_roots: Query<Entity, (With<ArenaGeometry>, Without<ChildOf>)>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let selected = active_arena_index();
+    let selected = active_arena.index();
     if scene.index == selected {
         return;
     }
 
-    for entity in &geometry {
+    // Despawning a hierarchy root recursively removes its descendants. Querying
+    // every marked child as well caused Bevy B0004 warnings when later commands
+    // attempted to despawn children whose parent had already gone away.
+    for entity in &geometry_roots {
         commands.entity(entity).despawn();
     }
-    scene.index = selected;
-    spawn_arena_geometry(&mut commands, &asset_server, &mut meshes, &mut materials);
+    let generation = scene.rebuild(selected);
+    spawn_arena_geometry(
+        &mut commands,
+        &asset_server,
+        &mut meshes,
+        &mut materials,
+        selected,
+        generation,
+        active_arena.definition(),
+    );
 }
 
 fn spawn_arena_geometry(
@@ -564,8 +1323,20 @@ fn spawn_arena_geometry(
     asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    arena_index: usize,
+    generation: u64,
+    arena: &ArenaDefinition,
 ) {
-    let arena = active_arena_definition();
+    commands.spawn((
+        ArenaGeometry,
+        ArenaSceneReadyMarker {
+            arena_index,
+            generation,
+        },
+        Name::new(format!(
+            "Arena scene ready marker {arena_index}:{generation}"
+        )),
+    ));
     spawn_arena_background(
         commands,
         asset_server,
@@ -575,7 +1346,6 @@ fn spawn_arena_geometry(
         arena.camera_offset,
     );
 
-    let arena_index = active_arena_index();
     let palette = arena_theme_palette(arena.visual_theme);
     let hazard_material = materials.add(StandardMaterial {
         base_color: palette.hazard.with_alpha(0.34),
@@ -1050,18 +1820,27 @@ fn spawn_champions_court_map(
 }
 
 fn load_champions_court_map() -> Result<ChampionsCourtRon, String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let contents = include_str!("../arts/champions_court.ron");
-        return ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"));
-    }
+    load_champions_court_map_from_path(Path::new(CHAMPIONS_COURT_RON_PATH))
+}
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        let contents = fs::read_to_string(CHAMPIONS_COURT_RON_PATH)
-            .map_err(|error| format!("read failed: {error}"))?;
-        ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))
-    }
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn load_champions_court_map_from_path(path: &Path) -> Result<ChampionsCourtRon, String> {
+    let contents = fs::read_to_string(path).map_err(|error| format!("read failed: {error}"))?;
+    ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn load_champions_court_map_from_path(_path: &Path) -> Result<ChampionsCourtRon, String> {
+    ron::from_str(EMBEDDED_CHAMPIONS_COURT_RON)
+        .map_err(|error| format!("RON parse failed: {error}"))
 }
 
 fn spawn_champions_floor_shapes(
@@ -1478,7 +2257,7 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     let arena_index = arena_definitions()
         .iter()
         .position(|candidate| candidate.name == arena.name)
-        .unwrap_or_else(active_arena_index);
+        .unwrap_or(CHAMPIONS_COURT_ARENA_INDEX);
 
     // Champions Court is rendered from its RON scene rather than this fallback prop list.
     if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
@@ -1488,42 +2267,995 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     }
 }
 
+// Frozen from the pre-C1 production RON/quaternion/Euler collision builder on the
+// reference toolchain documented in canonical_math. Presentation still consumes
+// the RON; canonical collision consumes only these final world-space records.
+const CHAMPIONS_COURT_COLLISION_BARRIERS: [WorldPropBarrier; 91] = [
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3eaf1aa0),
+            f32::from_bits(0x3e8adaba),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fb50b10),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f733333),
+            f32::from_bits(0x3f733333),
+            f32::from_bits(0x3f490fdc),
+            f32::from_bits(0x3f2fdf3c),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0x3e9a9fbe),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0x3e9a9fbe),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3f96c8b4),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3f96c8b4),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x4154cccd),
+            f32::from_bits(0x3f0ae147),
+            f32::from_bits(0x40654c98),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xb373321e),
+            f32::from_bits(0x412e0000),
+            f32::from_bits(0x3f200000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f1645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xb2a22169),
+            f32::from_bits(0x412a0000),
+            f32::from_bits(0x3f200000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f3645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x32a22169),
+            f32::from_bits(0x41260000),
+            f32::from_bits(0x3f200000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f5645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x3373321e),
+            f32::from_bits(0x41220000),
+            f32::from_bits(0x3f200000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f7645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0bc0000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f1645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0c40000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f3645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0cc0000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f5645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0d40000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f7645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0bd999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f1645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0c5999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f3645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0cd999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f5645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0d5999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f7645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40bc0000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f1645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40c40000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f3645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40cc0000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f5645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40d40000),
+            f32::from_bits(0xbfd9999a),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f7645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40bd999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f1645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40c5999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f3645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40cd999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f5645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40d5999a),
+            f32::from_bits(0x40200000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e000000),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f7645a2),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc11e6666),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x4000c49c),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x411e6666),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x4000c49c),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xbefd2f1b),
+            f32::from_bits(0xc1533333),
+            f32::from_bits(0x3da4dd2f),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x3efd2f1b),
+            f32::from_bits(0xc1533333),
+            f32::from_bits(0x3da4dd2f),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0xc1533333),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x3efd2f1b),
+            f32::from_bits(0x41800000),
+            f32::from_bits(0x3da4dd2f),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xbefd2f1b),
+            f32::from_bits(0x41800000),
+            f32::from_bits(0x3da4dd2f),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x41800000),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::OneWayTop,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0c00000),
+            f32::from_bits(0xc1533333),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40c00000),
+            f32::from_bits(0xc1533333),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0c00000),
+            f32::from_bits(0x41800000),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40c00000),
+            f32::from_bits(0x41800000),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc1500000),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41500000),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f133333),
+            f32::from_bits(0x3eb0a3d7),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc1380d7d),
+            f32::from_bits(0xc1375976),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x3f490fdc),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc1318c1d),
+            f32::from_bits(0xc1375976),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x3f490fdc),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41357357),
+            f32::from_bits(0xc134bf50),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0xbf490fdc),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41357357),
+            f32::from_bits(0xc13b40b0),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0xbf490fdc),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc1357357),
+            f32::from_bits(0x41498c1d),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x4016cbe4),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc1357357),
+            f32::from_bits(0x41500d7d),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x4016cbe4),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41380d7d),
+            f32::from_bits(0x414c2643),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0xc016cbe4),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41318c1d),
+            f32::from_bits(0x414c2643),
+            f32::from_bits(0x3e30a3d7),
+            f32::from_bits(0x3eeb851f),
+            f32::from_bits(0xc016cbe4),
+            f32::from_bits(0x3fce5604),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x40a66666),
+            f32::from_bits(0x3fa66666),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0xc0a66666),
+            f32::from_bits(0x3fa66666),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0a66666),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fa66666),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40a66666),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fa66666),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0966666),
+            f32::from_bits(0x40980000),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc08e6666),
+            f32::from_bits(0x40900000),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x408e6666),
+            f32::from_bits(0x40900000),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40966666),
+            f32::from_bits(0x40980000),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40966666),
+            f32::from_bits(0xc0980000),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x408e6666),
+            f32::from_bits(0xc0900000),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc08e6666),
+            f32::from_bits(0xc0900000),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0966666),
+            f32::from_bits(0xc0980000),
+            f32::from_bits(0x3e19999a),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3f66e978),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc1433333),
+            f32::from_bits(0xc10e6666),
+            f32::from_bits(0x3e199999),
+            f32::from_bits(0x3fa7ef9e),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x41433333),
+            f32::from_bits(0xc10e6666),
+            f32::from_bits(0x3e199999),
+            f32::from_bits(0x3fa7ef9e),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc12ccccd),
+            f32::from_bits(0x412ccccd),
+            f32::from_bits(0x3e072b02),
+            f32::from_bits(0x3f9ae148),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x412ccccd),
+            f32::from_bits(0x412ccccd),
+            f32::from_bits(0x3e072b02),
+            f32::from_bits(0x3f9ae148),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc1266666),
+            f32::from_bits(0x40733333),
+            f32::from_bits(0x3dc49ba6),
+            f32::from_bits(0x3fda5e35),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x41266666),
+            f32::from_bits(0x40733333),
+            f32::from_bits(0x3dc49ba6),
+            f32::from_bits(0x3fda5e35),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0xc0bccccd),
+            f32::from_bits(0xc0b33333),
+            f32::from_bits(0x3e828f5d),
+            f32::from_bits(0x3f89096c),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::circle(
+            f32::from_bits(0x40c00000),
+            f32::from_bits(0xc0a33333),
+            f32::from_bits(0x3e7be76d),
+            f32::from_bits(0x3f864990),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0b9999a),
+            f32::from_bits(0x40cccccd),
+            f32::from_bits(0x3eb1de6a),
+            f32::from_bits(0x3ec2eb1c),
+            f32::from_bits(0x3e97e9d7),
+            f32::from_bits(0x3f553261),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40e00000),
+            f32::from_bits(0x40866666),
+            f32::from_bits(0x3e9e1b09),
+            f32::from_bits(0x3ead42c4),
+            f32::from_bits(0xbe567750),
+            f32::from_bits(0x3f4aa64c),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x00000000),
+            f32::from_bits(0xc1245a1c),
+            f32::from_bits(0x3ec7ae14),
+            f32::from_bits(0x3e851eb8),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fa624dd),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0951597),
+            f32::from_bits(0xc140b71d),
+            f32::from_bits(0x3ec7ae14),
+            f32::from_bits(0x3e666666),
+            f32::from_bits(0x3edf66f4),
+            f32::from_bits(0x3f6dd2f2),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x4093581f),
+            f32::from_bits(0xc1404f41),
+            f32::from_bits(0x3ec7ae14),
+            f32::from_bits(0x3e666666),
+            f32::from_bits(0xbedf66f4),
+            f32::from_bits(0x3f6dd2f2),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc0f654b8),
+            f32::from_bits(0x41554d4d),
+            f32::from_bits(0x3ea9ba5e),
+            f32::from_bits(0x3e43d70a),
+            f32::from_bits(0x4032b8c2),
+            f32::from_bits(0x3f5be426),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40f7dd50),
+            f32::from_bits(0x415594c0),
+            f32::from_bits(0x3ea9ba5e),
+            f32::from_bits(0x3e43d70a),
+            f32::from_bits(0xc032b8c2),
+            f32::from_bits(0x3f5be426),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc14ccccd),
+            f32::from_bits(0x40cccccd),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3fc90fda),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x414ccccd),
+            f32::from_bits(0x40cccccd),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xbfc90fda),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0xc1526666),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0xc1526666),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc06ccccd),
+            f32::from_bits(0x417e6666),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x406ccccd),
+            f32::from_bits(0x417e6666),
+            f32::from_bits(0x3f000000),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0xc0490fda),
+            f32::from_bits(0x3fbb22d1),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc109999a),
+            f32::from_bits(0xc0d9999a),
+            f32::from_bits(0x3ec5a1cb),
+            f32::from_bits(0x3ed89375),
+            f32::from_bits(0x3f567751),
+            f32::from_bits(0x3f5fbe76),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc104344d),
+            f32::from_bits(0xc0ed192d),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3ecccccd),
+            f32::from_bits(0x3fa31564),
+            f32::from_bits(0x3f5cac08),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc10b69bf),
+            f32::from_bits(0xc0c784df),
+            f32::from_bits(0x3ea66666),
+            f32::from_bits(0x3ea66666),
+            f32::from_bits(0x3ea0d97a),
+            f32::from_bits(0x3f4978d4),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41066666),
+            f32::from_bits(0xc0d00000),
+            f32::from_bits(0x3eb1de6a),
+            f32::from_bits(0x3ec2eb1c),
+            f32::from_bits(0xbec49809),
+            f32::from_bits(0x3f553261),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x41104e55),
+            f32::from_bits(0xc0cce019),
+            f32::from_bits(0x3eb851eb),
+            f32::from_bits(0x3eb851eb),
+            f32::from_bits(0x3d567756),
+            f32::from_bits(0x3f526e97),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0x40fc646e),
+            f32::from_bits(0xc0cd8045),
+            f32::from_bits(0x3e95c28f),
+            f32::from_bits(0x3e95c28f),
+            f32::from_bits(0xbf685695),
+            f32::from_bits(0x3f4126e9),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc02ccccd),
+            f32::from_bits(0x41000000),
+            f32::from_bits(0x3e943958),
+            f32::from_bits(0x3ea26e98),
+            f32::from_bits(0x3eb2b8c3),
+            f32::from_bits(0x3f456042),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc010c6d8),
+            f32::from_bits(0x40f6e340),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3e99999a),
+            f32::from_bits(0x3f490fdc),
+            f32::from_bits(0x3f43126e),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+    WorldPropBarrier {
+        definition: ArenaBarrierDefinition::rectangle(
+            f32::from_bits(0xc03e55d5),
+            f32::from_bits(0x4105592c),
+            f32::from_bits(0x3e799999),
+            f32::from_bits(0x3e799999),
+            f32::from_bits(0xbe32b8c3),
+            f32::from_bits(0x3f34ac08),
+        ),
+        behavior: PropBarrierBehavior::Solid,
+    },
+];
+
+#[cfg(test)]
+const CHAMPIONS_COURT_COLLISION_FNV1A64: u64 = 0x16273c63e5b838fc;
+
 fn champions_court_collision_barriers() -> &'static [WorldPropBarrier] {
-    static BARRIERS: OnceLock<Vec<WorldPropBarrier>> = OnceLock::new();
-    BARRIERS.get_or_init(|| {
-        let map: ChampionsCourtRon = ron::from_str(include_str!("../arts/champions_court.ron"))
-            .expect("embedded Champion's Court RON should parse");
-        let mut barriers = Vec::new();
-
-        for object in &map.instances {
-            let transform = Transform::from_xyz(
-                object.position.0,
-                ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
-                object.position.2,
-            )
-            .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
-            .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
-            append_champions_object_barriers(&map.assets, object, transform, &mut barriers);
-        }
-
-        for prefab_instance in &map.prefab_instances {
-            let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
-                continue;
-            };
-            for object in objects {
-                append_champions_object_barriers(
-                    &map.assets,
-                    object,
-                    champions_prefab_object_transform(prefab_instance, object),
-                    &mut barriers,
-                );
-            }
-        }
-
-        barriers
-    })
+    &CHAMPIONS_COURT_COLLISION_BARRIERS
 }
 
+#[cfg(test)]
 fn append_champions_object_barriers(
     assets: &HashMap<String, String>,
     object: &ChampionsCourtObject,
@@ -1598,7 +3330,7 @@ pub fn arena_collision_world(arena: &ArenaDefinition) -> &'static ArenaCollision
                 .iter()
                 .position(|candidate| candidate.name == arena.name)
         })
-        .unwrap_or_else(active_arena_index);
+        .unwrap_or(CHAMPIONS_COURT_ARENA_INDEX);
     &arena_collision_worlds()[arena_index]
 }
 
@@ -2581,8 +4313,9 @@ pub fn update_arena_hazard_visuals(
     mut markers: Query<(&ArenaHazardMarker, &mut Transform), Without<ArenaCampfireFlame>>,
     mut flames: Query<(&ArenaCampfireFlame, &mut Transform), Without<ArenaHazardMarker>>,
 ) {
+    let elapsed = state.elapsed();
     for (marker, mut transform) in &mut markers {
-        let wave = ((state.elapsed + marker.phase) / marker.pulse_seconds.max(0.1) * TAU).sin();
+        let wave = ((elapsed + marker.phase) / marker.pulse_seconds.max(0.1) * TAU).sin();
         let scale = marker.base_scale * arena_hazard_marker_scale(marker.kind, wave);
         transform.scale = Vec3::new(scale, marker.base_scale, scale);
         transform.translation.y = marker.base_y
@@ -2594,8 +4327,8 @@ pub fn update_arena_hazard_visuals(
     }
 
     for (flame, mut transform) in &mut flames {
-        let flicker = (state.elapsed * 9.0 + flame.phase).sin();
-        let flutter = (state.elapsed * 13.0 + flame.phase * 0.7).sin();
+        let flicker = (elapsed * 9.0 + flame.phase).sin();
+        let flutter = (elapsed * 13.0 + flame.phase * 0.7).sin();
         transform.scale = flame.base_scale
             * Vec3::new(
                 1.0 - flicker * 0.055,
@@ -2607,11 +4340,12 @@ pub fn update_arena_hazard_visuals(
 
 pub fn update_arena_pipe_visuals(
     time: Res<Time>,
+    active_arena: Res<ActiveArena>,
     state: Res<ArenaPipeState>,
     mut rings: Query<(&ArenaPipePortalRing, &mut Transform), Without<ArenaPipePortalParticle>>,
     mut particles: Query<(&ArenaPipePortalParticle, &mut Transform), Without<ArenaPipePortalRing>>,
 ) {
-    let Some(pipe_pair) = active_arena_definition().pipe_pair else {
+    let Some(pipe_pair) = active_arena.definition().pipe_pair else {
         return;
     };
     let elapsed = time.elapsed_secs();
@@ -2643,9 +4377,34 @@ pub fn update_arena_pipe_visuals(
 }
 
 pub fn update_crank_yard_machinery(
-    time: Res<Time>,
+    active_arena: Res<ActiveArena>,
     mut state: ResMut<ArenaHazardState>,
-    fighters: Query<(&FighterInput, &Transform), With<Fighter>>,
+    fighters: Query<(&FighterInput, &SimPosition), With<Fighter>>,
+) {
+    let arena_index = active_arena.index();
+    state.sync_to_arena(arena_index, active_arena.definition().hazards.len());
+    state.crank_lever_toggle_cooldown.tick();
+
+    if arena_index == CRANK_YARD_ARENA_INDEX
+        && !state.crank_lever_toggle_cooldown.active()
+        && fighters.iter().any(|(input, transform)| {
+            (input.raw_light_pressed || input.raw_heavy_pressed)
+                && crate::canonical_math::vec2_length_squared(Vec2::new(
+                    transform.translation.x - CRANK_LEVER_POSITION.x,
+                    transform.translation.z - CRANK_LEVER_POSITION.z,
+                )) <= CRANK_LEVER_ATTACK_RADIUS * CRANK_LEVER_ATTACK_RADIUS
+        })
+    {
+        state.crank_saws_stopped = !state.crank_saws_stopped;
+        state.crank_lever_toggle_cooldown = TickTimer::from_millis_ceil(300);
+    }
+}
+
+/// Animates the crank-yard presentation from canonical device state. This is
+/// deliberately render-rate work and is never installed in the headless app.
+pub fn update_crank_yard_machinery_visuals(
+    time: Res<Time>,
+    state: Res<ArenaHazardState>,
     mut levers: Query<
         (&CrankLeverVisual, &mut Transform),
         (
@@ -2684,26 +4443,7 @@ pub fn update_crank_yard_machinery(
     >,
 ) {
     let dt = time.delta_secs();
-    let elapsed = time.elapsed_secs();
-    let arena_index = active_arena_index();
-    state.sync_to_arena(arena_index, active_arena_definition().hazards.len());
-    state.crank_lever_toggle_cooldown = (state.crank_lever_toggle_cooldown - dt).max(0.0);
-
-    if arena_index == CRANK_YARD_ARENA_INDEX
-        && state.crank_lever_toggle_cooldown <= 0.0
-        && fighters.iter().any(|(input, transform)| {
-            (input.raw_light_pressed || input.raw_heavy_pressed)
-                && Vec2::new(
-                    transform.translation.x - CRANK_LEVER_POSITION.x,
-                    transform.translation.z - CRANK_LEVER_POSITION.z,
-                )
-                .length()
-                    <= CRANK_LEVER_ATTACK_RADIUS
-        })
-    {
-        state.crank_saws_stopped = !state.crank_saws_stopped;
-        state.crank_lever_toggle_cooldown = 0.3;
-    }
+    let elapsed = state.elapsed();
 
     for (lever, mut transform) in &mut levers {
         let target = if state.crank_saws_stopped {
@@ -2748,76 +4488,216 @@ pub fn update_crank_yard_machinery(
     }
 }
 
-pub fn update_powder_keg_cannons(
+/// Reconciles visual bomb children from authoritative ordnance entities. No
+/// spawn event is needed: state reconciliation also handles snapshot restore,
+/// late join, and corrected despawns without replaying a one-shot.
+pub fn sync_arena_cannon_bomb_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<ArenaOrdnanceAssets>,
+    mut bombs: Query<
+        (
+            Entity,
+            &SimPosition,
+            Option<&mut Transform>,
+            Option<&Visibility>,
+        ),
+        (With<ArenaCannonBomb>, Without<ArenaCannonBombVisual>),
+    >,
+    existing_visuals: Query<&ChildOf, With<ArenaCannonBombVisual>>,
+    mut visual_transforms: Query<
+        &mut Transform,
+        (With<ArenaCannonBombVisual>, Without<ArenaCannonBomb>),
+    >,
+) {
+    for (bomb_entity, position, transform, visibility) in &mut bombs {
+        if let Some(mut transform) = transform {
+            transform.translation = position.translation;
+        } else {
+            commands
+                .entity(bomb_entity)
+                .insert(Transform::from_translation(position.translation));
+        }
+        if visibility.is_none() {
+            // The authoritative bomb is a non-rendering hierarchy root. Its
+            // mesh child still inherits visibility, so the parent must own the
+            // ordinary visibility components before the child is attached.
+            commands.entity(bomb_entity).insert(Visibility::Inherited);
+        }
+        if existing_visuals
+            .iter()
+            .any(|parent| parent.parent() == bomb_entity)
+        {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(assets.bomb_mesh.clone()),
+            MeshMaterial3d(assets.bomb_material.clone()),
+            Transform::default(),
+            ArenaCannonBombVisual,
+            ChildOf(bomb_entity),
+            Name::new("Powder keg cannon bomb visual"),
+        ));
+    }
+
+    let dt = time.delta_secs();
+    for mut transform in &mut visual_transforms {
+        transform.rotate_x(dt * 8.0);
+        transform.rotate_z(dt * 5.0);
+    }
+}
+
+pub(crate) fn present_arena_impact_accent(
+    commands: &mut Commands,
+    effect_assets: &EffectAssets,
+    fighter_entity: Entity,
+    intent: ArenaPresentationIntent,
+) {
+    match intent.accent {
+        ArenaImpactAccent::None => {}
+        ArenaImpactAccent::CampfireBurn { duration_seconds } => {
+            commands
+                .entity(fighter_entity)
+                .insert(ArenaFighterBurn::new(duration_seconds));
+            spawn_burning_fighter_effect(commands, effect_assets, fighter_entity, duration_seconds);
+        }
+        ArenaImpactAccent::MachineScratch { position } => {
+            spawn_machine_scratch(commands, effect_assets, fighter_entity, position);
+        }
+    }
+}
+
+/// Advances the render-local burn tint. The authoritative hazard cooldown and
+/// damage live in fixed simulation; this component exists only to shade the
+/// rendered fighter and is recreated from the stable impact event on rollback.
+pub fn update_arena_fighter_burns(
     time: Res<Time>,
     mut commands: Commands,
-    assets: Res<ArenaOrdnanceAssets>,
+    mut burns: Query<(Entity, &mut ArenaFighterBurn)>,
+) {
+    let dt = time.delta_secs();
+    for (fighter_entity, mut burn) in &mut burns {
+        burn.remaining_seconds = (burn.remaining_seconds - dt).max(0.0);
+        if burn.remaining_seconds <= 0.0 {
+            commands.entity(fighter_entity).remove::<ArenaFighterBurn>();
+        }
+    }
+}
+
+pub fn advance_powder_keg_cannons_and_collect_contacts(
+    active_arena: Res<ActiveArena>,
+    mut stable_entities: StableEntityCommands,
+    tick: Res<SimTick>,
     mut cannon_state: ResMut<PowderKegCannonState>,
     match_state: Res<MatchState>,
     feel: Res<CombatFeelTuning>,
-    effect_assets: Res<EffectAssets>,
-    mut hitstop: ResMut<Hitstop>,
-    mut feedback: ResMut<HitEffects>,
-    mut telemetry: ResMut<MatchTelemetry>,
-    mut bombs: Query<(Entity, &mut ArenaCannonBomb, &mut Transform)>,
-    mut fighters: Query<
-        (
-            &Fighter,
-            &mut FighterStats,
-            &mut FighterMotor,
-            &mut FighterActionState,
-            &FighterStyle,
-            &FighterEquipment,
-            &Transform,
-        ),
+    hitstop: Res<Hitstop>,
+    mut contact_frame: ResMut<ArenaOrdnanceContactFrame>,
+    mut contact_buffer: ResMut<ContactBuffer>,
+    mut bombs: Query<(&StableSimEntity, &mut ArenaCannonBomb, &mut SimPosition)>,
+    fighters: Query<
+        (&Fighter, &FighterStats, &FighterActionState, &SimPosition),
         Without<ArenaCannonBomb>,
     >,
 ) {
     if hitstop.active() {
+        contact_frame.cancel_tick();
         return;
     }
+    contact_frame.begin_tick(*tick);
 
-    let arena_index = active_arena_index();
+    let arena_index = active_arena.index();
     cannon_state.sync_to_arena(arena_index);
     if arena_index != POWDER_KEG_ARENA_INDEX {
+        // Arena visual reconciliation runs in render-rate `Update` and must
+        // never own authoritative ordnance lifetime. Clear bombs here, through
+        // the stable allocator, when a fighting match changes away from Powder
+        // Keg; match reset performs the same canonical cleanup explicitly.
+        let mut stale_ordnance = [None; ARENA_ORDNANCE_ENTITY_CAPACITY];
+        let mut stale_len = 0;
+        for index in 0..stable_entities
+            .identities
+            .capacity(SimEntityKind::ArenaOrdnance)
+        {
+            let Some((stable_id, entity)) = stable_entities
+                .identities
+                .entry_at(SimEntityKind::ArenaOrdnance, index)
+            else {
+                continue;
+            };
+            let Ok((stable, _, _)) = bombs.get_mut(entity) else {
+                continue;
+            };
+            if stable.id() == stable_id {
+                if stale_len < stale_ordnance.len() {
+                    stale_ordnance[stale_len] = Some((entity, *stable));
+                    stale_len += 1;
+                }
+            }
+        }
+        for (entity, stable) in stale_ordnance[..stale_len].iter().flatten().copied() {
+            despawn_stable(
+                &mut stable_entities.commands,
+                &mut stable_entities.identities,
+                entity,
+                stable,
+            );
+        }
         return;
     }
 
-    let dt = time.delta_secs();
-    cannon_state.fire_timer -= dt;
-    if cannon_state.fire_timer <= 0.0 {
+    if cannon_state.fire_timer.tick() {
         let (origin, velocity) = powder_cannon_shot(cannon_state.next_cannon);
-        commands.spawn((
-            Mesh3d(assets.bomb_mesh.clone()),
-            MeshMaterial3d(assets.bomb_material.clone()),
-            Transform::from_translation(origin),
-            ArenaCannonBomb {
-                velocity,
-                lifetime: 3.4,
-            },
-            ArenaGeometry,
-            Name::new("Powder keg cannon bomb"),
-        ));
+        let _ = try_spawn_stable(
+            &mut stable_entities.commands,
+            &mut stable_entities.identities,
+            SimEntityKind::ArenaOrdnance,
+            (
+                SimPosition::new(origin),
+                ArenaCannonBomb {
+                    velocity,
+                    lifetime: TickTimer::from_millis_ceil(3_400),
+                },
+            ),
+        );
         cannon_state.next_cannon = (cannon_state.next_cannon + 1) % 2;
-        cannon_state.fire_timer += POWDER_CANNON_INTERVAL_SECONDS;
+        cannon_state.fire_timer = TickTimer::from_millis_ceil(2_600);
     }
 
-    for (bomb_entity, mut bomb, mut bomb_transform) in &mut bombs {
-        bomb.lifetime -= dt;
-        bomb.velocity.y -= GRAVITY * dt;
-        bomb_transform.translation += bomb.velocity * dt;
-        bomb_transform.rotate_x(dt * 8.0);
-        bomb_transform.rotate_z(dt * 5.0);
+    let arena = active_arena.definition();
+    for index in 0..stable_entities
+        .identities
+        .capacity(SimEntityKind::ArenaOrdnance)
+    {
+        let Some((stable_id, bomb_entity)) = stable_entities
+            .identities
+            .entry_at(SimEntityKind::ArenaOrdnance, index)
+        else {
+            continue;
+        };
+        let Ok((stable, mut bomb, mut bomb_transform)) = bombs.get_mut(bomb_entity) else {
+            continue;
+        };
+        if stable.id() != stable_id {
+            continue;
+        }
+        let expired = bomb.lifetime.tick();
+        bomb.velocity.y -= GRAVITY * SIM_DT_SECONDS;
+        bomb_transform.translation += bomb.velocity * SIM_DT_SECONDS;
 
         let position = bomb_transform.translation;
-        let ground_hit = ground_height_at(position.x, position.z)
+        let ground_hit = ground_support_for_arena_with_radius(arena, position.x, position.z, 0.0)
+            .height()
             .is_some_and(|ground_y| position.y <= ground_y + 0.22 && bomb.velocity.y <= 0.0);
-        let expired = bomb.lifetime <= 0.0;
         let mut detonated = ground_hit || expired;
 
-        for (fighter, mut stats, mut motor, mut action, style, equipment, transform) in
-            &mut fighters
-        {
+        for victim in FighterId::ALL {
+            let Some((fighter, stats, action, transform)) = fighters
+                .iter()
+                .find(|(fighter, ..)| fighter.id == victim.index())
+            else {
+                continue;
+            };
             if !match_state.fighter_can_participate(fighter.id)
                 || !can_receive_impact(&stats, &action)
             {
@@ -2829,42 +4709,69 @@ pub fn update_powder_keg_cannons(
             } else {
                 0.34 + FIGHTER_RADIUS * stats.item_size_multiplier()
             };
-            if fighter_center.distance(position) > hit_radius {
+            debug_assert!(hit_radius >= 0.0);
+            if crate::canonical_math::vec3_distance_squared(fighter_center, position)
+                > hit_radius * hit_radius
+            {
                 continue;
             }
-
             let mut impact =
                 powder_cannon_impact_profile().with_hit_effects_enabled(feel.hit_effects_enabled());
-            impact.knockback_direction = Some(
+            impact.knockback_direction = Some(crate::canonical_math::vec3_normalize_or(
                 Vec3::new(
                     transform.translation.x - position.x,
                     0.0,
                     transform.translation.z - position.z,
-                )
-                .normalize_or(Vec3::Z),
-            );
-            apply_impact(
-                &mut commands,
-                &effect_assets,
-                &mut feedback,
-                &mut hitstop,
-                &match_state,
-                &mut stats,
-                &mut motor,
-                &mut action,
-                transform,
+                ),
+                Vec3::Z,
+            ));
+            let _ = contact_buffer.push(ContactRecord::new(
+                ContactPhase::Strike,
+                ContactSourceKind::ArenaOrdnance,
+                stable_id,
                 None,
+                victim,
+                u16::MAX,
+                crate::techniques::AttackShapeId::BombBurst as u16,
+                0,
+                fighter_center,
                 position,
                 impact,
-                DamageDefenderProfile::from_loadout(style, equipment),
-                &mut telemetry,
-            );
+                ContactFlags::default(),
+            ));
             detonated = true;
         }
 
         if detonated {
-            commands.entity(bomb_entity).despawn();
+            contact_frame.record_detonation(stable_id);
         }
+    }
+}
+
+/// Despawns cannon sources only after every frozen target has been resolved.
+/// Impact presentation and semantic hit events are emitted centrally by the
+/// contact resolver, so this consumer emits no additional event ordinal.
+pub fn apply_powder_keg_contact_outcomes(
+    mut commands: Commands,
+    mut identities: ResMut<crate::ecs_identity::SimulationIdentityAllocator>,
+    tick: Res<SimTick>,
+    contact_frame: Res<ArenaOrdnanceContactFrame>,
+    bombs: Query<(&StableSimEntity, &ArenaCannonBomb)>,
+) {
+    if contact_frame.tick != Some(*tick) {
+        return;
+    }
+    for source in contact_frame.detonations() {
+        let Some(entity) = identities.mapped_entity(source) else {
+            continue;
+        };
+        let Ok((stable, _)) = bombs.get(entity) else {
+            continue;
+        };
+        if stable.id() != source {
+            continue;
+        }
+        despawn_stable(&mut commands, &mut identities, entity, *stable);
     }
 }
 
@@ -2874,7 +4781,8 @@ fn powder_cannon_shot(index: usize) -> (Vec3, Vec3) {
     } else {
         Vec3::new(6.7, ARENA_TOP_Y + 1.05, -1.8)
     };
-    let direction = Vec3::new(-cannon.x, 0.0, -cannon.z).normalize_or(Vec3::X);
+    let direction =
+        crate::canonical_math::vec3_normalize_or(Vec3::new(-cannon.x, 0.0, -cannon.z), Vec3::X);
     (cannon + direction * 1.0, direction * 7.8 + Vec3::Y * 5.0)
 }
 
@@ -2897,6 +4805,7 @@ fn powder_cannon_impact_profile() -> ImpactProfile {
 
 pub fn update_vent_spiral_machinery(
     time: Res<Time>,
+    active_arena: Res<ActiveArena>,
     state: Res<ArenaHazardState>,
     mut visuals: ParamSet<(
         Query<(&ArenaVentRotor, &mut Transform)>,
@@ -2940,7 +4849,8 @@ pub fn update_vent_spiral_machinery(
         transform.rotate_y(dt * 0.42);
     }
 
-    let sequence_amount = active_arena_definition()
+    let sequence_amount = active_arena
+        .definition()
         .hazards
         .iter()
         .filter(|hazard| hazard.kind == ArenaHazardKind::PulseVent)
@@ -2981,45 +4891,50 @@ fn vent_charge_visual_amount(elapsed: f32, pulse_seconds: f32, phase: f32) -> f3
     ((progress - 0.72) / 0.28).clamp(0.0, 1.0)
 }
 
+fn fighter_pipe_base_scale(stats: &FighterStats) -> Vec3 {
+    Vec3::splat(stats.item_size_multiplier())
+}
+
 pub fn update_arena_pipe_transits(
-    time: Res<Time>,
+    active_arena: Res<ActiveArena>,
+    match_state: Res<MatchState>,
     mut state: ResMut<ArenaPipeState>,
     mut fighters: ParamSet<(
-        Query<(&Fighter, &Transform)>,
+        Query<(&Fighter, &SimPosition)>,
         Query<(
             &Fighter,
             &mut FighterStats,
             &mut FighterMotor,
             &mut FighterActionState,
-            &mut Transform,
+            &mut SimPosition,
         )>,
     )>,
 ) {
-    let arena_index = active_arena_index();
+    let arena_index = active_arena.index();
     state.sync_to_arena(arena_index);
-    let Some(pipe_pair) = active_arena_definition().pipe_pair else {
+    let Some(pipe_pair) = active_arena.definition().pipe_pair else {
         return;
     };
-    let dt = time.delta_secs();
-    let snapshots: Vec<(usize, Vec3)> = fighters
+    let snapshots: ArrayVec<(usize, Vec3), FIGHTER_COUNT> = fighters
         .p0()
         .iter()
+        .filter(|(fighter, _)| match_state.fighter_can_participate(fighter.id))
         .map(|(fighter, transform)| (fighter.id, transform.translation))
         .collect();
 
     for (fighter, mut stats, mut motor, mut action, mut transform) in &mut fighters.p1() {
-        if fighter.id >= FIGHTER_COUNT {
+        if fighter.id >= FIGHTER_COUNT || !match_state.fighter_can_participate(fighter.id) {
             continue;
         }
 
         match state.fighters[fighter.id] {
             FighterPipeState::Ready {
                 candidate,
-                dwell,
-                cooldown,
+                dwell_ticks,
+                mut cooldown,
             } => {
-                let cooldown = (cooldown - dt).max(0.0);
-                let endpoint = if cooldown == 0.0 {
+                cooldown.tick();
+                let endpoint = if !cooldown.active() {
                     pipe_entry_endpoint(pipe_pair, transform.translation, &motor, action.action)
                 } else {
                     None
@@ -3028,34 +4943,40 @@ pub fn update_arena_pipe_transits(
                     && !motor.grounded
                     && action.action == FighterAction::Jumping
                     && motor.velocity.y <= 0.0;
-                let next_dwell = if descending_entry {
-                    PIPE_ENTRY_DWELL_SECONDS
+                let next_dwell_ticks = if descending_entry {
+                    PIPE_ENTRY_DWELL_TICKS
                 } else if endpoint.is_some() && endpoint == candidate {
-                    dwell + dt
+                    dwell_ticks.saturating_add(1)
                 } else {
-                    0.0
+                    0
                 };
 
                 if let Some(source) = endpoint
-                    && next_dwell >= PIPE_ENTRY_DWELL_SECONDS
+                    && next_dwell_ticks >= PIPE_ENTRY_DWELL_TICKS
                 {
                     let destination = 1 - source;
                     state.fighters[fighter.id] = FighterPipeState::Transit {
                         source,
                         destination,
-                        elapsed: 0.0,
+                        elapsed: ElapsedTicks::ZERO,
                         entry_y: transform.translation.y,
-                        base_scale: transform.scale,
+                        // Root scale is presentation-owned and may contain a
+                        // render-time pulse. Derive the gameplay transit scale
+                        // only from canonical status so render cadence cannot
+                        // enter pipe state or rollback snapshots.
+                        base_scale: fighter_pipe_base_scale(&stats),
                     };
                     motor.velocity = Vec3::ZERO;
                     motor.grounded = false;
                     *action = FighterActionState::default();
                     action.action = FighterAction::Respawning;
-                    stats.invulnerability = stats.invulnerability.max(0.25);
+                    stats
+                        .invulnerability
+                        .set_max(TickTimer::from_seconds_ceil(0.25));
                 } else {
                     state.fighters[fighter.id] = FighterPipeState::Ready {
                         candidate: endpoint,
-                        dwell: next_dwell,
+                        dwell_ticks: next_dwell_ticks,
                         cooldown,
                     };
                 }
@@ -3070,19 +4991,18 @@ pub fn update_arena_pipe_transits(
                 let destination_center = pipe_pair.endpoints[destination];
                 let exit_occupied = snapshots.iter().any(|(other_id, position)| {
                     *other_id != fighter.id
-                        && Vec2::new(
+                        && crate::canonical_math::vec2_length_squared(Vec2::new(
                             position.x - destination_center.x,
                             position.z - destination_center.y,
-                        )
-                        .length()
-                            < PIPE_EXIT_CLEARANCE_RADIUS
+                        )) < PIPE_EXIT_CLEARANCE_RADIUS * PIPE_EXIT_CLEARANCE_RADIUS
                         && position.y >= pipe_pair.top_y - 0.2
                 });
-                let hidden_boundary = PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS;
-                let next_elapsed = if exit_occupied && elapsed >= hidden_boundary {
-                    hidden_boundary
+                let next_elapsed = if exit_occupied && elapsed.get() >= PIPE_HIDDEN_END_TICKS {
+                    ElapsedTicks::from_ticks(PIPE_HIDDEN_END_TICKS)
                 } else {
-                    elapsed + dt
+                    let mut elapsed = elapsed;
+                    elapsed.advance();
+                    elapsed
                 };
                 let sample = pipe_transit_sample(
                     pipe_pair,
@@ -3094,12 +5014,13 @@ pub fn update_arena_pipe_transits(
                 );
 
                 transform.translation = sample.position;
-                transform.scale = sample.scale;
                 motor.velocity = Vec3::ZERO;
                 motor.grounded = false;
                 *action = FighterActionState::default();
                 action.action = FighterAction::Respawning;
-                stats.invulnerability = stats.invulnerability.max(0.25);
+                stats
+                    .invulnerability
+                    .set_max(TickTimer::from_seconds_ceil(0.25));
 
                 if sample.complete {
                     transform.translation = Vec3::new(
@@ -3107,19 +5028,23 @@ pub fn update_arena_pipe_transits(
                         pipe_pair.top_y + 0.06,
                         destination_center.y,
                     );
-                    transform.scale = base_scale;
-                    motor.facing = Vec3::new(-destination_center.x, 0.0, -destination_center.y)
-                        .normalize_or_zero();
+                    motor.facing = crate::canonical_math::vec3_normalize_or_zero(Vec3::new(
+                        -destination_center.x,
+                        0.0,
+                        -destination_center.y,
+                    ));
                     motor.velocity = motor.facing * PIPE_EXIT_INWARD_SPEED;
                     motor.velocity.y = PIPE_EXIT_HOP_SPEED;
                     motor.grounded = false;
                     *action = FighterActionState::default();
                     action.action = FighterAction::Jumping;
-                    stats.invulnerability = stats.invulnerability.max(0.35);
+                    stats
+                        .invulnerability
+                        .set_max(TickTimer::from_seconds_ceil(0.35));
                     state.fighters[fighter.id] = FighterPipeState::Ready {
                         candidate: None,
-                        dwell: 0.0,
-                        cooldown: PIPE_REENTRY_COOLDOWN_SECONDS,
+                        dwell_ticks: 0,
+                        cooldown: TickTimer::from_millis_ceil(900),
                     };
                 } else {
                     state.fighters[fighter.id] = FighterPipeState::Transit {
@@ -3161,7 +5086,11 @@ fn pipe_entry_endpoint(
     }
 
     pipe_pair.endpoints.iter().position(|center| {
-        Vec2::new(position.x - center.x, position.z - center.y).length() <= pipe_pair.trigger_radius
+        debug_assert!(pipe_pair.trigger_radius >= 0.0);
+        crate::canonical_math::vec2_length_squared(Vec2::new(
+            position.x - center.x,
+            position.z - center.y,
+        )) <= pipe_pair.trigger_radius * pipe_pair.trigger_radius
     })
 }
 
@@ -3169,17 +5098,17 @@ fn pipe_transit_sample(
     pipe_pair: ArenaPipePairDefinition,
     source: usize,
     destination: usize,
-    elapsed: f32,
+    elapsed: ElapsedTicks,
     entry_y: f32,
     base_scale: Vec3,
 ) -> PipeTransitSample {
     let source_center = pipe_pair.endpoints[source];
     let destination_center = pipe_pair.endpoints[destination];
     let hidden_y = pipe_pair.top_y - PIPE_SINK_DEPTH;
-    let total = PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS;
+    let elapsed_seconds = elapsed.as_seconds();
 
-    if elapsed < PIPE_ENTER_SECONDS {
-        let t = smooth_step(elapsed / PIPE_ENTER_SECONDS);
+    if elapsed.get() < PIPE_ENTER_END_TICKS {
+        let t = smooth_step(elapsed_seconds / PIPE_ENTER_SECONDS);
         return PipeTransitSample {
             position: Vec3::new(
                 source_center.x,
@@ -3191,7 +5120,7 @@ fn pipe_transit_sample(
         };
     }
 
-    if elapsed < PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS {
+    if elapsed.get() < PIPE_HIDDEN_END_TICKS {
         return PipeTransitSample {
             position: Vec3::new(destination_center.x, hidden_y, destination_center.y),
             scale: base_scale * 0.45,
@@ -3200,7 +5129,8 @@ fn pipe_transit_sample(
     }
 
     let t = smooth_step(
-        ((elapsed - PIPE_ENTER_SECONDS - PIPE_TRAVEL_SECONDS) / PIPE_EXIT_SECONDS).clamp(0.0, 1.0),
+        ((elapsed_seconds - PIPE_ENTER_SECONDS - PIPE_TRAVEL_SECONDS) / PIPE_EXIT_SECONDS)
+            .clamp(0.0, 1.0),
     );
     PipeTransitSample {
         position: Vec3::new(
@@ -3209,7 +5139,7 @@ fn pipe_transit_sample(
             destination_center.y,
         ),
         scale: base_scale * (0.45 + (1.0 - 0.45) * t),
-        complete: elapsed >= total,
+        complete: elapsed.get() >= PIPE_TRANSIT_END_TICKS,
     }
 }
 
@@ -3228,106 +5158,69 @@ fn arena_hazard_marker_scale(kind: ArenaHazardKind, wave: f32) -> f32 {
     }
 }
 
-pub fn update_arena_hazards(
-    time: Res<Time>,
-    mut commands: Commands,
-    effect_assets: Res<EffectAssets>,
+pub fn advance_arena_hazards_and_collect_contacts(
+    active_arena: Res<ActiveArena>,
     mut state: ResMut<ArenaHazardState>,
     match_state: Res<MatchState>,
     feel: Res<CombatFeelTuning>,
-    mut hitstop: ResMut<Hitstop>,
-    mut camera_effects: ResMut<HitEffects>,
-    mut telemetry: ResMut<MatchTelemetry>,
-    mut burns: Query<(Entity, &mut ArenaFighterBurn)>,
-    mut fighters: Query<(
-        Entity,
+    hitstop: Res<Hitstop>,
+    mut contact_buffer: ResMut<ContactBuffer>,
+    fighters: Query<(
         &Fighter,
-        &mut FighterStats,
-        &mut FighterMotor,
-        &mut FighterActionState,
-        &FighterStyle,
-        &FighterEquipment,
-        &Transform,
+        &FighterStats,
+        &FighterMotor,
+        &FighterActionState,
+        &SimPosition,
     )>,
 ) {
     if hitstop.active() {
         return;
     }
 
-    let arena_index = active_arena_index();
-    let arena = active_arena_definition();
-    let dt = time.delta_secs();
+    let arena_index = active_arena.index();
+    let arena = active_arena.definition();
     state.sync_to_arena(arena_index, arena.hazards.len());
-    state.elapsed += dt;
-    state.tick_cooldowns(dt);
-
-    for (fighter_entity, mut burn) in &mut burns {
-        burn.remaining = (burn.remaining - dt).max(0.0);
-        if burn.remaining <= 0.0 {
-            commands.entity(fighter_entity).remove::<ArenaFighterBurn>();
-        }
-    }
+    state.elapsed.advance();
+    state.tick_cooldowns();
 
     for (hazard_index, hazard) in arena.hazards.iter().enumerate() {
         if hazard.kind == ArenaHazardKind::SawBlade && state.crank_saws_stopped {
             continue;
         }
-        if !arena_hazard_is_active_for_kind(state.elapsed, hazard) {
+        if !arena_hazard_is_active_for_kind_ticks(state.elapsed, hazard) {
             continue;
         }
 
-        let Some(cooldowns) = state.hit_cooldowns.get_mut(hazard_index) else {
+        let Some(cooldowns) = state.hit_cooldowns.get(hazard_index) else {
             continue;
         };
 
-        for (
-            fighter_entity,
-            fighter,
-            mut stats,
-            mut motor,
-            mut action,
-            style,
-            equipment,
-            transform,
-        ) in &mut fighters
-        {
+        for victim in FighterId::ALL {
+            let Some((fighter, stats, motor, action, transform)) = fighters
+                .iter()
+                .find(|(fighter, ..)| fighter.id == victim.index())
+            else {
+                continue;
+            };
             if fighter.id >= FIGHTER_COUNT
                 || !match_state.fighter_can_participate(fighter.id)
-                || cooldowns[fighter.id] > 0.0
+                || cooldowns[fighter.id].active()
                 || !can_receive_impact(&stats, &action)
                 || !arena_hazard_overlaps(hazard, transform.translation)
             {
                 continue;
             }
-
-            if hazard.kind == ArenaHazardKind::Campfire {
-                commands
-                    .entity(fighter_entity)
-                    .insert(ArenaFighterBurn::new(ARENA_HAZARD_CAMPFIRE_BURN_SECONDS));
-                spawn_burning_fighter_effect(
-                    &mut commands,
-                    &effect_assets,
-                    fighter_entity,
-                    ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
-                );
-            }
-
-            if hazard.kind == ArenaHazardKind::SnareField {
-                motor.velocity.x *= 0.55;
-                motor.velocity.z *= 0.55;
-            }
-
-            if hazard.kind == ArenaHazardKind::SawBlade {
-                spawn_machine_scratch(
-                    &mut commands,
-                    &effect_assets,
-                    fighter_entity,
-                    transform.translation,
-                );
-            }
+            let (Ok(arena_index), Ok(hazard_index)) =
+                (u16::try_from(arena_index), u16::try_from(hazard_index))
+            else {
+                continue;
+            };
 
             let mut impact = if hazard.kind == ArenaHazardKind::BumperNode {
-                bumper_impact_profile(Vec2::new(motor.velocity.x, motor.velocity.z).length())
+                bumper_impact_profile(crate::canonical_math::vec2_length(Vec2::new(
+                    motor.velocity.x,
+                    motor.velocity.z,
+                )))
             } else {
                 arena_hazard_impact_profile(hazard.kind)
             }
@@ -3343,24 +5236,112 @@ pub fn update_arena_hazards(
                 ));
             }
 
-            apply_impact(
-                &mut commands,
-                &effect_assets,
-                &mut camera_effects,
-                &mut hitstop,
-                &match_state,
-                &mut stats,
-                &mut motor,
-                &mut action,
-                transform,
+            let _ = contact_buffer.push(ContactRecord::new(
+                ContactPhase::Strike,
+                ContactSourceKind::PersistentArenaHazard,
+                ContactSourceId::ArenaHazard {
+                    arena_index,
+                    hazard_index,
+                },
                 None,
+                victim,
+                u16::MAX,
+                crate::techniques::AttackShapeId::HazardField as u16,
+                0,
+                transform.translation,
                 hazard.center,
                 impact,
-                DamageDefenderProfile::from_loadout(style, equipment),
-                &mut telemetry,
-            );
-            cooldowns[fighter.id] = arena_hazard_hit_cooldown(hazard.kind);
+                ContactFlags::default(),
+            ));
         }
+    }
+}
+
+/// Commits persistent-hazard cooldowns and status accents after central impact
+/// resolution. The resolver owns the semantic hit event; this consumer only
+/// attaches an arena presentation sidecar to that existing event ID.
+pub fn apply_arena_hazard_contact_outcomes(
+    active_arena: Res<ActiveArena>,
+    mut state: ResMut<ArenaHazardState>,
+    contact_buffer: Res<ContactBuffer>,
+    combat_intents: Option<Res<CombatPresentationIntentJournal>>,
+    mut presentation_intents: Option<ResMut<ArenaPresentationIntentJournal>>,
+    mut fighters: Query<(&Fighter, &mut FighterMotor, &SimPosition)>,
+) {
+    let arena_index = active_arena.index();
+    let arena = active_arena.definition();
+    for contact_index in 0..contact_buffer.len() {
+        let Some(contact) = contact_buffer.record(contact_index) else {
+            continue;
+        };
+        if contact.source_kind != ContactSourceKind::PersistentArenaHazard
+            || contact.phase != ContactPhase::Strike
+        {
+            continue;
+        }
+        let Some((contact_arena, hazard_index)) = contact.source.arena_hazard() else {
+            continue;
+        };
+        if usize::from(contact_arena) != arena_index {
+            continue;
+        }
+        let hazard_index = usize::from(hazard_index);
+        let Some(hazard) = arena.hazards.get(hazard_index) else {
+            continue;
+        };
+        let Some(outcome) = contact_buffer.outcome(contact_index) else {
+            continue;
+        };
+        if !matches!(
+            outcome.kind,
+            ContactOutcomeKind::Accepted | ContactOutcomeKind::Guarded
+        ) {
+            continue;
+        }
+
+        let Some((_, mut motor, transform)) = fighters
+            .iter_mut()
+            .find(|(fighter, ..)| fighter.id == contact.target.index())
+        else {
+            continue;
+        };
+        if hazard.kind == ArenaHazardKind::SnareField {
+            motor.velocity.x *= 0.55;
+            motor.velocity.z *= 0.55;
+        }
+        if let Some(cooldowns) = state.hit_cooldowns.get_mut(hazard_index) {
+            cooldowns[contact.target.index()] =
+                TickTimer::from_seconds_ceil(arena_hazard_hit_cooldown(hazard.kind));
+        }
+
+        let accent = match hazard.kind {
+            ArenaHazardKind::Campfire => ArenaImpactAccent::CampfireBurn {
+                duration_seconds: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+            },
+            ArenaHazardKind::SawBlade => ArenaImpactAccent::MachineScratch {
+                position: transform.translation,
+            },
+            _ => ArenaImpactAccent::None,
+        };
+        if accent == ArenaImpactAccent::None {
+            continue;
+        }
+        let (Some(event_id), Some(combat_intents), Some(presentation_intents)) = (
+            outcome.event_id,
+            combat_intents.as_ref(),
+            presentation_intents.as_deref_mut(),
+        ) else {
+            continue;
+        };
+        let Some(combat_intent) = combat_intents.get(event_id) else {
+            continue;
+        };
+        let _ = presentation_intents.record(ArenaPresentationIntent {
+            event_id,
+            victim: contact.target,
+            outcome: combat_intent.outcome,
+            accent,
+        });
     }
 }
 
@@ -3369,25 +5350,31 @@ fn saw_knockback_direction(
     hazard_center: Vec3,
     fighter_facing: Vec3,
 ) -> Vec3 {
-    let away_from_blade = Vec3::new(
+    let away_from_blade = crate::canonical_math::vec3_normalize_or_zero(Vec3::new(
         fighter_position.x - hazard_center.x,
         0.0,
         fighter_position.z - hazard_center.z,
-    )
-    .normalize_or_zero();
-    if away_from_blade.length_squared() > 0.0 {
+    ));
+    if crate::canonical_math::vec3_length_squared(away_from_blade) > 0.0 {
         return away_from_blade;
     }
 
-    let away_from_arena_center =
-        Vec3::new(hazard_center.x, 0.0, hazard_center.z).normalize_or_zero();
-    if away_from_arena_center.length_squared() > 0.0 {
+    let away_from_arena_center = crate::canonical_math::vec3_normalize_or_zero(Vec3::new(
+        hazard_center.x,
+        0.0,
+        hazard_center.z,
+    ));
+    if crate::canonical_math::vec3_length_squared(away_from_arena_center) > 0.0 {
         away_from_arena_center
     } else {
-        Vec3::new(fighter_facing.x, 0.0, fighter_facing.z).normalize_or(Vec3::X)
+        crate::canonical_math::vec3_normalize_or(
+            Vec3::new(fighter_facing.x, 0.0, fighter_facing.z),
+            Vec3::X,
+        )
     }
 }
 
+#[cfg(test)]
 pub fn ground_height_at(x: f32, z: f32) -> Option<f32> {
     ground_height_at_with_radius(x, z, 0.0)
 }
@@ -3408,12 +5395,14 @@ impl GroundSupport {
     }
 }
 
+#[cfg(test)]
 pub fn ground_height_at_with_radius(x: f32, z: f32, support_radius: f32) -> Option<f32> {
     ground_support_at_with_radius(x, z, support_radius).height()
 }
 
+#[cfg(test)]
 pub fn ground_support_at_with_radius(x: f32, z: f32, support_radius: f32) -> GroundSupport {
-    let arena = active_arena_definition();
+    let arena = &arena_definitions()[0];
     ground_support_for_arena_with_radius(arena, x, z, support_radius)
 }
 
@@ -3451,12 +5440,18 @@ pub fn ground_support_for_arena_with_radius(
         } else if let Some((outer_radius, opening_radius)) =
             circular_platform_profile(arena, platform)
         {
-            let distance = Vec2::new(x - platform.center.x, z - platform.center.y).length();
-            if opening_radius > 0.0 && distance <= opening_radius {
+            debug_assert!(outer_radius >= 0.0 && opening_radius >= 0.0 && ledge_grace >= 0.0);
+            let distance_squared = crate::canonical_math::vec2_length_squared(Vec2::new(
+                x - platform.center.x,
+                z - platform.center.y,
+            ));
+            if opening_radius > 0.0 && distance_squared <= opening_radius * opening_radius {
                 None
-            } else if distance <= outer_radius {
+            } else if distance_squared <= outer_radius * outer_radius {
                 Some(GroundSupport::Firm(platform.top_y))
-            } else if distance <= outer_radius + ledge_grace {
+            } else if distance_squared
+                <= (outer_radius + ledge_grace) * (outer_radius + ledge_grace)
+            {
                 Some(GroundSupport::Grace(platform.top_y))
             } else {
                 None
@@ -3523,10 +5518,12 @@ fn ground_shape_support(
             radius,
             top_y,
         } => {
-            let distance = Vec2::new(x - center.x, z - center.y).length();
-            if distance <= radius {
+            debug_assert!(radius >= 0.0 && ledge_grace >= 0.0);
+            let distance_squared =
+                crate::canonical_math::vec2_length_squared(Vec2::new(x - center.x, z - center.y));
+            if distance_squared <= radius * radius {
                 Some(GroundSupport::Firm(top_y))
-            } else if distance <= radius + ledge_grace {
+            } else if distance_squared <= (radius + ledge_grace) * (radius + ledge_grace) {
                 Some(GroundSupport::Grace(top_y))
             } else {
                 None
@@ -3539,8 +5536,7 @@ fn ground_shape_support(
             top_y,
         } => {
             let offset = Vec2::new(x - center.x, z - center.y);
-            let cos = yaw.cos();
-            let sin = yaw.sin();
+            let (cos, sin) = crate::canonical_math::collision_yaw_basis(yaw);
             let local = Vec2::new(
                 cos * offset.x + sin * offset.y,
                 -sin * offset.x + cos * offset.y,
@@ -3578,12 +5574,7 @@ fn prefer_ground_support(
     }
 }
 
-pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
-    let arena = active_arena_definition();
-    resolve_platform_side_collision_for_arena(arena, position, radius)
-}
-
-fn resolve_platform_side_collision_for_arena(
+pub(crate) fn resolve_platform_side_collision_for_arena(
     arena: &ArenaDefinition,
     position: Vec3,
     radius: f32,
@@ -3677,19 +5668,20 @@ fn resolve_circular_platform_side_collision_against(
         position.x - platform.center.x,
         position.z - platform.center.y,
     );
-    let distance = offset.length();
     let expanded_radius = platform_radius + fighter_radius;
+    debug_assert!(platform_radius >= 0.0 && fighter_radius >= 0.0 && opening_radius >= 0.0);
+    let distance_squared = crate::canonical_math::vec2_length_squared(offset);
     let clears_lip = position.y >= platform.top_y - crate::constants::LANDING_SNAP_TOLERANCE * 2.0;
 
-    if (opening_radius > 0.0 && distance <= opening_radius)
-        || distance >= expanded_radius
+    if (opening_radius > 0.0 && distance_squared <= opening_radius * opening_radius)
+        || distance_squared >= expanded_radius * expanded_radius
         || clears_lip
         || position.y > platform.top_y + 0.7
     {
         return position;
     }
 
-    let direction = offset.normalize_or(Vec2::X);
+    let direction = crate::canonical_math::vec2_normalize_or(offset, Vec2::X);
     Vec3::new(
         platform.center.x + direction.x * expanded_radius,
         position.y,
@@ -3751,9 +5743,25 @@ pub fn arena_hazard_is_active(elapsed: f32, pulse_seconds: f32) -> bool {
     elapsed.rem_euclid(cycle) <= cycle * 0.36
 }
 
+#[cfg(test)]
 pub fn arena_hazard_is_active_for_kind(elapsed: f32, hazard: &ArenaHazardDefinition) -> bool {
     let cycle = hazard.pulse_seconds.max(0.1);
     (elapsed + hazard.phase).rem_euclid(cycle) <= cycle * arena_hazard_active_fraction(hazard.kind)
+}
+
+pub fn arena_hazard_is_active_for_kind_ticks(
+    elapsed: ElapsedTicks,
+    hazard: &ArenaHazardDefinition,
+) -> bool {
+    let cycle_ticks = seconds_to_ticks_ceil(hazard.pulse_seconds.max(0.1)).max(1);
+    let phase_ticks = seconds_to_ticks_ceil(hazard.phase);
+    let cycle_position =
+        ((u64::from(elapsed.get()) + u64::from(phase_ticks)) % u64::from(cycle_ticks)) as u32;
+    let active_ticks = seconds_to_ticks_ceil(
+        hazard.pulse_seconds.max(0.1) * arena_hazard_active_fraction(hazard.kind),
+    )
+    .clamp(1, cycle_ticks);
+    cycle_position < active_ticks
 }
 
 fn arena_hazard_active_fraction(kind: ArenaHazardKind) -> f32 {
@@ -3781,7 +5789,9 @@ fn arena_hazard_overlaps(hazard: &ArenaHazardDefinition, fighter_position: Vec3)
         fighter_position.x - hazard.center.x,
         fighter_position.z - hazard.center.z,
     );
-    flat.length() <= hazard.radius + FIGHTER_RADIUS
+    let expanded_radius = hazard.radius + FIGHTER_RADIUS;
+    debug_assert!(hazard.radius >= 0.0 && expanded_radius >= 0.0);
+    crate::canonical_math::vec2_length_squared(flat) <= expanded_radius * expanded_radius
         && arena_hazard_affects_height(hazard, fighter_position.y)
 }
 
@@ -3876,6 +5886,1006 @@ fn bumper_impact_profile(planar_speed: f32) -> ImpactProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena_barriers::BarrierFootprint;
+    use crate::characters::{CharacterKind, CharacterMoveCatalog, FighterCharacter};
+    use crate::combat::{
+        CombatPresentationIntentJournal, DamageDefenderProfile, HitEffects, apply_impact_core,
+        begin_contact_collection, impact_sim_event_kind, present_committed_combat_events,
+        resolve_contacts,
+    };
+    use crate::components::{FighterGrabState, FighterUltimateState};
+    use crate::ecs_identity::SimulationIdentityAllocator;
+    use crate::equipment::FighterEquipment;
+    use crate::game_state::MatchTelemetry;
+    use crate::sim_event::{
+        PresentationEventCursor, PresentationEventRouter, SimEventJournal, SimEventSource,
+        TickEventBuffer,
+    };
+    use crate::styles::FighterStyle;
+
+    fn arena_presentation_test_outcome() -> ImpactOutcome {
+        let state = MatchState::default();
+        let mut stats = FighterStats::default();
+        let mut motor = FighterMotor {
+            grounded: true,
+            facing: Vec3::Z,
+            ..default()
+        };
+        let mut action = FighterActionState::default();
+        let mut hitstop = Hitstop::default();
+        let mut telemetry = MatchTelemetry::default();
+        apply_impact_core(
+            &mut hitstop,
+            &state,
+            &mut stats,
+            &mut motor,
+            &mut action,
+            Vec3::ZERO,
+            None,
+            Vec3::NEG_Z,
+            arena_hazard_impact_profile(ArenaHazardKind::Campfire),
+            DamageDefenderProfile::default(),
+            &mut telemetry,
+        )
+    }
+
+    fn hazard_test_app(kind: ArenaHazardKind, with_presentation: bool) -> (App, Entity) {
+        let arena_index = arena_definitions()
+            .iter()
+            .position(|arena| arena.hazards.iter().any(|hazard| hazard.kind == kind))
+            .expect("fixture arena must contain requested hazard");
+        let active = ActiveArena::new(arena_index);
+        let hazard = active
+            .definition()
+            .hazards
+            .iter()
+            .find(|hazard| hazard.kind == kind)
+            .copied()
+            .unwrap();
+        let mut state = MatchState::default();
+        state.set_active_slots([true, false, false, false]);
+        state.reset_for_new_match();
+
+        let mut app = App::new();
+        app.insert_resource(active)
+            .insert_resource(SimulationIdentityAllocator::default())
+            .insert_resource(ArenaHazardState::new(
+                arena_index,
+                active.definition().hazards.len(),
+            ))
+            .insert_resource(state)
+            .insert_resource(CombatFeelTuning::default())
+            .insert_resource(CharacterMoveCatalog::default())
+            .insert_resource(Hitstop::default())
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(ContactBuffer::default())
+            .insert_resource(TickEventBuffer::new(SimTick(7)))
+            .add_systems(
+                Update,
+                (
+                    begin_contact_collection,
+                    advance_arena_hazards_and_collect_contacts,
+                    resolve_contacts,
+                    apply_arena_hazard_contact_outcomes,
+                )
+                    .chain(),
+            );
+        if with_presentation {
+            app.insert_resource(ArenaPresentationIntentJournal::default())
+                .insert_resource(CombatPresentationIntentJournal::default());
+        }
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "Arena target",
+                    color: Color::WHITE,
+                    spawn: hazard.center,
+                },
+                FighterCharacter::new(CharacterKind::Cat),
+                FighterStats::default(),
+                FighterMotor {
+                    grounded: true,
+                    facing: Vec3::Z,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterGrabState::default(),
+                FighterUltimateState::default(),
+                FighterStyle {
+                    kind: crate::styles::FighterStyleKind::Anchor,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                SimPosition::new(hazard.center),
+            ))
+            .id();
+        (app, fighter)
+    }
+
+    fn arena_presentation_test_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(EffectAssets::presentation_enabled_for_test())
+            .insert_resource(HitEffects::default())
+            .insert_resource(SimEventJournal::default())
+            .insert_resource(CombatPresentationIntentJournal::default())
+            .insert_resource(ArenaPresentationIntentJournal::default())
+            .insert_resource(PresentationEventCursor::default())
+            .insert_resource(PresentationEventRouter::default())
+            .add_systems(Update, present_committed_combat_events);
+        app.world_mut().spawn((
+            Fighter {
+                id: 0,
+                name: "Arena presentation target",
+                color: Color::WHITE,
+                spawn: Vec3::ZERO,
+            },
+            FighterStats::default(),
+            FighterMotor::default(),
+            FighterActionState::default(),
+        ));
+        app
+    }
+
+    fn commit_arena_presentation(
+        app: &mut App,
+        tick: u64,
+        accent: ArenaImpactAccent,
+    ) -> SimEventId {
+        let outcome = arena_presentation_test_outcome();
+        let mut buffer = TickEventBuffer::new(SimTick(tick));
+        let event_id = buffer
+            .emit(
+                SimEventSource::Arena,
+                impact_sim_event_kind(outcome, None, FighterId::ZERO),
+            )
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<SimEventJournal>()
+            .commit(&buffer);
+        app.world_mut()
+            .resource_mut::<ArenaPresentationIntentJournal>()
+            .record(ArenaPresentationIntent {
+                event_id,
+                victim: FighterId::ZERO,
+                outcome,
+                accent,
+            })
+            .unwrap();
+        event_id
+    }
+
+    fn arena_effect_count(app: &mut App, kind: crate::effects::EffectKind) -> usize {
+        let world = app.world_mut();
+        let mut effects = world.query::<&crate::effects::VisualEffect>();
+        effects
+            .iter(world)
+            .filter(|effect| effect.kind == kind)
+            .count()
+    }
+
+    #[test]
+    fn headless_hazard_hit_commits_state_and_event_without_presentation_resources() {
+        let (mut app, fighter) = hazard_test_app(ArenaHazardKind::Campfire, false);
+
+        app.update();
+
+        let stats = app.world().get::<FighterStats>(fighter).unwrap();
+        assert!(stats.health < crate::constants::MAX_HEALTH);
+        assert_eq!(stats.hud_flash, 0.0);
+        assert!(
+            app.world().get::<ArenaFighterBurn>(fighter).is_none(),
+            "burn tint is render-local and must not enter the headless world"
+        );
+        assert!(app.world().get_resource::<EffectAssets>().is_none());
+        assert!(
+            app.world()
+                .get_resource::<ArenaPresentationIntentJournal>()
+                .is_none()
+        );
+        let events = app.world().resource::<TickEventBuffer>();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.iter().next().unwrap().kind,
+            crate::sim_event::SimEventKind::HitConfirmed {
+                attacker: None,
+                victim: FighterId::ZERO,
+                ..
+            }
+        ));
+        let health_after_first = stats.health;
+        assert!(
+            app.world()
+                .resource::<ArenaHazardState>()
+                .hit_cooldowns
+                .iter()
+                .any(|cooldowns| cooldowns[FighterId::ZERO.index()].active()),
+            "an accepted persistent-hazard contact starts its per-target cooldown"
+        );
+        app.update();
+        assert_eq!(
+            app.world().get::<FighterStats>(fighter).unwrap().health,
+            health_after_first,
+            "an active per-target cooldown suppresses the next overlapping tick"
+        );
+        assert_eq!(app.world().resource::<TickEventBuffer>().len(), 1);
+        let world = app.world_mut();
+        let mut effects = world.query::<&crate::effects::VisualEffect>();
+        assert_eq!(effects.iter(world).count(), 0);
+    }
+
+    #[test]
+    fn hazard_hit_records_sidecar_without_presenting_during_simulation() {
+        let (mut app, fighter) = hazard_test_app(ArenaHazardKind::SawBlade, true);
+
+        app.update();
+
+        assert!(
+            app.world().get::<FighterStats>(fighter).unwrap().health < crate::constants::MAX_HEALTH
+        );
+        assert_eq!(
+            app.world()
+                .resource::<ArenaPresentationIntentJournal>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            app.world().get::<FighterStats>(fighter).unwrap().hud_flash,
+            0.0
+        );
+        let world = app.world_mut();
+        let mut effects = world.query::<&crate::effects::VisualEffect>();
+        assert_eq!(effects.iter(world).count(), 0);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct HazardStrikeFixture {
+        health_q: i32,
+        outcomes: Vec<ContactOutcomeKind>,
+        event_sources: Vec<SimEventSource>,
+        cooldown_active: bool,
+    }
+
+    fn run_hazard_and_strike_fixture(reverse_insert_order: bool) -> HazardStrikeFixture {
+        let arena_index = arena_definitions()
+            .iter()
+            .position(|arena| {
+                arena
+                    .hazards
+                    .iter()
+                    .any(|hazard| hazard.kind == ArenaHazardKind::Campfire)
+            })
+            .unwrap();
+        let active_arena = ActiveArena::new(arena_index);
+        let (hazard_index, hazard) = active_arena
+            .definition()
+            .hazards
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, hazard)| hazard.kind == ArenaHazardKind::Campfire)
+            .unwrap();
+        let owner = FighterId::ZERO;
+        let target = FighterId::new(1).unwrap();
+
+        let mut match_state = MatchState::default();
+        match_state.set_active_slots([true, true, false, false]);
+        match_state.reset_for_new_match();
+        let mut app = App::new();
+        app.insert_resource(active_arena)
+            .insert_resource(ArenaHazardState::new(
+                arena_index,
+                active_arena.definition().hazards.len(),
+            ))
+            .insert_resource(match_state)
+            .insert_resource(CharacterMoveCatalog::default())
+            .insert_resource(Hitstop::default())
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(TickEventBuffer::new(SimTick(41)));
+
+        let spawn_fighter = |world: &mut World, fighter_id: FighterId, position: Vec3| {
+            world.spawn((
+                Fighter {
+                    id: fighter_id.index(),
+                    name: "Hazard and strike",
+                    color: Color::WHITE,
+                    spawn: position,
+                },
+                FighterCharacter::new(CharacterKind::Cat),
+                FighterStats::default(),
+                FighterMotor {
+                    grounded: true,
+                    facing: Vec3::Z,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterGrabState::default(),
+                FighterUltimateState::default(),
+                FighterStyle {
+                    kind: crate::styles::FighterStyleKind::Anchor,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                SimPosition::new(position),
+            ));
+        };
+        if reverse_insert_order {
+            spawn_fighter(app.world_mut(), target, hazard.center);
+            spawn_fighter(app.world_mut(), owner, hazard.center + Vec3::X * 3.0);
+        } else {
+            spawn_fighter(app.world_mut(), owner, hazard.center + Vec3::X * 3.0);
+            spawn_fighter(app.world_mut(), target, hazard.center);
+        }
+
+        let source_entity = app.world_mut().spawn_empty().id();
+        let mut identities = SimulationIdentityAllocator::default();
+        let stable_source = identities
+            .try_allocate(SimEntityKind::Hitbox, source_entity)
+            .unwrap();
+        app.world_mut()
+            .entity_mut(source_entity)
+            .insert(stable_source);
+        app.insert_resource(identities);
+
+        let strike = ContactRecord::new(
+            ContactPhase::Strike,
+            ContactSourceKind::FighterStrike,
+            stable_source.id(),
+            Some(owner),
+            target,
+            u16::MAX,
+            crate::techniques::AttackShapeId::CompactSlashLead as u16,
+            0,
+            hazard.center,
+            hazard.center + Vec3::X * 0.5,
+            impact_profile(
+                owner.index(),
+                ImpactSource::FighterStrike,
+                5.0,
+                3.0,
+                1.0,
+                false,
+                true,
+                8.0,
+                ImpactFeedbackIntensity::Light,
+                ReactionFamilyId::ShortStandingStagger,
+            ),
+            ContactFlags::default(),
+        );
+        let hazard_contact = ContactRecord::new(
+            ContactPhase::Strike,
+            ContactSourceKind::PersistentArenaHazard,
+            ContactSourceId::ArenaHazard {
+                arena_index: u16::try_from(arena_index).unwrap(),
+                hazard_index: u16::try_from(hazard_index).unwrap(),
+            },
+            None,
+            target,
+            u16::MAX,
+            crate::techniques::AttackShapeId::HazardField as u16,
+            0,
+            hazard.center,
+            hazard.center,
+            arena_hazard_impact_profile(hazard.kind),
+            ContactFlags::default(),
+        );
+        let mut contacts = ContactBuffer::default();
+        if reverse_insert_order {
+            contacts.push(hazard_contact);
+            contacts.push(strike);
+        } else {
+            contacts.push(strike);
+            contacts.push(hazard_contact);
+        }
+        app.insert_resource(contacts).add_systems(
+            Update,
+            (resolve_contacts, apply_arena_hazard_contact_outcomes).chain(),
+        );
+
+        app.update();
+
+        let health_q = {
+            let world = app.world_mut();
+            let mut fighters = world.query::<(&Fighter, &FighterStats)>();
+            let (_, stats) = fighters
+                .iter(world)
+                .find(|(fighter, _)| fighter.id == target.index())
+                .unwrap();
+            quantize_f32(stats.health, DEFAULT_F32_QUANTIZATION)
+        };
+        let outcomes = {
+            let contacts = app.world().resource::<ContactBuffer>();
+            (0..contacts.len())
+                .map(|index| contacts.outcome(index).unwrap().kind)
+                .collect()
+        };
+        let event_sources = app
+            .world()
+            .resource::<TickEventBuffer>()
+            .iter()
+            .map(|event| event.id.source)
+            .collect();
+        let cooldown_active = app.world().resource::<ArenaHazardState>().hit_cooldowns
+            [hazard_index][target.index()]
+        .active();
+        HazardStrikeFixture {
+            health_q,
+            outcomes,
+            event_sources,
+            cooldown_active,
+        }
+    }
+
+    #[test]
+    fn hazard_and_strike_both_land_independent_of_insertion_and_ecs_order() {
+        let forward = run_hazard_and_strike_fixture(false);
+        let reversed = run_hazard_and_strike_fixture(true);
+
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward.outcomes,
+            vec![ContactOutcomeKind::Accepted, ContactOutcomeKind::Accepted]
+        );
+        assert_eq!(forward.event_sources.len(), 2);
+        assert!(forward.cooldown_active);
+        assert!(
+            forward.health_q < quantize_f32(crate::constants::MAX_HEALTH, DEFAULT_F32_QUANTIZATION)
+        );
+    }
+
+    #[test]
+    fn arena_presentation_intent_storage_is_bounded_and_rollback_discardable() {
+        let outcome = arena_presentation_test_outcome();
+        let tick = SimTick(80);
+        let mut intents = ArenaPresentationIntentJournal::default();
+        for ordinal in 0..MAX_SIM_EVENTS_PER_TICK {
+            intents
+                .record(ArenaPresentationIntent {
+                    event_id: SimEventId {
+                        tick,
+                        source: SimEventSource::Arena,
+                        ordinal: ordinal as u16,
+                    },
+                    victim: FighterId::ZERO,
+                    outcome,
+                    accent: ArenaImpactAccent::None,
+                })
+                .unwrap();
+        }
+        assert_eq!(intents.len(), MAX_SIM_EVENTS_PER_TICK);
+        assert_eq!(
+            intents.capacity(),
+            SIM_EVENT_HISTORY_TICKS * MAX_SIM_EVENTS_PER_TICK
+        );
+        assert_eq!(
+            intents.record(ArenaPresentationIntent {
+                event_id: SimEventId {
+                    tick,
+                    source: SimEventSource::Arena,
+                    ordinal: MAX_SIM_EVENTS_PER_TICK as u16,
+                },
+                victim: FighterId::ZERO,
+                outcome,
+                accent: ArenaImpactAccent::None,
+            }),
+            Err(EventEmitError::CapacityExceeded {
+                capacity: MAX_SIM_EVENTS_PER_TICK,
+            })
+        );
+
+        intents.discard_after(SimTick(79));
+        assert_eq!(intents.len(), 0);
+        assert_eq!(intents.metrics().discarded, MAX_SIM_EVENTS_PER_TICK as u64);
+        assert_eq!(intents.metrics().rejected, 1);
+    }
+
+    #[test]
+    fn arena_events_survive_render_stall_and_rollback_replay_exactly_once() {
+        let mut app = arena_presentation_test_app();
+        let burn = commit_arena_presentation(
+            &mut app,
+            90,
+            ArenaImpactAccent::CampfireBurn {
+                duration_seconds: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+            },
+        );
+        let scratch = commit_arena_presentation(
+            &mut app,
+            91,
+            ArenaImpactAccent::MachineScratch {
+                position: Vec3::ZERO,
+            },
+        );
+
+        // One render update observes both fixed ticks after the simulated stall.
+        app.update();
+        assert_eq!(
+            arena_effect_count(&mut app, crate::effects::EffectKind::Burning),
+            7
+        );
+        let world = app.world_mut();
+        let mut fighters = world.query_filtered::<&ArenaFighterBurn, With<Fighter>>();
+        assert_eq!(fighters.iter(world).count(), 1);
+        assert_eq!(
+            arena_effect_count(&mut app, crate::effects::EffectKind::Scratch),
+            12
+        );
+        let first_total = {
+            let world = app.world_mut();
+            let mut effects = world.query::<&crate::effects::VisualEffect>();
+            effects.iter(world).count()
+        };
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<HitEffects>()
+                .drain_combat_sfx_cues()
+                .len(),
+            2
+        );
+        assert_eq!(
+            app.world()
+                .resource::<PresentationEventCursor>()
+                .metrics()
+                .observed_ticks,
+            2
+        );
+
+        let retained = SimTick(89);
+        app.world_mut()
+            .resource_mut::<PresentationEventCursor>()
+            .discard_after(retained);
+        app.world_mut()
+            .resource_mut::<PresentationEventRouter>()
+            .discard_after(retained);
+        app.world_mut()
+            .resource_mut::<SimEventJournal>()
+            .discard_after(retained);
+        app.world_mut()
+            .resource_mut::<ArenaPresentationIntentJournal>()
+            .discard_after(retained);
+        assert_eq!(
+            commit_arena_presentation(
+                &mut app,
+                90,
+                ArenaImpactAccent::CampfireBurn {
+                    duration_seconds: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+                },
+            ),
+            burn
+        );
+        assert_eq!(
+            commit_arena_presentation(
+                &mut app,
+                91,
+                ArenaImpactAccent::MachineScratch {
+                    position: Vec3::ZERO,
+                },
+            ),
+            scratch
+        );
+
+        app.update();
+
+        assert_eq!(
+            arena_effect_count(&mut app, crate::effects::EffectKind::Burning),
+            7
+        );
+        assert_eq!(
+            arena_effect_count(&mut app, crate::effects::EffectKind::Scratch),
+            12
+        );
+        let replay_total = {
+            let world = app.world_mut();
+            let mut effects = world.query::<&crate::effects::VisualEffect>();
+            effects.iter(world).count()
+        };
+        assert_eq!(replay_total, first_total);
+        assert!(
+            app.world_mut()
+                .resource_mut::<HitEffects>()
+                .drain_combat_sfx_cues()
+                .is_empty()
+        );
+        assert_eq!(
+            app.world()
+                .resource::<PresentationEventRouter>()
+                .metrics()
+                .duplicate_events_suppressed,
+            2
+        );
+    }
+
+    #[test]
+    fn canonical_arena_bootstrap_is_headless_idempotent_and_switch_safe() {
+        let mut world = World::new();
+        let selected = bootstrap_canonical_arena_runtime(&mut world, 0);
+        assert_eq!(selected.index(), 0);
+        assert_eq!(world.resource::<ActiveArena>().index(), 0);
+        assert_eq!(
+            world.resource::<ArenaHazardState>().hit_cooldowns.len(),
+            selected.definition().hazards.len()
+        );
+        assert_eq!(world.resource::<ArenaPipeState>().arena_index, 0);
+        assert_eq!(world.resource::<PowderKegCannonState>().arena_index, 0);
+
+        assert!(world.get_resource::<ArenaScene>().is_none());
+        assert!(world.get_resource::<ArenaOrdnanceAssets>().is_none());
+        assert!(world.get_resource::<AssetServer>().is_none());
+        assert!(world.get_resource::<Assets<Mesh>>().is_none());
+        assert!(world.get_resource::<Assets<StandardMaterial>>().is_none());
+        let geometry_count = world
+            .query_filtered::<Entity, With<ArenaGeometry>>()
+            .iter(&world)
+            .count();
+        assert_eq!(geometry_count, 0);
+
+        world.resource_mut::<ArenaHazardState>().elapsed = ElapsedTicks::from_ticks(73);
+        world.resource_mut::<PowderKegCannonState>().fire_timer = TickTimer::from_ticks(11);
+        let before_repeat = capture_arena_runtime_snapshot(&world).unwrap();
+        bootstrap_canonical_arena_runtime(&mut world, 0);
+        assert_eq!(
+            capture_arena_runtime_snapshot(&world).unwrap(),
+            before_repeat,
+            "same-arena bootstrap must not rewind live authoritative state"
+        );
+
+        let switched = bootstrap_canonical_arena_runtime(&mut world, CRANK_YARD_ARENA_INDEX);
+        let switched_snapshot = capture_arena_runtime_snapshot(&world).unwrap();
+        let mut fresh = World::new();
+        bootstrap_canonical_arena_runtime(&mut fresh, CRANK_YARD_ARENA_INDEX);
+        assert_eq!(switched.index(), CRANK_YARD_ARENA_INDEX);
+        assert_eq!(
+            switched_snapshot,
+            capture_arena_runtime_snapshot(&fresh).unwrap(),
+            "an arena switch must reset to the same canonical state as a fresh world"
+        );
+    }
+
+    #[test]
+    fn arena_render_generation_is_monotonic_across_repeated_indices() {
+        let mut scene = ArenaScene::new(0);
+        assert_eq!(scene.index(), 0);
+        assert_eq!(scene.generation(), 1);
+
+        assert_eq!(scene.rebuild(CRANK_YARD_ARENA_INDEX), 2);
+        assert_eq!(scene.index(), CRANK_YARD_ARENA_INDEX);
+        assert_eq!(scene.rebuild(0), 3);
+        assert_eq!(scene.index(), 0);
+        assert_eq!(scene.generation(), 3);
+
+        let stale = ArenaSceneReadyMarker {
+            arena_index: 0,
+            generation: 1,
+        };
+        assert_eq!(stale.arena_index(), scene.index());
+        assert_ne!(stale.generation(), scene.generation());
+    }
+
+    #[test]
+    #[should_panic(expected = "arena render generation exhausted")]
+    fn arena_render_generation_fails_closed_on_overflow() {
+        let mut scene = ArenaScene {
+            index: 0,
+            generation: u64::MAX,
+        };
+        scene.rebuild(1);
+    }
+
+    fn powder_keg_test_app(active_arena: usize) -> App {
+        let mut app = App::new();
+        app.insert_resource(ActiveArena::new(active_arena))
+            .insert_resource(SimulationIdentityAllocator::default())
+            .insert_resource(PowderKegCannonState::new(active_arena))
+            .insert_resource(ArenaOrdnanceContactFrame::default())
+            .insert_resource(MatchState::default())
+            .insert_resource(CombatFeelTuning::default())
+            .insert_resource(CharacterMoveCatalog::default())
+            .insert_resource(Hitstop::default())
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(ContactBuffer::default())
+            .insert_resource(SimTick::default())
+            .insert_resource(TickEventBuffer::default())
+            .add_systems(
+                Update,
+                (
+                    begin_contact_collection,
+                    advance_powder_keg_cannons_and_collect_contacts,
+                    resolve_contacts,
+                    apply_powder_keg_contact_outcomes,
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn leaving_powder_keg_releases_authoritative_ordnance() {
+        let mut app = powder_keg_test_app(0);
+        let bomb_entity = app
+            .world_mut()
+            .spawn((
+                ArenaCannonBomb {
+                    velocity: Vec3::ZERO,
+                    lifetime: TickTimer::from_ticks(60),
+                },
+                SimPosition::default(),
+            ))
+            .id();
+        let stable = app
+            .world_mut()
+            .resource_mut::<SimulationIdentityAllocator>()
+            .try_allocate(SimEntityKind::ArenaOrdnance, bomb_entity)
+            .expect("test ordnance pool has room");
+        app.world_mut().entity_mut(bomb_entity).insert(stable);
+
+        app.update();
+
+        assert!(app.world().get_entity(bomb_entity).is_err());
+        assert_eq!(
+            app.world()
+                .resource::<SimulationIdentityAllocator>()
+                .live_count(SimEntityKind::ArenaOrdnance),
+            0
+        );
+    }
+
+    #[test]
+    fn powder_keg_bombs_are_not_tagged_as_render_owned_arena_geometry() {
+        let mut app = powder_keg_test_app(POWDER_KEG_ARENA_INDEX);
+        app.world_mut()
+            .resource_mut::<PowderKegCannonState>()
+            .fire_timer = TickTimer::from_ticks(1);
+
+        app.update();
+
+        let bomb_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ArenaCannonBomb>>()
+            .single(app.world())
+            .expect("the cannon should spawn one bomb");
+        assert!(app.world().get::<StableSimEntity>(bomb_entity).is_some());
+        assert!(app.world().get::<ArenaGeometry>(bomb_entity).is_none());
+        assert!(app.world().get::<Mesh3d>(bomb_entity).is_none());
+    }
+
+    #[test]
+    fn headless_cannon_hit_emits_neutral_impact_without_inline_feedback() {
+        let mut app = powder_keg_test_app(POWDER_KEG_ARENA_INDEX);
+        let position = Vec3::new(0.0, ARENA_TOP_Y + 0.7, 0.0);
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "Cannon target",
+                    color: Color::WHITE,
+                    spawn: position,
+                },
+                FighterCharacter::new(CharacterKind::Cat),
+                FighterStats::default(),
+                FighterMotor {
+                    grounded: true,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterGrabState::default(),
+                FighterUltimateState::default(),
+                FighterStyle {
+                    kind: crate::styles::FighterStyleKind::Anchor,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                SimPosition::new(position),
+            ))
+            .id();
+        let bomb = app
+            .world_mut()
+            .spawn((
+                ArenaCannonBomb {
+                    velocity: Vec3::ZERO,
+                    lifetime: TickTimer::from_ticks(60),
+                },
+                SimPosition::new(position + Vec3::Y * 0.2),
+            ))
+            .id();
+        let stable = app
+            .world_mut()
+            .resource_mut::<SimulationIdentityAllocator>()
+            .try_allocate(SimEntityKind::ArenaOrdnance, bomb)
+            .unwrap();
+        app.world_mut().entity_mut(bomb).insert(stable);
+
+        app.update();
+
+        assert!(app.world().get_entity(bomb).is_err());
+        let stats = app.world().get::<FighterStats>(fighter).unwrap();
+        assert!(stats.health < crate::constants::MAX_HEALTH);
+        assert_eq!(stats.hud_flash, 0.0);
+        assert!(app.world().get_resource::<EffectAssets>().is_none());
+        let events = app.world().resource::<TickEventBuffer>();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.iter().next().unwrap().kind,
+            crate::sim_event::SimEventKind::HitConfirmed {
+                attacker: None,
+                victim: FighterId::ZERO,
+                ..
+            }
+        ));
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct CannonMultiTargetFixture {
+        health: [f32; 2],
+        victims: Vec<FighterId>,
+        source: SimEntityId,
+        live_ordnance: u32,
+    }
+
+    fn run_cannon_multi_target_fixture(reverse_ecs_allocation: bool) -> CannonMultiTargetFixture {
+        let mut app = powder_keg_test_app(POWDER_KEG_ARENA_INDEX);
+        let mut match_state = MatchState::default();
+        match_state.set_active_slots([true, true, false, false]);
+        match_state.reset_for_new_match();
+        app.insert_resource(match_state);
+
+        if reverse_ecs_allocation {
+            app.world_mut().spawn_empty();
+        }
+        let fighter_position = |fighter: FighterId| {
+            Vec3::new(
+                if fighter == FighterId::ZERO {
+                    -0.2
+                } else {
+                    0.2
+                },
+                ARENA_TOP_Y,
+                0.0,
+            )
+        };
+        let spawn_fighter = |world: &mut World, fighter_id: FighterId| {
+            let position = fighter_position(fighter_id);
+            world.spawn((
+                Fighter {
+                    id: fighter_id.index(),
+                    name: "Cannon multi-target",
+                    color: Color::WHITE,
+                    spawn: position,
+                },
+                FighterCharacter::new(CharacterKind::Cat),
+                FighterStats::default(),
+                FighterMotor {
+                    grounded: true,
+                    facing: Vec3::Z,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterGrabState::default(),
+                FighterUltimateState::default(),
+                FighterStyle {
+                    kind: crate::styles::FighterStyleKind::Anchor,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                SimPosition::new(position),
+            ));
+        };
+        let fighter_one = FighterId::new(1).unwrap();
+        let fighter_order = if reverse_ecs_allocation {
+            [fighter_one, FighterId::ZERO]
+        } else {
+            [FighterId::ZERO, fighter_one]
+        };
+        for fighter_id in fighter_order {
+            spawn_fighter(app.world_mut(), fighter_id);
+        }
+
+        let bomb_position = Vec3::new(0.0, ARENA_TOP_Y + 0.72, 0.0);
+        let bomb = app
+            .world_mut()
+            .spawn((
+                ArenaCannonBomb {
+                    velocity: Vec3::ZERO,
+                    lifetime: TickTimer::from_ticks(60),
+                },
+                SimPosition::new(bomb_position),
+            ))
+            .id();
+        let stable = app
+            .world_mut()
+            .resource_mut::<SimulationIdentityAllocator>()
+            .try_allocate(SimEntityKind::ArenaOrdnance, bomb)
+            .unwrap();
+        app.world_mut().entity_mut(bomb).insert(stable);
+
+        app.update();
+
+        let mut health = [0.0; 2];
+        {
+            let world = app.world_mut();
+            let mut fighters = world.query::<(&Fighter, &FighterStats)>();
+            for (fighter, stats) in fighters.iter(world) {
+                if fighter.id < health.len() {
+                    health[fighter.id] = stats.health;
+                }
+            }
+        }
+        let victims = app
+            .world()
+            .resource::<TickEventBuffer>()
+            .iter()
+            .filter_map(|event| match event.kind {
+                crate::sim_event::SimEventKind::HitConfirmed { victim, .. } => Some(victim),
+                _ => None,
+            })
+            .collect();
+        CannonMultiTargetFixture {
+            health,
+            victims,
+            source: stable.id(),
+            live_ordnance: app
+                .world()
+                .resource::<SimulationIdentityAllocator>()
+                .live_count(SimEntityKind::ArenaOrdnance),
+        }
+    }
+
+    #[test]
+    fn cannon_projectile_freezes_all_targets_and_ignores_ecs_allocation_order() {
+        let forward = run_cannon_multi_target_fixture(false);
+        let reversed = run_cannon_multi_target_fixture(true);
+
+        assert_eq!(forward, reversed);
+        assert!(
+            forward
+                .health
+                .iter()
+                .all(|health| *health < crate::constants::MAX_HEALTH)
+        );
+        assert_eq!(
+            forward.victims,
+            vec![FighterId::ZERO, FighterId::new(1).unwrap()]
+        );
+        assert_eq!(forward.live_ordnance, 0);
+        assert_eq!(forward.source.kind(), SimEntityKind::ArenaOrdnance);
+    }
+
+    #[test]
+    fn cannon_bomb_visual_is_reconciled_as_a_render_only_child() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ArenaOrdnanceAssets::default())
+            .add_systems(Update, sync_arena_cannon_bomb_visuals);
+        let bomb = app
+            .world_mut()
+            .spawn((
+                ArenaCannonBomb {
+                    velocity: Vec3::X,
+                    lifetime: TickTimer::from_ticks(5),
+                },
+                SimPosition::new(Vec3::new(1.0, 2.0, 3.0)),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(app.world().get::<Mesh3d>(bomb).is_none());
+        assert_eq!(
+            app.world().get::<Transform>(bomb).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0),
+            "the render transform must be projected from canonical position"
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(bomb),
+            Some(&Visibility::Inherited),
+            "a render-child parent must participate in visibility propagation"
+        );
+        assert!(app.world().get::<InheritedVisibility>(bomb).is_some());
+        let world = app.world_mut();
+        let mut visuals = world.query::<(&ArenaCannonBombVisual, &ChildOf)>();
+        let parents: Vec<_> = visuals
+            .iter(world)
+            .map(|(_, parent)| parent.parent())
+            .collect();
+        assert_eq!(parents, vec![bomb]);
+    }
 
     #[test]
     fn arena_preview_layers_include_gameplay_and_preview_cameras() {
@@ -3888,7 +6898,7 @@ mod tests {
 
     #[test]
     fn radius_support_extends_platform_ground_query_slightly() {
-        let platform = active_arena_definition().platforms[0];
+        let platform = arena_definitions()[0].platforms[0];
         let x = platform.center.x + platform.half_extents.x + 0.08;
         assert_eq!(ground_height_at(x, platform.center.y), None);
         assert_eq!(
@@ -4191,8 +7201,8 @@ mod tests {
     fn fighter_burn_visual_starts_hot_and_fades_out() {
         let fresh = ArenaFighterBurn::new(ARENA_HAZARD_CAMPFIRE_BURN_SECONDS);
         let ending = ArenaFighterBurn {
-            remaining: 0.01,
-            duration: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
+            remaining_seconds: SIM_DT_SECONDS,
+            duration_seconds: ARENA_HAZARD_CAMPFIRE_BURN_SECONDS,
         };
 
         assert!(fresh.visual_amount() > 0.7);
@@ -4311,7 +7321,7 @@ mod tests {
             pipe_pair,
             0,
             1,
-            PIPE_ENTER_SECONDS * 0.5,
+            ElapsedTicks::from_ticks(seconds_to_ticks_ceil(PIPE_ENTER_SECONDS * 0.5)),
             pipe_pair.top_y,
             base_scale,
         );
@@ -4323,7 +7333,9 @@ mod tests {
             pipe_pair,
             0,
             1,
-            PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS * 0.5,
+            ElapsedTicks::from_ticks(seconds_to_ticks_ceil(
+                PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS * 0.5,
+            )),
             pipe_pair.top_y,
             base_scale,
         );
@@ -4334,13 +7346,113 @@ mod tests {
             pipe_pair,
             0,
             1,
-            PIPE_ENTER_SECONDS + PIPE_TRAVEL_SECONDS + PIPE_EXIT_SECONDS,
+            ElapsedTicks::from_ticks(PIPE_TRANSIT_END_TICKS),
             pipe_pair.top_y,
             base_scale,
         );
         assert!(complete.complete);
         assert_eq!(complete.position.y, pipe_pair.top_y);
         assert_eq!(complete.scale, base_scale);
+    }
+
+    #[test]
+    fn pipe_transit_base_scale_ignores_render_owned_transform_pulses() {
+        let mut stats = FighterStats::default();
+        assert_eq!(fighter_pipe_base_scale(&stats), Vec3::ONE);
+
+        stats.item_giant_timer = TickTimer::from_ticks(1);
+        assert_eq!(
+            fighter_pipe_base_scale(&stats),
+            Vec3::splat(stats.item_size_multiplier())
+        );
+    }
+
+    #[test]
+    fn arena_runtime_snapshot_round_trips_private_resources_exactly() {
+        let arena_index = 3;
+        let active = ActiveArena::new(arena_index);
+        let mut world = World::new();
+        world.insert_resource(active);
+
+        let mut hazard = ArenaHazardState::new(arena_index, active.definition().hazards.len());
+        hazard.elapsed = ElapsedTicks::from_ticks(321);
+        hazard.hit_cooldowns[0][0] = TickTimer::from_ticks(8);
+        hazard.hit_cooldowns[1][0] = TickTimer::from_ticks(5);
+        hazard.hit_cooldowns[1][3] = TickTimer::from_ticks(13);
+        hazard.crank_saws_stopped = true;
+        hazard.crank_lever_toggle_cooldown = TickTimer::from_ticks(17);
+        world.insert_resource(hazard);
+
+        let mut pipes = ArenaPipeState::new(arena_index);
+        pipes.fighters[0] = FighterPipeState::Ready {
+            candidate: Some(1),
+            dwell_ticks: 7,
+            cooldown: TickTimer::from_ticks(2),
+        };
+        pipes.fighters[2] = FighterPipeState::Transit {
+            source: 0,
+            destination: 1,
+            elapsed: ElapsedTicks::from_ticks(19),
+            entry_y: 1.25,
+            base_scale: Vec3::splat(1.5),
+        };
+        world.insert_resource(pipes);
+        world.insert_resource(PowderKegCannonState {
+            arena_index,
+            fire_timer: TickTimer::from_ticks(29),
+            next_cannon: 1,
+        });
+
+        let snapshot = capture_arena_runtime_snapshot(&world).unwrap();
+        assert_eq!(snapshot.hazard_clock_ticks, 321);
+        assert_eq!(snapshot.per_fighter_hazard_cooldowns, [8, 0, 0, 13]);
+        assert_eq!(
+            snapshot.logical_device_flags,
+            ARENA_DEVICE_CRANK_SAWS_STOPPED
+        );
+
+        world.insert_resource(ArenaHazardState::new(arena_index, 0));
+        world.insert_resource(ArenaPipeState::new(arena_index));
+        world.insert_resource(PowderKegCannonState::new(arena_index));
+        let plan = prepare_arena_runtime_restore(&world, &snapshot).unwrap();
+        commit_arena_runtime_restore(&mut world, plan);
+        assert_eq!(capture_arena_runtime_snapshot(&world).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn arena_runtime_restore_rejects_hostile_payload_and_pipe_state() {
+        let arena_index = 3;
+        let active = ActiveArena::new(arena_index);
+        let mut world = World::new();
+        world.insert_resource(active);
+        world.insert_resource(ArenaHazardState::new(
+            arena_index,
+            active.definition().hazards.len(),
+        ));
+        world.insert_resource(ArenaPipeState::new(arena_index));
+        world.insert_resource(PowderKegCannonState::new(arena_index));
+        let snapshot = capture_arena_runtime_snapshot(&world).unwrap();
+
+        let mut padding = snapshot.clone();
+        padding.payload[ARENA_PAYLOAD_BYTES - 1] = 1;
+        assert!(matches!(
+            prepare_arena_runtime_restore(&world, &padding),
+            Err(ArenaRuntimeSnapshotError::NonCanonicalPayloadPadding)
+        ));
+
+        let mut aggregate = snapshot.clone();
+        aggregate.per_fighter_hazard_cooldowns[0] = 1;
+        assert!(matches!(
+            prepare_arena_runtime_restore(&world, &aggregate),
+            Err(ArenaRuntimeSnapshotError::InconsistentHazardAggregate { fighter: 0, .. })
+        ));
+
+        let mut pipe = snapshot;
+        pipe.pipes[0].flags = 0x80;
+        assert!(matches!(
+            prepare_arena_runtime_restore(&world, &pipe),
+            Err(ArenaRuntimeSnapshotError::InvalidPipeFlags(0x80))
+        ));
     }
 
     #[test]
@@ -4524,7 +7636,24 @@ mod tests {
     #[test]
     fn champions_court_objects_generate_shared_prop_barriers() {
         let barriers = champions_court_collision_barriers();
-        assert!(!barriers.is_empty());
+        let rectangle_count = barriers
+            .iter()
+            .filter(|barrier| {
+                matches!(
+                    barrier.definition.footprint,
+                    BarrierFootprint::Rectangle { .. }
+                )
+            })
+            .count();
+        let circle_count = barriers.len() - rectangle_count;
+        let one_way_count = barriers
+            .iter()
+            .filter(|barrier| barrier.behavior == PropBarrierBehavior::OneWayTop)
+            .count();
+
+        assert_eq!(barriers.len(), 91);
+        assert_eq!((rectangle_count, circle_count), (78, 13));
+        assert_eq!((barriers.len() - one_way_count, one_way_count), (69, 22));
         assert!(barriers.iter().any(|barrier| {
             barrier.definition.center.distance(Vec2::ZERO) < 0.01
                 && barrier.definition.top_y > ARENA_TOP_Y
@@ -4534,6 +7663,91 @@ mod tests {
                 .iter()
                 .any(|barrier| barrier.behavior == PropBarrierBehavior::OneWayTop)
         );
+    }
+
+    fn champions_court_collision_words(barrier: &WorldPropBarrier) -> [u32; 8] {
+        let behavior = u32::from(barrier.behavior == PropBarrierBehavior::OneWayTop);
+        match barrier.definition.footprint {
+            BarrierFootprint::Circle { radius } => [
+                0,
+                behavior,
+                barrier.definition.center.x.to_bits(),
+                barrier.definition.center.y.to_bits(),
+                barrier.definition.top_y.to_bits(),
+                radius.to_bits(),
+                0,
+                0,
+            ],
+            BarrierFootprint::Rectangle { half_extents, yaw } => [
+                1,
+                behavior,
+                barrier.definition.center.x.to_bits(),
+                barrier.definition.center.y.to_bits(),
+                barrier.definition.top_y.to_bits(),
+                half_extents.x.to_bits(),
+                half_extents.y.to_bits(),
+                yaw.to_bits(),
+            ],
+        }
+    }
+
+    #[test]
+    fn champions_court_prebake_matches_frozen_record_fingerprint() {
+        let words: Vec<_> = champions_court_collision_barriers()
+            .iter()
+            .flat_map(champions_court_collision_words)
+            .collect();
+        assert_eq!(words.len(), 91 * 8);
+        assert_eq!(
+            crate::canonical_math::fnv1a64_words(&words),
+            CHAMPIONS_COURT_COLLISION_FNV1A64
+        );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn champions_court_prebake_matches_every_v3_reference_record_bit() {
+        let map: ChampionsCourtRon = ron::from_str(include_str!("../arts/champions_court.ron"))
+            .expect("embedded Champion's Court RON should parse");
+        let mut reference = Vec::new();
+
+        for object in &map.instances {
+            let transform = Transform::from_xyz(
+                object.position.0,
+                ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
+                object.position.2,
+            )
+            .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
+            .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
+            append_champions_object_barriers(&map.assets, object, transform, &mut reference);
+        }
+
+        for prefab_instance in &map.prefab_instances {
+            let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
+                continue;
+            };
+            for object in objects {
+                append_champions_object_barriers(
+                    &map.assets,
+                    object,
+                    champions_prefab_object_transform(prefab_instance, object),
+                    &mut reference,
+                );
+            }
+        }
+
+        assert_eq!(reference.len(), CHAMPIONS_COURT_COLLISION_BARRIERS.len());
+        for (index, (actual, expected)) in CHAMPIONS_COURT_COLLISION_BARRIERS
+            .iter()
+            .zip(&reference)
+            .enumerate()
+        {
+            assert_eq!(
+                champions_court_collision_words(actual),
+                champions_court_collision_words(expected),
+                "Champion's Court barrier {index} changed from v3 reference"
+            );
+        }
     }
 
     #[test]
@@ -4582,17 +7796,28 @@ mod tests {
     }
 
     #[test]
-    fn champions_court_ron_parses_when_present() {
-        if fs::metadata(CHAMPIONS_COURT_RON_PATH).is_err() {
-            return;
-        }
-
+    fn champions_court_authorship_parses() {
         let map = load_champions_court_map().expect("champions court RON should parse");
         assert_eq!(map.map.tile_size, 2.0);
         assert!(map.assets.contains_key("floor"));
         assert!(!map.floor_shapes.is_empty());
         assert!(!map.instances.is_empty());
         assert!(!map.prefab_instances.is_empty());
+    }
+
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
+    #[test]
+    fn immutable_champions_court_does_not_consult_the_working_directory() {
+        let missing = std::env::temp_dir().join("afc-definitely-missing-champions-court.ron");
+        let map = load_champions_court_map_from_path(&missing)
+            .expect("the embedded Champions Court should parse without a loose file");
+        assert_eq!(map.map.tile_size, 2.0);
+        assert!(map.assets.contains_key("floor"));
+        assert!(!map.instances.is_empty());
     }
 
     #[test]

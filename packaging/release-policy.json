@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "product_name": "Animal Fighter Club",
+  "package_name": "ffc-prototype",
+  "player_binary": "ffc-prototype",
+  "shipping_feature": "shipping",
+  "required_source_paths": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "arts/champions_court.ron",
+    "build.rs",
+    "rust-toolchain.toml",
+    "web/index.html"
+  ],
+  "embedded_build_only_paths": [
+    "arts/champions_court.ron",
+    "assets/camera/single_player_camera.ron",
+    "assets/characters/character_move_sets.ron",
+    "assets/feel/combat_overrides.ron",
+    "assets/maps/overlays/arena_0.ron",
+    "assets/maps/overlays/arena_1.ron",
+    "assets/maps/overlays/arena_2.ron",
+    "assets/maps/overlays/arena_3.ron",
+    "assets/maps/overlays/arena_4.ron",
+    "assets/maps/overlays/arena_5.ron",
+    "assets/maps/overlays/arena_6.ron",
+    "assets/maps/overlays/arena_7.ron",
+    "assets/maps/overlays/arena_8.ron",
+    "assets/maps/overlays/arena_9.ron"
+  ],
+  "required_runtime_assets": [
+    "assets/steam_input/action_manifest.vdf",
+    "assets/steam_input/generic_gamepad_default.vdf",
+    "assets/steam_input/steam_deck_default.vdf"
+  ],
+  "forbidden_basenames": [
+    "steam_appid.txt"
+  ],
+  "forbidden_suffixes": [
+    ".csm",
+    ".csd",
+    ".dSYM",
+    ".pdb"
+  ],
+  "platforms": {
+    "windows-x86_64": {
+      "binary_format": "pe-x86_64",
+      "binary_name": "ffc-prototype.exe",
+      "entrypoint": "ffc-prototype.exe",
+      "redistributable_name": "steam_api64.dll"
+    },
+    "linux-x86_64": {
+      "binary_format": "elf-x86_64",
+      "binary_name": "ffc-prototype",
+      "entrypoint": "afc-launch",
+      "redistributable_name": "libsteam_api.so"
+    },
+    "macos-universal": {
+      "binary_format": "macho-universal-x86_64-arm64",
+      "binary_name": "Animal Fighter Club.app/Contents/MacOS/ffc-prototype",
+      "entrypoint": "Animal Fighter Club.app",
+      "redistributable_name": "libsteam_api.dylib"
+    }
+  },
+  "steam_linux_runtime": {
+    "name": "Steam Linux Runtime 4.0",
+    "app_id": 4183110,
+    "sdk_image": "registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk",
+    "sdk_tag": "4.0.20260714.251823",
+    "sdk_digest": "sha256:2c4c6520a268ef53255d511ae5988e35855b39a4b6c1e9865d56e5011c76ec3e"
+  }
+}

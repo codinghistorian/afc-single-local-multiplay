@@ -1,0 +1,493 @@
+name: Native release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_label:
+        description: Immutable label, for example steam-rc.12+abcdef123456
+        required: true
+        type: string
+      macos_bundle_id:
+        description: Confirm the protected-environment macOS bundle ID
+        required: true
+        type: string
+      macos_bundle_version:
+        description: Confirm the numeric macOS bundle build version
+        required: true
+        type: string
+      macos_min_version:
+        description: Confirm the numeric minimum supported macOS version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release-candidate-${{ github.ref }}-${{ inputs.release_label }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  preflight:
+    name: Authorize and validate immutable inputs
+    runs-on: ubuntu-24.04
+    environment: steam-release
+    outputs:
+      source_commit: ${{ steps.config.outputs.source_commit }}
+      release_label: ${{ steps.config.outputs.release_label }}
+      app_id: ${{ steps.config.outputs.app_id }}
+      windows_depot_id: ${{ steps.config.outputs.windows_depot_id }}
+      linux_depot_id: ${{ steps.config.outputs.linux_depot_id }}
+      macos_depot_id: ${{ steps.config.outputs.macos_depot_id }}
+      macos_bundle_id: ${{ steps.config.outputs.macos_bundle_id }}
+      macos_bundle_version: ${{ steps.config.outputs.macos_bundle_version }}
+      macos_min_version: ${{ steps.config.outputs.macos_min_version }}
+    env:
+      RELEASE_LABEL: ${{ inputs.release_label }}
+      DISPATCH_MACOS_BUNDLE_ID: ${{ inputs.macos_bundle_id }}
+      DISPATCH_MACOS_BUNDLE_VERSION: ${{ inputs.macos_bundle_version }}
+      DISPATCH_MACOS_MIN_VERSION: ${{ inputs.macos_min_version }}
+      AFC_STEAM_APP_ID: ${{ vars.AFC_STEAM_APP_ID }}
+      AFC_STEAM_DEPOT_WINDOWS_ID: ${{ vars.AFC_STEAM_DEPOT_WINDOWS_ID }}
+      AFC_STEAM_DEPOT_LINUX_ID: ${{ vars.AFC_STEAM_DEPOT_LINUX_ID }}
+      AFC_STEAM_DEPOT_MACOS_ID: ${{ vars.AFC_STEAM_DEPOT_MACOS_ID }}
+      AFC_MACOS_BUNDLE_ID: ${{ vars.AFC_MACOS_BUNDLE_ID }}
+      AFC_MACOS_BUNDLE_VERSION: ${{ vars.AFC_MACOS_BUNDLE_VERSION }}
+      AFC_MACOS_MIN_VERSION: ${{ vars.AFC_MACOS_MIN_VERSION }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Run portable release-tool tests
+        run: python scripts/release.py self-test -v
+      - name: Require a clean, materialized source tree
+        run: python scripts/release.py audit-source
+      - name: Validate IDs and platform configuration
+        run: >-
+          python scripts/release.py validate-inputs
+          --release-label "$RELEASE_LABEL"
+          --app-id "$AFC_STEAM_APP_ID"
+          --windows-depot-id "$AFC_STEAM_DEPOT_WINDOWS_ID"
+          --linux-depot-id "$AFC_STEAM_DEPOT_LINUX_ID"
+          --macos-depot-id "$AFC_STEAM_DEPOT_MACOS_ID"
+          --macos-bundle-id "$AFC_MACOS_BUNDLE_ID"
+          --macos-bundle-version "$AFC_MACOS_BUNDLE_VERSION"
+          --macos-min-version "$AFC_MACOS_MIN_VERSION"
+      - name: Confirm dispatch values and publish validated job outputs
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_MACOS_BUNDLE_ID" != "$AFC_MACOS_BUNDLE_ID" ]] ||
+             [[ "$DISPATCH_MACOS_BUNDLE_VERSION" != "$AFC_MACOS_BUNDLE_VERSION" ]] ||
+             [[ "$DISPATCH_MACOS_MIN_VERSION" != "$AFC_MACOS_MIN_VERSION" ]]; then
+            echo "Dispatch macOS values do not match the protected environment." >&2
+            exit 1
+          fi
+          source_commit="$(git rev-parse --verify HEAD)"
+          {
+            echo "source_commit=$source_commit"
+            echo "release_label=$RELEASE_LABEL"
+            echo "app_id=$AFC_STEAM_APP_ID"
+            echo "windows_depot_id=$AFC_STEAM_DEPOT_WINDOWS_ID"
+            echo "linux_depot_id=$AFC_STEAM_DEPOT_LINUX_ID"
+            echo "macos_depot_id=$AFC_STEAM_DEPOT_MACOS_ID"
+            echo "macos_bundle_id=$AFC_MACOS_BUNDLE_ID"
+            echo "macos_bundle_version=$AFC_MACOS_BUNDLE_VERSION"
+            echo "macos_min_version=$AFC_MACOS_MIN_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+  release-acceptance:
+    name: Release-profile online and determinism acceptance
+    needs: preflight
+    runs-on: ubuntu-24.04
+    env:
+      AFC_BUILD_ID: ${{ needs.preflight.outputs.release_label }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate/acceptance
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-acceptance-linux
+      - name: Install Linux test prerequisites
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libasound2-dev libudev-dev libwayland-dev libx11-dev libxi-dev
+          libxkbcommon-dev pkg-config
+      - name: Run production live-network acceptance
+        run: >-
+          cargo test --locked --release --no-default-features --lib
+          listen_authority::live_network_acceptance::production_live_
+          -- --test-threads=1
+      - name: Run security and reconnect acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(
+            authority_peer_hub::tests::malformed_datagrams_disconnect_only_the_abusive_endpoint
+            authority_peer_hub::tests::active_platform_ban_rejects_initial_and_reconnect_admission
+            authority_peer_hub::tests::authentication_revocation_queues_typed_disconnect_and_blocks_reconnect
+            authority_peer_hub::tests::same_identity_reconnect_replaces_closing_generation_and_isolates_stale_operations
+            authority_peer_hub::tests::reconnect_is_transactional_and_stale_connection_generation_fails_closed
+            network_runtime::tests::malformed_traffic_escalates_and_receive_work_is_bounded
+            network_runtime::tests::reconnect_result_waits_unacked_until_reconnect_enters_fighting
+            network_lab_tests::malformed_datagram_flood_stays_within_runtime_bounds
+          )
+          for test_name in "${tests[@]}"; do
+            cargo test --locked --release --no-default-features --lib \
+              "$test_name" -- --exact --test-threads=1
+          done
+      - name: Run 100,000-tick production-Bevy repeated-hash soak
+        run: >-
+          cargo test --locked --release --no-default-features --lib
+          headless::tests::production_bevy_state_repeated_hash_soak_100000_ticks
+          -- --exact --ignored --test-threads=1
+
+  windows:
+    name: Build and seal Windows x86-64
+    needs: [preflight, release-acceptance]
+    runs-on: windows-2025
+    env:
+      AFC_BUILD_ID: ${{ needs.preflight.outputs.release_label }}
+      AFC_STEAM_APP_ID: ${{ needs.preflight.outputs.app_id }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate/windows
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+      - name: Build exact shipping player
+        run: >-
+          cargo build --locked --release --no-default-features
+          --features shipping --bin ffc-prototype
+      - name: Stage and verify Windows depot
+        run: >-
+          python scripts/release.py stage
+          --platform windows-x86_64
+          --binary "$env:CARGO_TARGET_DIR/release/ffc-prototype.exe"
+          --redistributable-search-root "$env:CARGO_TARGET_DIR/release/build"
+          --output "dist/stage/windows-x86_64"
+          --release-label "$env:AFC_BUILD_ID"
+          --app-id "$env:AFC_STEAM_APP_ID"
+      - name: Reverify sealed Windows depot
+        run: >-
+          python scripts/release.py verify
+          --stage "dist/stage/windows-x86_64"
+          --platform windows-x86_64
+          --release-label "$env:AFC_BUILD_ID"
+          --app-id "$env:AFC_STEAM_APP_ID"
+          --source-commit "$env:SOURCE_COMMIT"
+      - name: Create deterministic Windows archive and evidence
+        shell: pwsh
+        run: |
+          $archive = "dist/archives/afc-$env:AFC_BUILD_ID-windows-x86_64.zip"
+          python scripts/release.py archive `
+            --stage "dist/stage/windows-x86_64" `
+            --output $archive
+          New-Item -ItemType Directory -Force "dist/artifact/windows" | Out-Null
+          Copy-Item $archive "dist/artifact/windows/"
+          Copy-Item "${archive}.sha256" "dist/artifact/windows/"
+          Copy-Item "dist/stage/windows-x86_64/release-manifest.json" "dist/artifact/windows/"
+          Copy-Item "dist/stage/windows-x86_64/release-identity.json" "dist/artifact/windows/"
+          Copy-Item "dist/stage/windows-x86_64/SHA256SUMS" "dist/artifact/windows/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afc-windows-candidate-${{ github.run_id }}
+          path: dist/artifact/windows/
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Build and seal Linux x86-64 in SteamRT4
+    needs: [preflight, release-acceptance]
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk:4.0.20260714.251823@sha256:2c4c6520a268ef53255d511ae5988e35855b39a4b6c1e9865d56e5011c76ec3e
+    env:
+      AFC_BUILD_ID: ${{ needs.preflight.outputs.release_label }}
+      AFC_STEAM_APP_ID: ${{ needs.preflight.outputs.app_id }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate/linux
+    steps:
+      - name: Install SDK build prerequisites
+        run: >-
+          apt-get update &&
+          apt-get install --yes
+          ca-certificates curl git git-lfs python3 build-essential
+          libasound2-dev libudev-dev libwayland-dev libx11-dev libxi-dev
+          libxkbcommon-dev pkg-config
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+      - name: Build exact shipping player
+        run: >-
+          cargo build --locked --release --no-default-features
+          --features shipping --bin ffc-prototype
+      - name: Stage and verify Linux depot
+        run: >-
+          python3 scripts/release.py stage
+          --platform linux-x86_64
+          --binary "$CARGO_TARGET_DIR/release/ffc-prototype"
+          --redistributable-search-root "$CARGO_TARGET_DIR/release/build"
+          --output "dist/stage/linux-x86_64"
+          --release-label "$AFC_BUILD_ID"
+          --app-id "$AFC_STEAM_APP_ID"
+      - name: Reverify sealed Linux depot
+        run: >-
+          python3 scripts/release.py verify
+          --stage "dist/stage/linux-x86_64"
+          --platform linux-x86_64
+          --release-label "$AFC_BUILD_ID"
+          --app-id "$AFC_STEAM_APP_ID"
+          --source-commit "$SOURCE_COMMIT"
+      - name: Create deterministic Linux archive and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/archives/afc-$AFC_BUILD_ID-linux-x86_64.zip"
+          python3 scripts/release.py archive \
+            --stage "dist/stage/linux-x86_64" \
+            --output "$archive"
+          mkdir -p "dist/artifact/linux"
+          cp "$archive" "$archive.sha256" "dist/artifact/linux/"
+          cp "dist/stage/linux-x86_64/release-manifest.json" \
+             "dist/stage/linux-x86_64/release-identity.json" \
+             "dist/stage/linux-x86_64/SHA256SUMS" \
+             "dist/artifact/linux/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afc-linux-candidate-${{ github.run_id }}
+          path: dist/artifact/linux/
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    name: Build and seal macOS universal
+    needs: [preflight, release-acceptance]
+    runs-on: macos-15
+    env:
+      AFC_BUILD_ID: ${{ needs.preflight.outputs.release_label }}
+      AFC_STEAM_APP_ID: ${{ needs.preflight.outputs.app_id }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      AFC_MACOS_BUNDLE_ID: ${{ needs.preflight.outputs.macos_bundle_id }}
+      AFC_MACOS_BUNDLE_VERSION: ${{ needs.preflight.outputs.macos_bundle_version }}
+      AFC_MACOS_MIN_VERSION: ${{ needs.preflight.outputs.macos_min_version }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate/macos
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build x86-64 shipping slice
+        run: >-
+          cargo build --locked --release --target x86_64-apple-darwin
+          --no-default-features --features shipping --bin ffc-prototype
+      - name: Build arm64 shipping slice
+        run: >-
+          cargo build --locked --release --target aarch64-apple-darwin
+          --no-default-features --features shipping --bin ffc-prototype
+      - name: Create universal player binary
+        run: |
+          mkdir -p dist/inputs
+          lipo -create \
+            "$CARGO_TARGET_DIR/x86_64-apple-darwin/release/ffc-prototype" \
+            "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/ffc-prototype" \
+            -output "dist/inputs/ffc-prototype"
+          lipo -verify_arch x86_64 arm64 "dist/inputs/ffc-prototype"
+      - name: Stage and verify macOS depot
+        run: >-
+          python3 scripts/release.py stage
+          --platform macos-universal
+          --binary "dist/inputs/ffc-prototype"
+          --redistributable-search-root
+          "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/build"
+          --output "dist/stage/macos-universal"
+          --release-label "$AFC_BUILD_ID"
+          --app-id "$AFC_STEAM_APP_ID"
+          --macos-bundle-id "$AFC_MACOS_BUNDLE_ID"
+          --macos-bundle-version "$AFC_MACOS_BUNDLE_VERSION"
+          --macos-min-version "$AFC_MACOS_MIN_VERSION"
+      - name: Reverify sealed macOS depot
+        run: >-
+          python3 scripts/release.py verify
+          --stage "dist/stage/macos-universal"
+          --platform macos-universal
+          --release-label "$AFC_BUILD_ID"
+          --app-id "$AFC_STEAM_APP_ID"
+          --source-commit "$SOURCE_COMMIT"
+      - name: Create deterministic macOS archive and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/archives/afc-$AFC_BUILD_ID-macos-universal.zip"
+          python3 scripts/release.py archive \
+            --stage "dist/stage/macos-universal" \
+            --output "$archive"
+          mkdir -p "dist/artifact/macos"
+          cp "$archive" "$archive.sha256" "dist/artifact/macos/"
+          cp "dist/stage/macos-universal/release-manifest.json" \
+             "dist/stage/macos-universal/release-identity.json" \
+             "dist/stage/macos-universal/SHA256SUMS" \
+             "dist/artifact/macos/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afc-macos-candidate-${{ github.run_id }}
+          path: dist/artifact/macos/
+          if-no-files-found: error
+          retention-days: 30
+
+  cross-platform-evidence:
+    name: Verify archives and cross-platform identity
+    needs: [preflight, windows, linux, macos]
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_LABEL: ${{ needs.preflight.outputs.release_label }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      AFC_STEAM_APP_ID: ${{ needs.preflight.outputs.app_id }}
+      AFC_STEAM_DEPOT_WINDOWS_ID: ${{ needs.preflight.outputs.windows_depot_id }}
+      AFC_STEAM_DEPOT_LINUX_ID: ${{ needs.preflight.outputs.linux_depot_id }}
+      AFC_STEAM_DEPOT_MACOS_ID: ${{ needs.preflight.outputs.macos_depot_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: afc-windows-candidate-${{ github.run_id }}
+          path: dist/download/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: afc-linux-candidate-${{ github.run_id }}
+          path: dist/download/linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: afc-macos-candidate-${{ github.run_id }}
+          path: dist/download/macos
+      - name: Verify archive sidecars and extract depot roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in windows linux macos; do
+            mapfile -t archives < <(
+              find "dist/download/$platform" -maxdepth 1 -type f -name '*.zip' -print
+            )
+            if [[ "${#archives[@]}" -ne 1 ]]; then
+              echo "Expected one $platform candidate archive." >&2
+              exit 1
+            fi
+            (
+              cd "dist/download/$platform"
+              sha256sum --check --strict ./*.zip.sha256
+            )
+            mkdir -p "dist/extracted/$platform"
+            unzip -q "${archives[0]}" -d "dist/extracted/$platform"
+          done
+      - name: Verify every extracted stage
+        run: |
+          python scripts/release.py verify \
+            --stage "dist/extracted/windows" \
+            --platform windows-x86_64 \
+            --release-label "$RELEASE_LABEL" \
+            --app-id "$AFC_STEAM_APP_ID" \
+            --source-commit "$SOURCE_COMMIT"
+          python scripts/release.py verify \
+            --stage "dist/extracted/linux" \
+            --platform linux-x86_64 \
+            --release-label "$RELEASE_LABEL" \
+            --app-id "$AFC_STEAM_APP_ID" \
+            --source-commit "$SOURCE_COMMIT"
+          python scripts/release.py verify \
+            --stage "dist/extracted/macos" \
+            --platform macos-universal \
+            --release-label "$RELEASE_LABEL" \
+            --app-id "$AFC_STEAM_APP_ID" \
+            --source-commit "$SOURCE_COMMIT"
+      - name: Compare exact release identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/evidence
+          python scripts/release.py compare-identities \
+            "dist/extracted/windows" \
+            "dist/extracted/linux" \
+            "dist/extracted/macos" \
+            | tee "dist/evidence/cross-platform-identity.json"
+      - name: Render preview-only SteamPipe evidence
+        run: >-
+          python scripts/release.py render-steam-vdf
+          --release-label "$RELEASE_LABEL"
+          --source-commit "$SOURCE_COMMIT"
+          --app-id "$AFC_STEAM_APP_ID"
+          --windows-depot-id "$AFC_STEAM_DEPOT_WINDOWS_ID"
+          --linux-depot-id "$AFC_STEAM_DEPOT_LINUX_ID"
+          --macos-depot-id "$AFC_STEAM_DEPOT_MACOS_ID"
+          --windows-stage "dist/extracted/windows"
+          --linux-stage "dist/extracted/linux"
+          --macos-stage "dist/extracted/macos"
+          --build-output ".steam/build-output/$RELEASE_LABEL"
+          --output ".steam/vdf/$RELEASE_LABEL"
+      - name: Assemble promotion evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/evidence/platforms"
+          for platform in windows linux macos; do
+            mkdir -p "dist/evidence/platforms/$platform"
+            cp "dist/download/$platform/release-manifest.json" \
+               "dist/download/$platform/release-identity.json" \
+               "dist/download/$platform/SHA256SUMS" \
+               "dist/download/$platform/"*.zip.sha256 \
+               "dist/evidence/platforms/$platform/"
+          done
+          cp -R ".steam/vdf/$RELEASE_LABEL" "dist/evidence/steam-vdf-preview"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afc-release-evidence-${{ github.run_id }}
+          path: dist/evidence/
+          if-no-files-found: error
+          retention-days: 90

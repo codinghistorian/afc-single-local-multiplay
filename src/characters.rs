@@ -1,10 +1,23 @@
-use std::{
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::path::Path;
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 use std::fs;
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
+use std::{path::PathBuf, time::SystemTime};
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -13,6 +26,8 @@ use crate::constants::FIGHTER_COUNT;
 use crate::techniques::TechniqueId;
 
 pub const CHARACTER_MOVE_CATALOG_PATH: &str = "assets/characters/character_move_sets.ron";
+const EMBEDDED_CHARACTER_MOVE_CATALOG: &str =
+    include_str!("../assets/characters/character_move_sets.ron");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum CharacterKind {
@@ -144,34 +159,94 @@ pub struct CharacterMoveCatalogFile {
 #[derive(Resource, Clone, Debug)]
 pub struct CharacterMoveCatalog {
     file: CharacterMoveCatalogFile,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     path: PathBuf,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "dev-hot-reload",
+            not(feature = "shipping"),
+            not(target_arch = "wasm32")
+        )
+    ))]
     modified: Option<SystemTime>,
     last_error: Option<String>,
 }
 
 impl Default for CharacterMoveCatalog {
     fn default() -> Self {
-        let path = PathBuf::from(CHARACTER_MOVE_CATALOG_PATH);
-        match load_character_move_catalog_file(&path) {
-            Ok((file, modified)) => Self {
-                file,
-                path,
-                modified,
-                last_error: None,
-            },
-            Err(error) => Self {
-                file: default_character_move_catalog_file(),
-                path,
-                modified: None,
-                last_error: Some(error),
-            },
-        }
+        initial_character_move_catalog(Path::new(CHARACTER_MOVE_CATALOG_PATH))
     }
 }
 
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn initial_character_move_catalog(path: &Path) -> CharacterMoveCatalog {
+    match load_character_move_catalog_file(path) {
+        Ok((file, modified)) => CharacterMoveCatalog {
+            file,
+            path: path.to_path_buf(),
+            modified,
+            last_error: None,
+        },
+        Err(error) => CharacterMoveCatalog {
+            file: default_character_move_catalog_file(),
+            path: path.to_path_buf(),
+            modified: None,
+            last_error: Some(error),
+        },
+    }
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn initial_character_move_catalog(_path: &Path) -> CharacterMoveCatalog {
+    CharacterMoveCatalog::from_embedded_gameplay()
+        .expect("the embedded character move catalog must remain valid")
+}
+
 impl CharacterMoveCatalog {
+    /// Constructs the immutable gameplay catalog used by online authority and
+    /// prediction worlds. This never consults the working directory or the
+    /// native file-watcher path.
+    pub(crate) fn from_embedded_gameplay() -> Result<Self, String> {
+        Ok(Self {
+            file: parse_character_move_catalog(EMBEDDED_CHARACTER_MOVE_CATALOG)?,
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
+            path: PathBuf::from(CHARACTER_MOVE_CATALOG_PATH),
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
+            modified: None,
+            last_error: None,
+        })
+    }
+
     #[allow(dead_code)]
     pub fn from_file(file: CharacterMoveCatalogFile) -> Self {
         let last_error = validate_catalog(&file).err();
@@ -181,7 +256,23 @@ impl CharacterMoveCatalog {
             } else {
                 default_character_move_catalog_file()
             },
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
             path: PathBuf::from(CHARACTER_MOVE_CATALOG_PATH),
+            #[cfg(any(
+                test,
+                all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                )
+            ))]
             modified: None,
             last_error,
         }
@@ -238,7 +329,16 @@ impl CharacterMoveCatalog {
         self.last_error.as_deref()
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(test)]
+    pub(crate) fn authored_file_for_test(&self) -> &CharacterMoveCatalogFile {
+        &self.file
+    }
+
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     fn reload_if_changed(&mut self) -> bool {
         let Ok(metadata) = fs::metadata(&self.path) else {
             return false;
@@ -281,12 +381,20 @@ pub fn setup_character_move_catalog(mut commands: Commands) {
     commands.insert_resource(catalog);
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn reload_character_move_catalog(
     time: Res<Time>,
+    simulation_drive: Res<crate::simulation::SimulationDriveMode>,
     mut next_check_at: Local<f32>,
     mut catalog: ResMut<CharacterMoveCatalog>,
 ) {
+    if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
+        return;
+    }
     let now = time.elapsed_secs();
     if now < *next_check_at {
         return;
@@ -310,7 +418,14 @@ pub fn character_for_fighter_id(id: usize) -> CharacterKind {
     DEFAULT_FIGHTER_CHARACTERS[id.min(DEFAULT_FIGHTER_CHARACTERS.len() - 1)]
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn next_character_kind(kind: CharacterKind) -> CharacterKind {
     CHARACTER_KINDS
         .iter()
@@ -319,7 +434,14 @@ pub fn next_character_kind(kind: CharacterKind) -> CharacterKind {
         .unwrap_or(CharacterKind::Cat)
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 pub fn previous_character_kind(kind: CharacterKind) -> CharacterKind {
     CHARACTER_KINDS
         .iter()
@@ -360,39 +482,128 @@ pub fn character_scene_model(
             .exists()
             .then(|| asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.to_owned())))
     }
+
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+    {
+        let _ = (asset_server, path);
+        None
+    }
 }
 
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(test, all(feature = "dev-hot-reload", not(feature = "shipping")))
+))]
 pub(crate) fn load_character_move_catalog_file(
     path: &Path,
 ) -> Result<(CharacterMoveCatalogFile, Option<SystemTime>), String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        let contents = include_str!("../assets/characters/character_move_sets.ron");
-        let file: CharacterMoveCatalogFile =
-            ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        validate_catalog(&file)?;
-        return Ok((file, None));
+    if !path.exists() {
+        return Ok((default_character_move_catalog_file(), None));
     }
 
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    {
-        if !path.exists() {
-            return Ok((default_character_move_catalog_file(), None));
-        }
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let file = parse_character_move_catalog(&contents)?;
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| error.to_string())?;
+    Ok((file, Some(modified)))
+}
 
-        let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        let file: CharacterMoveCatalogFile =
-            ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))?;
-        validate_catalog(&file)?;
-        let modified = fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .map_err(|error| error.to_string())?;
-        Ok((file, Some(modified)))
-    }
+#[cfg(all(test, target_arch = "wasm32"))]
+pub(crate) fn load_character_move_catalog_file(
+    _path: &Path,
+) -> Result<(CharacterMoveCatalogFile, Option<SystemTime>), String> {
+    Ok((
+        parse_character_move_catalog(EMBEDDED_CHARACTER_MOVE_CATALOG)?,
+        None,
+    ))
+}
+
+fn parse_character_move_catalog(contents: &str) -> Result<CharacterMoveCatalogFile, String> {
+    let file: CharacterMoveCatalogFile =
+        ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"))?;
+    validate_catalog(&file)?;
+    Ok(file)
 }
 
 fn validate_catalog(file: &CharacterMoveCatalogFile) -> Result<(), String> {
+    for (index, profile) in file.characters.iter().enumerate() {
+        if file.characters[..index]
+            .iter()
+            .any(|prior| prior.kind == profile.kind)
+        {
+            return Err(format!(
+                "duplicate character profile for {:?}",
+                profile.kind
+            ));
+        }
+        if profile.label.is_empty() || profile.scene.is_empty() || profile.move_set.is_empty() {
+            return Err(format!(
+                "character profile for {:?} has an empty required identifier",
+                profile.kind
+            ));
+        }
+        let body = profile.body;
+        let scalars = [
+            body.ground_speed,
+            body.air_speed,
+            body.dash_impulse,
+            body.jump_impulse,
+            body.gravity,
+            body.fall_gravity,
+            body.stop_friction,
+            body.landing_stick,
+            body.dash_slide,
+        ];
+        if scalars.into_iter().any(|value| !value.is_finite())
+            || body
+                .mesh_bounds
+                .min
+                .into_iter()
+                .chain(body.mesh_bounds.max)
+                .any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "character profile for {:?} contains a non-finite body value",
+                profile.kind
+            ));
+        }
+        if body
+            .mesh_bounds
+            .min
+            .into_iter()
+            .zip(body.mesh_bounds.max)
+            .any(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(format!(
+                "character profile for {:?} has inverted mesh bounds",
+                profile.kind
+            ));
+        }
+    }
+    for (index, move_set) in file.move_sets.iter().enumerate() {
+        if move_set.id.is_empty() {
+            return Err("move set ID must not be empty".to_owned());
+        }
+        if file.move_sets[..index]
+            .iter()
+            .any(|prior| prior.id == move_set.id)
+        {
+            return Err(format!("duplicate move set '{}'", move_set.id));
+        }
+        for (slot_index, slot) in move_set.slots.iter().enumerate() {
+            if move_set.slots[..slot_index]
+                .iter()
+                .any(|prior| prior.slot == slot.slot)
+            {
+                return Err(format!(
+                    "move set '{}' has duplicate {:?} slots",
+                    move_set.id, slot.slot
+                ));
+            }
+        }
+    }
+
     for kind in CHARACTER_KINDS {
         let Some(profile) = file.characters.iter().find(|profile| profile.kind == kind) else {
             return Err(format!("missing character profile for {kind:?}"));
@@ -979,6 +1190,74 @@ fn character_move_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_gameplay_catalog_is_valid_and_has_no_reload_state() {
+        let catalog = CharacterMoveCatalog::from_embedded_gameplay().unwrap();
+        let parsed = parse_character_move_catalog(EMBEDDED_CHARACTER_MOVE_CATALOG).unwrap();
+
+        assert_eq!(catalog.authored_file_for_test(), &parsed);
+        assert_eq!(
+            catalog.path.as_path(),
+            Path::new(CHARACTER_MOVE_CATALOG_PATH)
+        );
+        assert_eq!(catalog.modified, None);
+        assert_eq!(catalog.last_error(), None);
+    }
+
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
+    #[test]
+    fn immutable_catalog_ignores_a_hostile_loose_file() {
+        let path = std::env::temp_dir().join(format!(
+            "afc-character-catalog-{}-{}.ron",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "this loose catalog must never be parsed").unwrap();
+
+        let catalog = initial_character_move_catalog(&path);
+        let embedded = CharacterMoveCatalog::from_embedded_gameplay().unwrap();
+
+        assert_eq!(
+            catalog.authored_file_for_test(),
+            embedded.authored_file_for_test()
+        );
+        assert_eq!(catalog.modified, None);
+        assert_eq!(catalog.last_error(), None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn embedded_gameplay_catalog_validation_rejects_incomplete_authorship() {
+        let error = parse_character_move_catalog("(characters: [], move_sets: [])").unwrap_err();
+        assert!(error.contains("missing character profile"));
+    }
+
+    #[test]
+    fn character_catalog_validation_rejects_ambiguous_and_non_finite_authorship() {
+        let mut duplicate = parse_character_move_catalog(EMBEDDED_CHARACTER_MOVE_CATALOG).unwrap();
+        duplicate.characters[1].kind = duplicate.characters[0].kind;
+        assert!(
+            validate_catalog(&duplicate)
+                .unwrap_err()
+                .contains("duplicate character profile")
+        );
+
+        let mut non_finite = parse_character_move_catalog(EMBEDDED_CHARACTER_MOVE_CATALOG).unwrap();
+        non_finite.characters[0].body.ground_speed = f32::NAN;
+        assert!(
+            validate_catalog(&non_finite)
+                .unwrap_err()
+                .contains("non-finite body value")
+        );
+    }
 
     #[test]
     fn committed_character_move_catalog_parses() {

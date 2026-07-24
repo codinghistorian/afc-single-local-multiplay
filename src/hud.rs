@@ -2,7 +2,7 @@ use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
-use crate::arena_defs::{active_arena_definition, active_arena_index, arena_definitions};
+use crate::arena_defs::{ActiveArena, arena_definitions};
 use crate::characters::{
     CharacterKind, FighterCharacter, character_for_fighter_id, character_label,
 };
@@ -16,11 +16,17 @@ use crate::constants::{FIGHTER_COLORS, MAX_HEALTH, MAX_STAMINA};
 use crate::equipment::{equipment_effect_label, equipment_label};
 use crate::fighter::ringout_danger_level;
 use crate::game_state::{
-    LocalSetup, MatchAnnouncements, MatchPhase, MatchState, MatchTelemetry, TeamId,
+    LocalSetup, MatchAnnouncements, MatchPhase, MatchState, MatchTelemetry, StockMatchOutcome,
+    TeamId,
 };
 use crate::items::{ArenaItem, ItemState};
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 use crate::map_editor::MapEditorState;
+use crate::match_presentation::{MatchPresentationPolicy, PresentationPhase};
 use crate::specials::{ActiveSpecial, SpecialKind};
 use crate::styles::{style_identity, style_label};
 use crate::user_mode::UserModeState;
@@ -71,18 +77,33 @@ const HUD_PORTRAIT_TEXTURE_SIZE: u32 = 128;
 const HUD_PORTRAIT_LAYER_BASE: usize = 12;
 const HUD_CAT_PORTRAIT_PATH: &str = "ui/hud/animal-cat.png";
 const HUD_PIG_PORTRAIT_PATH: &str = "ui/hud/animal-pig.png";
+const HUD_DOG_PORTRAIT_PATH: &str = "ui/hud/animal-dog.png";
+const HUD_FOX_PORTRAIT_PATH: &str = "ui/hud/animal-fox.png";
+const HUD_PANDA_PORTRAIT_PATH: &str = "ui/hud/animal-panda.png";
 const HUD_BEE_PORTRAIT_PATH: &str = "ui/hud/animal-bee.png";
 const HUD_PENGUIN_PORTRAIT_PATH: &str = "ui/hud/animal-penguin.png";
 const HUD_CHICK_PORTRAIT_PATH: &str = "ui/hud/animal-chick.png";
 
-pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let portrait_images = [
-        asset_server.load(HUD_CAT_PORTRAIT_PATH),
-        asset_server.load(HUD_PIG_PORTRAIT_PATH),
-        asset_server.load(HUD_BEE_PORTRAIT_PATH),
-        asset_server.load(HUD_PENGUIN_PORTRAIT_PATH),
-        asset_server.load(HUD_CHICK_PORTRAIT_PATH),
-    ];
+pub fn setup_hud(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
+    active_arena: Res<ActiveArena>,
+) {
+    let portrait_images = HudPortraitHandles {
+        cat: asset_server.load(HUD_CAT_PORTRAIT_PATH),
+        pig: asset_server.load(HUD_PIG_PORTRAIT_PATH),
+        dog: asset_server.load(HUD_DOG_PORTRAIT_PATH),
+        fox: asset_server.load(HUD_FOX_PORTRAIT_PATH),
+        panda: asset_server.load(HUD_PANDA_PORTRAIT_PATH),
+        bee: asset_server.load(HUD_BEE_PORTRAIT_PATH),
+        penguin: asset_server.load(HUD_PENGUIN_PORTRAIT_PATH),
+        chick: asset_server.load(HUD_CHICK_PORTRAIT_PATH),
+    };
 
     commands.spawn((
         Camera2d,
@@ -107,20 +128,23 @@ pub fn setup_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|parent| {
             parent.spawn(top_timer());
             parent.spawn(phase_plate());
-            parent.spawn(dev_arena_label());
+            #[cfg(all(
+                feature = "dev-hot-reload",
+                not(feature = "shipping"),
+                not(target_arch = "wasm32")
+            ))]
+            parent.spawn(dev_arena_label(active_arena.index()));
             parent.spawn(announcement_banner());
-            #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                feature = "dev-hot-reload",
+                not(feature = "shipping"),
+                not(target_arch = "wasm32")
+            ))]
             {
                 parent.spawn(controls_overlay());
                 parent.spawn(debug_overlay());
             }
-            parent.spawn(bottom_plate_row(
-                portrait_images[0].clone(),
-                portrait_images[1].clone(),
-                portrait_images[2].clone(),
-                portrait_images[3].clone(),
-                portrait_images[4].clone(),
-            ));
+            parent.spawn(bottom_plate_row(portrait_images));
             parent.spawn(result_overlay());
         });
 }
@@ -136,6 +160,8 @@ fn spawn_hud_portrait(
     #[cfg(target_arch = "wasm32")]
     let portrait_view_format = None;
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    let portrait_view_format = Some(TextureFormat::Rgba8UnormSrgb);
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     let portrait_view_format = Some(TextureFormat::Rgba8UnormSrgb);
 
     let image = Image::new_target_texture(
@@ -328,17 +354,37 @@ fn phase_plate() -> impl Bundle {
 }
 
 #[derive(Component)]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) struct DevArenaLabelPanel;
 
 #[derive(Component)]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) struct DevArenaNameText;
 
 #[derive(Component)]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) struct DevArenaLabelState {
     arena_index: usize,
 }
 
-fn dev_arena_label() -> impl Bundle {
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn dev_arena_label(arena_index: usize) -> impl Bundle {
     (
         GameplayHudPanel,
         DevArenaLabelPanel,
@@ -356,17 +402,23 @@ fn dev_arena_label() -> impl Bundle {
         BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.78)),
         Pickable::IGNORE,
         children![(
-            Text::new(dev_arena_label_text(active_arena_index())),
+            Text::new(dev_arena_label_text(arena_index)),
             text_style(17.0, Color::srgb(1.0, 0.78, 0.28)),
             TextShadow::default(),
             DevArenaNameText,
-            DevArenaLabelState {
-                arena_index: active_arena_index(),
-            },
+            DevArenaLabelState { arena_index },
         )],
     )
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )
+))]
 fn dev_arena_label_text(arena_index: usize) -> String {
     let arenas = arena_definitions();
     let arena_index = arena_index.min(arenas.len().saturating_sub(1));
@@ -384,7 +436,11 @@ pub(crate) struct GameplayHudPanel;
 #[derive(Component)]
 pub(crate) struct ControlsOverlayPanel;
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn controls_overlay() -> impl Bundle {
     (
         ControlsOverlayPanel,
@@ -398,14 +454,18 @@ fn controls_overlay() -> impl Bundle {
         BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.62)),
         children![(
             Text::new(
-                "Move Arrows | Shift+A next map | Shift+U user mode | Shift+Arrows camera | Shift+R camera reset | Shift+C filter cycle | Z aim/grab | X strong/throw | C light/pickup | V jump | double-tap dash | X+C guard | H debug | F2 map editor"
+                "Move Arrows | Shift+A next map | Shift+U user mode | Shift+Arrows camera | Shift+R camera reset | Shift+C filter cycle | Z hold aim / tap grab | X strong/throw | C light/pickup | V jump | double-tap dash | X+C guard | H debug | F2 map editor"
             ),
             text_style(14.0, Color::srgb(0.88, 0.88, 0.82)),
         )],
     )
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 fn debug_overlay() -> impl Bundle {
     (
         Node {
@@ -463,13 +523,19 @@ fn result_overlay() -> impl Bundle {
     )
 }
 
-fn bottom_plate_row(
-    left_portrait: Handle<Image>,
-    right_portrait: Handle<Image>,
-    bee_portrait: Handle<Image>,
-    penguin_portrait: Handle<Image>,
-    chick_portrait: Handle<Image>,
-) -> impl Bundle {
+#[derive(Clone)]
+struct HudPortraitHandles {
+    cat: Handle<Image>,
+    pig: Handle<Image>,
+    dog: Handle<Image>,
+    fox: Handle<Image>,
+    panda: Handle<Image>,
+    bee: Handle<Image>,
+    penguin: Handle<Image>,
+    chick: Handle<Image>,
+}
+
+fn bottom_plate_row(portraits: HudPortraitHandles) -> impl Bundle {
     (
         GameplayHudPanel,
         Node {
@@ -483,55 +549,15 @@ fn bottom_plate_row(
             ..default()
         },
         children![
-            fighter_plate(
-                0,
-                FIGHTER_COLORS[0],
-                left_portrait.clone(),
-                right_portrait.clone(),
-                bee_portrait.clone(),
-                penguin_portrait.clone(),
-                chick_portrait.clone()
-            ),
-            fighter_plate(
-                1,
-                FIGHTER_COLORS[1],
-                left_portrait.clone(),
-                right_portrait.clone(),
-                bee_portrait.clone(),
-                penguin_portrait.clone(),
-                chick_portrait.clone()
-            ),
-            fighter_plate(
-                2,
-                FIGHTER_COLORS[2],
-                left_portrait.clone(),
-                right_portrait.clone(),
-                bee_portrait.clone(),
-                penguin_portrait.clone(),
-                chick_portrait.clone()
-            ),
-            fighter_plate(
-                3,
-                FIGHTER_COLORS[3],
-                left_portrait,
-                right_portrait,
-                bee_portrait,
-                penguin_portrait,
-                chick_portrait
-            ),
+            fighter_plate(0, FIGHTER_COLORS[0], portraits.clone()),
+            fighter_plate(1, FIGHTER_COLORS[1], portraits.clone()),
+            fighter_plate(2, FIGHTER_COLORS[2], portraits.clone()),
+            fighter_plate(3, FIGHTER_COLORS[3], portraits),
         ],
     )
 }
 
-fn fighter_plate(
-    id: usize,
-    color: Color,
-    cat_portrait: Handle<Image>,
-    pig_portrait: Handle<Image>,
-    bee_portrait: Handle<Image>,
-    penguin_portrait: Handle<Image>,
-    chick_portrait: Handle<Image>,
-) -> impl Bundle {
+fn fighter_plate(id: usize, color: Color, portraits: HudPortraitHandles) -> impl Bundle {
     (
         Node {
             width: Val::Px(286.0),
@@ -559,11 +585,14 @@ fn fighter_plate(
                 BackgroundColor(color.darker(0.32)),
                 BorderColor::all(color.lighter(0.28)),
                 children![
-                    hud_portrait_image(id, CharacterKind::Cat, cat_portrait),
-                    hud_portrait_image(id, CharacterKind::Pig, pig_portrait),
-                    hud_portrait_image(id, CharacterKind::Bee, bee_portrait),
-                    hud_portrait_image(id, CharacterKind::Penguin, penguin_portrait),
-                    hud_portrait_image(id, CharacterKind::Chick, chick_portrait),
+                    hud_portrait_image(id, CharacterKind::Cat, portraits.cat),
+                    hud_portrait_image(id, CharacterKind::Pig, portraits.pig),
+                    hud_portrait_image(id, CharacterKind::Dog, portraits.dog),
+                    hud_portrait_image(id, CharacterKind::Fox, portraits.fox),
+                    hud_portrait_image(id, CharacterKind::Panda, portraits.panda),
+                    hud_portrait_image(id, CharacterKind::Bee, portraits.bee),
+                    hud_portrait_image(id, CharacterKind::Penguin, portraits.penguin),
+                    hud_portrait_image(id, CharacterKind::Chick, portraits.chick),
                 ]
             ),
             (
@@ -643,15 +672,21 @@ fn default_hud_character_for_fighter(fighter_id: usize) -> CharacterKind {
 pub fn sync_hud_fighter_plates(
     state: Res<MatchState>,
     user_mode: Res<UserModeState>,
+    policy: Res<MatchPresentationPolicy>,
     mut plates: Query<(&HudFighterPlate, &mut Node)>,
 ) {
-    let resources_changed = state.is_changed() || user_mode.is_changed();
+    let resources_changed = state.is_changed() || user_mode.is_changed() || policy.is_changed();
+    let gameplay_hud_visible = if policy.phase == PresentationPhase::Offline {
+        !user_mode.active()
+    } else {
+        policy.gameplay_hud_visible
+    };
 
     for (plate, mut node) in &mut plates {
         if !resources_changed && !node.is_added() {
             continue;
         }
-        let display = if !user_mode.active() && state.fighter_active(plate.fighter_id) {
+        let display = if gameplay_hud_visible && state.fighter_active(plate.fighter_id) {
             Display::Flex
         } else {
             Display::None
@@ -663,13 +698,7 @@ pub fn sync_hud_fighter_plates(
 }
 
 fn hud_portrait_character(character: CharacterKind) -> CharacterKind {
-    match character {
-        CharacterKind::Pig => CharacterKind::Pig,
-        CharacterKind::Bee => CharacterKind::Bee,
-        CharacterKind::Penguin => CharacterKind::Penguin,
-        CharacterKind::Chick => CharacterKind::Chick,
-        _ => CharacterKind::Cat,
-    }
+    character
 }
 
 fn life_label(stock: Option<i32>) -> String {
@@ -727,11 +756,16 @@ fn set_text_if_changed(text: &mut Text, value: String) {
 
 pub fn update_hud(
     state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
     setup: Res<LocalSetup>,
     user_mode: Res<UserModeState>,
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))] editor: Option<
-        Res<MapEditorState>,
-    >,
+    policy: Res<MatchPresentationPolicy>,
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
+    editor: Option<Res<MapEditorState>>,
     announcements: Res<MatchAnnouncements>,
     telemetry: Res<MatchTelemetry>,
     fighters: Query<(
@@ -766,18 +800,28 @@ pub fn update_hud(
         Query<&mut Text, With<DebugOverlayText>>,
     )>,
 ) {
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    ))]
     let editor_active = editor.as_ref().is_some_and(|editor| editor.active());
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(all(
+        feature = "dev-hot-reload",
+        not(feature = "shipping"),
+        not(target_arch = "wasm32")
+    )))]
     let editor_active = false;
 
     {
         let mut gameplay_panels = bar_queries.p5();
         for mut node in &mut gameplay_panels {
-            let display = if user_mode.active() {
-                Display::None
-            } else {
+            let display = if (policy.phase == PresentationPhase::Offline && !user_mode.active())
+                || policy.gameplay_hud_visible
+            {
                 Display::Flex
+            } else {
+                Display::None
             };
             if node.display != display {
                 node.display = display;
@@ -802,12 +846,26 @@ pub fn update_hud(
     {
         let mut timer_text = text_queries.p0();
         for mut text in &mut timer_text {
-            set_text_if_changed(&mut text, timer_label(&state));
+            let label = match policy.phase {
+                PresentationPhase::Countdown => "READY".to_owned(),
+                PresentationPhase::Reconnecting => "SYNC".to_owned(),
+                PresentationPhase::ConfirmingResult => "CONFIRM".to_owned(),
+                _ => timer_label(&state),
+            };
+            set_text_if_changed(&mut text, label);
         }
     }
 
     {
-        let phase = phase_label(&state, &setup);
+        let phase = match policy.phase {
+            PresentationPhase::Countdown => "Countdown".to_owned(),
+            PresentationPhase::Fighting => {
+                format!("Online | {}", state.active_rule_label())
+            }
+            PresentationPhase::Reconnecting => "Reconnecting — neutral input".to_owned(),
+            PresentationPhase::ConfirmingResult => "Confirming result".to_owned(),
+            _ => phase_label(&state, &setup),
+        };
         let mut phase_text = text_queries.p5();
         for mut text in &mut phase_text {
             set_text_if_changed(&mut text, phase.clone());
@@ -828,7 +886,7 @@ pub fn update_hud(
                 score: stats.score,
                 stock: state.stock_for(fighter.id),
                 flash: stats.hud_flash,
-                special_cooldown: special_state.cooldown,
+                special_cooldown: special_state.cooldown.as_seconds(),
                 action: action.action,
                 technique: action
                     .technique_id
@@ -837,7 +895,7 @@ pub fn update_hud(
                 branch_window_open: action.branch_window_open,
                 ringout_danger: ringout_danger_level(
                     transform.translation,
-                    active_arena_definition(),
+                    active_arena.definition(),
                 ),
             },
         )
@@ -1005,18 +1063,18 @@ pub fn update_hud(
     }
 }
 
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
 pub fn update_dev_arena_label(
     user_mode: Res<UserModeState>,
+    active_arena: Res<ActiveArena>,
     mut panels: Query<&mut Node, With<DevArenaLabelPanel>>,
     mut texts: Query<(&mut Text, &mut DevArenaLabelState), With<DevArenaNameText>>,
 ) {
-    #[cfg(target_arch = "wasm32")]
-    let _ = &user_mode;
-
-    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     let show_dev_arena = !user_mode.hides_dev_controls();
-    #[cfg(target_arch = "wasm32")]
-    let show_dev_arena = false;
 
     for mut node in &mut panels {
         let display = if show_dev_arena {
@@ -1029,7 +1087,7 @@ pub fn update_dev_arena_label(
         }
     }
 
-    let arena_index = active_arena_index();
+    let arena_index = active_arena.index();
     for (mut text, mut label_state) in &mut texts {
         if label_state.arena_index != arena_index {
             set_text_if_changed(&mut text, dev_arena_label_text(arena_index));
@@ -1042,7 +1100,7 @@ fn timer_label(state: &MatchState) -> String {
     match state.phase {
         MatchPhase::Setup => "SETUP".to_string(),
         MatchPhase::Fighting if state.rules.uses_timer() => {
-            format!("{:03}", state.timer.ceil() as i32)
+            format!("{:03}", state.timer_seconds_ceil())
         }
         MatchPhase::Fighting => "--".to_string(),
         MatchPhase::TimeUp => "TIME".to_string(),
@@ -1258,6 +1316,25 @@ fn team_scores_for_snapshots(state: &MatchState, snapshots: &[FighterHudSnapshot
 }
 
 fn result_message(state: &MatchState, snapshots: &[FighterHudSnapshot]) -> String {
+    match state.stock_match_outcome() {
+        StockMatchOutcome::Draw => return "Draw - no survivors".to_string(),
+        StockMatchOutcome::FighterWinner(fighter) => {
+            let name = snapshots
+                .iter()
+                .find(|snapshot| snapshot.id == fighter.index())
+                .map(|snapshot| snapshot.name)
+                .unwrap_or("Fighter");
+            return format!("{name} survives");
+        }
+        StockMatchOutcome::TeamWinner(TeamId::Red) => {
+            return "Red squad survives".to_string();
+        }
+        StockMatchOutcome::TeamWinner(TeamId::Blue) => {
+            return "Blue squad survives".to_string();
+        }
+        StockMatchOutcome::Undecided => {}
+    }
+
     if state.rules.team_scoring {
         let (red_score, blue_score) = team_scores_for_snapshots(state, snapshots);
         return match red_score.cmp(&blue_score) {
@@ -1265,17 +1342,6 @@ fn result_message(state: &MatchState, snapshots: &[FighterHudSnapshot]) -> Strin
             std::cmp::Ordering::Less => format!("Blue squad wins {blue_score}-{red_score}"),
             std::cmp::Ordering::Equal => format!("Draw {red_score}-{blue_score}"),
         };
-    }
-
-    if state.rules.uses_stocks() {
-        let mut survivors = snapshots
-            .iter()
-            .filter(|snapshot| snapshot.stock.unwrap_or(1) > 0);
-        if let Some(winner) = survivors.next() {
-            if survivors.next().is_none() {
-                return format!("{} survives", winner.name);
-            }
-        }
     }
 
     let Some(best_score) = snapshots.iter().map(|snapshot| snapshot.score).max() else {
@@ -1450,27 +1516,10 @@ mod tests {
     }
 
     #[test]
-    fn hud_portrait_selection_supports_cat_pig_bee_penguin_and_chick() {
-        assert_eq!(
-            hud_portrait_character(CharacterKind::Cat),
-            CharacterKind::Cat
-        );
-        assert_eq!(
-            hud_portrait_character(CharacterKind::Pig),
-            CharacterKind::Pig
-        );
-        assert_eq!(
-            hud_portrait_character(CharacterKind::Bee),
-            CharacterKind::Bee
-        );
-        assert_eq!(
-            hud_portrait_character(CharacterKind::Penguin),
-            CharacterKind::Penguin
-        );
-        assert_eq!(
-            hud_portrait_character(CharacterKind::Chick),
-            CharacterKind::Chick
-        );
+    fn hud_portrait_selection_supports_all_eight_characters_without_fallback() {
+        for character in crate::characters::CHARACTER_KINDS {
+            assert_eq!(hud_portrait_character(character), character);
+        }
     }
 
     #[test]
@@ -1479,6 +1528,7 @@ mod tests {
         app.insert_resource(MatchState::default());
         app.insert_resource(LocalSetup::default());
         app.insert_resource(UserModeState::default());
+        app.insert_resource(MatchPresentationPolicy::default());
         let plates: [Entity; crate::constants::FIGHTER_COUNT] = std::array::from_fn(|fighter_id| {
             app.world_mut()
                 .spawn((HudFighterPlate { fighter_id }, Node::default()))
@@ -1533,6 +1583,13 @@ mod tests {
         assert_eq!(timer_label(&state), "SETUP");
         state.reset_for_new_match();
         assert_eq!(timer_label(&state), "--");
+        state.rules.time_limit = Some(10.0);
+        state.reset_for_new_match();
+        assert_eq!(timer_label(&state), "010");
+        state.timer_ticks = 61;
+        assert_eq!(timer_label(&state), "002");
+        state.timer_ticks = 60;
+        assert_eq!(timer_label(&state), "001");
         state.phase = MatchPhase::Results;
         assert_eq!(timer_label(&state), "RESULTS");
     }
@@ -1605,6 +1662,36 @@ mod tests {
 
         assert_eq!(team_scores_for_snapshots(&state, &snapshots), (2, 2));
         assert_eq!(result_message(&state, &snapshots), "Draw 2-2");
+    }
+
+    #[test]
+    fn result_message_uses_canonical_zero_survivor_draw_instead_of_scores() {
+        let mut state = MatchState::default();
+        state.rules = crate::game_state::RULE_PRESETS[1];
+        state.rule_index = 1;
+        state.phase = MatchPhase::Results;
+        state.set_active_slots([true, true, false, false]);
+        state.stocks = [0, 0, 0, 0];
+        let forward = vec![snapshot(0, "Red", 1), snapshot(1, "Blue", 9)];
+        let reversed = vec![snapshot(1, "Blue", 9), snapshot(0, "Red", 1)];
+
+        assert_eq!(result_message(&state, &forward), "Draw - no survivors");
+        assert_eq!(result_message(&state, &reversed), "Draw - no survivors");
+    }
+
+    #[test]
+    fn result_message_uses_canonical_surviving_team_instead_of_scores() {
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Results;
+        state.set_active_slots([true, true, true, false]);
+        state.stocks = [1, 0, 1, 0];
+        let snapshots = vec![
+            snapshot(0, "Red", 0),
+            snapshot(1, "Blue", 99),
+            snapshot(2, "Mint", 0),
+        ];
+
+        assert_eq!(result_message(&state, &snapshots), "Red squad survives");
     }
 
     #[test]

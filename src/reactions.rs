@@ -1,3 +1,5 @@
+use crate::determinism::{DEFAULT_F32_QUANTIZATION, canonicalize_f32};
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReactionKind {
@@ -28,6 +30,23 @@ pub enum ReactionFamilyId {
     UltimateBombDown,
 }
 
+const REACTION_FAMILIES: [ReactionFamilyId; 14] = [
+    ReactionFamilyId::ShortStandingStagger,
+    ReactionFamilyId::MediumStandingStagger,
+    ReactionFamilyId::HeavyStandingStagger,
+    ReactionFamilyId::FrozenStun,
+    ReactionFamilyId::LauncherDown,
+    ReactionFamilyId::GroundedDownGetup,
+    ReactionFamilyId::SlidingKnockdown,
+    ReactionFamilyId::LightAirPop,
+    ReactionFamilyId::CounterPop,
+    ReactionFamilyId::GroundBounceDown,
+    ReactionFamilyId::AerialSpikeDown,
+    ReactionFamilyId::AirFishKnockdown,
+    ReactionFamilyId::UltimateLockedStagger,
+    ReactionFamilyId::UltimateBombDown,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueuedAftermath {
     pub family: ReactionFamilyId,
@@ -35,6 +54,8 @@ pub struct QueuedAftermath {
     pub recover_ms: u32,
     pub landing_stick_ms: u32,
     pub horizontal_damping: f32,
+    /// Presentation-only SFX key. Consumers must re-derive it from the
+    /// rollback-relevant aftermath tuple before emitting a sidecar intent.
     pub cue: &'static str,
 }
 
@@ -311,6 +332,34 @@ pub fn reaction_profile_for_family(id: ReactionFamilyId) -> ReactionProfile {
     reaction_family_definition(id)
 }
 
+/// Re-derives the presentation-only landing cue from rollback-relevant
+/// aftermath fields. Several source reactions deliberately converge on the
+/// same landing family, so `family` alone is not enough to recover the authored
+/// cue after snapshot restore.
+pub fn queued_aftermath_presentation_cue(aftermath: &QueuedAftermath) -> Option<&'static str> {
+    let mut cue = None;
+    for authored in REACTION_FAMILIES
+        .into_iter()
+        .filter_map(|family| reaction_family_definition(family).landing_aftermath)
+    {
+        let matches = authored.family == aftermath.family
+            && authored.getup_transition_ms == aftermath.getup_transition_ms
+            && authored.recover_ms == aftermath.recover_ms
+            && authored.landing_stick_ms == aftermath.landing_stick_ms
+            && canonicalize_f32(authored.horizontal_damping, DEFAULT_F32_QUANTIZATION).to_bits()
+                == canonicalize_f32(aftermath.horizontal_damping, DEFAULT_F32_QUANTIZATION)
+                    .to_bits();
+        if !matches {
+            continue;
+        }
+        if cue.is_some_and(|existing| existing != authored.cue) {
+            return None;
+        }
+        cue = Some(authored.cue);
+    }
+    cue
+}
+
 #[allow(dead_code)]
 pub fn ground_bounce_profile() -> ReactionProfile {
     ReactionFamilyDef {
@@ -406,6 +455,64 @@ mod tests {
         assert!(fish.landing_aftermath.is_some());
         assert!(slide.immediate_down);
         assert_ne!(bounce.cue, spike.cue);
+    }
+
+    #[test]
+    fn every_authored_aftermath_tuple_reconstructs_exact_cue_and_unknown_fails_closed() {
+        let cases = [
+            (ReactionFamilyId::LauncherDown, "reaction_down_getup"),
+            (ReactionFamilyId::GroundBounceDown, "reaction_bounce_down"),
+            (ReactionFamilyId::AerialSpikeDown, "reaction_spike_down"),
+            (
+                ReactionFamilyId::AirFishKnockdown,
+                "reaction_fish_knockdown",
+            ),
+            (
+                ReactionFamilyId::UltimateBombDown,
+                "reaction_ultimate_bomb_down",
+            ),
+        ];
+        assert_eq!(
+            REACTION_FAMILIES
+                .into_iter()
+                .filter(|family| reaction_family_definition(*family)
+                    .landing_aftermath
+                    .is_some())
+                .count(),
+            cases.len(),
+            "the cue table must list every authored queued aftermath"
+        );
+
+        for (source, expected_cue) in cases {
+            let authored = reaction_family_definition(source)
+                .landing_aftermath
+                .expect("table lists every authored queued aftermath");
+            assert_eq!(
+                queued_aftermath_presentation_cue(&authored),
+                Some(expected_cue)
+            );
+
+            let canonical = QueuedAftermath {
+                horizontal_damping: canonicalize_f32(
+                    authored.horizontal_damping,
+                    DEFAULT_F32_QUANTIZATION,
+                ),
+                cue: "mutated-excluded-cue",
+                ..authored
+            };
+            assert_eq!(
+                queued_aftermath_presentation_cue(&canonical),
+                Some(expected_cue)
+            );
+        }
+
+        let malformed = QueuedAftermath {
+            recover_ms: 1,
+            ..reaction_family_definition(ReactionFamilyId::LauncherDown)
+                .landing_aftermath
+                .unwrap()
+        };
+        assert_eq!(queued_aftermath_presentation_cue(&malformed), None);
     }
 
     #[test]

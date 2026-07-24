@@ -1,2 +1,23 @@
-# Auto detect text files and perform LF normalization
 * text=auto
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.ron text eol=lf
+*.vdf text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.glb binary
+*.ogg binary
+*.mp3 binary
+*.wav binary
+*.dll binary
+*.so binary
+*.dylib binary

@@ -1,14 +1,17 @@
 # Multiplayer Architecture and Delivery Plan
 
-- Status: Proposed implementation specification
-- Last updated: 2026-07-23
+- Status: Implemented architecture; release-candidate acceptance still pending
+- Last updated: 2026-07-24
 - Target platform: Steam native client, with local/offline play retained
 - Initial match size: four fighter slots
 
-This document is the implementation authority for converting Animal Fighter Club
-from local multiplayer to online multiplayer. It defines the target architecture,
-the required simulation invariants, the network protocol boundaries, the delivery
-order, and the acceptance gates for each work package.
+This document is the implementation authority for Animal Fighter Club multiplayer.
+It defines the architecture, required simulation invariants, network protocol
+boundaries, delivery order, and acceptance gates for each work package. The
+repository now implements the first-release private/friends listen architecture;
+unchecked items distinguish still-pending local measurements or exhaustive
+fixture breadth from external release evidence and capabilities explicitly
+deferred by product policy.
 
 The document intentionally does not prescribe every Rust type or library call. A
 task is complete only when its stated invariant and acceptance gate are satisfied,
@@ -82,37 +85,31 @@ implementation if any of them change materially.
 - Kernel-level anti-cheat.
 - Browser-to-Steam networking.
 
-## Current-state assessment
+## Implementation-state assessment
 
-The local game has several qualities that make rollback feasible:
+The migration gaps that motivated this plan are now closed in repository code:
 
-- Four stable fighter slots already exist.
-- Movement and collision use custom game code rather than a third-party rigid-body
-  simulation.
-- Combat is already divided into recognizable input, action, movement, impact,
-  item, and respawn stages.
-- Arena definitions contain the static collision and gameplay data needed by a
-  headless simulation.
-- The total combat state is small enough to snapshot in full.
+- Canonical gameplay runs in the ordered 60 Hz `FixedUpdate` pipeline while input
+  sampling and presentation remain frame driven.
+- Integer tick timers, stable fighter/dynamic IDs, named seeded randomness,
+  deterministic contact arbitration, and TickEnd quantization own gameplay.
+- `SimPosition` owns rollback-relevant translation. Render `Transform` values are
+  one-way projections and are absent from the headless authority.
+- Versioned snapshots, hashes, input tapes, replays, full-world prediction,
+  rollback, hard resync, and rollback-safe presentation journals are implemented.
+- Offline/local, listen, and render-free authority compositions use the shared
+  simulation/protocol boundary.
+- AFC's bounded protocol runs over in-process and ordinary UDP test transports; the
+  native build provides Steam lobby, authentication, P2P/SDR, reconnect, rematch,
+  and player-facing application composition behind platform adapters.
 
-The following gaps must be closed before networking gameplay:
-
-1. `docs/architecture.md` describes fixed-step gameplay, but authoritative systems
-   are currently registered in Bevy's frame-rate `Update` schedule.
-2. Gameplay timers and motion consume variable `Time::delta_secs()` values.
-3. Gameplay state contains local Bevy `Entity` references.
-4. Query iteration and command application are not a documented canonical order.
-5. Gameplay systems directly spawn visual effects and enqueue audio/camera output.
-6. Bot decisions consume elapsed wall-clock time and transcendental functions.
-7. `replay_seed` is stored, but gameplay does not yet consume explicit seeded RNG
-   streams.
-8. The active arena is process-global, preventing isolated matches or an embedded
-   client and authority from owning different worlds.
-9. There is no canonical snapshot, tick hash, input tape, or replay fixture.
-10. There is no headless authority binary or multiplayer protocol.
-
-These gaps are migration requirements, not reasons to discard the existing combat
-implementation.
+This is not a Steam release-approval claim. Real two-machine Steam/SDR behavior,
+physical controller and Steam Deck coverage, supported-OS determinism, external GPU
+captures, long cross-region soaks, depot/AppID verification, and final measured
+performance remain release gates. Hosted Steam dedicated/ranked operation is
+product-deferred for the first private/friends listen release. The detailed
+evidence split is maintained in
+[multiplayer-implementation-readiness.md](multiplayer-implementation-readiness.md).
 
 ## System overview
 
@@ -246,8 +243,9 @@ must fail closed rather than targeting a newly allocated object.
   never round down to zero ticks.
 - Network tick continues during hitstop. A hitstop counter freezes the explicitly
   selected gameplay phases while input and network histories continue advancing.
-- Whether the match timer advances during hitstop must be defined once and preserved
-  by a fixture. The initial policy should match current local behavior.
+- The match and network clocks advance during hitstop. `Hitstop::remaining_ticks`
+  decrements once at the start of each simulation step; phase freeze checks observe
+  the post-decrement value. This policy is frozen by fixed-tick fixtures.
 - Presentation may run at any frame rate and interpolates between simulation poses.
 
 ### Numeric determinism policy
@@ -316,6 +314,8 @@ InputFrame
   movement_x: signed quantized axis
   movement_y: signed quantized axis
   held_buttons: bit set
+  pressed_buttons: bit set
+  released_buttons: bit set
   sequence: wrapping sequence number
 ```
 
@@ -324,6 +324,17 @@ jump, guard, ultimate, and special. Dash may be represented as an action after l
 double-tap recognition only if the recognition algorithm is identical for local and
 network play. Prefer moving all gameplay-relevant gesture recognition into the
 tick-based input interpreter.
+
+Simulation v5 defines the shared offline/online `AIM_GRAB` compiler contract. A
+held button is aim-only. Releasing it at or before the inclusive five-tick grace
+boundary emits exactly one grab pulse; holding it through tick five cancels that
+pending pulse, and a later release does nothing. A complete press/release
+accumulated between fixed ticks emits immediately. Ultimate and guard recognition
+run first and cannot co-emit grab. A light/heavy edge on a grab-release tick is
+staged with its ordinary grace, while a complete same-tick tap can co-emit with an
+already-expiring solo attack. `LocalTickInputState` and
+`local_tick_to_network_input` are the single compiler used by rendered offline,
+listen, and remote-client paths.
 
 Never send raw `KeyCode`, gamepad button, or Steam Input action handles. Device
 binding remains a local concern.
@@ -363,13 +374,24 @@ Recommended starting configuration:
 | --- | --- |
 | Simulation/input rate | 60 Hz |
 | Input redundancy | Previous 4 to 6 frames |
-| Match-wide input delay | 2 ticks, tunable between rounds from 1 to 4 |
+| Match-wide input delay | Authority-selected before commit; 2 ticks on low-latency links, bounded from 2 to 6 |
 | Client snapshot history | At least 32 ticks |
 | Maximum normal rollback | 12 ticks / 200 ms |
 | Authoritative delta rate | Approximately 20 Hz |
 | Tick-hash cadence | Every authoritative update, subject to measurement |
 
-The settings are initial validation targets, not hard-coded protocol constants.
+The authority selects one immutable delay only after every authenticated remote
+has at least 20 valid samples in its connection-generation-specific, 32-sample
+rolling RTT window. Unknown Steam ping readings are skipped rather than treated
+as zero. The authority uses the worst nearest-rank p95 across those peers. For a
+conservative high-percentile RTT budget, the starting policy is
+`clamp(ceil(RTT_ms * 60 / 2000) + 1, 2, 6)`: one half-RTT of transit plus one
+scheduling tick. The authority rejects a start whose half-RTT plus selected delay
+cannot fit inside the 12-tick normal-rollback envelope. Replacing a native
+connection resets that peer's samples, packet loss does not independently add
+latency, and the selected delay is copied into the immutable manifest and never
+changes during a committed match. The settings remain validation targets that
+must be confirmed by the production network matrix and field telemetry.
 
 ### Correction algorithm
 
@@ -481,10 +503,24 @@ The authority commits one immutable manifest before countdown:
 - Arena, rules, teams, fighter slots, characters, styles, and equipment.
 - Peer-to-seat-to-fighter ownership.
 - Master gameplay seed and derived-stream scheme version.
-- Tick rate, input delay, rollback limit, and agreed start tick.
+- Tick rate, input delay, rollback limit, and earliest proposed start tick
+  (`agreed_start_tick`).
 
 All peers acknowledge the exact manifest. A mismatch prevents the match from
-starting.
+starting. The manifest start tick is a lower bound, not an expiring deadline. Once
+every peer has loaded, applied initial sync, synchronized its clock, and declared
+readiness, the authority chooses one immutable actual countdown boundary:
+
+```text
+actual_start_tick = max(manifest.agreed_start_tick,
+                        authority_network_tick + countdown_lead_ticks)
+```
+
+`countdown_lead_ticks` is nonzero and bounded (120 ticks by default, 600 maximum).
+The authority broadcasts the selected value in `StartMessage::Countdown`; clients
+use that message—not the manifest proposal—for the countdown transition and for
+mapping the authority network clock onto gameplay ticks. Loading may finish after
+the proposal without failing the match.
 
 ### Channels
 
@@ -507,6 +543,9 @@ Loss of one packet must not block newer input or state.
 - Delta state against an acknowledged baseline.
 - Full snapshots are reserved for initial sync, reconnect, periodic recovery if
   measurements justify it, and explicit resync.
+- Every full snapshot transfer also carries a reliable, identity-bound canonical
+  input tail ending at the snapshot tick. It contains at most five ticks per
+  occupied seat and remains below the 1,200-byte packet ceiling.
 - Every variable-length field has a protocol maximum and is validated before
   allocation.
 - Serialization failure or unknown incompatible message versions fail closed.
@@ -522,6 +561,21 @@ Maintain separate values for:
 
 Steam lobby filters must prevent incompatible builds from matching. Hot reload of
 gameplay definitions and map editing are disabled during an online session.
+Authority and prediction worlds construct character moves and combat tuning only
+from validated bytes embedded in the executable; native loose files and their file
+watchers belong only to the rendered developer sandbox.
+
+The compiled v2 compatibility digests are deliberately path-aware. Build identity
+hashes normalized relative paths and LF-normalized bytes for every `src/**/*.rs`
+file, the Cargo manifests/lockfile, enabled features, build profile, configured
+release label, and Steam App ID. Gameplay-content identity remains a narrower,
+explicit source set at canonical-module granularity and includes every authored
+rules asset used by simulation, including Champion's Court collision authorship.
+Presentation and test modules outside that canonical source set may change the
+conservative exact build identity, but never the gameplay-content hash. Inline
+tests or presentation helpers that still share a canonical module intentionally
+receive that module's conservative content identity until the source boundary is
+split.
 
 ## Authority deployment
 
@@ -572,23 +626,51 @@ Use Steam services at the platform boundary:
 
 Lobby chat is not the gameplay data plane.
 
-Use Lightyear 0.26.x as the first networking-framework candidate because it matches
-Bevy 0.18 and exposes Steam transport, channels, input buffering, time
-synchronization, prediction, rollback, replication, and metrics. Pin the accepted
-version and hide it behind `afc_net` interfaces. Complete the networking spike before
-allowing Lightyear types to spread into gameplay modules.
+Overlay requests are local presentation operations. Lobby/action eligibility is
+validated before querying current overlay readiness, and disabled invite or
+binding surfaces produce a short dismissible notice rather than a session
+failure. Overlay active/deactive callbacks are latest-value state: online
+simulation and networking continue while local combat input is neutralized.
 
-The spike must prove:
+The Steam lobby contract uses schema 2 and separates desired admission
+(`afc_admission`) from effective joinability (`afc_open`). Effective joinability is
+owner-controlled and true only while peer capacity remains, every current member
+has a coherent declaration, and the aggregate accepted seat count is below the
+lobby seat cap. Member declarations use a staged/committed transaction marker:
+`s:<revision>` while seats/loadout are being written and
+`c:<revision>:<ready>` only after the complete declaration is visible. Observers
+retain each user's last accepted declaration, enforce monotonic revision
+continuity, and resolve concurrent capacity pressure deterministically by lobby
+owner then Steam user ID. A bad declaration is peer-scoped; immutable lobby
+contract drift still fails the whole session closed.
 
-- One listen authority with three remote clients over Steam transport.
-- One headless dedicated authority over both ordinary UDP test transport and Steam.
-- Multiple local seats on one client connection.
-- Whole-match snapshot restoration and bounded rollback.
-- Reconnect with the same Steam identity and seat assignment.
-- Required metrics and packet fault injection.
+Pre-game Steam authentication signaling uses a versioned, exact-epoch envelope.
+Version 2 binds lobby, attributed sender and recipient, sender peer identity,
+non-zero sender/owner declaration revisions, admission purpose, and the current
+`MatchId` for reconnect. Manifest commit freezes immutable Steam-user/peer/revision
+leases. Those leases authorize same-match reconnect across transient roster
+callback gaps, while a fresh Initial exchange requires live coherent membership
+and a ready declaration. The ready gate preserves the Lobby editing window for
+the first match and every owner-authored between-match epoch; reconnect remains
+independent of readiness. Old revisions and old match IDs are benign stale
+messages; malformed or current-epoch identity mismatches are peer-scoped hostile
+input. Ticket bytes are move-only, redacted from diagnostics, and zeroized at
+every owned lifetime boundary.
 
-If the Steam backend or rollback integration cannot satisfy these gates, retain the
-simulation and protocol and replace only the `afc_net` adapter.
+Lightyear 0.26.4 is pinned as a narrow native networking compatibility adapter for
+Bevy 0.18. AFC owns the wire codec, channel limits, input/history model,
+prediction/rollback, snapshots, and deterministic fault laboratory. No Lightyear
+type crosses into gameplay or protocol modules. The stock Lightyear Steam adapter
+does not satisfy AFC's pre-admission authentication contract, so production Steam
+uses the custom auth-gated transport described in
+[steam-gameplay-transport.md](steam-gameplay-transport.md).
+
+Local automated composition proves a listen authority with remote clients,
+multiple seats per peer, whole-world restore and bounded rollback, reconnect, and
+metrics/fault injection over in-process and ordinary UDP transports. Equivalent
+real Steam/SDR behavior remains a two-machine external release gate. Hosted Steam
+dedicated transport is product-deferred; the local `afc-dedicated` executable
+proves only the shared render-free authority contract.
 
 References:
 
@@ -617,27 +699,169 @@ Offline/Menu
   -> ConfirmingResult
   -> Results
   -> Lobby
+
+Countdown(start_tick) or Fighting
+  -> Reconnecting(resume_phase, retained_start_tick)
+  -> Authenticating
+  -> InitialSync
+  -> resume_phase
 ```
 
 Every transition has a timeout and a user-visible failure reason. A client does not
 enter `Countdown` until it has authenticated, accepted the manifest, loaded required
 content, applied the initial snapshot, synchronized its clock, and acknowledged
-readiness.
+readiness. `Countdown(start_tick)` always stores the authority-selected boundary;
+the manifest proposal is never used as a replacement after this message arrives.
+A reconnect records whether it interrupted `Countdown` or `Fighting`; completing
+the reconnect sync resumes that exact phase, preserving the selected countdown
+boundary when applicable.
 
 ### Disconnect and reconnect policy
 
 Initial policy:
 
 - Retain the fighter slot for a configurable grace period.
+- Once the manifest is committed, temporary Steam-lobby departure retains the
+  identity-to-peer binding, seat lease, and measured connection quality. It closes
+  all current and pending transport connections, authentication sessions, gameplay
+  endpoints, and ticket exchanges before exposing the disconnected roster state.
+  Before commitment, departure removes the provisional lease and its quality state.
+- Before commitment, an inbound connection is eligible only when its Steam
+  identity is in the coherent current lobby roster. After commitment, the exact
+  immutable identity/seat lease is the ingress allowlist; it remains valid across
+  temporary membership/cache loss so same-identity reconnect is not starved by
+  callback ordering. Every reconnect still requires a fresh Steam auth admission.
+  Quality-rejected identities and post-commit identities without a lease are
+  excluded. Rejected attempts are closed in the native listener before they
+  consume bounded pending-admission capacity or public-event capacity, and a
+  successfully admitted connection is recorded as the binding's pending connection.
+- Connection-close callbacks are keyed to the exact connection ID. A stale callback
+  from an old transport cannot clear or disconnect its authenticated replacement.
+- Same-identity overlap is never inferred from the Steam user or reconnect phase.
+  Only an authenticated `ReconnectAllowed` terminal may grant one exact connected
+  `SteamConnectionId` a one-shot replacement capability, and it is consumable only
+  by a fresh `AdmissionPurpose::Reconnect`. Initial admission, unmarked duplicates,
+  non-reconnect terminals, shutdown, quality rejection, kick, and ban paths cannot
+  create an overlap. The binding retains the old draining and new active
+  connection IDs separately until the old callback arrives.
+- An authority-authored kick or terminal first removes the peer from gameplay and
+  starts its reconnect/substitute policy, then retains the physical link in a
+  bounded `Closing` phase. The reliable ordered Disconnect is tracked by exact
+  channel/sequence until ACK, retry exhaustion, transport loss, or a 120-tick
+  deadline. Existing Control predecessors drain first; a full Control queue defers
+  the terminal without restoring peer eligibility. Non-Control outbound traffic is
+  purged. A same-identity authenticated replacement may preempt that old physical
+  generation without inheriting any of its packets or callbacks.
+- The remote client ACKs a valid typed Disconnect before publishing it atomically
+  with its worker generation and local confirmed progress. Only an exact active
+  match/role/generation payload reaches the application. The first valid terminal
+  controls recovery (`ReconnectAllowed`, `ReturnToLobby`, `MatchEndedNoContest`, or
+  `Fatal`) and wins over the later generic socket close. Authority-provided detail
+  and tick fields are diagnostic only and are never displayed or used as a
+  reconnect baseline.
+- On a listen authority, physical cleanup is generation-safe too. Endpoint attach
+  records the exact mapping
+  `(peer_id, SteamUserId, AuthorityConnectionId) -> SteamConnectionId`.
+  `TerminalDrained` may mark only that mapped Steam connection as terminal. A
+  stale user/peer/generation tuple is a benign no-op and cannot close or clear a
+  replacement. If the native close callback arrives first, its exact connection
+  fact is retained for one coordinator turn so either ordering has the same
+  cleanup result.
+- `PeerDisconnected` always carries its exact `SteamConnectionId`.
+  `PeerAuthenticationRejected` carries `Some(connection)` for an attached
+  generation and `None` only for local or pre-attach rejection. Application and
+  authority detach/revocation paths compare that generation before mutation, so a
+  delayed old close or rejection cannot revoke a same-identity replacement.
+- After the client worker drops its Steam endpoint, the transport performs an
+  outbound-only drain so the queued ACK can reach the authority: 50 ms of quiet,
+  a hard 250 ms cap, and immediate close on backend failure. No new native receive
+  work occurs during this drain.
+- Application transitions retire the whole old match transport explicitly rather
+  than relying on object destruction. Retirement immediately disables listener
+  admission, public events, and native receive, then services each bounded
+  outbound budget before testing its deadline. Per-link quiet/hard limits remain
+  50/250 ms and the complete transport has a fixed 300 ms cap with sticky
+  `Complete`, `TimedOut`, or `Faulted` outcome. Ordinary `Drop` is emergency
+  cleanup and offers no delivery guarantee.
+- Before graceful listen shutdown, `QuiesceAdmission` raises a monotonic match
+  fence: listener admission stops, pending inbound links are rejected, undelivered
+  endpoint/auth events and transport requests are removed, tickets are cancelled,
+  and native authentication signaling is drained but ignored. Established
+  endpoints remain send-capable for the bounded typed-terminal/ACK drain. No new
+  capability may cross from the fenced runtime into a worker.
+- The lobby coordinator owns a fixed queue of at most four retiring transport
+  generations, so a fresh between-match transport may coexist with an old
+  outbound drain without reusing its callbacks or packets. It delays cancellation
+  of that generation's auth tickets, Steam authentication sessions, identity
+  bindings, and final lobby leave until retirement is terminal. Retiring
+  identities cannot begin fresh authentication. Queue exhaustion fails closed
+  rather than growing memory.
+- A verified final frame, retained result, Results status, and Completed terminal
+  are one atomic client-mailbox publication. Completed keeps pumping its endpoint
+  without submitting gameplay input until explicit teardown; Stop preserves the
+  Completed terminal. A later transport-only close is benign after confirmed
+  Results, but not during Fighting or ConfirmingResult.
+- Between matches, only the listen owner advances the round epoch by publishing a
+  coherent newer unready Steam member declaration. Early client Rematch/Return
+  actions remain bounded intents in Results. Clients reset only after observing
+  that owner epoch and acknowledge with their own newer declaration; the owner
+  gates fresh Initial tickets on those per-member acknowledgements. This removes
+  both client-first and owner-first authentication races without treating the
+  reset as host migration.
 - During the grace period, the authority supplies neutral input or bot takeover
   according to the selected match rules.
 - A reconnecting peer must reauthenticate as the same Steam identity.
-- Rejoin applies a full snapshot, recent canonical inputs, current tick, and seat
-  ownership before prediction resumes.
+- Rejoin restores the previously accepted manifest and actual countdown boundary,
+  then applies a full snapshot plus the transfer's canonical input tail before
+  prediction resumes. It does not replay ManifestAccepted, InitialSyncApplied, or
+  Ready against an authority that already has an active match.
+- A replacement transport queues only its authenticated handshake initially. The
+  authority sends the reconnect transfer unsolicited, and the client blocks new
+  gameplay input until it has sent `ResyncApplied` and collected fresh clock-sync
+  samples. The authority admits input only after the same acknowledgement and
+  clock gate complete.
+- The input tail is copied atomically from committed authority history and is bound
+  to match ID, transfer ID, snapshot tick, and snapshot hash. Every occupied seat
+  has the same contiguous range ending at the snapshot. Source, seat ownership,
+  fighter identity, tick range, duplicates, and canonical padding are validated.
+  Snapshot tick zero uses an explicit neutral `MissingSubstitute` seed.
+- Applying the snapshot is contingent on receiving the valid tail, regardless of
+  whether Begin, chunks, or tail arrived first. The newest tail frame seeds each
+  seat's held input at the snapshot boundary; older frames establish committed
+  coverage but are never rolled back or replayed behind that boundary.
+- While a reconnect snapshot is still incomplete, ordinary committed-input and
+  state replication is identity/ownership validated but discarded as bounded
+  pre-baseline traffic. Replication after atomic snapshot-plus-tail application
+  catches the client up or triggers the normal bounded hard-resync path.
+- An in-fight `HistoryExpired` or hash-mismatch repair is client-requested. The
+  client fences new local input before sending the request; only then may the
+  authority capture and transfer a snapshot. Unsolicited in-fight Begin, chunk,
+  or tail messages fail closed. Because Resync traffic can precede Control after
+  a valid request, the client may bounded-stage matching chunks/tail before Begin.
+  Transfer-scoped fixed receipt caches make late byte-identical retries idempotent
+  while a same-transfer conflict still fails closed.
+- Peer-authored baseline acknowledgements are accepted only when their tick is not
+  ahead of authority history and, while retained, their hash exactly matches the
+  authority snapshot. An expired offered acknowledgement is ignored and cannot
+  replace the peer's last authority-verified baseline. If that retained baseline
+  expires, authoritative hash replication causes the client to request at most one
+  bounded repair after fencing input; the authority does not push a stale snapshot
+  across an unknown local-input generation. Forged future/hash acknowledgements
+  score and detach only that peer.
+- Peer-requested repair construction has a per-roster-peer cooldown and rolling
+  fixed window budget that survives connection replacement. Initial sync,
+  reconnect sync, and an already coalesced in-flight repair do not consume that
+  abuse budget. Cooldown/window denials are explicitly
+  consumed and scored as peer-local rate violations, so the first duplicate does
+  not become a forced session error while sustained abuse still reaches the normal
+  isolation threshold. Repeated valid repair requests therefore cannot force
+  unbounded snapshot/chunk work or interrupt healthy peers.
 - After the grace period, apply the mode-specific forfeit, bot replacement, or
   elimination policy.
 - In a listen match, authority loss ends the match; clients do not elect a new
-  mid-match authority.
+  mid-match authority. If a result was already confirmed, authority loss performs
+  transport/authentication teardown without replacing that result, emitting a
+  second terminal event, or downgrading it to no-contest.
 
 The exact grace duration and competitive forfeit rules are product decisions that
 must be recorded before Steam matchmaking work is accepted.
@@ -664,7 +888,9 @@ The authority alone:
 - Runs bots and gameplay RNG.
 - Creates and destroys simulation entities.
 - Calculates hits, damage, score, stock, ring-outs, and results.
-- Grants confirmed progression or submits leaderboard results.
+- Emits the confirmed result identity and canonical final state. Only an approved
+  durable sink may grant progression or submit leaderboard results, and the first
+  private/friends listen release has no trusted sink.
 
 Transport encryption does not make a listen host trustworthy. Competitive integrity
 requires dedicated authority.
@@ -697,6 +923,10 @@ measured hot path, capture a same-hardware baseline. Update the baseline table o
 after an accepted result is reproduced.
 
 ## Observability
+
+The bounded implementation schema, privacy constraints, dashboard contract, and
+incident runbook are maintained in
+[multiplayer-operations.md](multiplayer-operations.md).
 
 Expose development and telemetry counters for:
 
@@ -790,6 +1020,11 @@ root `web_dist/`.
 Do not start WP7 before WP6 passes under ordinary UDP and deterministic fault
 simulation. Steam must be an adapter over a proven session and simulation model.
 
+Checklist notation in this document is implementation-specific: `[x]` means the
+production boundary exists and has local automated evidence. It does not claim
+that a work package's measured, cross-platform, two-machine Steam, GPU, depot, or
+other external acceptance gate has passed.
+
 ## WP0: Baselines and behavior fixtures
 
 Objective: establish evidence that prevents the multiplayer refactor from silently
@@ -799,19 +1034,28 @@ Tasks:
 
 - [ ] Capture the pending `FourBotStress`, `MapCycle100`, and `Soak10Minutes`
   baselines described in [performance.md](performance.md).
-- [ ] Inventory every authoritative resource, component, dynamic entity, timer,
+- [x] Inventory every authoritative resource, component, dynamic entity, timer,
   relationship, global, and gameplay random decision.
-- [ ] Document the current system execution order and command-flush boundaries.
-- [ ] Capture input/result fixtures for movement, jump, dash, combo, guard, grab,
-  throw, item, special, hazard, ring-out, respawn, and match completion.
-- [ ] Add fixtures for simultaneous or contested interactions.
-- [ ] Define the initial policy for match timers during hitstop.
+- [x] Document the current system execution order and command-flush boundaries.
+- [x] Capture production-headless category tapes for movement, jump, dash, combo,
+  guard, grab, throw, item, special, hazard, ring-out, respawn, and match
+  completion. These freeze representative category paths, not every
+  character/arena/move combination.
+- [x] Add representative simultaneous and contested evidence through BF024/BF025
+  plus focused reverse-allocation-order tests. Exhaustive authored-content
+  combinations remain continuing corpus work rather than a claim of complete
+  behavioral enumeration.
+- [ ] Expand the representative category tapes into exhaustive
+  character/arena/move interaction breadth before making any exhaustive behavior
+  coverage claim.
+- [x] Define the initial policy for match timers during hitstop.
 - [ ] Record current entity and allocation peaks for four-fighter stress.
 
 Acceptance gate:
 
 - Baselines contain measured, same-hardware results rather than pending entries.
-- Each high-risk combat interaction has an expected result fixture.
+- Each high-risk combat interaction category has a representative expected-result
+  fixture; exhaustive breadth remains explicitly tracked.
 - Current behavior can be compared against later fixed-tick output.
 - `cargo run` and `cargo test` pass.
 
@@ -822,18 +1066,18 @@ rate.
 
 Tasks:
 
-- [ ] Introduce a canonical `SimTick` and fixed 60 Hz schedule.
-- [ ] Move authoritative match, action, movement, combat, item, hazard, and respawn
+- [x] Introduce a canonical `SimTick` and fixed 60 Hz schedule.
+- [x] Move authoritative match, action, movement, combat, item, hazard, and respawn
   work out of frame-rate `Update`.
-- [ ] Keep device sampling, UI, camera, rendering, visual interpolation, audio, and
+- [x] Keep device sampling, UI, camera, rendering, visual interpolation, audio, and
   effects in frame-rate schedules.
-- [ ] Add an input accumulator that cannot lose a tap between fixed ticks.
-- [ ] Convert the four local control paths to per-tick action frames.
-- [ ] Define how a render frame containing zero or multiple simulation ticks samples
+- [x] Add an input accumulator that cannot lose a tap between fixed ticks.
+- [x] Convert the four local control paths to per-tick action frames.
+- [x] Define how a render frame containing zero or multiple simulation ticks samples
   and consumes input.
-- [ ] Ensure hitstop freezes selected simulation phases without stopping network tick
+- [x] Ensure hitstop freezes selected simulation phases without stopping network tick
   progression.
-- [ ] Add render interpolation between the previous and current simulation pose.
+- [x] Add render interpolation between the previous and current simulation pose.
 
 Acceptance gate:
 
@@ -851,17 +1095,17 @@ Objective: remove machine-local and order-dependent values from authoritative st
 
 Tasks:
 
-- [ ] Replace authoritative Bevy `Entity` relationships with stable simulation IDs.
-- [ ] Replace the process-global active arena with match-owned state.
-- [ ] Replace authoritative floating-second timers with integer tick counters.
-- [ ] Introduce master-seed-derived named RNG streams and route all gameplay random
+- [x] Replace authoritative Bevy `Entity` relationships with stable simulation IDs.
+- [x] Replace the process-global active arena with match-owned state.
+- [x] Replace authoritative floating-second timers with integer tick counters.
+- [x] Introduce master-seed-derived named RNG streams and route all gameplay random
   decisions through them.
-- [ ] Replace bot wall-clock waves and gameplay trigonometric randomness.
-- [ ] Define stable ordering for fighters, dynamic entities, contacts, contested
+- [x] Replace bot wall-clock waves and gameplay trigonometric randomness.
+- [x] Define stable ordering for fighters, dynamic entities, contacts, contested
   pickups, grabs, simultaneous impacts, and respawns.
-- [ ] Replace order-dependent hash-map iteration in gameplay paths.
-- [ ] Introduce bounded dynamic-object pools and deterministic overflow policy.
-- [ ] Add canonical numeric quantization and serialization order.
+- [x] Replace order-dependent hash-map iteration in gameplay paths.
+- [x] Introduce bounded dynamic-object pools and deterministic overflow policy.
+- [x] Add canonical numeric quantization and serialization order.
 
 Acceptance gate:
 
@@ -879,15 +1123,15 @@ Objective: make the complete match restorable and replayable at any retained tic
 
 Tasks:
 
-- [ ] Define the versioned canonical snapshot schema.
-- [ ] Capture every state group in the simulation-state inventory.
-- [ ] Implement deterministic snapshot serialization and restoration.
-- [ ] Implement canonical per-tick hashing.
-- [ ] Add a bounded client-style snapshot history.
-- [ ] Record accepted input frames for all fighter slots.
-- [ ] Build a headless replay runner that advances faster than realtime.
-- [ ] Store periodic hashes and optional keyframes in replay files.
-- [ ] Add snapshot size and restore-time metrics.
+- [x] Define the versioned canonical snapshot schema.
+- [x] Capture every state group in the simulation-state inventory.
+- [x] Implement deterministic snapshot serialization and restoration.
+- [x] Implement canonical per-tick hashing.
+- [x] Add a bounded client-style snapshot history.
+- [x] Record accepted input frames for all fighter slots.
+- [x] Build a headless replay runner that advances faster than realtime.
+- [x] Store periodic hashes and optional keyframes in replay files.
+- [x] Add snapshot size and restore-time metrics.
 
 Acceptance gate:
 
@@ -905,15 +1149,15 @@ Objective: make rollback safe for effects, audio, camera, HUD, and progression.
 
 Tasks:
 
-- [ ] Replace direct effect spawning in authoritative systems with ordered
-  `SimEvents`.
-- [ ] Assign deterministic event IDs.
-- [ ] Build client presentation consumers and a bounded event-deduplication history.
-- [ ] Separate simulation hitstop from presentation time scaling.
-- [ ] Classify every current cue as predicted, predicted-and-deduplicated, or
+- [x] Route authoritative effect facts through ordered `SimEvents`; retained direct
+  visual sidecars are explicitly cosmetic and absent from the headless composition.
+- [x] Assign deterministic event IDs.
+- [x] Build client presentation consumers and a bounded event-deduplication history.
+- [x] Separate simulation hitstop from presentation time scaling.
+- [x] Classify every current cue as predicted, predicted-and-deduplicated, or
   confirmed-only.
-- [ ] Ensure rollback discards unconfirmed events and does not replay consumed audio.
-- [ ] Route result, achievement, statistic, and progression hooks through confirmed
+- [x] Ensure rollback discards unconfirmed events and does not replay consumed audio.
+- [x] Route result, achievement, statistic, and progression hooks through confirmed
   authority events.
 
 Acceptance gate:
@@ -932,15 +1176,16 @@ local play use it.
 
 Tasks:
 
-- [ ] Create the authority runner and explicit match lifecycle.
-- [ ] Create a headless server entry point or mode with no render/audio dependencies.
-- [ ] Add in-process transport queues implementing the protocol/session interfaces.
-- [ ] Make offline and local multiplayer connect through the authority boundary.
-- [ ] Support one process owning multiple local seats.
-- [ ] Move bot execution to the authority and expose bot input frames.
-- [ ] Add input validation and connection-to-seat ownership.
-- [ ] Ensure an embedded listen authority runs independently of render cadence.
-- [ ] Add full initial sync and result confirmation over loopback.
+- [x] Create the authority runner and explicit match lifecycle.
+- [x] Create a headless server entry point or mode with no render/audio dependencies.
+- [x] Add in-process transport queues implementing the protocol/session interfaces.
+- [x] Make player-facing offline and local multiplayer connect through the authority
+  boundary; the developer sandbox retains an intentional direct-debug mode.
+- [x] Support one process owning multiple local seats.
+- [x] Move bot execution to the authority and expose bot input frames.
+- [x] Add input validation and connection-to-seat ownership.
+- [x] Ensure an embedded listen authority runs independently of render cadence.
+- [x] Add full initial sync and result confirmation over loopback.
 
 Acceptance gate:
 
@@ -958,18 +1203,18 @@ injection.
 
 Tasks:
 
-- [ ] Implement or integrate protocol channels over ordinary UDP.
-- [ ] Complete the Lightyear compatibility spike and pin the accepted version.
-- [ ] Add tick synchronization, input lead/deadline handling, redundancy, and
+- [x] Implement or integrate protocol channels over ordinary UDP.
+- [x] Complete the Lightyear compatibility spike and pin the accepted version.
+- [x] Add tick synchronization, input lead/deadline handling, redundancy, and
   processed-input acknowledgements.
-- [ ] Relay canonical human and bot inputs.
-- [ ] Add authoritative delta state and full resync messages.
-- [ ] Implement full-world client prediction.
-- [ ] Implement snapshot comparison, rollback, re-simulation, and hard resync.
-- [ ] Add render-only correction smoothing.
-- [ ] Add deterministic latency, jitter, loss, duplication, reorder, bandwidth, and
+- [x] Relay canonical human and bot inputs.
+- [x] Add authoritative delta state and full resync messages.
+- [x] Implement full-world client prediction.
+- [x] Implement snapshot comparison, rollback, re-simulation, and hard resync.
+- [x] Add render-only correction smoothing.
+- [x] Add deterministic latency, jitter, loss, duplication, reorder, bandwidth, and
   disconnect injection.
-- [ ] Add all observability counters listed in this document.
+- [x] Add the bounded local observability counters listed in this document.
 
 Acceptance gate:
 
@@ -985,21 +1230,27 @@ Acceptance gate:
 Objective: replace the test transport/session discovery with Steam-native user flow
 without changing simulation behavior.
 
+Implementation status and the exact remaining wiring/hosted-SDR boundary are
+tracked in [steam-platform-foundation.md](steam-platform-foundation.md) and the
+[auth-gated Steam gameplay transport](steam-gameplay-transport.md).
+
 Tasks:
 
-- [ ] Add Steam initialization and callback ownership at the platform boundary.
-- [ ] Implement private, friends-only, and public lobby creation/join flows as
-  required by the product plan.
-- [ ] Implement invites, `+connect_lobby`, rich presence, and return-to-lobby.
-- [ ] Publish build, protocol, content, authority, region, rules, arena, and seat
+- [x] Add Steam initialization and callback ownership at the platform boundary.
+- [x] Implement private and friends-only lobby creation/join flows; public discovery
+  is deliberately rejected by the first-release product policy.
+- [x] Implement invites, `+connect_lobby`, rich presence, and return-to-lobby.
+- [x] Publish build, protocol, content, authority, region, rules, arena, and seat
   metadata.
-- [ ] Negotiate multiple local seats per Steam peer.
-- [ ] Create listen-authority connections through Steam Networking Sockets and SDR.
-- [ ] Authenticate session tickets and verify AppID ownership.
-- [ ] Surface clear authentication, version, timeout, host-loss, and kick errors.
+- [x] Negotiate multiple local seats per Steam peer.
+- [x] Create auth-gated listen-authority connections through Steam Networking
+  Sockets/SDR; real relay selection remains an external gate.
+- [x] Authenticate session tickets and verify AppID ownership at the platform
+  boundary; real account callbacks remain an external gate.
+- [x] Surface clear authentication, version, timeout, host-loss, and kick errors.
 - [ ] Prove the dedicated-authority Steam path even if it is not enabled for the first
-  private-play milestone.
-- [ ] Keep ordinary UDP and in-process transports available for tests.
+  private-play milestone. This is product-deferred for the listen release.
+- [x] Keep ordinary UDP and in-process transports available for tests.
 
 Acceptance gate:
 
@@ -1016,17 +1267,20 @@ Objective: meet shipping reliability, security, performance, and operations gate
 
 Tasks:
 
-- [ ] Finalize reconnect grace and mode-specific disconnect/forfeit policy.
-- [ ] Add minimum/maximum acceptable network-quality policies and UI indicators.
+- [x] Finalize the casual listen reconnect grace and disconnect/bot-takeover policy;
+  competitive forfeit policy remains product-deferred with competitive play.
+- [x] Add minimum/maximum acceptable network-quality policies and UI indicators.
 - [ ] Perform long-running Steam soak and cross-region tests.
 - [ ] Complete Windows, Linux, and Steam Deck determinism verification.
-- [ ] Add crash-safe replay/diagnostic capture with privacy review.
-- [ ] Add server health, match, network, desync, and capacity metrics.
-- [ ] Add rate limits, invalid-input policy, kick reasons, and ban integration where
-  required.
+- [x] Add crash-safe replay/diagnostic capture with bounded privacy-safe records.
+- [ ] Complete the external product privacy/consent review for release diagnostics.
+- [x] Add bounded local server health, match, network, desync, and capacity metrics.
+- [x] Add rate limits, invalid-input policy, kick reasons, and listen/platform-ban
+  integration. A shipping operator ban provider is deferred with hosted dedicated
+  service.
 - [ ] Package and deploy the headless dedicated authority if ranked or trusted
   rewards are in launch scope.
-- [ ] Verify result submission is idempotent and authority-confirmed.
+- [x] Verify result submission is idempotent and authority-confirmed.
 - [ ] Run final performance, memory, bandwidth, rollback, reconnect, and failure
   matrices on release builds.
 
@@ -1043,6 +1297,10 @@ Acceptance gate:
 
 These product decisions do not block WP0 through WP6, but must be recorded before
 the listed milestone is accepted.
+
+The initial-release choices are now recorded in
+[multiplayer-product-policy.md](multiplayer-product-policy.md). Any later change to
+those choices must update that decision record and the affected acceptance tests.
 
 | Decision | Required before | Default recommendation |
 | --- | --- | --- |
@@ -1073,17 +1331,32 @@ the listed milestone is accepted.
 
 The game is multiplayer-ready only when all of the following are true:
 
-- [ ] Local, listen, and dedicated modes use one simulation and authority contract.
-- [ ] Gameplay advances at 60 deterministic ticks per second.
+- [x] Local, listen, and the local dedicated smoke use one simulation and authority
+  contract.
+- [x] Gameplay advances at 60 deterministic ticks per second.
 - [ ] Identical manifests and input tapes reproduce identical confirmed hashes on all
   supported native platforms.
-- [ ] Clients send inputs only; the authority decides all outcomes.
-- [ ] Clients predict the full combat world and recover through bounded rollback.
-- [ ] Presentation is rollback-safe and irreversible effects are confirmed once.
-- [ ] Full snapshots restore every gameplay relationship and RNG stream.
-- [ ] Steam identity, ownership, lobby, invite, connection, and failure flows work.
-- [ ] Listen play is clearly unranked; trusted modes use dedicated authority.
-- [ ] Required fault, reconnect, malformed-traffic, soak, and performance tests pass.
-- [ ] Packet, bandwidth, rollback, allocation, and server-tick budgets are measured.
-- [ ] Replays reproduce authority results and provide sufficient desync diagnostics.
+- [x] Clients send inputs only; the authority decides all outcomes.
+- [x] Clients predict the full combat world and recover through bounded rollback.
+- [x] Presentation is rollback-safe and irreversible effects are confirmed once.
+- [x] Full snapshots restore every gameplay relationship and RNG stream.
+- [x] Local fake-backend application tests exercise Steam identity, ownership,
+  lobby, invite, connection, reconnect, rematch, and failure state-machine
+  boundaries.
+- [ ] Real two-machine Steam identity, ownership, lobby, invite, authentication,
+  SDR connection, teardown, and failure flows pass on licensed accounts.
+- [x] Listen play is clearly unranked; trusted modes are unavailable until a
+  dedicated authority exists.
+- [x] Deterministic local fault, reconnect, malformed-traffic, security,
+  bandwidth, bounded-queue, and production-headless soak fixtures pass in
+  repository evidence.
+- [x] Canonical-pose authority/rollback hot paths and protocol development-reference
+  packet, bandwidth, rollback, and server-tick budgets have same-hardware or
+  automated measurements.
+- [ ] Final schema-v4 graphical timing/allocation matrices and ten-minute plateau
+  evidence pass on the frozen release candidate.
+- [ ] External GPU capture, minimum-supported-CPU budgets, supported-OS/Steam Deck
+  runs, cross-region Steam soak, signed packaging, depot preview/upload, and
+  promotion evidence pass for the same sealed candidate.
+- [x] Replays reproduce authority results and provide bounded desync diagnostics.
 - [ ] Every implementation code change has passed `cargo run` and `cargo test`.

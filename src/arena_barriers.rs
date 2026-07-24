@@ -74,10 +74,12 @@ impl ArenaBarrierDefinition {
     pub fn support_at(&self, point: Vec2, ledge_grace: f32) -> Option<BarrierSupport> {
         match self.footprint {
             BarrierFootprint::Circle { radius } => {
-                let distance = (point - self.center).length();
-                if distance <= radius {
+                debug_assert!(radius >= 0.0 && ledge_grace >= 0.0);
+                let distance_squared =
+                    crate::canonical_math::vec2_distance_squared(point, self.center);
+                if distance_squared <= radius * radius {
                     Some(BarrierSupport::Firm)
-                } else if distance <= radius + ledge_grace {
+                } else if distance_squared <= (radius + ledge_grace) * (radius + ledge_grace) {
                     Some(BarrierSupport::Grace)
                 } else {
                     None
@@ -112,10 +114,14 @@ impl ArenaBarrierDefinition {
             BarrierFootprint::Circle { radius } => {
                 let offset = Vec2::new(position.x, position.z) - self.center;
                 let expanded_radius = radius + fighter_radius;
-                if offset.length() >= expanded_radius {
+                debug_assert!(radius >= 0.0 && fighter_radius >= 0.0);
+                if crate::canonical_math::vec2_length_squared(offset)
+                    >= expanded_radius * expanded_radius
+                {
                     return position;
                 }
-                let resolved = self.center + offset.normalize_or(Vec2::X) * expanded_radius;
+                let resolved = self.center
+                    + crate::canonical_math::vec2_normalize_or(offset, Vec2::X) * expanded_radius;
                 Vec3::new(resolved.x, position.y, resolved.y)
             }
             BarrierFootprint::Rectangle { half_extents, yaw } => {
@@ -141,8 +147,7 @@ impl ArenaBarrierDefinition {
 }
 
 fn rotate_into_local(offset: Vec2, yaw: f32) -> Vec2 {
-    let cos = yaw.cos();
-    let sin = yaw.sin();
+    let (cos, sin) = crate::canonical_math::collision_yaw_basis(yaw);
     Vec2::new(
         cos * offset.x + sin * offset.y,
         -sin * offset.x + cos * offset.y,
@@ -150,8 +155,7 @@ fn rotate_into_local(offset: Vec2, yaw: f32) -> Vec2 {
 }
 
 fn rotate_from_local(offset: Vec2, yaw: f32) -> Vec2 {
-    let cos = yaw.cos();
-    let sin = yaw.sin();
+    let (cos, sin) = crate::canonical_math::collision_yaw_basis(yaw);
     Vec2::new(
         cos * offset.x - sin * offset.y,
         sin * offset.x + cos * offset.y,

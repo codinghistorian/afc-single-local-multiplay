@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::{ARENA_TOP_Y, CAMERA_BASE_OFFSET, RINGOUT_RADIUS, RINGOUT_Y};
 use crate::items::ItemKind;
@@ -934,28 +933,52 @@ const ARENAS: &[ArenaDefinition] = &[
     },
 ];
 
-static ACTIVE_ARENA_INDEX: AtomicUsize = AtomicUsize::new(0);
-
 pub fn arena_definitions() -> &'static [ArenaDefinition] {
     ARENAS
 }
+
+/// Stable index for Crank Yard's arena-specific gameplay and rendering paths.
+pub(crate) const CRANK_YARD_ARENA_INDEX: usize = 3;
+
+/// The graphical combat performance fixture uses a hazard-bearing arena whose
+/// connected floor lets all four production bots exercise combat. Keeping the
+/// selection beside the authored arena list makes content-order changes fail
+/// loudly instead of silently changing the benchmark workload.
+pub(crate) const BUMPER_ALLEY_ARENA_INDEX: usize = 5;
 
 pub fn arena_definition(index: usize) -> &'static ArenaDefinition {
     &ARENAS[index.min(ARENAS.len() - 1)]
 }
 
-pub fn active_arena_index() -> usize {
-    ACTIVE_ARENA_INDEX
-        .load(Ordering::Relaxed)
-        .min(ARENAS.len() - 1)
+/// Match-owned arena selection used by authoritative simulation.
+///
+/// The legacy local implementation also exposes a process-global selection
+/// below while callers are migrated. Authoritative systems must consume this
+/// resource so isolated listen/dedicated matches cannot affect one another.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActiveArena {
+    index: u8,
 }
 
-pub fn set_active_arena_index(index: usize) {
-    ACTIVE_ARENA_INDEX.store(index.min(ARENAS.len() - 1), Ordering::Relaxed);
-}
+impl ActiveArena {
+    #[cfg(test)]
+    pub fn new(index: usize) -> Self {
+        let mut active = Self::default();
+        active.select(index);
+        active
+    }
 
-pub fn active_arena_definition() -> &'static ArenaDefinition {
-    arena_definition(active_arena_index())
+    pub const fn index(self) -> usize {
+        self.index as usize
+    }
+
+    pub fn select(&mut self, index: usize) {
+        self.index = index.min(ARENAS.len() - 1) as u8;
+    }
+
+    pub fn definition(self) -> &'static ArenaDefinition {
+        arena_definition(self.index())
+    }
 }
 
 #[cfg(test)]
@@ -972,9 +995,13 @@ mod tests {
         assert!(!arenas[1].hazards.is_empty());
         assert!(arenas[1].platforms[2].top_y > ARENA_TOP_Y);
         assert_eq!(arenas[2].name, "Sunstone Steps");
-        assert_eq!(arenas[3].name, "Crank Yard");
+        assert_eq!(CRANK_YARD_ARENA_INDEX, 3);
+        assert_eq!(arenas[CRANK_YARD_ARENA_INDEX].name, "Crank Yard");
         assert_eq!(arenas[4].name, "Vent Spiral");
-        assert_eq!(arenas[5].name, "Bumper Alley");
+        assert_eq!(BUMPER_ALLEY_ARENA_INDEX, 5);
+        assert_eq!(arenas[BUMPER_ALLEY_ARENA_INDEX].name, "Bumper Alley");
+        assert_eq!(arenas[BUMPER_ALLEY_ARENA_INDEX].item_anchors.len(), 4);
+        assert_eq!(arenas[BUMPER_ALLEY_ARENA_INDEX].hazards.len(), 3);
         assert_eq!(arenas[6].name, "Feast Market");
         assert_eq!(arenas[7].name, "Snare Garden");
         assert_eq!(arenas[8].name, "Sky Steps");
@@ -1000,6 +1027,19 @@ mod tests {
                 .count()
                 >= 3
         );
+    }
+
+    #[test]
+    fn match_owned_arena_selection_is_isolated_and_clamped() {
+        let first = ActiveArena::new(1);
+        let mut second = ActiveArena::new(3);
+        assert_eq!(first.index(), 1);
+        assert_eq!(second.index(), 3);
+        assert_ne!(first.definition().name, second.definition().name);
+
+        second.select(usize::MAX);
+        assert_eq!(second.index(), arena_definitions().len() - 1);
+        assert_eq!(first.index(), 1);
     }
 
     #[test]

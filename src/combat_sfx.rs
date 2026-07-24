@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use crate::combat::{
     HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource, impact_feedback_profile,
 };
+use crate::match_presentation::MatchPresentationTransient;
 use crate::reactions::ReactionFamilyId;
 use crate::techniques::{
     AttackPayloadId, payload_is_ultimate_bomb, payload_is_ultimate_catch,
@@ -161,6 +162,7 @@ pub fn play_combat_sfx(
 
     for cue in coalesce_combat_sfx_cues(&cues) {
         commands.spawn((
+            MatchPresentationTransient,
             AudioPlayer::new(assets.handle_for(cue.kind)),
             playback_settings_for_cue(cue),
         ));
@@ -404,6 +406,25 @@ mod tests {
         effects.push_combat_sfx(CombatSfxCue::new(CombatSfxKind::LightHit, Vec3::ZERO, 20));
 
         assert_eq!(effects.drain_combat_sfx_cues().len(), 1);
+        assert!(effects.drain_combat_sfx_cues().is_empty());
+    }
+
+    #[test]
+    fn headless_or_stalled_audio_queue_rejects_newest_at_a_fixed_bound() {
+        let mut effects = HitEffects::default();
+        for index in 0..crate::combat::MAX_PENDING_COMBAT_SFX_CUES + 10 {
+            effects.push_combat_sfx(CombatSfxCue::new(
+                CombatSfxKind::LightHit,
+                Vec3::ZERO,
+                index as u8,
+            ));
+        }
+
+        assert_eq!(
+            effects.drain_combat_sfx_cues().len(),
+            crate::combat::MAX_PENDING_COMBAT_SFX_CUES
+        );
+        assert_eq!(effects.dropped_combat_sfx_cues(), 10);
         assert!(effects.drain_combat_sfx_cues().is_empty());
     }
 
