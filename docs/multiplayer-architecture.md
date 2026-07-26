@@ -1,7 +1,7 @@
 # Multiplayer Architecture and Delivery Plan
 
 - Status: Implemented architecture; release-candidate acceptance still pending
-- Last updated: 2026-07-24
+- Last updated: 2026-07-26
 - Target platform: Steam native client, with local/offline play retained
 - Initial match size: four fighter slots
 
@@ -104,11 +104,14 @@ The migration gaps that motivated this plan are now closed in repository code:
   and player-facing application composition behind platform adapters.
 
 This is not a Steam release-approval claim. Real two-machine Steam/SDR behavior,
-physical controller and Steam Deck coverage, supported-OS determinism, external GPU
-captures, long cross-region soaks, depot/AppID verification, and final measured
-performance remain release gates. Hosted Steam dedicated/ranked operation is
-product-deferred for the first private/friends listen release. The detailed
-evidence split is maintained in
+physical controller and Steam Deck coverage, supported-OS determinism,
+minimum-supported-CPU execution, external GPU captures, long cross-region soaks,
+depot/AppID verification, and final sealed-candidate performance evidence remain
+release gates. The complete local schema-v6 graphical timing/allocator matrix now
+passes on frozen patched profiling binaries; it is not external GPU evidence or a
+sealed release-candidate approval. Hosted Steam dedicated/ranked operation is
+product-deferred for the first private/friends listen release. The detailed evidence
+split is maintained in
 [multiplayer-implementation-readiness.md](multiplayer-implementation-readiness.md).
 
 ## System overview
@@ -1032,8 +1035,22 @@ changing game feel or hot-path performance.
 
 Tasks:
 
-- [ ] Capture the pending `FourBotStress`, `MapCycle100`, and `Soak10Minutes`
-  baselines described in [performance.md](performance.md).
+- [x] Capture the schema-v6 `FourBotStress`, `MapCycle100`, and `Soak10Minutes`
+  local baselines described in [performance.md](performance.md): three timing and
+  three allocator runs for each short scenario, plus one timing and one allocator
+  ten-minute soak, all on the same host and frozen patched binaries. The timing
+  binary SHA-256 is
+  `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd`;
+  the allocator binary SHA-256 is
+  `54d6239ec592bf3139f24cfc120abb23ccfbd7115a22e70bec097d7920b49db6`.
+  Every accepted `MapCycle100` run preloads exactly 101 supported assets, completes
+  10 warm presents and 100 measured switches, observes exactly 111 present ACKs
+  and 11 aligned checkpoints, and passes the aligned-tail RSS gates (range at most
+  8 MiB and slope at most 2 MiB/min). Allocator runs also pass the aligned-tail live
+  gates (range at most 1 MiB and slope at most 0.25 MiB/min). Per-run before/after
+  host, architecture, binary-hash, and AC-power records are retained. One otherwise
+  passing allocator sample that crossed from AC power to battery was rejected and
+  replaced; it is not counted among the three accepted runs.
 - [x] Inventory every authoritative resource, component, dynamic entity, timer,
   relationship, global, and gameplay random decision.
 - [x] Document the current system execution order and command-flush boundaries.
@@ -1049,7 +1066,8 @@ Tasks:
   character/arena/move interaction breadth before making any exhaustive behavior
   coverage claim.
 - [x] Define the initial policy for match timers during hitstop.
-- [ ] Record current entity and allocation peaks for four-fighter stress.
+- [x] Record current entity and allocation peaks for four-fighter stress in the
+  schema-v6 capture results summarized by [performance.md](performance.md).
 
 Acceptance gate:
 
@@ -1353,10 +1371,19 @@ The game is multiplayer-ready only when all of the following are true:
 - [x] Canonical-pose authority/rollback hot paths and protocol development-reference
   packet, bandwidth, rollback, and server-tick budgets have same-hardware or
   automated measurements.
-- [ ] Final schema-v4 graphical timing/allocation matrices and ten-minute plateau
-  evidence pass on the frozen release candidate.
+- [x] The complete local schema-v6 graphical timing/allocation matrices and
+  ten-minute plateau evidence pass on frozen patched profiling binaries. Each
+  result still reports
+  `external_gpu_evidence_status=required_not_collected` and
+  `gpu_completion_measured=false`; the sealed-candidate repeat and external
+  promotion gates remain separate.
 - [ ] External GPU capture, minimum-supported-CPU budgets, supported-OS/Steam Deck
   runs, cross-region Steam soak, signed packaging, depot preview/upload, and
   promotion evidence pass for the same sealed candidate.
 - [x] Replays reproduce authority results and provide bounded desync diagnostics.
-- [ ] Every implementation code change has passed `cargo run` and `cargo test`.
+- [x] Every implementation code change has been validated with the exact
+  `cargo test` command and an exact `cargo run` native launch. The graphical
+  run reached the Metal renderer and created the Animal Fighter Club window;
+  because the normal client has no automatic exit, the verification process
+  was then stopped manually. The dedicated 120-tick `cargo run` smoke also
+  exited cleanly.

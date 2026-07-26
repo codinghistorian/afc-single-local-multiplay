@@ -141,15 +141,15 @@ Use the same hardware and procedure in [performance.md](performance.md).
 
 | Evidence | Result / artifact |
 | --- | --- |
-| Three final schema-v4 timing `FourBotStress` runs | |
-| Three final schema-v4 allocator `FourBotStress` runs | |
-| Three final schema-v4 timing `MapCycle100` runs, each 100/100 switches with the final present/exit fence complete | |
-| Three final schema-v4 allocator `MapCycle100` runs, each 100/100 switches with the final present/exit fence complete | |
-| One final schema-v4 timing `Soak10Minutes` run | |
-| One final schema-v4 allocator `Soak10Minutes` run with RSS and live-allocation plateau analysis | |
-| Authority p50/p95/p99/max and over-budget ticks | |
-| Minimum-supported-CPU authority and rollback budgets | |
-| External GPU capture for the graphical stress and soak workloads | |
+| Three final schema-v6 timing `FourBotStress` runs | Local matrix passes 3/3 on frozen patched binary SHA-256 `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd`; attach the sealed candidate's per-run host/power records here. |
+| Three final schema-v6 allocator `FourBotStress` runs | Local matrix passes 3/3 on frozen patched binary SHA-256 `54d6239ec592bf3139f24cfc120abb23ccfbd7115a22e70bec097d7920b49db6`; attach the sealed candidate's per-run host/power records here. |
+| Three final schema-v6 timing `MapCycle100` runs | Local matrix passes 3/3 with exactly 101 supported assets preloaded, 10 warm presents, 100 measured switches, 111 present ACKs, and 11 aligned checkpoints per run. Each run passes the aligned-tail RSS gates (range at most 8 MiB; slope at most 2 MiB/min), verifies timing binary SHA-256 `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd` before/after, and retains before/after host and AC-power records. Attach the sealed-candidate records here. |
+| Three final schema-v6 allocator `MapCycle100` runs | Local matrix passes 3/3 with exactly 101 supported assets preloaded, 10 warm presents, 100 measured switches, 111 present ACKs, and 11 aligned checkpoints per run. Each accepted run passes the aligned-tail RSS gates (range at most 8 MiB; slope at most 2 MiB/min) and live-allocation gates (range at most 1 MiB; slope at most 0.25 MiB/min), verifies allocator binary SHA-256 `54d6239ec592bf3139f24cfc120abb23ccfbd7115a22e70bec097d7920b49db6` before/after, and retains before/after host and AC-power records. One otherwise passing AC-to-battery sample was rejected and replaced, so it is excluded from the 3/3 result. Attach the sealed-candidate records here. |
+| One final schema-v6 timing `Soak10Minutes` run | Local matrix passes 1/1 on the frozen patched timing binary; attach the sealed-candidate result and per-run host/power records here. |
+| One final schema-v6 allocator `Soak10Minutes` run with RSS and live-allocation plateau analysis | Local matrix passes 1/1 on the frozen patched allocator binary; attach the sealed-candidate result and per-run host/power records here. |
+| Authority and exact 12-tick rollback p50/p95/p99/max and over-budget ticks | Local Apple M2 Max verification (`final-local-01` through `03`) passed all three runs. Authority p50/p95/p99/max ranges were 53,833–55,625 / 64,417–70,416 / 66,916–73,166 / 71,333–89,292 ns, with zero samples over the 1 ms budget and zero steady-state allocations. Rollback p50/p95/p99/max ranges were 356,000–356,792 / 363,833–365,958 / 370,417–376,958 / 385,625–418,667 ns, with zero samples over the 4 ms budget. Attach the sealed-candidate and minimum-supported-CPU records separately. |
+| Minimum-supported-CPU authority and rollback budgets | Pending; the local Apple M2 Max matrix is not minimum-supported-CPU approval. |
+| External GPU capture for the graphical stress and soak workloads | Pending; every local schema-v6 result reports `external_gpu_evidence_status=required_not_collected` and `gpu_completion_measured=false`. |
 | Cross-region Steam soak: duration, reconnects, hard resyncs, bandwidth, queue high-water | |
 | Incident/replay retention and privacy review | |
 

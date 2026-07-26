@@ -90,6 +90,11 @@ steamworks = { version = "=0.12.2", optional = true, default-features = false, f
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 
+[patch.crates-io]
+# Bevy 0.18.1 forgets an owned render-pass diagnostic label every frame.
+# Keep this exact-version backport until the upstream guard is fixed.
+bevy_render = { path = "vendor/bevy_render" }
+
 [profile.dev]
 opt-level = 1
 

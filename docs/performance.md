@@ -21,23 +21,26 @@ compiler, browser, resolution, scenario seed, and commit configuration.
 
 ## Scenarios
 
-The rendered scenario contract below is the corrected v3 harness. It uses the normal
-match-reset lifecycle, promotes four real `Combatant` bot brains after reset,
-and fences every fixture on an acquired surface texture that Bevy consumes
-through `SurfaceTexture::present`. Historical v1 captures remain superseded:
-their training-dummy workload, UI churn, allocator replacement, and unfenced map
+The rendered scenario contract below is the canonical schema-v6 harness. It uses
+the normal match-reset lifecycle, promotes four real `Combatant` bot brains only
+after the complete logical and rendered fixture is ready, and fences every
+fixture on an acquired surface texture that Bevy consumes through
+`SurfaceTexture::present`. Historical v1 captures remain superseded: their
+training-dummy workload, UI churn, allocator replacement, and unfenced map
 completion make them unsuitable as baselines. The never-accepted v2 harness is
 also superseded because its post-render system acknowledged unconditionally and
 therefore proved render-schedule ordering, not a present invocation.
 
 | Scenario | Workload | Required observations |
 | --- | --- | --- |
-| `FourBotStress` | Four seeded fighters, maximum normal items, hazards, projectiles, and effects for five minutes. | Mean/median/p95/p99 CPU and whole-frame time, a separate external GPU capture, separate allocation evidence, exact fixture counts, bounded resource slopes, and owner activity. |
-| `MapCycle100` | Cycle through every arena ten times with normal setup and teardown. | Exactly 100 switch samples after each target arena's exact scene-generation, item/hazard-marker count, and surface-present-invocation fence; compare the first warmed cycle with the tenth. |
-| `Soak10Minutes` | Ten minutes of uninterrupted seeded combat. | First/last-minute drift, bounded entity/asset/RSS/live-byte slopes, final asset plateau, peak/end stale-owner entities, and a separate external GPU capture. |
+| `FourBotStress` | Five minutes in Bumper Alley (arena index 5): four seeded `Combatant` bots, four authored items, and three authored/public hazards. | Mean/median/p95/p99 CPU and whole-frame time, separate external GPU and allocation evidence, exact fixture counts, bounded diagnostic resource slopes, and owner activity. |
+| `MapCycle100` | Preload exactly 101 supported assets from `arena`, `backgrounds`, and `music/bgm`; present one complete ten-arena warm precycle, then measure 100 presented switches. | Exactly 100 switch samples, 111 present acknowledgements including initial/final fences, 11 aligned cycle checkpoints, exact scene/item/hazard counts, and aligned RSS/live-byte gates. |
+| `Soak10Minutes` | Ten uninterrupted minutes with the same fixed Bumper Alley four-bot fixture. | First/last-minute drift, bounded entity/asset/RSS/live-byte slopes, final asset plateau, peak/end stale-owner entities, and a separate external GPU capture. |
 
-Run with vsync disabled for frame-cost measurements so the limiter does not hide
-work. Keep normal gameplay on automatic vsync. Use a release-equivalent profile:
+Canonical captures use Bevy `AutoVsync`, matching normal gameplay.
+`AFC_PERF_UNCAPPED=1` selects `AutoNoVsync`, makes
+`canonical_present_mode_eligible:false`, and is exploratory only. Use a
+release-equivalent profile:
 
 ```bash
 AFC_PERF_SCENARIO=FourBotStress \
@@ -52,10 +55,26 @@ the soak. `AFC_PERF_SEED`, `AFC_PERF_WARMUP_SECONDS`, and
 `AFC_PERF_MEASUREMENT_SECONDS` override those values for a labeled experiment.
 It exits automatically after printing one `AFC_PERF_RESULT` JSON record.
 
+Canonical release evidence runs an already-built immutable binary through
+`scripts/run_graphical_perf.py`. The runner removes seed, duration, and uncapped
+overrides; sets `BEVY_ASSET_ROOT` to the repository root; requires exactly one
+matching schema-v6 result; and verifies the executable SHA-256 before and after
+every run. It records host, source status, binary architecture, and power at
+both edges. On Apple Silicon it rejects a non-arm64 binary, non-AC capture, or
+power-source transition. Preserve the same source status for the whole matrix.
+For example:
+
+```bash
+python3 scripts/run_graphical_perf.py \
+  --binary target/perf-captures/release/bin/ffc-prototype-timing \
+  --output-dir target/perf-captures/release/timing-fourbot \
+  --kind timing --scenario FourBotStress --run-prefix release
+```
+
 The timing/RSS build reports whole-frame and main-App CPU mean/percentiles,
 first/last-minute drift, process CPU/RSS, fixed four-owner activity, exact
 fixture counts, bounded resource slopes, stale-owner counts, assets, and
-map-switch latency. Its `AFC_PERF_RESULT` JSON uses `schema_version:3` and
+map-switch latency. Its `AFC_PERF_RESULT` JSON uses `schema_version:6` and
 explicitly declares
 `allocation_instrumentation:false`; it does not replace the process allocator.
 Use a separate allocation diagnostic build when allocation information is wanted:
@@ -64,11 +83,22 @@ Use a separate allocation diagnostic build when allocation information is wanted
 cargo run --profile profiling --no-default-features --features native,perf-alloc
 ```
 
+Before measurement, the harness pre-touches its preallocated frame-duration
+buffers so first-touch page faults are outside the sample. Every measured frame
+is classified exactly once as steady, transition, or finalization work; schema
+v6 requires those three counts to sum exactly to the aggregate frame count with
+no gap or overlap. The reported whole-frame p99 is always computed from that
+complete aggregate, not from the cheaper steady subset.
+
 The main world publishes present-fixture evidence in `Last`, after gameplay
 mutation and before render extraction. That evidence is valid only when its
 request epoch and exact arena generation match and the fighter, combatant-bot,
-item, and public hazard-marker counts are all exact. The render-world fence
-cannot arm from an epoch alone. Its arm runs after
+item, and public hazard-marker counts are all exact. Readiness is non-vacuous:
+there must be at least one `SceneRoot`, every root must expose a
+`SceneInstance`, and every instance must be ready in `SceneSpawner`. Combat bots
+are promoted only after this rendered evidence and the complete logical fixture
+are simultaneously ready. The render-world fence cannot arm from an epoch
+alone. Its arm runs after
 `RenderSystems::ManageViews` and immediately before Bevy's
 `renderer::render_system`; it requires the matching evidence, an acquired
 swapchain surface texture, and the same window-present condition used by Bevy.
@@ -95,15 +125,18 @@ per-pass path collection allocates.
 integrity gates passed: exact fixture counts, render evidence, combat activity,
 event-history continuity, owner attribution, map sample completeness, and the
 scenario-specific resource-stability checks. It is never a performance-budget
-pass. Acceptance status is evaluated in evidence order:
-`fixture_invalid`, then `local_timing_budget_failed`, then
-`external_gpu_evidence_required`. Thus an invalid fixture can never be presented
-as a timing failure or GPU-ready run. `render_evidence` is conditional: it is
+pass. Acceptance status is evaluated in fail-closed evidence order:
+`fixture_invalid`, `exploratory_only_noncanonical_configuration`, the timing
+budget for an uninstrumented timing build, the scenario's applicable RSS gate,
+the allocation build's applicable live-byte gate, and finally
+`external_gpu_evidence_required`. Thus a later gate cannot hide an earlier
+failure. `render_evidence` is
 `same_window_same_view_surface_texture_present_invoked` only after a successful
-fence and otherwise is `surface_present_invocation_not_observed`.
-`external_gpu_evidence_status` is `not_evaluated_fixture_invalid` for an invalid
-fixture and `required_not_collected` for a locally valid one because the JSON
-cannot claim asynchronous GPU completion.
+fence and otherwise is `surface_present_invocation_not_observed`. A locally
+accepted capture still reports
+`external_gpu_evidence_status:"required_not_collected"` and
+`gpu_completion_measured:false`; only an external platform trace can close that
+gate.
 
 Resource growth uses a bounded 64-entry sampler: 48 time-density-thinned
 historical samples plus the exact latest 16 samples. The first sample and broad
@@ -117,9 +150,17 @@ computed over the representative retained series. Monotonic-growth flags are
 tracked separately over every raw observation, so thinning cannot erase an
 intermediate dip. Start/peak/end and stale-owner peak/end remain independent
 edge/high-water evidence.
-For `MapCycle100`, executable validity requires exactly 100 latency samples and
-exact equality between resource counts after the first warmed arena cycle and
-the tenth. For the soak, executable validity requires:
+For `MapCycle100`, executable validity requires the exact 10-present warm
+precycle, 100 measured switch/latency samples, 111 total present
+acknowledgements, and 11 aligned cycle checkpoints. Resource counts must match
+at every aligned checkpoint. Memory acceptance uses the last
+four aligned checkpoints, hence exactly three complete-cycle intervals: RSS
+range at most 8 MiB and absolute slope at most 2 MiB/minute in both builds; in
+the `perf-alloc` build, live-byte range at most 1 MiB and absolute slope at most
+0.25 MiB/minute. Whole-run or wall-clock-tail Map memory fields are diagnostic
+and do not replace these arena-cycle-aligned gates.
+
+For the soak, executable validity requires:
 
 - exact asset counts throughout the final 60-second window;
 - no strictly monotonic entity, mesh, material, image, or RSS growth;
@@ -265,8 +306,75 @@ only after the same executable and seed reproduce the result.
 | 2026-07-23 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Simulation-v4 canonical normalization, interleaved immutable C1/v4 `afc-multiplayer-profile` runs, three 1,000-sample pairs | Accepted v4 median p99: authority 53,292 ns, exact 12-tick rollback 363,708 ns; respectively -1.4% and +2.1% versus the same-power C1 values 54,042/356,083 ns. Zero authority allocations and all history/depth gates retained. | Accepted same-hardware simulation-v4 hot-path baseline. The rollback change is immaterial against the 4 ms budget; minimum-supported-CPU evidence remains required. |
 | 2026-07-23 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, battery power, High Power mode, no fixed affinity | Final simulation-v5 gameplay-source set, interleaved immutable pre/post `afc-multiplayer-profile` executables, nine 1,000-sample pairs | Accepted v5 median p99: authority 63,583 ns, exact 12-tick rollback 402,125 ns; respectively +2.2% and +3.1% versus 62,208/390,125 ns before. Zero authority allocations, identical rollback allocation diagnostics, and all history/depth gates retained. | Accepted same-hardware simulation-v5 hot-path baseline. Both changes are immaterial against the 1/4 ms budgets; minimum-supported-CPU evidence remains required. |
 | 2026-07-24 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Canonical `SimPosition` ownership and render-only `Transform` projection, interleaved immutable v5/canonical-pose `afc-multiplayer-profile` executables, nine 1,000-sample pairs | Accepted canonical-pose median p99: authority 58,667 ns, exact 12-tick rollback 403,791 ns; respectively -1.9% and -1.3% versus the same-power v5 values 59,833/409,292 ns. Zero authority allocations; rollback diagnostics improved from 121,083 allocations / 142,311,564 bytes to 120,083 / 142,279,564; all history/depth gates retained. | Accepted same-hardware canonical-pose hot-path baseline. Both paths remain far inside the 1/4 ms budgets; minimum-supported-CPU evidence remains required. |
-| Pending | Minimum native target and Apple M2 Max | Corrected rendered harness v3 timing, separate allocation captures, and external GPU evidence | Four active `Combatant` bots, activity floors, exact fixture counts, bounded growth/stale-owner evidence, exact 100-switch samples, and acquired-surface-texture present-invocation fences. | Required before accepting a graphical combat, map-cycle, or soak baseline. No v2 capture is accepted because its fence and allocation peak boundary were invalid. |
+| 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1; local verification invocation whose power edges were not recorded by the profiler | Three `afc-multiplayer-profile` runs (`final-local-01` through `03`), 1,000 authority samples and 1,000 exact 12-tick rollback samples each | Authority p99 66,916–73,166 ns (median 67,292 ns); rollback p99 370,417–376,958 ns (median 376,750 ns). Authority remained allocation-free; rollback diagnostics were identical at 120,083 allocations / 142,279,564 bytes; every timing, depth, and history gate passed. | Accepted local verification, not a new controlled before/after baseline and not minimum-supported-CPU evidence. |
+| 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 pre-backport `MapCycle100`, immutable timing triplicate plus one allocation run | Timing frame/CPU p99 medians 8.992834/2.439333 ms. Allocation run aligned RSS range/slope 2.125000 MiB / 1.402960 MiB/min passed, but aligned live range/slope 1.570396 MiB / 1.052623 MiB/min and +5,752,718 live bytes failed. | Accepted timing evidence; rejected allocation baseline. This same-hardware result identified the render-pass name leak corrected below. External GPU was not evaluated for the failed allocation run. |
+| 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 post-backport full local matrix: timing and allocation `FourBotStress`/`MapCycle100`/`Soak10Minutes` | All 14 admissible captures passed fixture/canonical-mode and every applicable local timing, RSS/live, stale-owner, presentation, and exact-resource gate. Maximum reported frame/CPU p99, including diagnostic allocator timing, was 10.060500/3.847458 ms. Detailed exact values and hashes follow. | Accepted Apple M2 Max local baseline. Every result remains `external_gpu_evidence_required`; minimum-supported-CPU and external GPU captures remain pending. |
+| Pending | Minimum native target and Apple M2 Max | Schema-v6 external GPU trace and minimum-supported-CPU capture | Repeat the canonical matrix on the minimum CPU and attach platform GPU-completion evidence for stress and soak. | Required for release acceptance; the local JSON explicitly does not measure GPU completion. |
 | Pending | Current Chrome and Safari | Optimized web release | Capture p95/p99 frame time, WASM, and distribution size. | Required before changing the accepted web baseline. |
+
+### Schema-v6 local graphical baseline
+
+The post-backport matrix used one immutable timing executable and one immutable
+allocation executable:
+
+- timing SHA-256:
+  `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd`;
+- allocation SHA-256:
+  `54d6239ec592bf3139f24cfc120abb23ccfbd7115a22e70bec097d7920b49db6`.
+
+The values below are in capture order. For Map, memory is the canonical aligned
+range in MiB / absolute slope in MiB/minute over the last four checkpoints.
+For Soak, it is the final 60-second window. FourBot memory is diagnostic and is
+not an acceptance gate. Only the uninstrumented timing rows own the timing
+budget; frame and CPU values from allocation rows are diagnostic.
+
+| Scenario/build | Frame p99 (ms) | Main-App CPU p99 (ms) | Canonical memory evidence | Runner result |
+| --- | --- | --- | --- | --- |
+| `FourBotStress` timing, 3 runs | 8.961750 / 8.925416 / 8.971791 | 2.461667 / 2.263375 / 2.273792 | Final RSS: 0.031250 / 0.010813; 1.406250 / 1.537059; 0.062500 / 0.028124 | 3/3 locally accepted |
+| `FourBotStress` allocation, 3 runs | 9.068042 / 8.935167 / 8.941041 | 2.990708 / 2.333084 / 2.290125 | Final live: 0.059624 / 0.043370; 0.064453 / 0.043081; 0.050821 / 0.031369 | 3/3 locally accepted |
+| `MapCycle100` timing, 3 runs | 8.926416 / 8.926542 / 8.918333 | 2.170500 / 2.258750 / 2.224958 | Aligned RSS: 0.015625 / 0.012500; 0.187500 / 0.112500; 0.046875 / 0.021876 | 3/3 locally accepted |
+| `MapCycle100` allocation, 3 admissible runs | 10.060500 / 8.931875 / 8.933125 | 3.847458 / 2.271958 / 2.335458 | Aligned RSS: 0.093750 / 0.031250; 0.203125 / 0.118740; 0.062500 / 0.028125. Aligned live: 0.021275 / 0.000499; 0.095520 / 0.057130; 0.062439 / 0.038062 | 3/3 locally accepted |
+| `Soak10Minutes` timing, 1 run | 8.939792 | 2.238250 | Final RSS: 0.046875 / 0.010545 | 1/1 locally accepted |
+| `Soak10Minutes` allocation, 1 run | 8.957542 | 2.369417 | Final RSS: 0.031250 / 0.007030; final live: 0.021894 / 0.012469 | 1/1 locally accepted |
+
+Each fixed-combat result proved Bumper Alley index 5, 4 fighters, 4
+`Combatant` bots, 4 authored items, and 3 public hazards. Every Map result
+proved the 101-asset preload, 10 warm presents, 100 measured switches, 111
+total acknowledgements, 11 aligned checkpoints, and stable final resource
+counts of 1,528 entities, 222 meshes, 166 materials, and 52 images. All
+admissible captures reported
+`performance_acceptance_status:"external_gpu_evidence_required"`,
+`external_gpu_evidence_status:"required_not_collected"`, and
+`gpu_completion_measured:false`. One otherwise locally passing allocation Map
+attempt was rejected by the wrapper because AC power changed to battery; the
+listed replacement remained on AC throughout.
+
+### Bevy render-pass leak before/after
+
+The pre-backport timing and allocation executable SHA-256 values were,
+respectively,
+`a70f342091d6543d1b7a05db887ac190d3d59c417e08735656d701ee1b2fab47`
+and
+`fd6a4ed0de4f9ea43aa4954f24ae840f05df6d37afc84fe230648583f1f76eb8`.
+All pre/post comparisons used the same Mac14,6, OS, power policy, resolution,
+seed, present mode, compiler profile, and schema-v6 Map fixture.
+
+| Map build | Frame p99 (ms) | CPU p99 (ms) | Aligned RSS range / slope | Aligned live range / slope | Live-byte delta | Result |
+| --- | --- | --- | --- | --- | ---: | --- |
+| Before timing, 3 runs | 8.990708 / 9.193875 / 8.992834 | 2.193667 / 3.580458 / 2.439333 | 2.421875 / 1.646838; 2.421875 / 1.600076; 2.140625 / 1.424967 | Unavailable in timing build | N/A | 3/3 locally accepted |
+| Before allocation, 1 run | 9.267250 | 3.238500 | 2.125000 / 1.402960 | 1.570396 / 1.052623 | 5,752,718 | Rejected: live range and slope |
+| After timing, 3 runs | 8.926416 / 8.926542 / 8.918333 | 2.170500 / 2.258750 / 2.224958 | 0.015625 / 0.012500; 0.187500 / 0.112500; 0.046875 / 0.021876 | Unavailable in timing build | N/A | 3/3 locally accepted |
+| After allocation, 3 admissible runs | 10.060500 / 8.931875 / 8.933125 | 3.847458 / 2.271958 / 2.335458 | 0.093750 / 0.031250; 0.203125 / 0.118740; 0.062500 / 0.028125 | 0.021275 / -0.000499; 0.095520 / 0.057130; 0.062439 / 0.038062 | 541,262 / 452,848 / 436,808 | 3/3 locally accepted |
+
+Heap attribution found 70,803 retained owned pass-label strings. Bevy 0.18.1
+`PassSpanGuard::end` forgot the guard after ending a pass without first dropping
+its owned `Cow<'static, str>` name; AFC's one shadowed directional light
+generated four dynamic cascade labels per rendered frame. The vendored
+backport drops only that owned name before preserving the guard's established
+forget behavior. Its exact source provenance, license retention, removal plan,
+and patch are recorded in
+[vendor/bevy_render/PATCHES.md](../vendor/bevy_render/PATCHES.md). Remove the
+override only after an upstream upgrade repeats the allocator Map gate.
 
 ### Deterministic-math C1 before/after capture
 
@@ -453,7 +561,7 @@ the v1 idle-dummy/UI/allocator defects and are not a valid combat comparison.
 
 Across the three valid samples, the median whole-frame p95 is 13.577 ms (run 2)
 and the independently selected median main-App CPU p95 is 3.016 ms. These values
-must not be used to accept a corrected v3 baseline.
+must not be used to accept a schema-v6 baseline.
 
 ### Superseded v1 MapCycle100 evidence
 
@@ -476,10 +584,12 @@ at 232,296,377 bytes. The process-RSS ending value varied more than tracked live
 allocations, so both measurements remain in future comparisons.
 
 Every return to Crank Yard emitted Bevy hierarchy warning `B0004` for
-`lever.colormap`: the child outlived or lost its arena parent during teardown. The
-warning is a pre-existing cleanup defect captured by this baseline. It did not
-change the identical ending counts, but must be fixed and remeasured before arena
-teardown is considered production-clean.
+`lever.colormap`. Subsequent investigation identifies this as Bevy's
+insertion-order false positive tracked in
+[bevyengine/bevy#19776](https://github.com/bevyengine/bevy/issues/19776), not
+evidence that the child outlived or lost its arena parent. Retain the warning in
+raw logs as an upstream diagnostic; schema-v6 exact resource checkpoints and
+zero stale-owner counts remain the acceptance evidence.
 
 ### Superseded v1 Soak10Minutes evidence
 
@@ -501,7 +611,7 @@ The CPU p95 drift was only 0.034 ms (about 1.3%), while whole-frame p95 increase
 1.027 ms (about 6.9%). Stable ECS/asset counts rule out those registries as the
 source of growth. The final-start delta alone does not distinguish a leak from a
 late cache plateau, especially without owner counters. Treat it as a measurable
-pre-existing cache-growth signal that the corrected v3 bounded owner/slope soak
+pre-existing cache-growth signal that the schema-v6 bounded owner/slope soak
 must diagnose.
 
 ## Measurement rules

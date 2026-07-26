@@ -77,14 +77,21 @@ The current four-peer baseline is:
 
 | Scenario | Final hash | Drain | Hard requests | Upstream per peer | Downstream per peer | Maximum normal rollback |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| NetLoopback4 | `0x0f6f159e0116187b` | 0 ticks | 0 | 12,240 B/s | 45,603 B/s | 3 ticks |
-| NetTypical4 | `0x2c02c65ce0915a50` | 4 ticks | 0 | 12,235 B/s | 45,527–45,530 B/s | 4–5 ticks |
-| NetDegraded4 | `0x0269a249e2b8c16c` | 7 ticks | 2 | 12,235–12,333 B/s | 45,528–47,452 B/s | 8 ticks |
-| RollbackStorm | `0x7af96d09c24d89c3` | 10 ticks | 0 | 12,231 B/s | 59,181–59,184 B/s | 10–11 ticks |
+| NetLoopback4 | `0x0f6f159e0116187b` | 0 ticks | 0 | 12,240 B/s | 45,603 B/s | 2 ticks |
+| NetTypical4 | `0xaeae49b768c17032` | 4 ticks | 0 | 12,235 B/s | 45,526–45,530 B/s | 4–5 ticks |
+| NetDegraded4 | `0x09c2def95d24faa9` | 8 ticks | 0 | 12,235 B/s | 45,527–45,530 B/s | 7–8 ticks |
+| RollbackStorm | `0x7af96d09c24d89c3` | 11 ticks | 0 | 12,231 B/s | 59,182–59,186 B/s | 10–11 ticks |
 
 These values are acceptance evidence, not protocol constants. Update the table
 only after the matching deterministic test passes and an intentional cadence or
 wire-format change explains the new baseline.
+
+This table was revalidated on 2026-07-26 after the current five-frame committed
+input relay contract was frozen. The complete release-profile network lab and
+separate exact reruns reproduced every row. The earlier Typical and Degraded
+literals were stale and did not reproduce under that final recovery contract;
+the current Degraded run completes inside the normal rollback window and
+therefore requires no hard resync.
 
 ## Reliable resync ordering
 
