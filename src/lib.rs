@@ -12,6 +12,7 @@ mod combat;
 mod combat_sfx;
 mod components;
 mod constants;
+mod control_settings;
 mod effects;
 mod equipment;
 mod feel;
@@ -19,6 +20,8 @@ mod fighter;
 mod game_state;
 mod hud;
 mod items;
+#[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+mod macos_gamepad;
 mod map_editor;
 mod penguin_skills;
 #[cfg(feature = "perf")]
@@ -98,6 +101,9 @@ pub fn build_app() -> App {
         ..default()
     });
 
+    #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+    let default_plugins = default_plugins.disable::<bevy::gilrs::GilrsPlugin>();
+
     #[cfg(target_arch = "wasm32")]
     let default_plugins = default_plugins.set(AssetPlugin {
         meta_check: AssetMetaCheck::Never,
@@ -107,6 +113,9 @@ pub fn build_app() -> App {
     let mut app = App::new();
 
     app.add_plugins(default_plugins);
+
+    #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+    app.add_plugins(macos_gamepad::MacOsGamepadPlugin);
 
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
@@ -125,8 +134,10 @@ pub fn build_app() -> App {
         .init_resource::<combat::HitEffects>()
         .init_resource::<camera::CameraActionEffects>()
         .init_resource::<components::PlayerKeyBindings>()
+        .init_resource::<control_settings::ControlPreferences>()
         .init_resource::<user_mode::UserModeState>()
         .init_resource::<user_mode::UserModeGameplayScene>()
+        .init_resource::<user_mode::LocalControllerReconnect>()
         .configure_sets(
             Update,
             (
@@ -144,6 +155,7 @@ pub fn build_app() -> App {
         .add_systems(
             Startup,
             (
+                control_settings::load_control_preferences,
                 effects::setup_effect_assets,
                 combat::setup_combat_visual_assets,
                 bee_skills::setup_bee_skill_assets,
@@ -177,6 +189,7 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
+                control_settings::sync_controller_device_info,
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 map_editor::toggle_map_editor,
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -185,8 +198,12 @@ pub fn build_app() -> App {
                 characters::reload_character_move_catalog,
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 feel::reload_combat_feel_tuning,
-                user_mode::handle_user_mode_input,
-                user_mode::sync_user_mode_controllers,
+                (
+                    user_mode::handle_user_mode_input,
+                    user_mode::sync_user_mode_controllers,
+                    user_mode::handle_local_controller_reconnect,
+                )
+                    .chain(),
                 game_state::handle_global_input,
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
@@ -351,6 +368,7 @@ pub fn build_app() -> App {
                     user_mode::update_user_mode_selection_previews,
                     user_mode::update_user_mode_ui,
                     user_mode::update_user_mode_button_styles,
+                    user_mode::update_controller_reconnect_overlay,
                 )
                     .chain(),
             )
@@ -379,7 +397,11 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
-            user_mode::update_user_mode_controls_ui.in_set(GameSet::Presentation),
+            (
+                user_mode::update_user_mode_controls_ui,
+                user_mode::update_control_settings_ui,
+            )
+                .in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,

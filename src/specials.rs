@@ -9,7 +9,7 @@ use crate::combat::{
 };
 use crate::components::{
     Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterSpecialState,
-    FighterStats,
+    FighterStats, SpecialInputKind,
 };
 use crate::constants::*;
 use crate::effects::{EffectAssets, FeedbackPackageId, spawn_feedback_package};
@@ -240,6 +240,14 @@ fn can_cast_special(action: FighterAction) -> bool {
 }
 
 fn requested_special_kind(input: &FighterInput) -> SpecialKind {
+    if let Some(kind) = input.special_kind {
+        return match kind {
+            SpecialInputKind::Projectile => SpecialKind::Projectile,
+            SpecialInputKind::Trap => SpecialKind::Trap,
+            SpecialInputKind::Hazard => SpecialKind::Hazard,
+            SpecialInputKind::Shockwave => SpecialKind::Shockwave,
+        };
+    }
     if input.guard {
         SpecialKind::Trap
     } else if input.heavy {
@@ -975,6 +983,19 @@ mod tests {
 
         assert!(special.stamina_disrupt > 0.0);
         assert_eq!(profile.damage, SPECIAL_PROJECTILE_DAMAGE);
+    }
+
+    #[test]
+    fn explicit_controller_special_kind_overrides_combat_button_state() {
+        let input = FighterInput {
+            special: true,
+            guard: true,
+            heavy: true,
+            grab: true,
+            special_kind: Some(SpecialInputKind::Shockwave),
+            ..default()
+        };
+        assert_eq!(requested_special_kind(&input), SpecialKind::Shockwave);
     }
 
     fn test_special(kind: SpecialKind) -> ActiveSpecial {

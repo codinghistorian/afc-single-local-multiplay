@@ -29,6 +29,17 @@ Build the static web folder:
 ./scripts/build_web.sh
 ```
 
+Create the itch.io upload archive:
+
+```bash
+./scripts/package_itch.sh
+```
+
+The package is written to
+`target/itch/animal-fighter-club-web.zip`. The script verifies that
+`index.html` is at the ZIP root, `pkg/` and `assets/` are sibling directories,
+and the archive stays within itch.io's HTML5 file-count and size limits.
+
 Serve locally:
 
 ```bash
@@ -36,6 +47,12 @@ python3 -m http.server 8000 --directory web_dist
 ```
 
 Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
+
+For itch.io, create an **HTML Game**, upload the ZIP, and select
+**Click to launch in fullscreen**. The launch click supplies the browser
+interaction needed before audio playback and controller joining. Test Xbox
+controller detection on a draft upload in both Chrome and Safari before
+publishing.
 
 ## Development documentation
 
@@ -70,6 +87,13 @@ Player:
 
 User Mode Local Multiplayer:
 - Choose single-player or two, three, or four local players from the mode screen.
+- Join in P1-P4 order with Xbox A or any keyboard layout's Jump/Aim key; Xbox B leaves.
+- Xbox: Left stick/D-pad move; A jump; X light; Y heavy; B aim/grab; RT dash;
+  LB guard; LT ultimate; RB special.
+- Open **Settings → Controls** to register or reorder local devices, remove or
+  clear assignments, inspect live controller inputs, test vibration, and edit or
+  restore all four keyboard layouts. Controller order is retained for the current
+  session; keyboard bindings and vibration preference persist between launches.
 - P1: Arrow keys move; Z/X/C/V actions.
 - P2: A/D/W/S move; T/Y/U/I actions.
 - P3: F/H/R/G move; B/N/M/Comma actions.

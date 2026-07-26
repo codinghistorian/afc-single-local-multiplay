@@ -890,8 +890,11 @@ fn next_replay_seed(seed: u64) -> u64 {
     seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
 }
 
-pub fn match_accepts_gameplay(state: Res<MatchState>) -> bool {
-    state.is_fighting()
+pub fn match_accepts_gameplay(
+    state: Res<MatchState>,
+    reconnect: Res<crate::user_mode::LocalControllerReconnect>,
+) -> bool {
+    state.is_fighting() && !reconnect.blocks_gameplay()
 }
 
 pub fn handle_global_input(

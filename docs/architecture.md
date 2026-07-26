@@ -12,10 +12,25 @@ Directional gameplay input modifiers run after all human and bot input producers
 and before action interpretation. This keeps modifiers such as drunkenness
 consistent across controller types without changing action-button semantics.
 
-Local play uses the four stable fighter slots directly. Each human slot owns a
-distinct keyboard assignment and binding set; user mode activates two to four human
-slots or one human plus a bot without changing fighter entity identity, spawn order,
-camera tracking, combat targeting, or replay ordering.
+Local play uses the four stable fighter slots directly. Each human slot owns one
+unique local keyboard or gamepad assignment; keyboard layouts retain independent
+binding sets. User mode activates two to four human slots or one human plus a bot
+without changing fighter entity identity, spawn order, camera tracking, combat
+targeting, or replay ordering. Gamepad entities and device reconnect state remain
+local presentation/input state and never enter authoritative match or replay state.
+
+The Controls hub owns local device setup, family-aware menu conventions, live
+input testing, and keyboard configuration. Device assignments are session state;
+versioned keyboard and vibration preferences are stored in the platform
+application-data directory on native builds and `localStorage` on web builds.
+Disconnected combat seats pause virtual time until each seat is reclaimed, then
+resume after a one-frame input gate.
+
+Native macOS input uses Apple's GameController framework to expose normalized
+controller profiles as Bevy `Gamepad` components. This avoids the raw HID profile
+used by some wired Xbox Series controllers, which macOS can enumerate without
+providing usable Gilrs button or axis elements. Other native platforms and web
+builds continue to use Bevy Gilrs.
 
 Inactive match states and map-specific behavior are gated with run conditions.
 Systems should not retain unused query parameters or overlapping mutable queries,

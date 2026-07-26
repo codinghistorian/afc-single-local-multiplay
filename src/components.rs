@@ -187,6 +187,15 @@ pub struct FighterInput {
     pub guard: bool,
     pub ultimate: bool,
     pub special: bool,
+    pub special_kind: Option<SpecialInputKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecialInputKind {
+    Projectile,
+    Trap,
+    Hazard,
+    Shockwave,
 }
 
 /// Refresh-only directional input modifier applied after every input producer.
@@ -273,6 +282,7 @@ impl ParticipantKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalInputAssignment {
     Keyboard(usize),
+    Gamepad(Entity),
     Unassigned,
 }
 
@@ -357,7 +367,7 @@ impl ControlAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerControlBindings {
     pub left: KeyCode,
     pub right: KeyCode,
@@ -449,7 +459,7 @@ impl PlayerControlBindings {
     }
 }
 
-#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+#[derive(Resource, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerKeyBindings {
     pub p1: PlayerControlBindings,
     pub p2: PlayerControlBindings,
@@ -582,7 +592,8 @@ impl PlayerKeyBindings {
 pub fn reserved_binding_key(key: KeyCode) -> bool {
     matches!(
         key,
-        KeyCode::Escape
+        KeyCode::Unidentified(_)
+            | KeyCode::Escape
             | KeyCode::Enter
             | KeyCode::Tab
             | KeyCode::ShiftLeft

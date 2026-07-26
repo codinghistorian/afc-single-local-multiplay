@@ -1,0 +1,863 @@
+// Champion's Court Arena Map
+// Data-driven scene layout for a Bevy arena brawler.
+// Coordinate convention:
+//   - Bevy world axes: X = left/right, Y = up, Z = forward/back
+//   - Tile coordinates are on X/Z. world_x = tile_x * tile_size, world_z = tile_z * tile_size.
+//   - Angles are degrees around Bevy's Y axis.
+//
+// Suggested renderer behavior:
+//   1. Load assets from `assets`.
+//   2. Expand `floor_shapes` into floor instances.
+//   3. Spawn `instances` and `prefab_instances`.
+//   4. Apply collider rules by tag/asset.
+//   5. Spawn gameplay zones, player spawns, lighting, camera.
+//
+// This file intentionally favors readability and Codex-friendly implementation over minimal size.
+
+(
+    schema_version: 1,
+
+    map: (
+        id: "champions_court",
+        name: "Champion's Court",
+        description: "A stylized ruined fortress arena with a central trophy plaza, raised side platforms, gates, banners, columns, trees, and a statue dais.",
+        tile_size: 2.0,
+        coordinate_system: "bevy_xzy",
+        theme: "stylized_ruined_fortress_arena",
+        recommended_modes: ["1v1", "2v2", "ffa_4"],
+        recommended_player_count: 4,
+    ),
+
+    asset_root: "models/",
+
+    assets: {
+        "banner": "banner.glb",
+        "block": "block.glb",
+        "border_corner": "border-corner.glb",
+        "border_straight": "border-straight.glb",
+        "bricks": "bricks.glb",
+        "soldier": "character-soldier.glb",
+        "column_damaged": "column-damaged.glb",
+        "column": "column.glb",
+        "floor_detail": "floor-detail.glb",
+        "floor": "floor.glb",
+        "stairs_corner_inner": "stairs-corner-inner.glb",
+        "stairs_corner": "stairs-corner.glb",
+        "stairs": "stairs.glb",
+        "statue": "statue.glb",
+        "tree": "tree.glb",
+        "trophy": "trophy.glb",
+        "wall_corner": "wall-corner.glb",
+        "wall_gate": "wall-gate.glb",
+        "wall": "wall.glb",
+        "weapon_rack": "weapon-rack.glb",
+        "weapon_spear": "weapon-spear.glb",
+        "weapon_sword": "weapon-sword.glb",
+    },
+
+    // Optional material/color guidance. Your Bevy loader can ignore this at first.
+    palette: (
+        source_image: "palettes/colormap.png",
+        notes: "Warm sandstone, muted red-orange banners, green overgrowth, cool blue-purple shadows.",
+        colors: {
+            "stone_warm": (0.78, 0.62, 0.45, 1.0),
+            "stone_light": (0.92, 0.80, 0.63, 1.0),
+            "banner_red": (0.70, 0.18, 0.12, 1.0),
+            "foliage_green": (0.28, 0.55, 0.34, 1.0),
+            "shadow_purple": (0.34, 0.32, 0.55, 1.0),
+            "gold_trim": (0.95, 0.67, 0.24, 1.0),
+        },
+    ),
+
+    // Procedural floor declarations. The Bevy loader should expand these into repeated tile meshes.
+    // Shape coordinates are tile coordinates, except y which is world-space height.
+    floor_shapes: [
+        (
+            id: "main_octagon_floor",
+            kind: "filled_octagon",
+            asset: "floor",
+            center: (0, 0),
+            radius_tiles: 9,
+            y: 0.0,
+            rotation_y: 0.0,
+            tags: ["walkable", "arena_floor"],
+        ),
+        (
+            id: "outer_rotation_ring_detail",
+            kind: "octagon_ring",
+            asset: "floor_detail",
+            center: (0, 0),
+            inner_radius_tiles: 6,
+            outer_radius_tiles: 9,
+            y: 0.018,
+            rotation_y: 0.0,
+            tags: ["walkable", "rotation_ring", "visual_detail"],
+        ),
+        (
+            id: "center_plaza_detail",
+            kind: "filled_octagon",
+            asset: "floor_detail",
+            center: (0, 0),
+            radius_tiles: 4,
+            y: 0.025,
+            rotation_y: 0.0,
+            tags: ["walkable", "center_plaza", "objective_area"],
+        ),
+        (
+            id: "south_gate_approach",
+            kind: "rectangle",
+            asset: "floor_detail",
+            center: (0, -11),
+            size_tiles: (5, 4),
+            y: 0.02,
+            rotation_y: 0.0,
+            tags: ["walkable", "spawn_approach", "team_a_side"],
+        ),
+        (
+            id: "north_statue_approach",
+            kind: "rectangle",
+            asset: "floor_detail",
+            center: (0, 11),
+            size_tiles: (5, 4),
+            y: 0.02,
+            rotation_y: 0.0,
+            tags: ["walkable", "statue_approach", "team_b_side"],
+        ),
+        (
+            id: "north_dais_floor",
+            kind: "rectangle",
+            asset: "floor_detail",
+            center: (0, 13),
+            size_tiles: (5, 3),
+            y: 0.95,
+            rotation_y: 0.0,
+            tags: ["walkable", "raised_dais", "landmark"],
+        ),
+        (
+            id: "west_platform_floor",
+            kind: "rectangle",
+            asset: "floor_detail",
+            center: (-8, 0),
+            size_tiles: (4, 5),
+            y: 0.70,
+            rotation_y: 0.0,
+            tags: ["walkable", "high_ground", "west_platform"],
+        ),
+        (
+            id: "east_platform_floor",
+            kind: "rectangle",
+            asset: "floor_detail",
+            center: (8, 0),
+            size_tiles: (4, 5),
+            y: 0.70,
+            rotation_y: 0.0,
+            tags: ["walkable", "high_ground", "east_platform"],
+        ),
+    ],
+
+    // Prefabs are local mini-compositions. Codex/Bevy can instantiate these with parent transforms.
+    prefabs: {
+        "bannered_wall": [
+            (asset: "wall", position: (0.0, 0.0, 0.0), rotation_y: 0.0, scale: (1.0, 1.0, 1.0), tags: ["boundary"]),
+            (asset: "banner", position: (0.0, 1.35, -0.16), rotation_y: 0.0, scale: (1.0, 1.0, 1.0), tags: ["decoration", "banner"]),
+        ],
+
+        "weapon_corner": [
+            (asset: "weapon_rack", position: (0.0, 0.0, 0.0), rotation_y: 0.0, scale: (1.0, 1.0, 1.0), tags: ["decoration", "weapon_display"]),
+            (asset: "weapon_spear", position: (0.45, 0.0, 0.18), rotation_y: 18.0, scale: (1.0, 1.0, 1.0), tags: ["decoration"]),
+            (asset: "weapon_sword", position: (-0.42, 0.0, 0.12), rotation_y: -16.0, scale: (1.0, 1.0, 1.0), tags: ["decoration"]),
+        ],
+
+        "torch_pillar": [
+            (asset: "column", position: (0.0, 0.0, 0.0), rotation_y: 0.0, scale: (0.72, 0.72, 0.72), tags: ["cover", "pillar"]),
+            // Use light_source metadata below rather than a visible torch mesh, since no torch asset was provided.
+        ],
+
+        "rubble_cluster_small": [
+            (asset: "bricks", position: (0.0, 0.0, 0.0), rotation_y: 8.0, scale: (1.0, 1.0, 1.0), tags: ["rubble", "low_cover"]),
+            (asset: "block", position: (0.65, 0.0, -0.25), rotation_y: 33.0, scale: (0.8, 0.8, 0.8), tags: ["rubble", "low_cover"]),
+            (asset: "block", position: (-0.45, 0.0, 0.36), rotation_y: -22.0, scale: (0.65, 0.65, 0.65), tags: ["rubble", "low_cover"]),
+        ],
+    },
+
+    // Single scene instances. Positions are world coordinates, not tile coordinates.
+    instances: [
+        // --- Objective center ---
+        (
+            id: "center_trophy",
+            asset: "trophy",
+            position: (0.0, 0.38, 0.0),
+            rotation_y: 0.0,
+            scale: (1.20, 1.20, 1.20),
+            tags: ["objective", "centerpiece", "solid"],
+        ),
+        (
+            id: "center_plinth_block_1",
+            asset: "block",
+            position: (0.0, 0.05, 0.0),
+            rotation_y: 45.0,
+            scale: (1.9, 0.35, 1.9),
+            tags: ["objective_base", "solid"],
+        ),
+
+        // --- Center LOS columns ---
+        (
+            id: "column_northwest_center",
+            asset: "column",
+            position: (-3.7, 0.0, 3.7),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["cover", "los_break", "solid"],
+        ),
+        (
+            id: "column_northeast_center",
+            asset: "column",
+            position: (3.7, 0.0, 3.7),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["cover", "los_break", "solid"],
+        ),
+        (
+            id: "column_southwest_center_damaged",
+            asset: "column_damaged",
+            position: (-3.7, 0.0, -3.7),
+            rotation_y: 26.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["cover", "los_break", "ruin", "solid"],
+        ),
+        (
+            id: "column_southeast_center_damaged",
+            asset: "column_damaged",
+            position: (3.7, 0.0, -3.7),
+            rotation_y: -22.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["cover", "los_break", "ruin", "solid"],
+        ),
+
+        // --- Statue dais and north focal point ---
+        (
+            id: "north_statue",
+            asset: "statue",
+            position: (0.0, 1.05, 13.3),
+            rotation_y: 180.0,
+            scale: (1.55, 1.55, 1.55),
+            tags: ["landmark", "solid", "statue"],
+        ),
+        (
+            id: "north_dais_stairs",
+            asset: "stairs",
+            position: (0.0, 0.0, 10.5),
+            rotation_y: 180.0,
+            scale: (1.25, 1.0, 1.0),
+            tags: ["navigation", "stairs", "walkable"],
+        ),
+
+        // --- East and west high platforms ---
+        (
+            id: "west_platform_stairs_main",
+            asset: "stairs",
+            position: (-6.25, 0.0, -1.7),
+            rotation_y: 90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["navigation", "stairs", "walkable", "platform_access"],
+        ),
+        (
+            id: "west_platform_stairs_corner",
+            asset: "stairs_corner",
+            position: (-6.3, 0.0, 2.5),
+            rotation_y: 90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["navigation", "stairs", "walkable", "platform_access"],
+        ),
+        (
+            id: "east_platform_stairs_main",
+            asset: "stairs",
+            position: (6.25, 0.0, -1.7),
+            rotation_y: -90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["navigation", "stairs", "walkable", "platform_access"],
+        ),
+        (
+            id: "east_platform_stairs_corner",
+            asset: "stairs_corner",
+            position: (6.3, 0.0, 2.5),
+            rotation_y: -90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["navigation", "stairs", "walkable", "platform_access"],
+        ),
+
+        // Platform edge trims / small battlements.
+        (
+            id: "west_platform_back_wall",
+            asset: "wall",
+            position: (-9.9, 0.7, 0.0),
+            rotation_y: 90.0,
+            scale: (1.0, 0.85, 1.0),
+            tags: ["boundary", "platform_edge", "solid"],
+        ),
+        (
+            id: "east_platform_back_wall",
+            asset: "wall",
+            position: (9.9, 0.7, 0.0),
+            rotation_y: -90.0,
+            scale: (1.0, 0.85, 1.0),
+            tags: ["boundary", "platform_edge", "solid"],
+        ),
+
+        // --- Gates ---
+        (
+            id: "south_gate",
+            asset: "wall_gate",
+            position: (0.0, 0.0, -13.2),
+            rotation_y: 0.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "gate", "solid", "team_a_side"],
+        ),
+        (
+            id: "north_gate_backdrop",
+            asset: "wall_gate",
+            position: (0.0, 0.0, 16.0),
+            rotation_y: 180.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "gate", "solid", "team_b_side", "backdrop"],
+        ),
+
+        // --- Outer wall perimeter, approximate octagon ---
+        (
+            id: "wall_southwest_1",
+            asset: "wall",
+            position: (-6.0, 0.0, -13.2),
+            rotation_y: 0.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "wall_southeast_1",
+            asset: "wall",
+            position: (6.0, 0.0, -13.2),
+            rotation_y: 0.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "wall_northwest_1",
+            asset: "wall",
+            position: (-6.0, 0.0, 16.0),
+            rotation_y: 180.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "wall_northeast_1",
+            asset: "wall",
+            position: (6.0, 0.0, 16.0),
+            rotation_y: 180.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "wall_west_mid",
+            asset: "wall",
+            position: (-13.0, 0.0, 0.0),
+            rotation_y: 90.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "wall_east_mid",
+            asset: "wall",
+            position: (13.0, 0.0, 0.0),
+            rotation_y: -90.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "solid"],
+        ),
+        (
+            id: "corner_southwest",
+            asset: "wall_corner",
+            position: (-11.3, 0.0, -11.5),
+            rotation_y: 45.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "corner", "solid"],
+        ),
+        (
+            id: "corner_southeast",
+            asset: "wall_corner",
+            position: (11.3, 0.0, -11.5),
+            rotation_y: -45.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "corner", "solid"],
+        ),
+        (
+            id: "corner_northwest",
+            asset: "wall_corner",
+            position: (-11.3, 0.0, 12.8),
+            rotation_y: 135.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "corner", "solid"],
+        ),
+        (
+            id: "corner_northeast",
+            asset: "wall_corner",
+            position: (11.3, 0.0, 12.8),
+            rotation_y: -135.0,
+            scale: (1.15, 1.15, 1.15),
+            tags: ["boundary", "corner", "solid"],
+        ),
+
+        // --- Border trims around important areas ---
+        (
+            id: "center_border_north",
+            asset: "border_straight",
+            position: (0.0, 0.04, 5.2),
+            rotation_y: 0.0,
+            scale: (2.6, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_south",
+            asset: "border_straight",
+            position: (0.0, 0.04, -5.2),
+            rotation_y: 180.0,
+            scale: (2.6, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_west",
+            asset: "border_straight",
+            position: (-5.2, 0.04, 0.0),
+            rotation_y: 90.0,
+            scale: (2.6, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_east",
+            asset: "border_straight",
+            position: (5.2, 0.04, 0.0),
+            rotation_y: -90.0,
+            scale: (2.6, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_corner_nw",
+            asset: "border_corner",
+            position: (-4.6, 0.04, 4.6),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_corner_ne",
+            asset: "border_corner",
+            position: (4.6, 0.04, 4.6),
+            rotation_y: 90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_corner_se",
+            asset: "border_corner",
+            position: (4.6, 0.04, -4.6),
+            rotation_y: 180.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+        (
+            id: "center_border_corner_sw",
+            asset: "border_corner",
+            position: (-4.6, 0.04, -4.6),
+            rotation_y: 270.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "trim"],
+        ),
+
+        // --- Trees and vegetation silhouette ---
+        (
+            id: "tree_southwest_large",
+            asset: "tree",
+            position: (-12.2, 0.0, -8.9),
+            rotation_y: 25.0,
+            scale: (1.25, 1.25, 1.25),
+            tags: ["decoration", "vegetation"],
+        ),
+        (
+            id: "tree_southeast_large",
+            asset: "tree",
+            position: (12.2, 0.0, -8.9),
+            rotation_y: -25.0,
+            scale: (1.25, 1.25, 1.25),
+            tags: ["decoration", "vegetation"],
+        ),
+        (
+            id: "tree_northwest",
+            asset: "tree",
+            position: (-10.8, 0.0, 10.8),
+            rotation_y: 70.0,
+            scale: (1.1, 1.1, 1.1),
+            tags: ["decoration", "vegetation"],
+        ),
+        (
+            id: "tree_northeast",
+            asset: "tree",
+            position: (10.8, 0.0, 10.8),
+            rotation_y: -70.0,
+            scale: (1.1, 1.1, 1.1),
+            tags: ["decoration", "vegetation"],
+        ),
+        (
+            id: "tree_west_platform_back",
+            asset: "tree",
+            position: (-10.4, 0.7, 3.8),
+            rotation_y: 18.0,
+            scale: (0.8, 0.8, 0.8),
+            tags: ["decoration", "vegetation"],
+        ),
+        (
+            id: "tree_east_platform_back",
+            asset: "tree",
+            position: (10.4, 0.7, 3.8),
+            rotation_y: -18.0,
+            scale: (0.8, 0.8, 0.8),
+            tags: ["decoration", "vegetation"],
+        ),
+
+        // --- Rubble and broken detail, intentionally asymmetric ---
+        (
+            id: "fallen_column_southwest",
+            asset: "column_damaged",
+            position: (-5.9, 0.0, -5.6),
+            rotation_y: 70.0,
+            scale: (0.85, 0.85, 0.85),
+            tags: ["decoration", "ruin", "low_cover"],
+        ),
+        (
+            id: "broken_column_southeast",
+            asset: "column_damaged",
+            position: (6.0, 0.0, -5.1),
+            rotation_y: -35.0,
+            scale: (0.82, 0.82, 0.82),
+            tags: ["decoration", "ruin", "low_cover"],
+        ),
+        (
+            id: "rubble_northwest_ring",
+            asset: "bricks",
+            position: (-5.8, 0.0, 6.4),
+            rotation_y: 17.0,
+            scale: (0.9, 0.9, 0.9),
+            tags: ["decoration", "rubble"],
+        ),
+        (
+            id: "rubble_east_ring",
+            asset: "bricks",
+            position: (7.0, 0.0, 4.2),
+            rotation_y: -12.0,
+            scale: (0.8, 0.8, 0.8),
+            tags: ["decoration", "rubble"],
+        ),
+
+        // --- Soldier scale reference / neutral guard ---
+        (
+            id: "south_guard",
+            asset: "soldier",
+            position: (0.0, 0.0, -10.2),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["npc_static", "scale_reference", "decoration"],
+        ),
+    ],
+
+    prefab_instances: [
+        // South gate weapon displays.
+        (
+            id: "southwest_weapon_corner",
+            prefab: "weapon_corner",
+            position: (-4.6, 0.0, -12.1),
+            rotation_y: 25.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "spawn_flavor"],
+        ),
+        (
+            id: "southeast_weapon_corner",
+            prefab: "weapon_corner",
+            position: (4.6, 0.0, -12.1),
+            rotation_y: -25.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "spawn_flavor"],
+        ),
+
+        // North decorative weapon displays.
+        (
+            id: "northwest_weapon_corner",
+            prefab: "weapon_corner",
+            position: (-7.7, 0.0, 13.4),
+            rotation_y: 160.0,
+            scale: (0.85, 0.85, 0.85),
+            tags: ["decoration", "arena_flavor"],
+        ),
+        (
+            id: "northeast_weapon_corner",
+            prefab: "weapon_corner",
+            position: (7.7, 0.0, 13.4),
+            rotation_y: -160.0,
+            scale: (0.85, 0.85, 0.85),
+            tags: ["decoration", "arena_flavor"],
+        ),
+
+        // Bannered perimeter segments.
+        (
+            id: "banner_wall_west_high",
+            prefab: "bannered_wall",
+            position: (-12.8, 0.0, 6.4),
+            rotation_y: 90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+        (
+            id: "banner_wall_east_high",
+            prefab: "bannered_wall",
+            position: (12.8, 0.0, 6.4),
+            rotation_y: -90.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+        (
+            id: "banner_wall_south_left",
+            prefab: "bannered_wall",
+            position: (-3.7, 0.0, -13.15),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+        (
+            id: "banner_wall_south_right",
+            prefab: "bannered_wall",
+            position: (3.7, 0.0, -13.15),
+            rotation_y: 0.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+        (
+            id: "banner_wall_north_left",
+            prefab: "bannered_wall",
+            position: (-3.7, 0.0, 15.9),
+            rotation_y: 180.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+        (
+            id: "banner_wall_north_right",
+            prefab: "bannered_wall",
+            position: (3.7, 0.0, 15.9),
+            rotation_y: 180.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["boundary", "bannered_wall"],
+        ),
+
+        // Low detail rubble clusters.
+        (
+            id: "rubble_cluster_west_outer",
+            prefab: "rubble_cluster_small",
+            position: (-8.6, 0.0, -6.8),
+            rotation_y: 40.0,
+            scale: (1.0, 1.0, 1.0),
+            tags: ["decoration", "ruin"],
+        ),
+        (
+            id: "rubble_cluster_east_outer",
+            prefab: "rubble_cluster_small",
+            position: (8.4, 0.0, -6.5),
+            rotation_y: -30.0,
+            scale: (0.9, 0.9, 0.9),
+            tags: ["decoration", "ruin"],
+        ),
+        (
+            id: "rubble_cluster_north_path",
+            prefab: "rubble_cluster_small",
+            position: (-2.7, 0.0, 8.0),
+            rotation_y: 12.0,
+            scale: (0.75, 0.75, 0.75),
+            tags: ["decoration", "ruin"],
+        ),
+    ],
+
+    // Lightweight collision rules. The loader can match by tag or asset.
+    collider_rules: [
+        (
+            id: "boundary_box",
+            match_tags_any: ["boundary"],
+            collider: (kind: "box", size: (2.4, 2.8, 0.6), offset: (0.0, 1.3, 0.0)),
+            friction: 0.8,
+            restitution: 0.0,
+        ),
+        (
+            id: "column_cylinder",
+            match_tags_any: ["cover", "pillar"],
+            collider: (kind: "cylinder", radius: 0.45, height: 2.4, offset: (0.0, 1.2, 0.0)),
+            friction: 0.8,
+            restitution: 0.0,
+        ),
+        (
+            id: "objective_cylinder",
+            match_tags_any: ["objective"],
+            collider: (kind: "cylinder", radius: 0.85, height: 1.7, offset: (0.0, 0.85, 0.0)),
+            friction: 0.8,
+            restitution: 0.0,
+        ),
+        (
+            id: "low_cover_box",
+            match_tags_any: ["low_cover"],
+            collider: (kind: "box", size: (1.2, 0.8, 1.2), offset: (0.0, 0.4, 0.0)),
+            friction: 0.8,
+            restitution: 0.0,
+        ),
+        (
+            id: "decor_no_collider",
+            match_tags_all: ["decoration"],
+            collider: (kind: "none"),
+            friction: 0.0,
+            restitution: 0.0,
+        ),
+    ],
+
+    // Gameplay metadata.
+    gameplay: (
+        bounds: (
+            kind: "circle",
+            center: (0.0, 0.0),
+            radius: 14.0,
+        ),
+        death_plane_y: -8.0,
+        walkable_tags: ["walkable", "arena_floor", "high_ground", "stairs"],
+        blocked_tags: ["boundary", "solid", "cover"],
+        navigation_notes: "Center is open; four columns create micro-cover; east/west platforms give mild height advantage; outer ring allows rotations.",
+    ),
+
+    spawn_points: [
+        (
+            id: "team_a_spawn_1",
+            team: "A",
+            position: (-2.0, 0.12, -9.3),
+            rotation_y: 0.0,
+            tags: ["spawn", "team_a"],
+        ),
+        (
+            id: "team_a_spawn_2",
+            team: "A",
+            position: (2.0, 0.12, -9.3),
+            rotation_y: 0.0,
+            tags: ["spawn", "team_a"],
+        ),
+        (
+            id: "team_b_spawn_1",
+            team: "B",
+            position: (-2.0, 0.12, 8.7),
+            rotation_y: 180.0,
+            tags: ["spawn", "team_b"],
+        ),
+        (
+            id: "team_b_spawn_2",
+            team: "B",
+            position: (2.0, 0.12, 8.7),
+            rotation_y: 180.0,
+            tags: ["spawn", "team_b"],
+        ),
+        (
+            id: "ffa_spawn_west",
+            team: "FFA",
+            position: (-8.2, 0.82, 0.0),
+            rotation_y: 90.0,
+            tags: ["spawn", "ffa", "high_ground"],
+        ),
+        (
+            id: "ffa_spawn_east",
+            team: "FFA",
+            position: (8.2, 0.82, 0.0),
+            rotation_y: -90.0,
+            tags: ["spawn", "ffa", "high_ground"],
+        ),
+    ],
+
+    gameplay_zones: [
+        (
+            id: "center_control_zone",
+            kind: "control",
+            shape: (kind: "cylinder", center: (0.0, 0.0, 0.0), radius: 4.5, height: 2.2),
+            tags: ["objective_zone", "center"],
+        ),
+        (
+            id: "outer_rotation_ring",
+            kind: "movement",
+            shape: (kind: "ring", center: (0.0, 0.0), inner_radius: 5.4, outer_radius: 9.8),
+            tags: ["rotation", "flank_route"],
+        ),
+        (
+            id: "west_high_ground_zone",
+            kind: "high_ground",
+            shape: (kind: "box", center: (-8.0, 0.70, 0.0), size: (5.0, 1.2, 6.0)),
+            tags: ["high_ground", "west"],
+        ),
+        (
+            id: "east_high_ground_zone",
+            kind: "high_ground",
+            shape: (kind: "box", center: (8.0, 0.70, 0.0), size: (5.0, 1.2, 6.0)),
+            tags: ["high_ground", "east"],
+        ),
+    ],
+
+    // Optional local lights. If no visible brazier asset exists, spawn point lights only.
+    lights: [
+        (
+            id: "warm_sun",
+            kind: "directional",
+            rotation_euler_degrees: (-48.0, -35.0, 0.0),
+            illuminance: 10000.0,
+            color: (0.96, 0.84, 0.72),
+            shadows: true,
+        ),
+    ],
+
+    environment: (
+        ambient_light: (
+            color: (0.55, 0.50, 0.66),
+            brightness: 0.45,
+        ),
+        fog: (
+            enabled: true,
+            color: (0.42, 0.39, 0.58),
+            falloff: "exponential",
+            density: 0.014,
+        ),
+        sky: (
+            kind: "gradient",
+            top_color: (0.32, 0.34, 0.58),
+            horizon_color: (0.95, 0.70, 0.48),
+            ground_color: (0.22, 0.20, 0.30),
+        ),
+        post_processing: (
+            tonemapping: "TonyMcMapface",
+            exposure: 0.0,
+            bloom: true,
+            bloom_intensity: 0.18,
+        ),
+    ),
+
+    camera: (
+        id: "arena_overview_camera",
+        kind: "isometric_orbit",
+        position: (0.0, 23.5, -22.0),
+        target: (0.0, 0.0, 1.0),
+        fov_degrees: 45.0,
+        near: 0.1,
+        far: 200.0,
+        gameplay_bounds_padding: 2.5,
+    ),
+
+    implementation_notes: [
+        "Use Bevy SceneBundle or SceneRoot to spawn each GLB scene.",
+        "RON comments and trailing commas are used intentionally.",
+        "If asset scale/origin differs, add per-asset calibration in the loader rather than changing this map first.",
+        "For floor_shapes, generate individual floor/floor_detail entities at tile_size spacing.",
+        "For filled_octagon, include tile (x,z) when max(abs(dx), abs(dz)) + min(abs(dx), abs(dz)) * 0.414 <= radius_tiles, or use a simpler clipped-square approximation.",
+        "For stairs, you may need custom ramp colliders so player movement is smooth.",
+        "First render pass can ignore collider_rules, gameplay_zones, fog, and post_processing; spawn assets, camera, and lights first.",
+    ],
+)
