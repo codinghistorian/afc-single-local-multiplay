@@ -621,6 +621,7 @@ pub enum GameplayPauseOwner {
     ControllerReconnect,
     TutorialPrompt,
     TutorialMenu,
+    TutorialSuccess,
     TutorialTransition,
 }
 
@@ -629,6 +630,7 @@ pub struct GameplayPauseOwners {
     controller_reconnect: bool,
     tutorial_prompt: bool,
     tutorial_menu: bool,
+    tutorial_success: bool,
     tutorial_transition: bool,
 }
 
@@ -638,6 +640,7 @@ impl GameplayPauseOwners {
             GameplayPauseOwner::ControllerReconnect => self.controller_reconnect = active,
             GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt = active,
             GameplayPauseOwner::TutorialMenu => self.tutorial_menu = active,
+            GameplayPauseOwner::TutorialSuccess => self.tutorial_success = active,
             GameplayPauseOwner::TutorialTransition => self.tutorial_transition = active,
         }
     }
@@ -647,6 +650,7 @@ impl GameplayPauseOwners {
             GameplayPauseOwner::ControllerReconnect => self.controller_reconnect,
             GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt,
             GameplayPauseOwner::TutorialMenu => self.tutorial_menu,
+            GameplayPauseOwner::TutorialSuccess => self.tutorial_success,
             GameplayPauseOwner::TutorialTransition => self.tutorial_transition,
         }
     }
@@ -655,12 +659,14 @@ impl GameplayPauseOwners {
         self.contains(GameplayPauseOwner::ControllerReconnect)
             || self.contains(GameplayPauseOwner::TutorialPrompt)
             || self.contains(GameplayPauseOwner::TutorialMenu)
+            || self.contains(GameplayPauseOwner::TutorialSuccess)
             || self.contains(GameplayPauseOwner::TutorialTransition)
     }
 
     pub fn clear_tutorial_overlays(&mut self) {
         self.tutorial_prompt = false;
         self.tutorial_menu = false;
+        self.tutorial_success = false;
     }
 }
 

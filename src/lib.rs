@@ -221,6 +221,7 @@ pub fn build_app() -> App {
                 (
                     game_state::handle_global_input,
                     tutorial::observe_tutorial_objective,
+                    tutorial::advance_tutorial_success,
                     tutorial::advance_tutorial_transition
                         .run_if(tutorial::tutorial_transition_active),
                     tutorial::reset_tutorial_step,

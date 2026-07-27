@@ -22,7 +22,7 @@ use crate::components::{
 };
 use crate::constants::{ARENA_TOP_Y, FIGHTER_COUNT, MAX_HEALTH, STOCK_LIVES};
 use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
-use crate::effects::VisualEffect;
+use crate::effects::{EffectKind, VisualEffect};
 use crate::equipment::FighterEquipment;
 use crate::game_state::{
     GameplayPauseOwner, GameplayPauseOwners, Hitstop, LocalSetup, MatchAnnouncements, MatchPhase,
@@ -390,6 +390,7 @@ pub enum TutorialPromptAction {
     Guard,
     Ultimate,
     Menu,
+    Confirm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1383,6 +1384,7 @@ pub enum TutorialPhase {
     WaitingForMatch,
     Prompt,
     Playing,
+    Success,
     PauseMenu,
     ChapterComplete,
     FinalResult,
@@ -1391,6 +1393,19 @@ pub enum TutorialPhase {
 const TUTORIAL_FADE_OUT_SECONDS: f32 = 0.18;
 const TUTORIAL_FADE_HOLD_SECONDS: f32 = 0.06;
 const TUTORIAL_FADE_IN_SECONDS: f32 = 0.26;
+const TUTORIAL_SETTLE_STABLE_SECONDS: f32 = 0.18;
+const TUTORIAL_AIM_HOLD_SECONDS: f32 = 0.35;
+const TUTORIAL_SUCCESS_REVEAL_SECONDS: f32 = 0.14;
+const TUTORIAL_SUCCESS_MIN_SECONDS: f32 = 0.25;
+const TUTORIAL_SUCCESS_AUTO_SECONDS: f32 = 1.1;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TutorialCompletionState {
+    #[default]
+    Observing,
+    Settling,
+    Succeeded,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TutorialTransitionStage {
@@ -1544,6 +1559,8 @@ pub struct TutorialObjectiveBaseline {
     pub player_stock: i32,
     pub dummy_stock: i32,
     pub item_durability: i32,
+    pub lesson_item_entity: Option<Entity>,
+    pub item_count: usize,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -1564,6 +1581,12 @@ pub struct TutorialSession {
     pub objective_baseline: TutorialObjectiveBaseline,
     pub objective_latched: bool,
     pub item_was_held: bool,
+    pub completion_state: TutorialCompletionState,
+    pub completion_stable_elapsed: f32,
+    pub completion_hold_elapsed: f32,
+    pub completion_saw_airborne: bool,
+    pub completion_world_effect_seen: bool,
+    pub success_elapsed: f32,
     pub final_exam_won: Option<bool>,
     pub dummy_script_elapsed: f32,
     return_setup: Option<LocalSetup>,
@@ -1588,6 +1611,12 @@ impl Default for TutorialSession {
             objective_baseline: TutorialObjectiveBaseline::default(),
             objective_latched: false,
             item_was_held: false,
+            completion_state: TutorialCompletionState::Observing,
+            completion_stable_elapsed: 0.0,
+            completion_hold_elapsed: 0.0,
+            completion_saw_airborne: false,
+            completion_world_effect_seen: false,
+            success_elapsed: 0.0,
             final_exam_won: None,
             dummy_script_elapsed: 0.0,
             return_setup: None,
@@ -1612,6 +1641,7 @@ impl TutorialSession {
         self.objective_baseline = TutorialObjectiveBaseline::default();
         self.objective_latched = false;
         self.item_was_held = false;
+        self.reset_completion();
         self.final_exam_won = None;
         self.dummy_script_elapsed = 0.0;
     }
@@ -1643,6 +1673,7 @@ impl TutorialSession {
         self.objective_progress = 0;
         self.objective_latched = false;
         self.item_was_held = false;
+        self.reset_completion();
         self.dummy_script_elapsed = 0.0;
     }
 
@@ -1653,7 +1684,10 @@ impl TutorialSession {
     }
 
     pub fn pause(&mut self) {
-        if matches!(self.phase, TutorialPhase::Prompt | TutorialPhase::Playing) {
+        if matches!(
+            self.phase,
+            TutorialPhase::Prompt | TutorialPhase::Playing | TutorialPhase::Success
+        ) {
             self.paused_from = self.phase;
             self.phase = TutorialPhase::PauseMenu;
             self.pause_cursor = 0;
@@ -1664,10 +1698,20 @@ impl TutorialSession {
         if self.phase == TutorialPhase::PauseMenu {
             self.phase = match self.paused_from {
                 TutorialPhase::Prompt => TutorialPhase::Prompt,
+                TutorialPhase::Success => TutorialPhase::Success,
                 _ => TutorialPhase::Playing,
             };
             self.paused_from = TutorialPhase::Inactive;
         }
+    }
+
+    pub fn reset_completion(&mut self) {
+        self.completion_state = TutorialCompletionState::Observing;
+        self.completion_stable_elapsed = 0.0;
+        self.completion_hold_elapsed = 0.0;
+        self.completion_saw_airborne = false;
+        self.completion_world_effect_seen = false;
+        self.success_elapsed = 0.0;
     }
 
     pub fn restart_step(&mut self) {
@@ -1781,6 +1825,9 @@ fn controller_tutorial_action_label(
             .face_button_label(GamepadButton::LeftTrigger2)
             .to_string(),
         TutorialPromptAction::Menu => family.face_button_label(GamepadButton::Start).to_string(),
+        TutorialPromptAction::Confirm => family
+            .face_button_label(family.confirm_button())
+            .to_string(),
     }
 }
 
@@ -1821,6 +1868,7 @@ fn keyboard_tutorial_action_label(
             key(ControlAction::Heavy)
         ),
         TutorialPromptAction::Menu => "Esc".to_string(),
+        TutorialPromptAction::Confirm => "Enter".to_string(),
     }
 }
 
@@ -1853,6 +1901,29 @@ pub fn tutorial_objective_progress_text(session: &TutorialSession) -> String {
     }
 }
 
+fn tutorial_settlement_status(session: &TutorialSession) -> Option<&'static str> {
+    if session.completion_state != TutorialCompletionState::Settling {
+        return None;
+    }
+    Some(match session.current_step()?.objective {
+        TutorialObjective::Movement { .. } => "RELEASE MOVEMENT TO FINISH",
+        TutorialObjective::Input(_) => "RELEASE AIM TO FINISH",
+        TutorialObjective::Action(FighterAction::Jumping) => "FINISH THE JUMP AND LAND",
+        TutorialObjective::Action(FighterAction::Dashing) => "LET THE DASH FINISH",
+        TutorialObjective::ActivateTechnique { .. } if session.completion_saw_airborne => {
+            "FINISH THE MOVE AND LAND"
+        }
+        TutorialObjective::Guarding { .. } => "RELEASE GUARD AFTER THE BLOCK",
+        TutorialObjective::GrabEscape => "REGAIN CONTROL TO FINISH",
+        TutorialObjective::ItemThrow(ItemKind::Barrel) => "WAIT FOR THE SPRAY",
+        TutorialObjective::ItemThrow(ItemKind::Crate) => "WAIT FOR THE REVEAL",
+        TutorialObjective::ItemThrow(ItemKind::Steamer) => "MOVE CLEAR - WAIT FOR THE BLAST",
+        TutorialObjective::SpecialSpawn(_) => "LET THE SPECIAL ACTIVATE",
+        TutorialObjective::RingOutOpponent | TutorialObjective::LoseLife => "WAIT FOR THE RESPAWN",
+        _ => "LET THE ACTION FINISH",
+    })
+}
+
 pub fn configure_tutorial_match(
     chapter_id: TutorialChapterId,
     assignment: LocalInputAssignment,
@@ -1879,6 +1950,7 @@ pub fn configure_tutorial_match(
     session.start(chapter_id);
     pause_owners.set(GameplayPauseOwner::TutorialPrompt, true);
     pause_owners.set(GameplayPauseOwner::TutorialMenu, false);
+    pause_owners.set(GameplayPauseOwner::TutorialSuccess, false);
     user_mode.enter_tutorial_lesson();
     state.request_rematch();
 }
@@ -1951,6 +2023,7 @@ pub fn reset_tutorial_step(
     mut bots: Query<(Entity, &Fighter, &mut BotBrain)>,
     mut items: Query<
         (
+            Entity,
             &mut ArenaItem,
             &mut Transform,
             &mut Visibility,
@@ -2063,9 +2136,12 @@ pub fn reset_tutorial_step(
     let exercise_kind = current_item_objective(&session);
     let exercise_position = Vec3::new(-0.25, ARENA_TOP_Y + 0.55, 0.0);
     let mut baseline_item_durability = 0;
-    for (index, (mut item, mut transform, mut visibility, mut material, mut scene_root)) in
+    let mut lesson_item_entity = None;
+    let mut item_count = 0;
+    for (index, (entity, mut item, mut transform, mut visibility, mut material, mut scene_root)) in
         (&mut items).into_iter().enumerate()
     {
+        item_count += 1;
         let target = if chapter.final_exam {
             arena
                 .item_anchors
@@ -2085,6 +2161,7 @@ pub fn reset_tutorial_step(
             *visibility = Visibility::Visible;
             if !chapter.final_exam {
                 baseline_item_durability = item.durability;
+                lesson_item_entity = Some(entity);
             }
         } else {
             item.deactivate_for_match();
@@ -2105,15 +2182,19 @@ pub fn reset_tutorial_step(
         player_stock: state.stocks[TUTORIAL_PLAYER_ID],
         dummy_stock: state.stocks[TUTORIAL_DUMMY_ID],
         item_durability: baseline_item_durability,
+        lesson_item_entity,
+        item_count,
     };
     session.objective_progress = 0;
     session.objective_latched = false;
     session.item_was_held = false;
+    session.reset_completion();
     session.dummy_script_elapsed = 0.0;
     session.reset_requested = false;
     session.phase = TutorialPhase::Prompt;
     pause_owners.set(GameplayPauseOwner::TutorialPrompt, true);
     pause_owners.set(GameplayPauseOwner::TutorialMenu, false);
+    pause_owners.set(GameplayPauseOwner::TutorialSuccess, false);
 }
 
 fn fighter_position_floor_fix(transform: &mut Transform) {
@@ -2174,6 +2255,7 @@ fn scripted_input_pulse(elapsed: f32, period: f32) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub fn observe_tutorial_objective(
+    time: Res<Time>,
     mut session: ResMut<TutorialSession>,
     state: Res<MatchState>,
     telemetry: Res<MatchTelemetry>,
@@ -2191,6 +2273,7 @@ pub fn observe_tutorial_objective(
     )>,
     items: Query<(Entity, &ArenaItem)>,
     specials: Query<&ActiveSpecial>,
+    effects: Query<&VisualEffect>,
 ) {
     if session.phase != TutorialPhase::Playing || transition.active() {
         return;
@@ -2212,11 +2295,13 @@ pub fn observe_tutorial_objective(
         return;
     }
 
-    let dummy_position = fighters
-        .iter()
-        .find_map(|(fighter, _, _, _, _, _, transform, _)| {
-            (fighter.id == TUTORIAL_DUMMY_ID).then_some(transform.translation)
-        });
+    let dummy_state =
+        fighters
+            .iter()
+            .find_map(|(fighter, _, action, _, motor, _, transform, _)| {
+                (fighter.id == TUTORIAL_DUMMY_ID).then_some((action, motor, transform.translation))
+            });
+    let dummy_position = dummy_state.map(|(_, _, position)| position);
     let Some((input, action, _stats, motor, grab, transform, inventory)) =
         fighters.iter().find_map(
             |(fighter, input, action, stats, motor, grab, transform, inventory)| {
@@ -2228,7 +2313,22 @@ pub fn observe_tutorial_objective(
         return;
     };
 
-    let complete = match step.objective {
+    let player_lost_stock =
+        state.stocks[TUTORIAL_PLAYER_ID] < session.objective_baseline.player_stock;
+    let dummy_lost_stock = state.stocks[TUTORIAL_DUMMY_ID] < session.objective_baseline.dummy_stock;
+    let unexpected_stock_change = (player_lost_stock
+        && step.objective != TutorialObjective::LoseLife)
+        || (dummy_lost_stock && step.objective != TutorialObjective::RingOutOpponent);
+    if !chapter.final_exam && unexpected_stock_change {
+        request_tutorial_transition(
+            &mut transition,
+            &mut pause_owners,
+            TutorialTransitionAction::RestartStep,
+        );
+        return;
+    }
+
+    let evidence_detected = match step.objective {
         TutorialObjective::Knowledge => false,
         TutorialObjective::Movement {
             direction,
@@ -2246,7 +2346,19 @@ pub fn observe_tutorial_objective(
             }
             session.objective_progress >= (distance * 10.0).round() as u32
         }
-        TutorialObjective::Input(control) => tutorial_control_is_active(control, input),
+        TutorialObjective::Input(control) => {
+            let active = tutorial_control_is_active(control, input);
+            if control == ControlAction::AimGrab {
+                if active && input.movement.length_squared() > 0.12 {
+                    session.completion_hold_elapsed += time.delta_secs();
+                } else {
+                    session.completion_hold_elapsed = 0.0;
+                }
+                session.completion_hold_elapsed >= TUTORIAL_AIM_HOLD_SECONDS
+            } else {
+                active
+            }
+        }
         TutorialObjective::Action(expected) => action.action == expected,
         TutorialObjective::ActivateTechnique {
             technique,
@@ -2312,37 +2424,125 @@ pub fn observe_tutorial_objective(
             .iter()
             .any(|special| special.owner_id == TUTORIAL_PLAYER_ID && special.kind == kind),
         TutorialObjective::RingOutOpponent => {
-            telemetry.ring_outs > session.objective_baseline.ring_outs
-                || state.stocks[TUTORIAL_DUMMY_ID] < session.objective_baseline.dummy_stock
+            telemetry.ring_outs > session.objective_baseline.ring_outs || dummy_lost_stock
         }
-        TutorialObjective::LoseLife => {
-            state.stocks[TUTORIAL_PLAYER_ID] < session.objective_baseline.player_stock
-        }
+        TutorialObjective::LoseLife => player_lost_stock,
         TutorialObjective::MatchResult { win } => {
             state.phase == MatchPhase::Results
                 && ((state.stocks[TUTORIAL_PLAYER_ID] > state.stocks[TUTORIAL_DUMMY_ID]) == win)
         }
     };
 
-    if complete {
-        request_tutorial_transition(
-            &mut transition,
-            &mut pause_owners,
-            TutorialTransitionAction::AdvanceStep { skipped: false },
-        );
+    if session.completion_state == TutorialCompletionState::Observing && evidence_detected {
+        session.completion_state = TutorialCompletionState::Settling;
+        session.completion_stable_elapsed = 0.0;
+        session.completion_saw_airborne = !motor.grounded;
+        session.completion_world_effect_seen = false;
+    }
+
+    if session.completion_state != TutorialCompletionState::Settling {
         return;
     }
 
-    if !chapter.final_exam
-        && (state.stocks[TUTORIAL_PLAYER_ID] < session.objective_baseline.player_stock
-            || state.stocks[TUTORIAL_DUMMY_ID] < session.objective_baseline.dummy_stock)
-    {
-        request_tutorial_transition(
-            &mut transition,
-            &mut pause_owners,
-            TutorialTransitionAction::RestartStep,
-        );
+    session.completion_saw_airborne |= !motor.grounded;
+    match step.objective {
+        TutorialObjective::ItemThrow(ItemKind::Barrel) => {
+            session.completion_world_effect_seen |= effects
+                .iter()
+                .any(|effect| effect.kind == EffectKind::AlcoholSpray);
+        }
+        TutorialObjective::ItemThrow(ItemKind::Crate) => {
+            let lesson_item_finished = session
+                .objective_baseline
+                .lesson_item_entity
+                .and_then(|entity| items.get(entity).ok())
+                .is_some_and(|(_, item)| matches!(item.state, ItemState::Respawning));
+            let reward_revealed = items.iter().count() > session.objective_baseline.item_count
+                && items.iter().any(|(entity, item)| {
+                    Some(entity) != session.objective_baseline.lesson_item_entity
+                        && !matches!(item.state, ItemState::Respawning)
+                });
+            session.completion_world_effect_seen |= lesson_item_finished && reward_revealed;
+        }
+        TutorialObjective::ItemThrow(ItemKind::Steamer) => {
+            session.completion_world_effect_seen |= effects
+                .iter()
+                .any(|effect| effect.kind == EffectKind::PopBombBlast);
+        }
+        TutorialObjective::ItemThrow(_) => {
+            session.completion_world_effect_seen = true;
+        }
+        TutorialObjective::SpecialSpawn(kind) => {
+            session.completion_world_effect_seen |= specials.iter().any(|special| {
+                tutorial_special_activation_matches(
+                    special.owner_id,
+                    special.kind,
+                    special.active_feedback_sent,
+                    kind,
+                )
+            });
+        }
+        _ => {}
     }
+
+    let player_recovered = tutorial_fighter_has_recovered(action, motor);
+    let settled = match step.objective {
+        TutorialObjective::Knowledge | TutorialObjective::MatchResult { .. } => false,
+        TutorialObjective::Movement { .. } => {
+            input.movement.length_squared() <= 0.04 && player_recovered
+        }
+        TutorialObjective::Input(control) => {
+            !tutorial_control_is_active(control, input) && player_recovered
+        }
+        TutorialObjective::Action(FighterAction::Jumping) => {
+            session.completion_saw_airborne && player_recovered
+        }
+        TutorialObjective::Action(_) => player_recovered,
+        TutorialObjective::ActivateTechnique { .. }
+        | TutorialObjective::ConfirmedHits { .. }
+        | TutorialObjective::Recovery(_)
+        | TutorialObjective::ItemUse { .. } => player_recovered,
+        TutorialObjective::Guarding { .. } => {
+            !input.guard && action.action != FighterAction::Guarding && player_recovered
+        }
+        TutorialObjective::GrabEscape => {
+            grab.held_by.is_none() && action.action != FighterAction::Grabbed && player_recovered
+        }
+        TutorialObjective::ItemThrow(_) | TutorialObjective::SpecialSpawn(_) => {
+            player_recovered && session.completion_world_effect_seen
+        }
+        TutorialObjective::RingOutOpponent => dummy_state
+            .is_some_and(|(action, motor, _)| tutorial_fighter_has_recovered(action, motor)),
+        TutorialObjective::LoseLife => player_recovered,
+    };
+
+    if settled {
+        session.completion_stable_elapsed += time.delta_secs();
+    } else {
+        session.completion_stable_elapsed = 0.0;
+    }
+    if session.completion_stable_elapsed >= TUTORIAL_SETTLE_STABLE_SECONDS {
+        session.completion_state = TutorialCompletionState::Succeeded;
+        session.success_elapsed = 0.0;
+        session.phase = TutorialPhase::Success;
+        pause_owners.set(GameplayPauseOwner::TutorialSuccess, true);
+    }
+}
+
+fn tutorial_fighter_has_recovered(action: &FighterActionState, motor: &FighterMotor) -> bool {
+    motor.grounded
+        && motor.velocity.y.abs() <= 0.05
+        && motor.dash_slide_timer <= 0.0
+        && matches!(action.action, FighterAction::Idle | FighterAction::Moving)
+}
+
+fn tutorial_special_activation_matches(
+    owner_id: usize,
+    actual_kind: SpecialKind,
+    active_feedback_sent: bool,
+    expected_kind: SpecialKind,
+) -> bool {
+    owner_id == TUTORIAL_PLAYER_ID && actual_kind == expected_kind && active_feedback_sent
 }
 
 fn tutorial_final_exam_won(state: &MatchState) -> bool {
@@ -2398,6 +2598,9 @@ pub(crate) struct TutorialPromptPanel;
 pub(crate) struct TutorialObjectivePanel;
 
 #[derive(Component)]
+pub(crate) struct TutorialSuccessPanel;
+
+#[derive(Component)]
 pub(crate) struct TutorialPausePanel;
 
 #[derive(Component)]
@@ -2443,6 +2646,12 @@ pub(crate) struct TutorialObjectiveControlText;
 
 #[derive(Component)]
 pub(crate) struct TutorialObjectiveHintText;
+
+#[derive(Component)]
+pub(crate) struct TutorialSuccessDetailText;
+
+#[derive(Component)]
+pub(crate) struct TutorialSuccessControlText;
 
 #[derive(Component)]
 pub(crate) struct TutorialCompleteText;
@@ -2767,6 +2976,103 @@ pub fn setup_tutorial_ui(mut commands: Commands, ui_cameras: Query<Entity, With<
         ));
 
         root.spawn((
+            TutorialSuccessPanel,
+            tutorial_modal_node(Display::None, 500.0),
+            UiTransform::from_scale(Vec2::splat(0.94)),
+            BackgroundColor(Color::srgba(0.02, 0.075, 0.045, 0.98)),
+            BorderColor::all(Color::srgb(0.35, 0.92, 0.48)),
+        ))
+        .with_children(|success| {
+            success
+                .spawn((
+                    Node {
+                        width: Val::Px(76.0),
+                        height: Val::Px(62.0),
+                        position_type: PositionType::Relative,
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ))
+                .with_children(|flag| {
+                    flag.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(12.0),
+                            top: Val::Px(3.0),
+                            width: Val::Px(5.0),
+                            height: Val::Px(56.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.76, 0.84, 0.72)),
+                        Pickable::IGNORE,
+                    ));
+                    flag.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(17.0),
+                            top: Val::Px(6.0),
+                            width: Val::Px(47.0),
+                            height: Val::Px(28.0),
+                            border: UiRect::all(Val::Px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.72, 0.28)),
+                        BorderColor::all(Color::srgb(0.55, 1.0, 0.63)),
+                        Pickable::IGNORE,
+                    ));
+                    flag.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(5.0),
+                            top: Val::Px(56.0),
+                            width: Val::Px(20.0),
+                            height: Val::Px(4.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.76, 0.84, 0.72)),
+                        Pickable::IGNORE,
+                    ));
+                });
+            success.spawn((
+                Text::new("GOOD JOB!"),
+                TextFont {
+                    font_size: 36.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.68, 1.0, 0.72)),
+                TextLayout::new_with_justify(Justify::Center),
+                TextShadow::default(),
+            ));
+            success.spawn((
+                TutorialSuccessDetailText,
+                Text::new(""),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.92, 0.98, 0.9)),
+                TextLayout::new_with_justify(Justify::Center),
+            ));
+            success.spawn((
+                TutorialSuccessControlText,
+                Text::new(""),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.64, 0.9, 0.72)),
+                TextLayout::new_with_justify(Justify::Center),
+            ));
+            success.spawn(tutorial_button(
+                "NEXT",
+                TutorialUiAction::Continue,
+                Val::Px(190.0),
+                44.0,
+                17.0,
+            ));
+        });
+
+        root.spawn((
             TutorialPausePanel,
             tutorial_modal_node(Display::None, 520.0),
             BackgroundColor(Color::srgba(0.025, 0.03, 0.045, 0.98)),
@@ -2977,6 +3283,7 @@ pub fn update_tutorial_ui(
             Without<TutorialUiRoot>,
             Without<Button>,
             Without<TutorialFadeOverlay>,
+            Without<TutorialSuccessPanel>,
             Or<(
                 With<TutorialHubPanel>,
                 With<TutorialPromptPanel>,
@@ -2986,6 +3293,15 @@ pub fn update_tutorial_ui(
                 With<TutorialFinalPanel>,
                 With<TutorialResetPanel>,
             )>,
+        ),
+    >,
+    mut success_panels: Query<
+        (&mut Node, &mut UiTransform),
+        (
+            With<TutorialSuccessPanel>,
+            Without<TutorialUiRoot>,
+            Without<Button>,
+            Without<TutorialFadeOverlay>,
         ),
     >,
     mut texts: Query<
@@ -3001,6 +3317,8 @@ pub fn update_tutorial_ui(
             Option<&TutorialObjectiveProgressText>,
             Option<&TutorialObjectiveControlText>,
             Option<&TutorialObjectiveHintText>,
+            Option<&TutorialSuccessDetailText>,
+            Option<&TutorialSuccessControlText>,
             Option<&TutorialCompleteText>,
             Option<&TutorialFinalText>,
         ),
@@ -3015,6 +3333,8 @@ pub fn update_tutorial_ui(
             With<TutorialObjectiveProgressText>,
             With<TutorialObjectiveControlText>,
             With<TutorialObjectiveHintText>,
+            With<TutorialSuccessDetailText>,
+            With<TutorialSuccessControlText>,
             With<TutorialCompleteText>,
             With<TutorialFinalText>,
         )>,
@@ -3086,6 +3406,19 @@ pub fn update_tutorial_ui(
         };
     }
 
+    let success_visible = user_mode.screen() == UserModeScreen::TutorialLesson
+        && session.phase == TutorialPhase::Success;
+    let success_reveal =
+        tutorial_fade_ease(session.success_elapsed / TUTORIAL_SUCCESS_REVEAL_SECONDS);
+    for (mut node, mut transform) in &mut success_panels {
+        node.display = if success_visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        transform.scale = Vec2::splat(0.94 + success_reveal * 0.06);
+    }
+
     let selected_chapter = TUTORIAL_CHAPTERS[session.hub_cursor.min(11)];
     let step = session.current_step();
     let assignment = user_mode.tutorial_player_assignment();
@@ -3104,6 +3437,8 @@ pub fn update_tutorial_ui(
         objective_progress,
         objective_control,
         objective_hint,
+        success_detail,
+        success_control,
         complete,
         final_result,
     ) in &mut texts
@@ -3164,7 +3499,13 @@ pub fn update_tutorial_ui(
             let progress_text = tutorial_objective_progress_text(&session);
             **text = step
                 .map(|step| {
-                    if progress_text.is_empty() {
+                    if let Some(status) = tutorial_settlement_status(&session) {
+                        if progress_text.is_empty() {
+                            format!("{}  |  {status}", step.instruction)
+                        } else {
+                            format!("{}  |  {progress_text}  |  {status}", step.instruction)
+                        }
+                    } else if progress_text.is_empty() {
                         step.instruction.to_string()
                     } else {
                         format!("{}  |  {progress_text}", step.instruction)
@@ -3188,6 +3529,18 @@ pub fn update_tutorial_ui(
                 })
                 .unwrap_or_default()
                 .to_string();
+        } else if success_detail.is_some() {
+            **text = step
+                .map(|step| format!("{} COMPLETE", step.title.to_uppercase()))
+                .unwrap_or_default();
+        } else if success_control.is_some() {
+            let confirm = tutorial_action_label(
+                TutorialPromptAction::Confirm,
+                assignment,
+                &bindings,
+                &controller_metadata,
+            );
+            **text = format!("{confirm}  NEXT  |  AUTO-CONTINUE");
         } else if complete.is_some() {
             **text = session
                 .current_chapter()
@@ -3231,7 +3584,10 @@ fn tutorial_action_selected(session: &TutorialSession, action: TutorialUiAction)
         TutorialUiAction::Chapter(chapter) => {
             session.hub_cursor == chapter_index(chapter) && !session.reset_confirmation
         }
-        TutorialUiAction::Continue => session.phase == TutorialPhase::Prompt,
+        TutorialUiAction::Continue => matches!(
+            session.phase,
+            TutorialPhase::Prompt | TutorialPhase::Success
+        ),
         TutorialUiAction::Resume => {
             session.phase == TutorialPhase::PauseMenu && session.pause_cursor == 0
         }
@@ -3476,8 +3832,14 @@ fn commit_tutorial_transition(
             context
                 .pause_owners
                 .set(GameplayPauseOwner::TutorialPrompt, false);
+            context
+                .pause_owners
+                .set(GameplayPauseOwner::TutorialSuccess, false);
         }
         TutorialTransitionAction::AdvanceStep { skipped } => {
+            context
+                .pause_owners
+                .set(GameplayPauseOwner::TutorialSuccess, false);
             let finished = record_tutorial_step_completion(
                 &mut context.session,
                 &mut context.progress,
@@ -3508,6 +3870,10 @@ fn commit_tutorial_transition(
                 GameplayPauseOwner::TutorialPrompt,
                 context.session.phase == TutorialPhase::Prompt,
             );
+            context.pause_owners.set(
+                GameplayPauseOwner::TutorialSuccess,
+                context.session.phase == TutorialPhase::Success,
+            );
         }
         TutorialTransitionAction::RestartStep => {
             if context.state.phase == MatchPhase::Results {
@@ -3518,6 +3884,9 @@ fn commit_tutorial_transition(
             context
                 .pause_owners
                 .set(GameplayPauseOwner::TutorialMenu, false);
+            context
+                .pause_owners
+                .set(GameplayPauseOwner::TutorialSuccess, false);
             context
                 .pause_owners
                 .set(GameplayPauseOwner::TutorialPrompt, true);
@@ -3538,6 +3907,9 @@ fn commit_tutorial_transition(
                 .set(GameplayPauseOwner::TutorialPrompt, false);
             context
                 .pause_owners
+                .set(GameplayPauseOwner::TutorialSuccess, false);
+            context
+                .pause_owners
                 .set(GameplayPauseOwner::TutorialMenu, true);
             context.user_mode.enter_tutorial_final_result();
             if won && context.session.chapter_can_complete() {
@@ -3552,6 +3924,34 @@ fn commit_tutorial_transition(
             context.session.request_cleanup();
         }
     }
+}
+
+pub fn advance_tutorial_success(
+    time: Res<Time<Real>>,
+    mut session: ResMut<TutorialSession>,
+    mut pause_owners: ResMut<GameplayPauseOwners>,
+    mut transition: ResMut<TutorialTransition>,
+) {
+    if session.phase != TutorialPhase::Success
+        || transition.active()
+        || pause_owners.contains(GameplayPauseOwner::ControllerReconnect)
+        || pause_owners.contains(GameplayPauseOwner::TutorialMenu)
+    {
+        return;
+    }
+    session.success_elapsed += time.delta_secs();
+    if session.success_elapsed >= TUTORIAL_SUCCESS_AUTO_SECONDS {
+        request_tutorial_transition(
+            &mut transition,
+            &mut pause_owners,
+            TutorialTransitionAction::AdvanceStep { skipped: false },
+        );
+    }
+}
+
+fn tutorial_success_ready_for_confirm(session: &TutorialSession) -> bool {
+    session.phase == TutorialPhase::Success
+        && session.success_elapsed >= TUTORIAL_SUCCESS_MIN_SECONDS
 }
 
 pub fn advance_tutorial_transition(
@@ -3714,6 +4114,25 @@ pub fn handle_tutorial_input(
                     );
                 }
             }
+            TutorialPhase::Success => {
+                if menu.menu {
+                    request_tutorial_transition(
+                        &mut transition,
+                        &mut context.pause_owners,
+                        TutorialTransitionAction::OpenPause,
+                    );
+                    return;
+                }
+                if tutorial_success_ready_for_confirm(&context.session)
+                    && (pointer_action == Some(TutorialUiAction::Continue) || menu.confirm)
+                {
+                    request_tutorial_transition(
+                        &mut transition,
+                        &mut context.pause_owners,
+                        TutorialTransitionAction::AdvanceStep { skipped: false },
+                    );
+                }
+            }
             TutorialPhase::ChapterComplete => {
                 if pointer_action == Some(TutorialUiAction::ExitToHub) || menu.confirm || menu.back
                 {
@@ -3750,9 +4169,9 @@ pub fn handle_tutorial_input(
                 let transition_action = match action {
                     TutorialUiAction::Resume => Some(TutorialTransitionAction::ResumePause),
                     TutorialUiAction::RestartStep => Some(TutorialTransitionAction::RestartStep),
-                    TutorialUiAction::SkipStep => {
-                        Some(TutorialTransitionAction::AdvanceStep { skipped: true })
-                    }
+                    TutorialUiAction::SkipStep => Some(TutorialTransitionAction::AdvanceStep {
+                        skipped: context.session.paused_from != TutorialPhase::Success,
+                    }),
                     TutorialUiAction::ExitToHub => Some(TutorialTransitionAction::ExitToHub),
                     _ => None,
                 };
@@ -3922,6 +4341,70 @@ fn restore_tutorial_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn advance_virtual_time(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(seconds));
+    }
+
+    fn advance_real_time(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(Duration::from_secs_f32(seconds));
+    }
+
+    fn item_objective_test_app(
+        step_index: usize,
+        kind: ItemKind,
+        item_state: impl FnOnce(Entity) -> ItemState,
+    ) -> (App, Entity) {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.start(TutorialChapterId::Items);
+        session.step_index = step_index;
+        session.phase = TutorialPhase::Playing;
+        session.reset_requested = false;
+        session.item_was_held = true;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(session)
+            .insert_resource(state)
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(GameplayPauseOwners::default())
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, observe_tutorial_objective);
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_PLAYER_ID,
+                    name: "Cat",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput::default(),
+                FighterActionState::default(),
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::default(),
+                FighterInventory::default(),
+            ))
+            .id();
+        let mut item = ArenaItem::new(kind, Vec3::ZERO, 0.0);
+        item.state = item_state(player);
+        let item_entity = app.world_mut().spawn(item).id();
+        {
+            let mut session = app.world_mut().resource_mut::<TutorialSession>();
+            session.objective_baseline.lesson_item_entity = Some(item_entity);
+            session.objective_baseline.item_count = 1;
+        }
+        (app, item_entity)
+    }
 
     #[test]
     fn catalog_has_twelve_unique_open_chapters() {
@@ -4070,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_restores_prompt_or_playing_phase() {
+    fn pause_resume_restores_prompt_playing_or_success_phase() {
         let mut session = TutorialSession::default();
         session.start(TutorialChapterId::Basics);
         session.phase = TutorialPhase::Prompt;
@@ -4083,6 +4566,11 @@ mod tests {
         session.pause();
         session.resume_from_pause();
         assert_eq!(session.phase, TutorialPhase::Playing);
+
+        session.phase = TutorialPhase::Success;
+        session.pause();
+        session.resume_from_pause();
+        assert_eq!(session.phase, TutorialPhase::Success);
     }
 
     #[test]
@@ -4091,6 +4579,7 @@ mod tests {
         owners.set(GameplayPauseOwner::ControllerReconnect, true);
         owners.set(GameplayPauseOwner::TutorialPrompt, true);
         owners.set(GameplayPauseOwner::TutorialMenu, true);
+        owners.set(GameplayPauseOwner::TutorialSuccess, true);
         owners.set(GameplayPauseOwner::TutorialTransition, true);
 
         owners.clear_tutorial_overlays();
@@ -4098,6 +4587,7 @@ mod tests {
         assert!(owners.contains(GameplayPauseOwner::ControllerReconnect));
         assert!(!owners.contains(GameplayPauseOwner::TutorialPrompt));
         assert!(!owners.contains(GameplayPauseOwner::TutorialMenu));
+        assert!(!owners.contains(GameplayPauseOwner::TutorialSuccess));
         assert!(owners.contains(GameplayPauseOwner::TutorialTransition));
         owners.set(GameplayPauseOwner::TutorialTransition, false);
         assert!(owners.blocks_gameplay());
@@ -4153,7 +4643,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_objective_observer_queues_only_the_current_step_transition() {
+    fn movement_objective_waits_for_input_release_before_success() {
         let mut app = App::new();
         let mut session = TutorialSession::default();
         session.start(TutorialChapterId::Basics);
@@ -4171,6 +4661,426 @@ mod tests {
             .insert_resource(GameplayPauseOwners::default())
             .insert_resource(TutorialTransition::default())
             .insert_resource(UserModeState::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, observe_tutorial_objective);
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_PLAYER_ID,
+                    name: "Cat",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    movement: Vec2::NEG_X,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::from_xyz(-3.0, 0.0, 0.0),
+                FighterInventory::default(),
+            ))
+            .id();
+
+        app.update();
+
+        let session = app.world().resource::<TutorialSession>();
+        assert_eq!(session.step_index, 1);
+        assert_eq!(session.phase, TutorialPhase::Playing);
+        assert_eq!(session.completion_state, TutorialCompletionState::Settling);
+        assert_eq!(
+            app.world().resource::<TutorialTransition>().pending_action,
+            None
+        );
+
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<FighterInput>()
+            .unwrap()
+            .movement = Vec2::ZERO;
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+
+        let session = app.world().resource::<TutorialSession>();
+        assert_eq!(session.phase, TutorialPhase::Success);
+        assert_eq!(session.completion_state, TutorialCompletionState::Succeeded);
+        assert!(
+            app.world()
+                .resource::<GameplayPauseOwners>()
+                .contains(GameplayPauseOwner::TutorialSuccess)
+        );
+    }
+
+    #[test]
+    fn jump_objective_waits_for_airborne_cycle_and_landing_recovery() {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.start(TutorialChapterId::Basics);
+        session.step_index = 5;
+        session.phase = TutorialPhase::Playing;
+        session.reset_requested = false;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(session)
+            .insert_resource(state)
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(GameplayPauseOwners::default())
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, observe_tutorial_objective);
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_PLAYER_ID,
+                    name: "Cat",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    jump: true,
+                    ..default()
+                },
+                FighterActionState {
+                    action: FighterAction::Jumping,
+                    ..default()
+                },
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::default(),
+                FighterInventory::default(),
+            ))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "the button press/takeoff frame must not finish Jump"
+        );
+
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            let mut motor = entity.get_mut::<FighterMotor>().unwrap();
+            motor.grounded = false;
+            motor.velocity.y = 3.0;
+        }
+        advance_virtual_time(&mut app, 0.3);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "airborne Jump must remain active"
+        );
+
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            let mut motor = entity.get_mut::<FighterMotor>().unwrap();
+            motor.grounded = true;
+            motor.velocity = Vec3::ZERO;
+            entity.get_mut::<FighterActionState>().unwrap().action = FighterAction::LandingRecovery;
+        }
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "landing recovery must finish before praise"
+        );
+
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<FighterActionState>()
+            .unwrap()
+            .action = FighterAction::Idle;
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn aim_objective_requires_a_deliberate_hold_then_release() {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.start(TutorialChapterId::Basics);
+        session.step_index = 7;
+        session.phase = TutorialPhase::Playing;
+        session.reset_requested = false;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(session)
+            .insert_resource(state)
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(GameplayPauseOwners::default())
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, observe_tutorial_objective);
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_PLAYER_ID,
+                    name: "Cat",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    movement: Vec2::X,
+                    aim: true,
+                    ..default()
+                },
+                FighterActionState::default(),
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::default(),
+                FighterInventory::default(),
+            ))
+            .id();
+
+        advance_virtual_time(&mut app, TUTORIAL_AIM_HOLD_SECONDS - 0.01);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Observing
+        );
+
+        advance_virtual_time(&mut app, 0.02);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+
+        *app.world_mut()
+            .entity_mut(player)
+            .get_mut::<FighterInput>()
+            .unwrap() = FighterInput::default();
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn confirmed_technique_waits_until_the_fighter_recovers() {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.start(TutorialChapterId::Combat);
+        session.step_index = 1;
+        session.phase = TutorialPhase::Playing;
+        session.reset_requested = false;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(session)
+            .insert_resource(state)
+            .insert_resource(MatchTelemetry::default())
+            .insert_resource(GameplayPauseOwners::default())
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, observe_tutorial_objective);
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_PLAYER_ID,
+                    name: "Cat",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput::default(),
+                FighterActionState {
+                    action: FighterAction::ComboFinisher,
+                    technique_id: Some(TechniqueId::CatComboFinisher),
+                    confirmed_hit: true,
+                    ..default()
+                },
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::default(),
+                FighterInventory::default(),
+            ))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        assert_eq!(
+            app.world().resource::<TutorialTransition>().pending_action,
+            None
+        );
+
+        *app.world_mut()
+            .entity_mut(player)
+            .get_mut::<FighterActionState>()
+            .unwrap() = FighterActionState::default();
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn steamer_waits_for_the_blast_after_throw_recovery() {
+        let (mut app, _) =
+            item_objective_test_app(9, ItemKind::Steamer, |owner| ItemState::Armed {
+                owner,
+                owner_id: TUTORIAL_PLAYER_ID,
+                timer: 0.5,
+                grace: 0.0,
+            });
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS * 2.0);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "arming and throw recovery alone must not complete Steamer"
+        );
+
+        app.world_mut().spawn(VisualEffect {
+            kind: EffectKind::PopBombBlast,
+            lifetime: 0.5,
+            age: 0.0,
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            start_scale: Vec3::ONE,
+            end_scale: Vec3::ONE,
+        });
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn barrel_waits_for_the_visible_spray() {
+        let (mut app, _) =
+            item_objective_test_app(5, ItemKind::Barrel, |owner| ItemState::Spraying {
+                owner,
+                owner_id: TUTORIAL_PLAYER_ID,
+                lifetime: 4.0,
+                spray_timer: 0.0,
+                spiral_phase: 0.0,
+                spiral_radius: 1.0,
+            });
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS * 2.0);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "the Spraying state alone must not replace the visible teaching cue"
+        );
+
+        app.world_mut().spawn(VisualEffect {
+            kind: EffectKind::AlcoholSpray,
+            lifetime: 0.5,
+            age: 0.0,
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            start_scale: Vec3::ONE,
+            end_scale: Vec3::ONE,
+        });
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn mystery_crate_waits_until_its_reward_is_revealed() {
+        let (mut app, crate_entity) =
+            item_objective_test_app(8, ItemKind::Crate, |owner| ItemState::Thrown {
+                owner,
+                owner_id: TUTORIAL_PLAYER_ID,
+                lifetime: 1.0,
+                grace: 0.0,
+            });
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS * 2.0);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing
+        );
+
+        app.world_mut()
+            .entity_mut(crate_entity)
+            .get_mut::<ArenaItem>()
+            .unwrap()
+            .state = ItemState::Respawning;
+        app.world_mut()
+            .spawn(ArenaItem::new(ItemKind::Apple, Vec3::ZERO, 0.0));
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn ring_out_objective_waits_for_the_dummy_to_finish_respawning() {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.start(TutorialChapterId::HudWinning);
+        session.step_index = 5;
+        session.phase = TutorialPhase::Playing;
+        session.reset_requested = false;
+        session.objective_baseline.player_stock = STOCK_LIVES;
+        session.objective_baseline.dummy_stock = STOCK_LIVES;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.stocks = [STOCK_LIVES, STOCK_LIVES - 1, STOCK_LIVES, STOCK_LIVES];
+        let mut telemetry = MatchTelemetry::default();
+        telemetry.ring_outs = 1;
+        app.insert_resource(session)
+            .insert_resource(state)
+            .insert_resource(telemetry)
+            .insert_resource(GameplayPauseOwners::default())
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         app.world_mut().spawn((
             Fighter {
@@ -4179,23 +5089,94 @@ mod tests {
                 color: Color::WHITE,
                 spawn: Vec3::ZERO,
             },
-            FighterInput {
-                movement: Vec2::NEG_X,
-                ..default()
-            },
+            FighterInput::default(),
             FighterActionState::default(),
             FighterStats::default(),
             FighterMotor::default(),
             FighterGrabState::default(),
-            Transform::from_xyz(-3.0, 0.0, 0.0),
+            Transform::default(),
             FighterInventory::default(),
         ));
+        let dummy = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: TUTORIAL_DUMMY_ID,
+                    name: "Pig",
+                    color: Color::WHITE,
+                    spawn: Vec3::X,
+                },
+                FighterInput::default(),
+                FighterActionState {
+                    action: FighterAction::Respawning,
+                    ..default()
+                },
+                FighterStats::default(),
+                FighterMotor::default(),
+                FighterGrabState::default(),
+                Transform::default(),
+                FighterInventory::default(),
+            ))
+            .id();
 
         app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS * 2.0);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing
+        );
 
-        let session = app.world().resource::<TutorialSession>();
-        assert_eq!(session.step_index, 1);
-        assert_eq!(session.phase, TutorialPhase::Playing);
+        app.world_mut()
+            .entity_mut(dummy)
+            .get_mut::<FighterActionState>()
+            .unwrap()
+            .action = FighterAction::Idle;
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
+        );
+    }
+
+    #[test]
+    fn success_auto_advance_pauses_for_controller_reconnect() {
+        let mut app = App::new();
+        let mut session = TutorialSession::default();
+        session.phase = TutorialPhase::Success;
+        session.completion_state = TutorialCompletionState::Succeeded;
+        let mut owners = GameplayPauseOwners::default();
+        owners.set(GameplayPauseOwner::TutorialSuccess, true);
+        app.insert_resource(session)
+            .insert_resource(owners)
+            .insert_resource(TutorialTransition::default())
+            .insert_resource(Time::<Real>::default())
+            .add_systems(Update, advance_tutorial_success);
+
+        advance_real_time(&mut app, 0.9);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialTransition>().pending_action,
+            None
+        );
+
+        app.world_mut()
+            .resource_mut::<GameplayPauseOwners>()
+            .set(GameplayPauseOwner::ControllerReconnect, true);
+        advance_real_time(&mut app, 0.5);
+        app.update();
+        assert!((app.world().resource::<TutorialSession>().success_elapsed - 0.9).abs() < 0.001);
+
+        app.world_mut()
+            .resource_mut::<GameplayPauseOwners>()
+            .set(GameplayPauseOwner::ControllerReconnect, false);
+        advance_real_time(&mut app, 0.21);
+        app.update();
         assert_eq!(
             app.world().resource::<TutorialTransition>().pending_action,
             Some(TutorialTransitionAction::AdvanceStep { skipped: false })
@@ -4205,6 +5186,66 @@ mod tests {
                 .resource::<GameplayPauseOwners>()
                 .contains(GameplayPauseOwner::TutorialTransition)
         );
+    }
+
+    #[test]
+    fn success_confirm_has_a_minimum_display_time() {
+        let mut session = TutorialSession {
+            phase: TutorialPhase::Success,
+            ..default()
+        };
+        session.success_elapsed = TUTORIAL_SUCCESS_MIN_SECONDS - 0.01;
+        assert!(!tutorial_success_ready_for_confirm(&session));
+        session.success_elapsed = TUTORIAL_SUCCESS_MIN_SECONDS;
+        assert!(tutorial_success_ready_for_confirm(&session));
+        session.phase = TutorialPhase::Playing;
+        assert!(!tutorial_success_ready_for_confirm(&session));
+    }
+
+    #[test]
+    fn fighter_recovery_rejects_active_air_and_dash_states() {
+        let mut action = FighterActionState::default();
+        let mut motor = FighterMotor::default();
+        assert!(tutorial_fighter_has_recovered(&action, &motor));
+
+        action.action = FighterAction::Jumping;
+        assert!(!tutorial_fighter_has_recovered(&action, &motor));
+        action.action = FighterAction::LandingRecovery;
+        assert!(!tutorial_fighter_has_recovered(&action, &motor));
+        action.action = FighterAction::Idle;
+        motor.grounded = false;
+        assert!(!tutorial_fighter_has_recovered(&action, &motor));
+        motor.grounded = true;
+        motor.dash_slide_timer = 0.1;
+        assert!(!tutorial_fighter_has_recovered(&action, &motor));
+    }
+
+    #[test]
+    fn special_spawn_waits_for_the_expected_active_effect() {
+        assert!(!tutorial_special_activation_matches(
+            TUTORIAL_PLAYER_ID,
+            SpecialKind::Projectile,
+            false,
+            SpecialKind::Projectile,
+        ));
+        assert!(!tutorial_special_activation_matches(
+            TUTORIAL_DUMMY_ID,
+            SpecialKind::Projectile,
+            true,
+            SpecialKind::Projectile,
+        ));
+        assert!(!tutorial_special_activation_matches(
+            TUTORIAL_PLAYER_ID,
+            SpecialKind::Trap,
+            true,
+            SpecialKind::Projectile,
+        ));
+        assert!(tutorial_special_activation_matches(
+            TUTORIAL_PLAYER_ID,
+            SpecialKind::Projectile,
+            true,
+            SpecialKind::Projectile,
+        ));
     }
 
     #[test]
@@ -4225,6 +5266,7 @@ mod tests {
             .insert_resource(GameplayPauseOwners::default())
             .insert_resource(TutorialTransition::default())
             .insert_resource(UserModeState::default())
+            .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let player = app
             .world_mut()
@@ -4266,8 +5308,24 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<TutorialSession>().step_index, 1);
         assert_eq!(
+            app.world().resource::<TutorialSession>().completion_state,
+            TutorialCompletionState::Settling
+        );
+        assert_eq!(
             app.world().resource::<TutorialTransition>().pending_action,
-            Some(TutorialTransitionAction::AdvanceStep { skipped: false })
+            None
+        );
+
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            entity.get_mut::<FighterInput>().unwrap().guard = false;
+            entity.get_mut::<FighterActionState>().unwrap().action = FighterAction::Idle;
+        }
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
         );
     }
 
@@ -4289,6 +5347,7 @@ mod tests {
             .insert_resource(GameplayPauseOwners::default())
             .insert_resource(TutorialTransition::default())
             .insert_resource(UserModeState::default())
+            .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let dummy = app
             .world_mut()
@@ -4350,11 +5409,12 @@ mod tests {
             .get_mut::<FighterGrabState>()
             .unwrap()
             .held_by = None;
+        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
         app.update();
         assert_eq!(app.world().resource::<TutorialSession>().step_index, 4);
         assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
-            Some(TutorialTransitionAction::AdvanceStep { skipped: false })
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Success
         );
     }
 
