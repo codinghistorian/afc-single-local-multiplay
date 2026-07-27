@@ -8,7 +8,7 @@ use crate::controller_haptics::{
     queue_simple_haptic,
 };
 
-const CONTROL_PREFERENCES_VERSION: u32 = 3;
+const CONTROL_PREFERENCES_VERSION: u32 = 4;
 #[cfg(target_arch = "wasm32")]
 const CONTROL_PREFERENCES_STORAGE_KEY: &str = "animal-fighter-club.controls.v1";
 
@@ -250,14 +250,98 @@ struct StoredControlPreferences {
 struct VersionTwoStoredControlPreferences {
     version: u32,
     vibration: VibrationLevel,
-    key_bindings: PlayerKeyBindings,
+    key_bindings: LegacyPlayerKeyBindings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct VersionThreeStoredControlPreferences {
+    version: u32,
+    vibration: VibrationLevel,
+    haptic_style: HapticStyle,
+    key_bindings: LegacyPlayerKeyBindings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyStoredControlPreferences {
     version: u32,
     vibration_enabled: bool,
-    key_bindings: PlayerKeyBindings,
+    key_bindings: LegacyPlayerKeyBindings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyPlayerControlBindings {
+    left: KeyCode,
+    right: KeyCode,
+    up: KeyCode,
+    down: KeyCode,
+    aim_grab: KeyCode,
+    heavy: KeyCode,
+    light: KeyCode,
+    jump: KeyCode,
+}
+
+impl LegacyPlayerControlBindings {
+    fn migrate(
+        self,
+        defaults: crate::components::PlayerControlBindings,
+    ) -> crate::components::PlayerControlBindings {
+        crate::components::PlayerControlBindings {
+            left: self.left,
+            right: self.right,
+            up: self.up,
+            down: self.down,
+            aim_grab: self.aim_grab,
+            heavy: self.heavy,
+            light: self.light,
+            jump: self.jump,
+            special: defaults.special,
+        }
+    }
+}
+
+impl From<crate::components::PlayerControlBindings> for LegacyPlayerControlBindings {
+    fn from(bindings: crate::components::PlayerControlBindings) -> Self {
+        Self {
+            left: bindings.left,
+            right: bindings.right,
+            up: bindings.up,
+            down: bindings.down,
+            aim_grab: bindings.aim_grab,
+            heavy: bindings.heavy,
+            light: bindings.light,
+            jump: bindings.jump,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyPlayerKeyBindings {
+    p1: LegacyPlayerControlBindings,
+    p2: LegacyPlayerControlBindings,
+    p3: LegacyPlayerControlBindings,
+    p4: LegacyPlayerControlBindings,
+}
+
+impl LegacyPlayerKeyBindings {
+    #[cfg(test)]
+    fn from_current(bindings: &PlayerKeyBindings) -> Self {
+        Self {
+            p1: bindings.p1.into(),
+            p2: bindings.p2.into(),
+            p3: bindings.p3.into(),
+            p4: bindings.p4.into(),
+        }
+    }
+
+    fn migrate(self) -> PlayerKeyBindings {
+        let defaults = PlayerKeyBindings::default();
+        PlayerKeyBindings {
+            p1: self.p1.migrate(defaults.p1),
+            p2: self.p2.migrate(defaults.p2),
+            p3: self.p3.migrate(defaults.p3),
+            p4: self.p4.migrate(defaults.p4),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -289,7 +373,7 @@ fn decode_control_preferences(
             let stored: LegacyStoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse legacy controls: {error}"))?;
             (
-                stored.key_bindings,
+                stored.key_bindings.migrate(),
                 if stored.vibration_enabled {
                     VibrationLevel::Standard
                 } else {
@@ -302,9 +386,18 @@ fn decode_control_preferences(
             let stored: VersionTwoStoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse version 2 controls: {error}"))?;
             (
-                stored.key_bindings,
+                stored.key_bindings.migrate(),
                 stored.vibration,
                 HapticStyle::Competitive,
+            )
+        }
+        3 => {
+            let stored: VersionThreeStoredControlPreferences = ron::from_str(contents)
+                .map_err(|error| format!("could not parse version 3 controls: {error}"))?;
+            (
+                stored.key_bindings.migrate(),
+                stored.vibration,
+                stored.haptic_style,
             )
         }
         CONTROL_PREFERENCES_VERSION => {
@@ -544,7 +637,7 @@ mod tests {
             &ControlPreferences::default(),
         )
         .unwrap()
-        .replacen("version: 3", "version: 99", 1);
+        .replacen("version: 4", "version: 99", 1);
         assert!(decode_control_preferences(&encoded).is_err());
     }
 
@@ -578,7 +671,7 @@ mod tests {
         let enabled = ron::ser::to_string(&LegacyStoredControlPreferences {
             version: 1,
             vibration_enabled: true,
-            key_bindings: bindings.clone(),
+            key_bindings: LegacyPlayerKeyBindings::from_current(&bindings),
         })
         .unwrap();
         let disabled = enabled.replacen("true", "false", 1);
@@ -601,11 +694,54 @@ mod tests {
         let encoded = ron::ser::to_string(&VersionTwoStoredControlPreferences {
             version: 2,
             vibration: VibrationLevel::High,
-            key_bindings: PlayerKeyBindings::default(),
+            key_bindings: LegacyPlayerKeyBindings::from_current(&PlayerKeyBindings::default()),
         })
         .unwrap();
         let preferences = decode_control_preferences(&encoded).unwrap().1;
         assert_eq!(preferences.vibration, VibrationLevel::High);
         assert_eq!(preferences.haptic_style, HapticStyle::Competitive);
+    }
+
+    #[test]
+    fn versions_one_through_three_fill_only_new_special_defaults() {
+        let mut current = PlayerKeyBindings::default();
+        current.p1.left = KeyCode::KeyQ;
+        current.p2.jump = KeyCode::BracketLeft;
+        let legacy = LegacyPlayerKeyBindings::from_current(&current);
+        let encoded_versions = [
+            ron::ser::to_string(&LegacyStoredControlPreferences {
+                version: 1,
+                vibration_enabled: true,
+                key_bindings: legacy.clone(),
+            })
+            .unwrap(),
+            ron::ser::to_string(&VersionTwoStoredControlPreferences {
+                version: 2,
+                vibration: VibrationLevel::Low,
+                key_bindings: legacy.clone(),
+            })
+            .unwrap(),
+            ron::ser::to_string(&VersionThreeStoredControlPreferences {
+                version: 3,
+                vibration: VibrationLevel::Low,
+                haptic_style: HapticStyle::Cinematic,
+                key_bindings: legacy,
+            })
+            .unwrap(),
+        ];
+
+        for encoded in &encoded_versions {
+            let (migrated, _) = decode_control_preferences(encoded).unwrap();
+            assert_eq!(migrated.p1.left, KeyCode::KeyQ);
+            assert_eq!(migrated.p2.jump, KeyCode::BracketLeft);
+            assert_eq!(migrated.p1.special, KeyCode::KeyE);
+            assert_eq!(migrated.p2.special, KeyCode::KeyP);
+            assert_eq!(migrated.p3.special, KeyCode::Period);
+            assert_eq!(migrated.p4.special, KeyCode::Minus);
+        }
+
+        let (_, preferences) = decode_control_preferences(&encoded_versions[2]).unwrap();
+        assert_eq!(preferences.vibration, VibrationLevel::Low);
+        assert_eq!(preferences.haptic_style, HapticStyle::Cinematic);
     }
 }

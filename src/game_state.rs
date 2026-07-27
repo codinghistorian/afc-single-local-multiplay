@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::time::Virtual;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::arena_defs::arena_definitions;
@@ -266,7 +267,7 @@ fn sync_setup_character_scene(
     }
 }
 
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, Debug)]
 pub struct LocalSetup {
     pub rule_index: usize,
     pub arena_index: usize,
@@ -615,6 +616,67 @@ impl MatchTelemetry {
 
 pub const DEFAULT_REPLAY_SEED: u64 = 0xFFC0_0001;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameplayPauseOwner {
+    ControllerReconnect,
+    TutorialPrompt,
+    TutorialMenu,
+    TutorialTransition,
+}
+
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct GameplayPauseOwners {
+    controller_reconnect: bool,
+    tutorial_prompt: bool,
+    tutorial_menu: bool,
+    tutorial_transition: bool,
+}
+
+impl GameplayPauseOwners {
+    pub fn set(&mut self, owner: GameplayPauseOwner, active: bool) {
+        match owner {
+            GameplayPauseOwner::ControllerReconnect => self.controller_reconnect = active,
+            GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt = active,
+            GameplayPauseOwner::TutorialMenu => self.tutorial_menu = active,
+            GameplayPauseOwner::TutorialTransition => self.tutorial_transition = active,
+        }
+    }
+
+    pub fn contains(&self, owner: GameplayPauseOwner) -> bool {
+        match owner {
+            GameplayPauseOwner::ControllerReconnect => self.controller_reconnect,
+            GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt,
+            GameplayPauseOwner::TutorialMenu => self.tutorial_menu,
+            GameplayPauseOwner::TutorialTransition => self.tutorial_transition,
+        }
+    }
+
+    pub fn blocks_gameplay(&self) -> bool {
+        self.contains(GameplayPauseOwner::ControllerReconnect)
+            || self.contains(GameplayPauseOwner::TutorialPrompt)
+            || self.contains(GameplayPauseOwner::TutorialMenu)
+            || self.contains(GameplayPauseOwner::TutorialTransition)
+    }
+
+    pub fn clear_tutorial_overlays(&mut self) {
+        self.tutorial_prompt = false;
+        self.tutorial_menu = false;
+    }
+}
+
+pub fn sync_virtual_time_pause(
+    owners: Res<GameplayPauseOwners>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+) {
+    if owners.blocks_gameplay() {
+        if !virtual_time.is_paused() {
+            virtual_time.pause();
+        }
+    } else if virtual_time.is_paused() {
+        virtual_time.unpause();
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct Hitstop {
     pub remaining: f32,
@@ -893,8 +955,11 @@ fn next_replay_seed(seed: u64) -> u64 {
 pub fn match_accepts_gameplay(
     state: Res<MatchState>,
     reconnect: Res<crate::user_mode::LocalControllerReconnect>,
+    pause_owners: Option<Res<GameplayPauseOwners>>,
 ) -> bool {
-    state.is_fighting() && !reconnect.blocks_gameplay()
+    state.is_fighting()
+        && !reconnect.blocks_gameplay()
+        && !pause_owners.is_some_and(|owners| owners.blocks_gameplay())
 }
 
 pub fn handle_global_input(

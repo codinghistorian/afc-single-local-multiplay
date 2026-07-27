@@ -2394,6 +2394,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "js-sys",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-haptics",
  "objc2-foundation 0.3.2",

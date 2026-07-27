@@ -209,7 +209,12 @@ pub fn handle_special_inputs(
         feedback.push_feedback_cue(special_cue(kind), ImpactSource::MatchFlow, 20);
         set_special_action(&mut action);
         input.special = false;
+        input.light = false;
+        input.light_held = false;
+        input.raw_light_pressed = false;
         input.heavy = false;
+        input.heavy_held = false;
+        input.raw_heavy_pressed = false;
         input.grab = false;
     }
 }

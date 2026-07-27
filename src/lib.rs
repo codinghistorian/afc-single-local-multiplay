@@ -31,6 +31,7 @@ mod reactions;
 mod specials;
 mod styles;
 mod techniques;
+mod tutorial;
 mod user_mode;
 
 #[cfg(target_arch = "wasm32")]
@@ -133,10 +134,14 @@ pub fn build_app() -> App {
         .init_resource::<game_state::MatchTelemetry>()
         .init_resource::<game_state::Hitstop>()
         .init_resource::<game_state::MatchAnnouncements>()
+        .init_resource::<game_state::GameplayPauseOwners>()
         .init_resource::<combat::HitEffects>()
         .init_resource::<camera::CameraActionEffects>()
         .init_resource::<components::PlayerKeyBindings>()
         .init_resource::<control_settings::ControlPreferences>()
+        .init_resource::<tutorial::TutorialProgress>()
+        .init_resource::<tutorial::TutorialSession>()
+        .init_resource::<tutorial::TutorialTransition>()
         .init_resource::<user_mode::UserModeState>()
         .init_resource::<user_mode::UserModeGameplayScene>()
         .init_resource::<user_mode::LocalControllerReconnect>()
@@ -158,6 +163,7 @@ pub fn build_app() -> App {
             Startup,
             (
                 control_settings::load_control_preferences,
+                tutorial::load_tutorial_progress,
                 effects::setup_effect_assets,
                 combat::setup_combat_visual_assets,
                 bee_skills::setup_bee_skill_assets,
@@ -189,6 +195,10 @@ pub fn build_app() -> App {
                 .chain(),
         )
         .add_systems(
+            Startup,
+            tutorial::setup_tutorial_ui.after(user_mode::setup_user_mode_ui),
+        )
+        .add_systems(
             Update,
             (
                 control_settings::sync_controller_device_info,
@@ -201,13 +211,23 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 feel::reload_combat_feel_tuning,
                 (
+                    tutorial::handle_tutorial_input,
                     user_mode::handle_user_mode_input,
                     user_mode::sync_user_mode_controllers,
                     user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
                 user_mode::announce_haptic_test_results,
-                game_state::handle_global_input,
+                (
+                    game_state::handle_global_input,
+                    tutorial::observe_tutorial_objective,
+                    tutorial::advance_tutorial_transition
+                        .run_if(tutorial::tutorial_transition_active),
+                    tutorial::reset_tutorial_step,
+                    tutorial::cleanup_tutorial_session,
+                    game_state::sync_virtual_time_pause,
+                )
+                    .chain(),
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
                 user_mode::sync_user_mode_battle_music,
@@ -250,6 +270,7 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 bot::bot_action_control_input,
                 bot::bot_input,
+                tutorial::script_tutorial_dummy,
                 fighter::apply_drunk_input_modifier,
             )
                 .chain()
@@ -365,6 +386,7 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 map_editor::update_map_editor_camera,
                 hud::update_hud.run_if(user_mode::gameplay_scene_loaded),
+                hud::update_hud_status_indicators.run_if(user_mode::gameplay_scene_loaded),
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 map_editor::update_map_editor_ui.run_if(user_mode::gameplay_scene_loaded),
                 (
@@ -373,6 +395,8 @@ pub fn build_app() -> App {
                     user_mode::update_user_mode_ui,
                     user_mode::update_user_mode_button_styles,
                     user_mode::update_controller_reconnect_overlay,
+                    tutorial::update_tutorial_ui,
+                    tutorial::update_tutorial_button_styles,
                 )
                     .chain(),
             )
@@ -409,7 +433,11 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
-            user_mode::sync_user_mode_ui_camera.in_set(GameSet::Presentation),
+            (
+                user_mode::sync_user_mode_ui_camera,
+                tutorial::sync_tutorial_ui_camera,
+            )
+                .in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,

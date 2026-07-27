@@ -639,6 +639,18 @@ fn keyboard_action_sample(
         reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings);
     let light_blocked =
         reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
+    let special_just = keys.just_pressed(bindings.special);
+    let special_kind = special_just.then(|| {
+        if keys.pressed(bindings.light) {
+            SpecialInputKind::Trap
+        } else if keys.pressed(bindings.aim_grab) {
+            SpecialInputKind::Shockwave
+        } else if keys.pressed(bindings.heavy) {
+            SpecialInputKind::Hazard
+        } else {
+            SpecialInputKind::Projectile
+        }
+    });
     DeviceActionSample {
         movement: if camera_movement_blocked {
             Vec2::ZERO
@@ -670,6 +682,8 @@ fn keyboard_action_sample(
         heavy_released: keys.just_released(bindings.heavy),
         grab_just: keys.just_pressed(bindings.aim_grab),
         grab_held: keys.pressed(bindings.aim_grab),
+        special_just,
+        special_kind,
         ..default()
     }
 }
@@ -6319,6 +6333,41 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn keyboard_special_chords_select_all_four_shared_specials() {
+        let bindings = PlayerControlBindings::player_one_default();
+        for (modifier, expected) in [
+            (None, SpecialInputKind::Projectile),
+            (Some(bindings.heavy), SpecialInputKind::Hazard),
+            (Some(bindings.aim_grab), SpecialInputKind::Shockwave),
+            (Some(bindings.light), SpecialInputKind::Trap),
+        ] {
+            let mut keys = ButtonInput::default();
+            if let Some(modifier) = modifier {
+                keys.press(modifier);
+            }
+            keys.press(bindings.special);
+            let sample = keyboard_action_sample(&keys, bindings, false);
+            assert!(sample.special_just);
+            assert_eq!(sample.special_kind, Some(expected));
+        }
+    }
+
+    #[test]
+    fn keyboard_special_modifier_precedence_is_light_then_aim_then_heavy() {
+        let bindings = PlayerControlBindings::player_one_default();
+        let mut keys = ButtonInput::default();
+        keys.press(bindings.light);
+        keys.press(bindings.aim_grab);
+        keys.press(bindings.heavy);
+        keys.press(bindings.special);
+
+        assert_eq!(
+            keyboard_action_sample(&keys, bindings, false).special_kind,
+            Some(SpecialInputKind::Trap)
+        );
     }
 
     #[test]
