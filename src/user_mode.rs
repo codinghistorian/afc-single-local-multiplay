@@ -44,6 +44,7 @@ const USER_MODE_TUTORIAL_BACKGROUND_PATH: &str =
     "backgrounds/menu/animal_fighter_tutorial_background_1920x1080.png";
 const USER_MODE_SETTINGS_BACKGROUND_PATH: &str =
     "backgrounds/menu/animal_fighter_settings_background_1920x1080.png";
+const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
 const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
@@ -2076,13 +2077,18 @@ pub fn setup_user_mode_ui(
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("ANIMAL FIGHTER CLUB"),
-                        TextFont {
-                            font_size: 46.0,
+                        Node {
+                            width: Val::Px(400.0),
+                            height: Val::Px(300.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                        TextShadow::default(),
+                        ImageNode::new(asset_server.load(USER_MODE_GAME_LOGO_PATH))
+                            .with_rect(Rect {
+                                min: Vec2::new(288.0, 96.0),
+                                max: Vec2::new(1248.0, 816.0),
+                            })
+                            .with_mode(NodeImageMode::Stretch),
+                        Pickable::IGNORE,
                     ),
                     user_mode_action_button(
                         "SINGLE PLAYER",
@@ -6198,6 +6204,13 @@ mod tests {
                 "missing main-menu background: {path}"
             );
         }
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(USER_MODE_GAME_LOGO_PATH)
+                .is_file(),
+            "missing main-menu logo: {USER_MODE_GAME_LOGO_PATH}"
+        );
     }
 
     #[test]
