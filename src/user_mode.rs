@@ -1,3 +1,4 @@
+use bevy::asset::LoadState;
 use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -35,6 +36,14 @@ use crate::game_state::{
 use crate::tutorial::{TutorialTransition, TutorialTransitionAction, request_tutorial_transition};
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
+const USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS: f32 = 0.35;
+const USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_single_player_background_1920x1080.png";
+const USER_MODE_MULTIPLAYER_BACKGROUND_PATH: &str = "backgrounds/menu/afc_multiplayer_menu.png";
+const USER_MODE_TUTORIAL_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_tutorial_background_1920x1080.png";
+const USER_MODE_SETTINGS_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_settings_background_1920x1080.png";
 const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
@@ -200,6 +209,25 @@ impl UserModeMainMenuChoice {
         }
     }
 }
+
+const USER_MODE_MAIN_MENU_BACKGROUNDS: &[(UserModeMainMenuChoice, &str)] = &[
+    (
+        UserModeMainMenuChoice::SinglePlayer,
+        USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Multiplayer,
+        USER_MODE_MULTIPLAYER_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Tutorial,
+        USER_MODE_TUTORIAL_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Settings,
+        USER_MODE_SETTINGS_BACKGROUND_PATH,
+    ),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UserModePlayerCountChoice {
@@ -1440,6 +1468,66 @@ pub(crate) struct UserModeStartPanel;
 #[derive(Component)]
 pub(crate) struct UserModeMainMenuPanel;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MainMenuBackgroundFade {
+    opacity: f32,
+    start_opacity: f32,
+    target_opacity: f32,
+    elapsed: f32,
+}
+
+impl Default for MainMenuBackgroundFade {
+    fn default() -> Self {
+        Self {
+            opacity: 0.0,
+            start_opacity: 0.0,
+            target_opacity: 0.0,
+            elapsed: 0.0,
+        }
+    }
+}
+
+impl MainMenuBackgroundFade {
+    fn advance(&mut self, target_opacity: f32, delta_seconds: f32) -> f32 {
+        if self.target_opacity != target_opacity {
+            self.start_opacity = self.opacity;
+            self.target_opacity = target_opacity;
+            self.elapsed = 0.0;
+        }
+
+        if self.opacity == self.target_opacity {
+            return self.opacity;
+        }
+
+        self.elapsed =
+            (self.elapsed + delta_seconds.max(0.0)).min(USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS);
+        let amount = (self.elapsed / USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS).clamp(0.0, 1.0);
+        let eased = amount * amount * (3.0 - 2.0 * amount);
+        self.opacity = self.start_opacity + (self.target_opacity - self.start_opacity) * eased;
+
+        if amount >= 1.0 {
+            self.opacity = self.target_opacity;
+        }
+        self.opacity
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeMainMenuBackground {
+    choice: UserModeMainMenuChoice,
+    asset_path: &'static str,
+    fade: MainMenuBackgroundFade,
+    load_failure_reported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainMenuBackgroundTarget {
+    Black,
+    Choice(UserModeMainMenuChoice),
+    HoldForLoad,
+    Failed(UserModeMainMenuChoice),
+}
+
 #[derive(Component)]
 pub(crate) struct UserModePlayerCountPanel;
 
@@ -1882,6 +1970,45 @@ pub fn setup_user_mode_ui(
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
 
+    let main_menu_backgrounds = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|parent| {
+            for &(choice, asset_path) in USER_MODE_MAIN_MENU_BACKGROUNDS {
+                parent.spawn((
+                    UserModeMainMenuBackground {
+                        choice,
+                        asset_path,
+                        fade: MainMenuBackgroundFade::default(),
+                        load_failure_reported: false,
+                    },
+                    Node {
+                        display: Display::None,
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    ImageNode::new(asset_server.load(asset_path))
+                        .with_color(Color::srgba(1.0, 1.0, 1.0, 0.0))
+                        .with_mode(NodeImageMode::Stretch),
+                    Pickable::IGNORE,
+                ));
+            }
+        })
+        .id();
+
     let mut user_mode_root = commands.spawn((
         UserModeRoot,
         Node {
@@ -1935,7 +2062,10 @@ pub fn setup_user_mode_ui(
                 UserModeMainMenuPanel,
                 Node {
                     display: Display::None,
-                    width: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(45.0),
                     height: Val::Percent(100.0),
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
@@ -2769,6 +2899,7 @@ pub fn setup_user_mode_ui(
             user_mode_back_button(),
         ],
     ));
+    user_mode_root.insert_children(0, &[main_menu_backgrounds]);
     if let Some(ui_camera) = ui_camera {
         user_mode_root.insert(UiTargetCamera(ui_camera));
     }
@@ -3203,6 +3334,27 @@ pub struct UserModeInputContext<'w, 's> {
     screen_transition: ResMut<'w, ScreenLookTransition>,
     pause_owners: ResMut<'w, GameplayPauseOwners>,
     tutorial_transition: ResMut<'w, TutorialTransition>,
+}
+
+pub fn sync_main_menu_pointer_hover(
+    mut user_mode: ResMut<UserModeState>,
+    action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
+) {
+    if user_mode.screen != UserModeScreen::ModeSelect {
+        return;
+    }
+
+    if let Some(choice) = action_buttons.iter().find_map(|(interaction, action)| {
+        if *interaction != Interaction::Hovered {
+            return None;
+        }
+        match action {
+            UserModeUiAction::MainMenu(choice) => Some(*choice),
+            _ => None,
+        }
+    }) {
+        user_mode.main_menu_choice = choice;
+    }
 }
 
 pub fn handle_user_mode_input(
@@ -4472,6 +4624,86 @@ pub fn sync_user_mode_ui_camera(
     };
     for root in &roots {
         commands.entity(root).insert(UiTargetCamera(ui_camera));
+    }
+}
+
+fn main_menu_background_path(choice: UserModeMainMenuChoice) -> Option<&'static str> {
+    USER_MODE_MAIN_MENU_BACKGROUNDS
+        .iter()
+        .find_map(|&(mapped_choice, path)| (mapped_choice == choice).then_some(path))
+}
+
+fn desired_main_menu_background(user_mode: &UserModeState) -> Option<UserModeMainMenuChoice> {
+    (user_mode.screen() == UserModeScreen::ModeSelect).then_some(user_mode.main_menu_choice)
+}
+
+pub fn update_user_mode_main_menu_backgrounds(
+    user_mode: Res<UserModeState>,
+    real_time: Res<Time<Real>>,
+    asset_server: Res<AssetServer>,
+    mut backgrounds: ParamSet<(
+        Query<(&UserModeMainMenuBackground, &ImageNode)>,
+        Query<(&mut UserModeMainMenuBackground, &mut Node, &mut ImageNode)>,
+    )>,
+) {
+    let desired_choice = desired_main_menu_background(&user_mode);
+    let target = {
+        let background_query = backgrounds.p0();
+        match desired_choice {
+            None => MainMenuBackgroundTarget::Black,
+            Some(choice) if main_menu_background_path(choice).is_none() => {
+                MainMenuBackgroundTarget::Black
+            }
+            Some(choice) => match background_query
+                .iter()
+                .find(|(background, _)| background.choice == choice)
+            {
+                None => MainMenuBackgroundTarget::Black,
+                Some((_, image)) if asset_server.is_loaded_with_dependencies(image.image.id()) => {
+                    MainMenuBackgroundTarget::Choice(choice)
+                }
+                Some((_, image))
+                    if matches!(
+                        asset_server.load_state(image.image.id()),
+                        LoadState::Failed(_)
+                    ) =>
+                {
+                    MainMenuBackgroundTarget::Failed(choice)
+                }
+                Some(_) => MainMenuBackgroundTarget::HoldForLoad,
+            },
+        }
+    };
+
+    if target == MainMenuBackgroundTarget::HoldForLoad {
+        return;
+    }
+
+    for (mut background, mut node, mut image) in &mut backgrounds.p1() {
+        if target == MainMenuBackgroundTarget::Failed(background.choice)
+            && !background.load_failure_reported
+        {
+            warn!(
+                "Could not load main-menu background asset {}",
+                background.asset_path
+            );
+            background.load_failure_reported = true;
+        }
+
+        let target_opacity = if target == MainMenuBackgroundTarget::Choice(background.choice) {
+            1.0
+        } else {
+            0.0
+        };
+        let opacity = background
+            .fade
+            .advance(target_opacity, real_time.delta_secs());
+        image.color = Color::srgba(1.0, 1.0, 1.0, opacity);
+        node.display = if opacity > 0.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -5933,6 +6165,75 @@ mod tests {
             UserModeMainMenuChoice::SinglePlayer.previous(),
             UserModeMainMenuChoice::Settings
         );
+    }
+
+    #[test]
+    fn main_menu_background_catalog_maps_every_choice_to_existing_art() {
+        let expected = [
+            (
+                UserModeMainMenuChoice::SinglePlayer,
+                USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Multiplayer,
+                USER_MODE_MULTIPLAYER_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Tutorial,
+                USER_MODE_TUTORIAL_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Settings,
+                USER_MODE_SETTINGS_BACKGROUND_PATH,
+            ),
+        ];
+
+        for (choice, path) in expected {
+            assert_eq!(main_menu_background_path(choice), Some(path));
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(path)
+                    .is_file(),
+                "missing main-menu background: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_menu_background_fade_eases_and_reverses_without_a_jump() {
+        let mut fade = MainMenuBackgroundFade::default();
+
+        assert_eq!(fade.advance(1.0, 0.0), 0.0);
+        assert!(
+            (fade.advance(1.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS * 0.5) - 0.5).abs() < 0.001
+        );
+        let before_reverse = fade.opacity;
+        assert_eq!(fade.advance(0.0, 0.0), before_reverse);
+        assert!(fade.advance(0.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS * 0.5) < before_reverse);
+        assert_eq!(
+            fade.advance(0.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS),
+            0.0
+        );
+    }
+
+    #[test]
+    fn hovering_a_main_menu_button_moves_selection_without_activating_it() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, sync_main_menu_pointer_hover);
+        app.world_mut().spawn((
+            Interaction::Hovered,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial),
+        ));
+
+        app.update();
+
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(user_mode.main_menu_choice, UserModeMainMenuChoice::Tutorial);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
     }
 
     #[test]

@@ -211,6 +211,7 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 feel::reload_combat_feel_tuning,
                 (
+                    user_mode::sync_main_menu_pointer_hover,
                     tutorial::handle_tutorial_input,
                     user_mode::handle_user_mode_input,
                     user_mode::sync_user_mode_controllers,
@@ -394,6 +395,7 @@ pub fn build_app() -> App {
                     fighter::update_aim_markers,
                     user_mode::rotate_user_mode_preview,
                     user_mode::update_user_mode_selection_previews,
+                    user_mode::update_user_mode_main_menu_backgrounds,
                     user_mode::update_user_mode_ui,
                     user_mode::update_user_mode_button_styles,
                     user_mode::update_controller_reconnect_overlay,
