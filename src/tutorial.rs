@@ -340,7 +340,6 @@ pub enum TutorialObjective {
     Guarding {
         count: u8,
     },
-    GrabEscape,
     Recovery(TechniqueId),
     ItemUse {
         kind: ItemKind,
@@ -373,7 +372,6 @@ pub enum ScriptedDummyMode {
     Guarding,
     TimedLightAttacks,
     TimedHeavyAttacks,
-    Grabs,
     KnockdownSetup,
     NormalBot,
 }
@@ -593,15 +591,6 @@ const COMBAT_STEPS: &[TutorialStep] = &[
         ScriptedDummyMode::Passive,
     ),
     lesson_step(
-        "Grab and throw",
-        "Grab Pig, choose a direction, and throw.",
-        TutorialObjective::Action(FighterAction::Throwing),
-        &[TutorialPromptAction::Aim, TutorialPromptAction::Move],
-        "Tap Aim near Pig, then choose a throw direction.",
-        "Walk into grab range, tap Aim/Grab, then press a movement direction.",
-        ScriptedDummyMode::Passive,
-    ),
-    lesson_step(
         "MP",
         "Heavy techniques, shared specials, and ultimates consume MP. White Wine and Barrel restore it.",
         TutorialObjective::Knowledge,
@@ -663,15 +652,6 @@ const DEFENSE_STEPS: &[TutorialStep] = &[
         "Hold Guard, choose a direction, then Dash.",
         "Keep Guard held as you double-tap a direction or press the controller Dash control.",
         ScriptedDummyMode::TimedHeavyAttacks,
-    ),
-    lesson_step(
-        "Brace and escape",
-        "Brace with Guard and move away from Pig to break the grab before the throw.",
-        TutorialObjective::GrabEscape,
-        &[TutorialPromptAction::Guard, TutorialPromptAction::Move],
-        "Let the grab connect, then hold Guard while moving directly away.",
-        "Stand close. Once grabbed, keep Guard held and push away from Pig until Cat escapes.",
-        ScriptedDummyMode::Grabs,
     ),
     lesson_step(
         "Quick stand",
@@ -1269,7 +1249,7 @@ pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
         id: TutorialChapterId::Combat,
         number: 2,
         title: "Combat",
-        summary: "Light and Heavy routes, aerials, grabs, MP, and Cat's ultimate.",
+        summary: "Light and Heavy routes, aerials, MP, and Cat's ultimate.",
         player_character: CharacterKind::Cat,
         steps: COMBAT_STEPS,
         final_exam: false,
@@ -1278,7 +1258,7 @@ pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
         id: TutorialChapterId::DefenseRecovery,
         number: 3,
         title: "Defense & Recovery",
-        summary: "Guard, perfect counters, guard steps, grab escape, quick stand, and recovery roll.",
+        summary: "Guard, perfect counters, guard steps, quick stand, and recovery roll.",
         player_character: CharacterKind::Cat,
         steps: DEFENSE_STEPS,
         final_exam: false,
@@ -1914,7 +1894,6 @@ fn tutorial_settlement_status(session: &TutorialSession) -> Option<&'static str>
             "FINISH THE MOVE AND LAND"
         }
         TutorialObjective::Guarding { .. } => "RELEASE GUARD AFTER THE BLOCK",
-        TutorialObjective::GrabEscape => "REGAIN CONTROL TO FINISH",
         TutorialObjective::ItemThrow(ItemKind::Barrel) => "WAIT FOR THE SPRAY",
         TutorialObjective::ItemThrow(ItemKind::Crate) => "WAIT FOR THE REVEAL",
         TutorialObjective::ItemThrow(ItemKind::Steamer) => "MOVE CLEAR - WAIT FOR THE BLAST",
@@ -2241,9 +2220,6 @@ pub fn script_tutorial_dummy(
             ScriptedDummyMode::TimedHeavyAttacks | ScriptedDummyMode::KnockdownSetup => {
                 input.heavy = scripted_input_pulse(elapsed, 2.8);
             }
-            ScriptedDummyMode::Grabs => {
-                input.grab = scripted_input_pulse(elapsed, 2.5);
-            }
             ScriptedDummyMode::NormalBot => {}
         }
     }
@@ -2267,7 +2243,6 @@ pub fn observe_tutorial_objective(
         &FighterActionState,
         &FighterStats,
         &FighterMotor,
-        &FighterGrabState,
         &Transform,
         &FighterInventory,
     )>,
@@ -2295,21 +2270,17 @@ pub fn observe_tutorial_objective(
         return;
     }
 
-    let dummy_state =
-        fighters
-            .iter()
-            .find_map(|(fighter, _, action, _, motor, _, transform, _)| {
-                (fighter.id == TUTORIAL_DUMMY_ID).then_some((action, motor, transform.translation))
-            });
-    let dummy_position = dummy_state.map(|(_, _, position)| position);
-    let Some((input, action, _stats, motor, grab, transform, inventory)) =
-        fighters.iter().find_map(
-            |(fighter, input, action, stats, motor, grab, transform, inventory)| {
-                (fighter.id == TUTORIAL_PLAYER_ID)
-                    .then_some((input, action, stats, motor, grab, transform, inventory))
-            },
-        )
-    else {
+    let dummy_state = fighters
+        .iter()
+        .find_map(|(fighter, _, action, _, motor, transform, _)| {
+            (fighter.id == TUTORIAL_DUMMY_ID).then_some((action, motor, transform.translation))
+        });
+    let Some((input, action, _stats, motor, transform, inventory)) = fighters.iter().find_map(
+        |(fighter, input, action, stats, motor, transform, inventory)| {
+            (fighter.id == TUTORIAL_PLAYER_ID)
+                .then_some((input, action, stats, motor, transform, inventory))
+        },
+    ) else {
         return;
     };
 
@@ -2378,24 +2349,6 @@ pub fn observe_tutorial_objective(
                 session.objective_progress = session.objective_progress.saturating_add(1);
             }
             session.objective_progress >= count as u32
-        }
-        TutorialObjective::GrabEscape => {
-            let grabbed = action.action == FighterAction::Grabbed || grab.held_by.is_some();
-            if grabbed {
-                session.objective_latched = true;
-                false
-            } else if session.objective_latched && input.guard {
-                dummy_position.is_some_and(|dummy_position| {
-                    let away = Vec2::new(
-                        transform.translation.x - dummy_position.x,
-                        transform.translation.z - dummy_position.z,
-                    )
-                    .normalize_or_zero();
-                    input.movement.normalize_or_zero().dot(away) > 0.25
-                })
-            } else {
-                false
-            }
         }
         TutorialObjective::Recovery(technique) => action.technique_id == Some(technique),
         TutorialObjective::ItemUse { kind, uses } => {
@@ -2504,9 +2457,6 @@ pub fn observe_tutorial_objective(
         | TutorialObjective::ItemUse { .. } => player_recovered,
         TutorialObjective::Guarding { .. } => {
             !input.guard && action.action != FighterAction::Guarding && player_recovered
-        }
-        TutorialObjective::GrabEscape => {
-            grab.held_by.is_none() && action.action != FighterAction::Grabbed && player_recovered
         }
         TutorialObjective::ItemThrow(_) | TutorialObjective::SpecialSpawn(_) => {
             player_recovered && session.completion_world_effect_seen
@@ -4428,6 +4378,33 @@ mod tests {
     }
 
     #[test]
+    fn catalog_excludes_generic_grab_and_throw_lessons() {
+        for chapter_id in [
+            TutorialChapterId::Combat,
+            TutorialChapterId::DefenseRecovery,
+        ] {
+            let chapter = tutorial_chapter(chapter_id);
+            for step in chapter.steps {
+                assert!(!matches!(
+                    step.objective,
+                    TutorialObjective::Action(FighterAction::Throwing)
+                ));
+                let copy = format!(
+                    "{} {} {} {}",
+                    step.title, step.instruction, step.hint, step.strong_hint
+                )
+                .to_ascii_lowercase();
+                assert!(!copy.contains("grab"), "{} still mentions grab", step.title);
+                assert!(
+                    !copy.contains("throw"),
+                    "{} still mentions throw",
+                    step.title
+                );
+            }
+        }
+    }
+
+    #[test]
     fn catalog_covers_five_selectable_fighters() {
         let fighters = TUTORIAL_CHAPTERS
             .iter()
@@ -5323,95 +5300,6 @@ mod tests {
         }
         advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
         app.update();
-        assert_eq!(
-            app.world().resource::<TutorialSession>().phase,
-            TutorialPhase::Success
-        );
-    }
-
-    #[test]
-    fn grab_escape_requires_grab_then_guarded_movement_away() {
-        let mut app = App::new();
-        let mut session = TutorialSession::default();
-        session.start(TutorialChapterId::DefenseRecovery);
-        session.step_index = 4;
-        session.phase = TutorialPhase::Playing;
-        session.reset_requested = false;
-        let mut state = MatchState::default();
-        state.phase = MatchPhase::Fighting;
-        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
-        app.insert_resource(session)
-            .insert_resource(TutorialProgress::default())
-            .insert_resource(state)
-            .insert_resource(MatchTelemetry::default())
-            .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
-            .insert_resource(UserModeState::default())
-            .insert_resource(Time::<()>::default())
-            .add_systems(Update, observe_tutorial_objective);
-        let dummy = app
-            .world_mut()
-            .spawn((
-                Fighter {
-                    id: TUTORIAL_DUMMY_ID,
-                    name: "Pig",
-                    color: Color::WHITE,
-                    spawn: Vec3::X,
-                },
-                FighterInput::default(),
-                FighterActionState::default(),
-                FighterStats::default(),
-                FighterMotor::default(),
-                FighterGrabState::default(),
-                Transform::from_xyz(1.0, 0.0, 0.0),
-                FighterInventory::default(),
-            ))
-            .id();
-        let player = app
-            .world_mut()
-            .spawn((
-                Fighter {
-                    id: TUTORIAL_PLAYER_ID,
-                    name: "Cat",
-                    color: Color::WHITE,
-                    spawn: Vec3::NEG_X,
-                },
-                FighterInput {
-                    movement: Vec2::NEG_X,
-                    guard: true,
-                    ..default()
-                },
-                FighterActionState {
-                    action: FighterAction::Grabbed,
-                    ..default()
-                },
-                FighterStats::default(),
-                FighterMotor::default(),
-                FighterGrabState {
-                    held_by: Some(dummy),
-                    ..default()
-                },
-                Transform::from_xyz(-1.0, 0.0, 0.0),
-                FighterInventory::default(),
-            ))
-            .id();
-
-        app.update();
-        assert_eq!(app.world().resource::<TutorialSession>().step_index, 4);
-
-        app.world_mut()
-            .entity_mut(player)
-            .get_mut::<FighterActionState>()
-            .unwrap()
-            .action = FighterAction::Idle;
-        app.world_mut()
-            .entity_mut(player)
-            .get_mut::<FighterGrabState>()
-            .unwrap()
-            .held_by = None;
-        advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
-        app.update();
-        assert_eq!(app.world().resource::<TutorialSession>().step_index, 4);
         assert_eq!(
             app.world().resource::<TutorialSession>().phase,
             TutorialPhase::Success

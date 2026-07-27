@@ -151,6 +151,10 @@ impl BotDifficulty {
             Self::Tutorial => 1.65,
         }
     }
+
+    fn normal_grab_allowed(self) -> bool {
+        matches!(self, Self::Standard)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -686,7 +690,8 @@ pub fn bot_input(
             brain.dash_timer = bot_movement_dash_cooldown(brain.movement_plan, bot.id);
         }
 
-        if distance < 0.9
+        if difficulty.normal_grab_allowed()
+            && distance < 0.9
             && brain.attack_timer <= 0.0
             && (time.elapsed_secs() * (bot.id as f32 + 3.3)).sin() > 0.55
         {
@@ -1883,6 +1888,12 @@ mod tests {
         assert!(tutorial.mistake_rate > normal.mistake_rate);
         assert!((0.0..=0.4).contains(&tutorial.mistake_rate));
         assert!(BotDifficulty::Tutorial.attack_recovery_scale() > 1.0);
+    }
+
+    #[test]
+    fn tutorial_difficulty_disables_normal_grabs_only() {
+        assert!(BotDifficulty::Standard.normal_grab_allowed());
+        assert!(!BotDifficulty::Tutorial.normal_grab_allowed());
     }
 
     #[test]
