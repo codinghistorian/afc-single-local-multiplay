@@ -32,6 +32,7 @@ use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
@@ -76,7 +77,7 @@ const CRANK_LEVER_ATTACK_RADIUS: f32 = 1.85;
 const POWDER_CANNON_INTERVAL_SECONDS: f32 = 2.6;
 const POWDER_CANNON_BOMB_DAMAGE: f32 = 9.0;
 const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
-const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
+const CHAMPIONS_COURT_RON_PATH: &str = "assets/maps/champions_court.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
@@ -1052,7 +1053,7 @@ fn spawn_champions_court_map(
 fn load_champions_court_map() -> Result<ChampionsCourtRon, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let contents = include_str!("../arts/champions_court.ron");
+        let contents = include_str!("../assets/maps/champions_court.ron");
         return ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"));
     }
 
@@ -1491,8 +1492,9 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
 fn champions_court_collision_barriers() -> &'static [WorldPropBarrier] {
     static BARRIERS: OnceLock<Vec<WorldPropBarrier>> = OnceLock::new();
     BARRIERS.get_or_init(|| {
-        let map: ChampionsCourtRon = ron::from_str(include_str!("../arts/champions_court.ron"))
-            .expect("embedded Champion's Court RON should parse");
+        let map: ChampionsCourtRon =
+            ron::from_str(include_str!("../assets/maps/champions_court.ron"))
+                .expect("embedded Champion's Court RON should parse");
         let mut barriers = Vec::new();
 
         for object in &map.instances {
@@ -2758,6 +2760,7 @@ pub fn update_powder_keg_cannons(
     effect_assets: Res<EffectAssets>,
     mut hitstop: ResMut<Hitstop>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut bombs: Query<(Entity, &mut ArenaCannonBomb, &mut Transform)>,
     mut fighters: Query<
@@ -2847,8 +2850,10 @@ pub fn update_powder_keg_cannons(
                 &mut commands,
                 &effect_assets,
                 &mut feedback,
+                &mut haptics,
                 &mut hitstop,
                 &match_state,
+                fighter.id,
                 &mut stats,
                 &mut motor,
                 &mut action,
@@ -3237,6 +3242,7 @@ pub fn update_arena_hazards(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut burns: Query<(Entity, &mut ArenaFighterBurn)>,
     mut fighters: Query<(
@@ -3347,8 +3353,10 @@ pub fn update_arena_hazards(
                 &mut commands,
                 &effect_assets,
                 &mut camera_effects,
+                &mut haptics,
                 &mut hitstop,
                 &match_state,
+                fighter.id,
                 &mut stats,
                 &mut motor,
                 &mut action,

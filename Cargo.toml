@@ -11,7 +11,7 @@ native = [
     "bevy/x11",
     "bevy/wayland",
 ]
-web = ["bevy/webgl2"]
+web = ["bevy/webgl2", "bevy/bevy_gilrs"]
 perf = []
 trace = ["perf", "bevy/trace_tracy"]
 
@@ -32,6 +32,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_winit",
     "default_font",
     "reflect_auto_register",
+    "serialize",
     "2d_bevy_render",
     "3d_bevy_render",
     "ui_api",
@@ -52,6 +53,38 @@ serde = { version = "1", features = ["derive"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Storage", "Window"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6.4"
+objc2-core-haptics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CHHapticEngine",
+    "CHHapticEvent",
+    "CHHapticParameter",
+    "CHHapticPattern",
+    "CHHapticPatternPlayer",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSError",
+    "NSString",
+] }
+objc2-game-controller = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "GCController",
+    "GCDevice",
+    "GCPhysicalInputProfile",
+    "GCExtendedGamepad",
+    "GCControllerElement",
+    "GCControllerButtonInput",
+    "GCControllerDirectionPad",
+    "GCControllerAxisInput",
+    "GCDeviceHaptics",
+] }
 
 [profile.dev]
 opt-level = 1

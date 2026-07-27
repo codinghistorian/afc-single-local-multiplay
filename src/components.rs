@@ -187,6 +187,38 @@ pub struct FighterInput {
     pub guard: bool,
     pub ultimate: bool,
     pub special: bool,
+    pub special_kind: Option<SpecialInputKind>,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FighterAimState {
+    pub direction: Vec3,
+    pub locked_target: Option<Entity>,
+    pub marker_position: Vec3,
+    pub marker_opacity: f32,
+    pub aim_pressed: bool,
+    pub manual_unlock_count: u64,
+}
+
+impl Default for FighterAimState {
+    fn default() -> Self {
+        Self {
+            direction: Vec3::Z,
+            locked_target: None,
+            marker_position: Vec3::ZERO,
+            marker_opacity: 0.0,
+            aim_pressed: false,
+            manual_unlock_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecialInputKind {
+    Projectile,
+    Trap,
+    Hazard,
+    Shockwave,
 }
 
 /// Refresh-only directional input modifier applied after every input producer.
@@ -273,6 +305,7 @@ impl ParticipantKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalInputAssignment {
     Keyboard(usize),
+    Gamepad(Entity),
     Unassigned,
 }
 
@@ -329,10 +362,11 @@ pub enum ControlAction {
     Heavy,
     Light,
     Jump,
+    Special,
 }
 
 impl ControlAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Left,
         Self::Right,
         Self::Up,
@@ -341,6 +375,7 @@ impl ControlAction {
         Self::Heavy,
         Self::Light,
         Self::Jump,
+        Self::Special,
     ];
 
     pub fn label(self) -> &'static str {
@@ -353,11 +388,12 @@ impl ControlAction {
             Self::Heavy => "Heavy",
             Self::Light => "Light",
             Self::Jump => "Jump",
+            Self::Special => "Special",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerControlBindings {
     pub left: KeyCode,
     pub right: KeyCode,
@@ -367,6 +403,7 @@ pub struct PlayerControlBindings {
     pub heavy: KeyCode,
     pub light: KeyCode,
     pub jump: KeyCode,
+    pub special: KeyCode,
 }
 
 impl PlayerControlBindings {
@@ -380,6 +417,7 @@ impl PlayerControlBindings {
             heavy: KeyCode::KeyX,
             light: KeyCode::KeyC,
             jump: KeyCode::KeyV,
+            special: KeyCode::KeyE,
         }
     }
 
@@ -393,6 +431,7 @@ impl PlayerControlBindings {
             heavy: KeyCode::KeyY,
             light: KeyCode::KeyU,
             jump: KeyCode::KeyI,
+            special: KeyCode::KeyP,
         }
     }
 
@@ -406,6 +445,7 @@ impl PlayerControlBindings {
             heavy: KeyCode::KeyN,
             light: KeyCode::KeyM,
             jump: KeyCode::Comma,
+            special: KeyCode::Period,
         }
     }
 
@@ -419,6 +459,7 @@ impl PlayerControlBindings {
             heavy: KeyCode::Digit8,
             light: KeyCode::Digit9,
             jump: KeyCode::Digit0,
+            special: KeyCode::Minus,
         }
     }
 
@@ -432,6 +473,7 @@ impl PlayerControlBindings {
             ControlAction::Heavy => self.heavy,
             ControlAction::Light => self.light,
             ControlAction::Jump => self.jump,
+            ControlAction::Special => self.special,
         }
     }
 
@@ -445,11 +487,12 @@ impl PlayerControlBindings {
             ControlAction::Heavy => self.heavy = key,
             ControlAction::Light => self.light = key,
             ControlAction::Jump => self.jump = key,
+            ControlAction::Special => self.special = key,
         }
     }
 }
 
-#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+#[derive(Resource, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerKeyBindings {
     pub p1: PlayerControlBindings,
     pub p2: PlayerControlBindings,
@@ -582,7 +625,8 @@ impl PlayerKeyBindings {
 pub fn reserved_binding_key(key: KeyCode) -> bool {
     matches!(
         key,
-        KeyCode::Escape
+        KeyCode::Unidentified(_)
+            | KeyCode::Escape
             | KeyCode::Enter
             | KeyCode::Tab
             | KeyCode::ShiftLeft

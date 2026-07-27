@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#050607" />
+    <title>Animal Fighter Club</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #050607;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background: #050607;
+      }
+
+      body {
+        display: grid;
+        place-items: stretch;
+      }
+
+      #bevy-canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+        outline: none;
+        background: #050607;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="bevy-canvas" tabindex="0" aria-label="Animal Fighter Club game"></canvas>
+    <script type="module">
+      import init from "./pkg/ffc_prototype.js";
+
+      const canvas = document.getElementById("bevy-canvas");
+      const focusCanvas = () => {
+        try {
+          canvas.focus({ preventScroll: true });
+        } catch {
+          canvas.focus();
+        }
+      };
+
+      window.addEventListener("pointerdown", focusCanvas, { passive: true });
+      window.addEventListener("touchstart", focusCanvas, { passive: true });
+      window.addEventListener("gamepadconnected", focusCanvas, { passive: true });
+
+      init().then(focusCanvas);
+    </script>
+  </body>
+</html>

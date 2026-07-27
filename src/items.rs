@@ -15,6 +15,9 @@ use crate::components::{
     FighterInventory, FighterMotor, FighterStats, Hitbox,
 };
 use crate::constants::*;
+use crate::controller_haptics::{
+    CombatHapticCue, CombatHapticQueue, HapticActionPhase, HapticMoveClass,
+};
 use crate::effects::{
     EffectAssets, spawn_alcohol_spray, spawn_dust_puff, spawn_guard_flash, spawn_pop_bomb_blast,
 };
@@ -1060,6 +1063,7 @@ fn advance_barrel_spray_timer(timer: f32, dt: f32) -> (bool, f32) {
 pub fn spawn_item_hitboxes(
     mut commands: Commands,
     hitstop: Res<Hitstop>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut fighters: Query<
         (
             Entity,
@@ -1095,6 +1099,11 @@ pub fn spawn_item_hitboxes(
         let Some(config) = item_swing_config(item.kind) else {
             continue;
         };
+        haptics.push(CombatHapticCue::action(
+            fighter.id,
+            HapticMoveClass::Heavy,
+            HapticActionPhase::Release,
+        ));
 
         item.durability -= 1;
         let facing = motor.facing.normalize_or_zero();
@@ -1300,6 +1309,7 @@ pub fn update_moving_items(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut items: Query<(
         Entity,
@@ -1378,8 +1388,10 @@ pub fn update_moving_items(
                         &mut commands,
                         &effect_assets,
                         &mut camera_effects,
+                        &mut haptics,
                         &mut hitstop,
                         &state,
+                        target.id,
                         &mut stats,
                         &mut motor,
                         &mut action,
@@ -1715,8 +1727,10 @@ pub fn update_moving_items(
                         &mut commands,
                         &effect_assets,
                         &mut camera_effects,
+                        &mut haptics,
                         &mut hitstop,
                         &state,
+                        fighter.id,
                         &mut stats,
                         &mut motor,
                         &mut action,

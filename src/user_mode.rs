@@ -1,4 +1,6 @@
+use bevy::asset::LoadState;
 use bevy::camera::{RenderTarget, visibility::RenderLayers};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::scene::SceneInstanceReady;
@@ -14,13 +16,35 @@ use crate::characters::{
 };
 use crate::combat::HitEffects;
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind};
-use crate::components::{BotBrain, ControlAction, Controller, Fighter, PlayerKeyBindings};
-use crate::constants::FIGHTER_COUNT;
-use crate::game_state::{
-    LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
+use crate::components::{
+    BotBrain, ControlAction, Controller, Fighter, FighterInput, LocalInputAssignment,
+    PlayerControlBindings, PlayerKeyBindings,
 };
+use crate::constants::FIGHTER_COUNT;
+use crate::control_settings::{
+    ControlPreferences, ControllerDeviceInfo, ControllerFamily, controller_info,
+    request_controller_rumble, save_control_preferences,
+};
+use crate::controller_haptics::{
+    ControllerHapticRequest, HapticPlaybackEvent, HapticPlaybackResult, HapticPurpose,
+    combat_preview_pattern, controller_test_pattern, queue_haptic_pattern,
+};
+use crate::game_state::{
+    GameplayPauseOwner, GameplayPauseOwners, LocalSetup, MatchAnnouncements, MatchPhase,
+    MatchState, reconcile_fighter_control_from_setup,
+};
+use crate::tutorial::{TutorialTransition, TutorialTransitionAction, request_tutorial_transition};
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
+const USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS: f32 = 0.35;
+const USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_single_player_background_1920x1080.png";
+const USER_MODE_MULTIPLAYER_BACKGROUND_PATH: &str = "backgrounds/menu/afc_multiplayer_menu.png";
+const USER_MODE_TUTORIAL_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_tutorial_background_1920x1080.png";
+const USER_MODE_SETTINGS_BACKGROUND_PATH: &str =
+    "backgrounds/menu/animal_fighter_settings_background_1920x1080.png";
+const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
 const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
@@ -48,6 +72,9 @@ const USER_MODE_NOIR_FADE_SECS: f32 = 1.2;
 const USER_MODE_RESULT_MENU_DELAY_SECS: f32 = 1.65;
 const USER_MODE_FILTER_RESET_SECS: f32 = 0.45;
 const USER_MODE_RESULT_SFX_PRIORITY: u8 = 120;
+const USER_MODE_MENU_STICK_THRESHOLD: f32 = 0.55;
+const USER_MODE_MENU_REPEAT_DELAY: f32 = 0.38;
+const USER_MODE_MENU_REPEAT_INTERVAL: f32 = 0.12;
 const USER_MODE_CHOICE_FONT_SIZE: f32 = 23.8;
 const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
     CharacterKind::Cat,
@@ -78,11 +105,59 @@ pub enum UserModeScreen {
     Start,
     ModeSelect,
     PlayerCountSelect,
+    DeviceJoin,
+    ControlsHub,
+    ControllerTest,
     KeySettings,
     CharacterSelect,
     ArenaSelect,
     ControlsBriefing,
     BattleResult,
+    TutorialHub,
+    TutorialLesson,
+    TutorialPause,
+    TutorialFinalResult,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ControlsHubChoice {
+    #[default]
+    ControllerSetup,
+    ControllerTest,
+    KeyboardControls,
+}
+
+impl ControlsHubChoice {
+    fn previous(self) -> Self {
+        match self {
+            Self::ControllerSetup => Self::KeyboardControls,
+            Self::ControllerTest => Self::ControllerSetup,
+            Self::KeyboardControls => Self::ControllerTest,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::ControllerSetup => Self::ControllerTest,
+            Self::ControllerTest => Self::KeyboardControls,
+            Self::KeyboardControls => Self::ControllerSetup,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ControllerSetupContext {
+    #[default]
+    Match,
+    Settings,
+    Tutorial,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ControllerSetupPhase {
+    #[default]
+    Normal,
+    Reorder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +187,7 @@ impl UserPlayMode {
 pub(crate) enum UserModeMainMenuChoice {
     SinglePlayer,
     Multiplayer,
+    Tutorial,
     Settings,
 }
 
@@ -120,18 +196,39 @@ impl UserModeMainMenuChoice {
         match self {
             Self::SinglePlayer => Self::Settings,
             Self::Multiplayer => Self::SinglePlayer,
-            Self::Settings => Self::Multiplayer,
+            Self::Tutorial => Self::Multiplayer,
+            Self::Settings => Self::Tutorial,
         }
     }
 
     fn next(self) -> Self {
         match self {
             Self::SinglePlayer => Self::Multiplayer,
-            Self::Multiplayer => Self::Settings,
+            Self::Multiplayer => Self::Tutorial,
+            Self::Tutorial => Self::Settings,
             Self::Settings => Self::SinglePlayer,
         }
     }
 }
+
+const USER_MODE_MAIN_MENU_BACKGROUNDS: &[(UserModeMainMenuChoice, &str)] = &[
+    (
+        UserModeMainMenuChoice::SinglePlayer,
+        USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Multiplayer,
+        USER_MODE_MULTIPLAYER_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Tutorial,
+        USER_MODE_TUTORIAL_BACKGROUND_PATH,
+    ),
+    (
+        UserModeMainMenuChoice::Settings,
+        USER_MODE_SETTINGS_BACKGROUND_PATH,
+    ),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UserModePlayerCountChoice {
@@ -203,12 +300,24 @@ enum UserModeMatchStartFlow {
 pub(crate) enum UserModeUiAction {
     MainMenu(UserModeMainMenuChoice),
     PlayerCount(UserModePlayerCountChoice),
+    ControlsHub(ControlsHubChoice),
     Previous,
     Next,
     PreviousColumn,
     NextColumn,
     Confirm,
     Back,
+    ControllerSetupReady,
+    ControllerSetupChangeOrder,
+    ControllerSetupClear,
+    ControllerSetupRemoveSeat(usize),
+    ToggleVibration,
+    ToggleHapticStyle,
+    TestVibration,
+    TestCombatHaptics,
+    ResetKeys,
+    ConfirmKeyReset,
+    CancelKeyReset,
     KeyBinding(KeyBindingCapture),
     Result(UserModeResultChoice),
 }
@@ -234,10 +343,23 @@ pub struct UserModeState {
     main_menu_choice: UserModeMainMenuChoice,
     player_count_choice: UserModePlayerCountChoice,
     player_characters: [CharacterKind; FIGHTER_COUNT],
+    input_assignments: [LocalInputAssignment; FIGHTER_COUNT],
+    character_ready: [bool; FIGHTER_COUNT],
     arena_index: usize,
     character_select_player: usize,
     key_settings_cursor: usize,
     key_capture: Option<KeyBindingCapture>,
+    controls_hub_choice: ControlsHubChoice,
+    controller_setup_context: ControllerSetupContext,
+    controller_setup_phase: ControllerSetupPhase,
+    controller_setup_snapshot: [LocalInputAssignment; FIGHTER_COUNT],
+    controller_setup_action_cursor: usize,
+    controller_setup_input_latched: bool,
+    controller_setup_clear_confirmation: bool,
+    controller_test_cursor: usize,
+    controller_test_active: Option<Entity>,
+    controller_test_back_hold: f32,
+    key_reset_confirmation: bool,
     controls_briefing_seen: bool,
     battle_music_pending: bool,
     battle_bot_ai_pending: bool,
@@ -252,6 +374,39 @@ pub struct UserModeState {
 pub struct UserModeGameplayScene {
     loaded: bool,
     warmup_remaining: f32,
+}
+
+#[derive(Resource, Clone, Debug)]
+pub struct LocalControllerReconnect {
+    missing_seats: [bool; FIGHTER_COUNT],
+    resume_delay_frames: u8,
+    paused_by_reconnect: bool,
+}
+
+impl Default for LocalControllerReconnect {
+    fn default() -> Self {
+        Self {
+            missing_seats: [false; FIGHTER_COUNT],
+            resume_delay_frames: 0,
+            paused_by_reconnect: false,
+        }
+    }
+}
+
+impl LocalControllerReconnect {
+    pub fn blocks_gameplay(&self) -> bool {
+        self.paused_by_reconnect || self.resume_delay_frames > 0
+    }
+
+    fn any_missing(&self) -> bool {
+        self.missing_seats.iter().any(|missing| *missing)
+    }
+
+    fn clear(&mut self) {
+        self.missing_seats = [false; FIGHTER_COUNT];
+        self.resume_delay_frames = 0;
+        self.paused_by_reconnect = false;
+    }
 }
 
 impl Default for UserModeGameplayScene {
@@ -455,6 +610,9 @@ fn parse_web_player_bindings(
         jump: js_string_prop(value, "jump")
             .and_then(|value| parse_web_key_code(&value))
             .unwrap_or(fallback.jump),
+        special: js_string_prop(value, "special")
+            .and_then(|value| parse_web_key_code(&value))
+            .unwrap_or(fallback.special),
     }
 }
 
@@ -466,6 +624,8 @@ fn parse_web_key_code(value: &str) -> Option<KeyCode> {
         "ArrowUp" => KeyCode::ArrowUp,
         "ArrowDown" => KeyCode::ArrowDown,
         "Comma" => KeyCode::Comma,
+        "Minus" => KeyCode::Minus,
+        "Period" => KeyCode::Period,
         "Digit0" => KeyCode::Digit0,
         "Digit1" => KeyCode::Digit1,
         "Digit2" => KeyCode::Digit2,
@@ -527,10 +687,23 @@ impl Default for UserModeState {
             main_menu_choice: UserModeMainMenuChoice::SinglePlayer,
             player_count_choice: UserModePlayerCountChoice::TwoPlayers,
             player_characters: USER_MODE_DEFAULT_CHARACTERS,
+            input_assignments: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
+            character_ready: [false; FIGHTER_COUNT],
             arena_index: 0,
             character_select_player: 0,
             key_settings_cursor: 0,
             key_capture: None,
+            controls_hub_choice: ControlsHubChoice::ControllerSetup,
+            controller_setup_context: ControllerSetupContext::Match,
+            controller_setup_phase: ControllerSetupPhase::Normal,
+            controller_setup_snapshot: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
+            controller_setup_action_cursor: 2,
+            controller_setup_input_latched: false,
+            controller_setup_clear_confirmation: false,
+            controller_test_cursor: 0,
+            controller_test_active: None,
+            controller_test_back_hold: 0.0,
+            key_reset_confirmation: false,
             controls_briefing_seen: false,
             battle_music_pending: false,
             battle_bot_ai_pending: false,
@@ -576,11 +749,22 @@ impl UserModeState {
         self.blocks_dev_input()
     }
 
+    pub fn shows_gameplay_hud(&self) -> bool {
+        !self.active()
+            || matches!(
+                self.screen,
+                UserModeScreen::TutorialLesson
+                    | UserModeScreen::TutorialPause
+                    | UserModeScreen::TutorialFinalResult
+            )
+    }
+
     pub fn restricts_bot_special_inputs(&self) -> bool {
-        self.battle_active
-            || self.battle_music_pending
-            || self.screen == UserModeScreen::ControlsBriefing
-            || self.screen == UserModeScreen::BattleResult
+        !self.tutorial_screen_active()
+            && (self.battle_active
+                || self.battle_music_pending
+                || self.screen == UserModeScreen::ControlsBriefing
+                || self.screen == UserModeScreen::BattleResult)
     }
 
     pub fn single_player_camera_target_id(&self) -> Option<usize> {
@@ -589,6 +773,52 @@ impl UserModeState {
                 || self.battle_music_pending
                 || self.screen == UserModeScreen::BattleResult))
             .then_some(USER_MODE_PLAYER_FIGHTER_ID)
+    }
+
+    pub fn tutorial_screen_active(&self) -> bool {
+        matches!(
+            self.screen,
+            UserModeScreen::TutorialHub
+                | UserModeScreen::TutorialLesson
+                | UserModeScreen::TutorialPause
+                | UserModeScreen::TutorialFinalResult
+        ) || (self.screen == UserModeScreen::DeviceJoin
+            && self.controller_setup_context == ControllerSetupContext::Tutorial)
+    }
+
+    pub(crate) fn tutorial_player_assignment(&self) -> LocalInputAssignment {
+        match self.input_assignments[0] {
+            LocalInputAssignment::Unassigned => LocalInputAssignment::Keyboard(0),
+            assignment => assignment,
+        }
+    }
+
+    pub(crate) fn enter_tutorial_hub(&mut self) {
+        self.screen = UserModeScreen::TutorialHub;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    pub(crate) fn enter_tutorial_lesson(&mut self) {
+        self.screen = UserModeScreen::TutorialLesson;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.battle_music_pending = true;
+        self.battle_bot_ai_pending = false;
+        self.battle_active = true;
+        self.clear_result_state();
+    }
+
+    pub(crate) fn enter_tutorial_pause(&mut self) {
+        self.screen = UserModeScreen::TutorialPause;
+    }
+
+    pub(crate) fn resume_tutorial_lesson(&mut self) {
+        self.screen = UserModeScreen::TutorialLesson;
+    }
+
+    pub(crate) fn enter_tutorial_final_result(&mut self) {
+        self.screen = UserModeScreen::TutorialFinalResult;
     }
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -602,10 +832,23 @@ impl UserModeState {
         self.main_menu_choice = UserModeMainMenuChoice::SinglePlayer;
         self.player_count_choice = UserModePlayerCountChoice::TwoPlayers;
         self.player_characters = USER_MODE_DEFAULT_CHARACTERS;
+        self.clear_input_assignments();
+        self.character_ready = [false; FIGHTER_COUNT];
         self.arena_index = 0;
         self.character_select_player = 0;
         self.key_settings_cursor = 0;
         self.key_capture = None;
+        self.controls_hub_choice = ControlsHubChoice::ControllerSetup;
+        self.controller_setup_context = ControllerSetupContext::Match;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = [LocalInputAssignment::Unassigned; FIGHTER_COUNT];
+        self.controller_setup_action_cursor = 2;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+        self.controller_test_cursor = 0;
+        self.controller_test_active = None;
+        self.controller_test_back_hold = 0.0;
+        self.key_reset_confirmation = false;
         self.controls_briefing_seen = false;
         self.clear_battle_state();
     }
@@ -627,6 +870,66 @@ impl UserModeState {
     fn enter_character_select(&mut self) {
         self.screen = UserModeScreen::CharacterSelect;
         self.character_select_player = 0;
+        self.character_ready = [false; FIGHTER_COUNT];
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    fn enter_device_join(&mut self) {
+        self.screen = UserModeScreen::DeviceJoin;
+        self.controller_setup_context = ControllerSetupContext::Match;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = self.input_assignments;
+        self.controller_setup_action_cursor = 2;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+        self.character_ready = [false; FIGHTER_COUNT];
+        self.character_select_player = 0;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    pub(crate) fn enter_tutorial_device_join(&mut self) {
+        self.screen = UserModeScreen::DeviceJoin;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.controller_setup_context = ControllerSetupContext::Tutorial;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = self.input_assignments;
+        self.controller_setup_action_cursor = 2;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+        self.character_ready = [false; FIGHTER_COUNT];
+        self.character_select_player = 0;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    fn enter_settings_device_join(&mut self) {
+        self.screen = UserModeScreen::DeviceJoin;
+        self.controller_setup_context = ControllerSetupContext::Settings;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = self.input_assignments;
+        self.controller_setup_action_cursor = 2;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    fn enter_controls_hub(&mut self) {
+        self.screen = UserModeScreen::ControlsHub;
+        self.key_capture = None;
+        self.key_reset_confirmation = false;
+        self.controller_test_active = None;
+        self.controller_test_back_hold = 0.0;
+        self.clear_battle_state();
+    }
+
+    fn enter_controller_test(&mut self) {
+        self.screen = UserModeScreen::ControllerTest;
+        self.controller_test_cursor = 0;
+        self.controller_test_active = None;
+        self.controller_test_back_hold = 0.0;
         self.key_capture = None;
         self.clear_battle_state();
     }
@@ -643,7 +946,7 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
-    fn enter_mode_select(&mut self) {
+    pub(crate) fn enter_mode_select(&mut self) {
         self.screen = UserModeScreen::ModeSelect;
         self.key_capture = None;
         self.clear_battle_state();
@@ -652,6 +955,7 @@ impl UserModeState {
     fn return_to_character_select_player(&mut self, player: usize) {
         self.screen = UserModeScreen::CharacterSelect;
         self.character_select_player = player.min(self.play_mode.human_player_count() - 1);
+        self.character_ready = [false; FIGHTER_COUNT];
         self.key_capture = None;
         self.clear_battle_state();
     }
@@ -659,6 +963,7 @@ impl UserModeState {
     fn enter_key_settings(&mut self) {
         self.screen = UserModeScreen::KeySettings;
         self.key_capture = None;
+        self.key_reset_confirmation = false;
         self.key_settings_cursor = 0;
         self.clear_battle_state();
     }
@@ -732,11 +1037,146 @@ impl UserModeState {
     }
 
     fn confirm_character_selection(&mut self) -> bool {
-        if self.character_select_player + 1 < self.play_mode.human_player_count() {
-            self.character_select_player += 1;
-            return false;
+        let player = self
+            .character_select_player
+            .min(self.play_mode.human_player_count() - 1);
+        self.character_ready[player] = true;
+        if self.all_characters_ready() {
+            return true;
         }
-        true
+        self.character_select_player = (0..self.play_mode.human_player_count())
+            .find(|candidate| !self.character_ready[*candidate])
+            .unwrap_or(0);
+        false
+    }
+
+    fn all_characters_ready(&self) -> bool {
+        self.character_ready
+            .iter()
+            .take(self.play_mode.human_player_count())
+            .all(|ready| *ready)
+    }
+
+    fn clear_input_assignments(&mut self) {
+        self.input_assignments = [LocalInputAssignment::Unassigned; FIGHTER_COUNT];
+    }
+
+    fn controller_setup_target(&self) -> usize {
+        match self.controller_setup_context {
+            ControllerSetupContext::Match => self.play_mode.human_player_count(),
+            ControllerSetupContext::Settings => FIGHTER_COUNT,
+            ControllerSetupContext::Tutorial => 1,
+        }
+    }
+
+    fn joined_player_count(&self) -> usize {
+        self.input_assignments
+            .iter()
+            .take(self.controller_setup_target())
+            .filter(|assignment| **assignment != LocalInputAssignment::Unassigned)
+            .count()
+    }
+
+    fn assignment_is_joined(&self, assignment: LocalInputAssignment) -> bool {
+        self.input_assignments.contains(&assignment)
+    }
+
+    fn join_assignment(&mut self, assignment: LocalInputAssignment) -> Option<usize> {
+        if assignment == LocalInputAssignment::Unassigned || self.assignment_is_joined(assignment) {
+            return None;
+        }
+        let target = self.controller_setup_target();
+        let seat = self
+            .input_assignments
+            .iter()
+            .take(target)
+            .position(|current| *current == LocalInputAssignment::Unassigned)?;
+        self.input_assignments[seat] = assignment;
+        Some(seat)
+    }
+
+    fn leave_assignment(&mut self, assignment: LocalInputAssignment) -> Option<usize> {
+        let target = self.controller_setup_target();
+        let seat = self
+            .input_assignments
+            .iter()
+            .take(target)
+            .position(|current| *current == assignment)?;
+        for index in seat..target.saturating_sub(1) {
+            self.input_assignments[index] = self.input_assignments[index + 1];
+        }
+        self.input_assignments[target - 1] = LocalInputAssignment::Unassigned;
+        Some(seat)
+    }
+
+    fn remove_assignment_at(&mut self, seat: usize) -> Option<LocalInputAssignment> {
+        let target = self.controller_setup_target();
+        if seat >= target || self.input_assignments[seat] == LocalInputAssignment::Unassigned {
+            return None;
+        }
+        let removed = self.input_assignments[seat];
+        for index in seat..target.saturating_sub(1) {
+            self.input_assignments[index] = self.input_assignments[index + 1];
+        }
+        self.input_assignments[target - 1] = LocalInputAssignment::Unassigned;
+        Some(removed)
+    }
+
+    fn begin_controller_reorder(&mut self) {
+        if self.controller_setup_phase == ControllerSetupPhase::Reorder {
+            return;
+        }
+        self.controller_setup_snapshot = self.input_assignments;
+        self.clear_input_assignments();
+        self.controller_setup_phase = ControllerSetupPhase::Reorder;
+        self.controller_setup_input_latched = true;
+        self.controller_setup_clear_confirmation = false;
+    }
+
+    fn finish_controller_reorder(&mut self) {
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = self.input_assignments;
+        self.controller_setup_clear_confirmation = false;
+    }
+
+    fn cancel_controller_reorder(&mut self) {
+        self.input_assignments = self.controller_setup_snapshot;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+    }
+
+    fn arm_or_confirm_clear_assignments(&mut self) -> bool {
+        if self.controller_setup_clear_confirmation {
+            self.clear_input_assignments();
+            self.controller_setup_clear_confirmation = false;
+            self.controller_setup_snapshot = self.input_assignments;
+            true
+        } else {
+            self.controller_setup_clear_confirmation = true;
+            false
+        }
+    }
+
+    fn move_controller_setup_action(&mut self, direction: isize) {
+        self.controller_setup_action_cursor =
+            (self.controller_setup_action_cursor as isize + direction).rem_euclid(3) as usize;
+    }
+
+    fn selected_controller_setup_action(&self) -> UserModeUiAction {
+        match self.controller_setup_action_cursor {
+            0 => UserModeUiAction::ControllerSetupChangeOrder,
+            1 => UserModeUiAction::ControllerSetupClear,
+            _ => UserModeUiAction::ControllerSetupReady,
+        }
+    }
+
+    fn ensure_test_or_web_assignments(&mut self) {
+        for player in 0..self.play_mode.human_player_count() {
+            if self.input_assignments[player] == LocalInputAssignment::Unassigned {
+                self.input_assignments[player] = LocalInputAssignment::Keyboard(player);
+            }
+        }
     }
 
     fn selected_key_target(&self) -> KeyBindingCapture {
@@ -791,17 +1231,18 @@ fn activate_main_menu_choice(user_mode: &mut UserModeState, choice: UserModeMain
     match choice {
         UserModeMainMenuChoice::SinglePlayer => {
             user_mode.play_mode = UserPlayMode::SinglePlayer;
-            user_mode.enter_character_select();
+            user_mode.enter_device_join();
         }
         UserModeMainMenuChoice::Multiplayer => user_mode.enter_player_count_select(),
-        UserModeMainMenuChoice::Settings => user_mode.enter_key_settings(),
+        UserModeMainMenuChoice::Tutorial => user_mode.enter_tutorial_device_join(),
+        UserModeMainMenuChoice::Settings => user_mode.enter_controls_hub(),
     }
 }
 
 fn activate_player_count_choice(user_mode: &mut UserModeState, choice: UserModePlayerCountChoice) {
     user_mode.player_count_choice = choice;
     user_mode.play_mode = choice.play_mode();
-    user_mode.enter_character_select();
+    user_mode.enter_device_join();
 }
 
 fn route_user_mode_action(
@@ -812,6 +1253,20 @@ fn route_user_mode_action(
         if user_mode.key_capture.is_some() {
             user_mode.cancel_key_capture();
             return UserModeRoute::None;
+        }
+        if user_mode.key_reset_confirmation {
+            user_mode.key_reset_confirmation = false;
+            return UserModeRoute::None;
+        }
+        if user_mode.screen == UserModeScreen::DeviceJoin {
+            if user_mode.controller_setup_clear_confirmation {
+                user_mode.controller_setup_clear_confirmation = false;
+                return UserModeRoute::None;
+            }
+            if user_mode.controller_setup_phase == ControllerSetupPhase::Reorder {
+                user_mode.cancel_controller_reorder();
+                return UserModeRoute::None;
+            }
         }
         return match user_mode.screen {
             UserModeScreen::ModeSelect => {
@@ -824,8 +1279,23 @@ fn route_user_mode_action(
                     UserModeRoute::None
                 }
             }
-            UserModeScreen::PlayerCountSelect | UserModeScreen::KeySettings => {
+            UserModeScreen::PlayerCountSelect | UserModeScreen::ControlsHub => {
                 user_mode.enter_mode_select();
+                UserModeRoute::None
+            }
+            UserModeScreen::ControllerTest | UserModeScreen::KeySettings => {
+                user_mode.enter_controls_hub();
+                UserModeRoute::None
+            }
+            UserModeScreen::DeviceJoin => {
+                match user_mode.controller_setup_context {
+                    ControllerSetupContext::Settings => user_mode.enter_controls_hub(),
+                    ControllerSetupContext::Tutorial => user_mode.enter_mode_select(),
+                    ControllerSetupContext::Match if user_mode.play_mode.is_single_player() => {
+                        user_mode.enter_mode_select();
+                    }
+                    ControllerSetupContext::Match => user_mode.enter_player_count_select(),
+                }
                 UserModeRoute::None
             }
             UserModeScreen::CharacterSelect if user_mode.character_select_player > 0 => {
@@ -833,11 +1303,7 @@ fn route_user_mode_action(
                 UserModeRoute::None
             }
             UserModeScreen::CharacterSelect => {
-                if user_mode.play_mode.is_single_player() {
-                    user_mode.enter_mode_select();
-                } else {
-                    user_mode.enter_player_count_select();
-                }
+                user_mode.enter_device_join();
                 UserModeRoute::None
             }
             UserModeScreen::ArenaSelect => {
@@ -886,6 +1352,31 @@ fn route_user_mode_action(
         }
         (UserModeScreen::PlayerCountSelect, UserModeUiAction::Confirm) => {
             activate_player_count_choice(user_mode, user_mode.player_count_choice);
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::ControlsHub(choice)) => {
+            user_mode.controls_hub_choice = choice;
+            match choice {
+                ControlsHubChoice::ControllerSetup => user_mode.enter_settings_device_join(),
+                ControlsHubChoice::ControllerTest => user_mode.enter_controller_test(),
+                ControlsHubChoice::KeyboardControls => user_mode.enter_key_settings(),
+            }
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::Previous) => {
+            user_mode.controls_hub_choice = user_mode.controls_hub_choice.previous();
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::Next) => {
+            user_mode.controls_hub_choice = user_mode.controls_hub_choice.next();
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::Confirm) => {
+            match user_mode.controls_hub_choice {
+                ControlsHubChoice::ControllerSetup => user_mode.enter_settings_device_join(),
+                ControlsHubChoice::ControllerTest => user_mode.enter_controller_test(),
+                ControlsHubChoice::KeyboardControls => user_mode.enter_key_settings(),
+            }
             UserModeRoute::None
         }
         (UserModeScreen::CharacterSelect, UserModeUiAction::Previous) => {
@@ -978,8 +1469,108 @@ pub(crate) struct UserModeStartPanel;
 #[derive(Component)]
 pub(crate) struct UserModeMainMenuPanel;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MainMenuBackgroundFade {
+    opacity: f32,
+    start_opacity: f32,
+    target_opacity: f32,
+    elapsed: f32,
+}
+
+impl Default for MainMenuBackgroundFade {
+    fn default() -> Self {
+        Self {
+            opacity: 0.0,
+            start_opacity: 0.0,
+            target_opacity: 0.0,
+            elapsed: 0.0,
+        }
+    }
+}
+
+impl MainMenuBackgroundFade {
+    fn advance(&mut self, target_opacity: f32, delta_seconds: f32) -> f32 {
+        if self.target_opacity != target_opacity {
+            self.start_opacity = self.opacity;
+            self.target_opacity = target_opacity;
+            self.elapsed = 0.0;
+        }
+
+        if self.opacity == self.target_opacity {
+            return self.opacity;
+        }
+
+        self.elapsed =
+            (self.elapsed + delta_seconds.max(0.0)).min(USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS);
+        let amount = (self.elapsed / USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS).clamp(0.0, 1.0);
+        let eased = amount * amount * (3.0 - 2.0 * amount);
+        self.opacity = self.start_opacity + (self.target_opacity - self.start_opacity) * eased;
+
+        if amount >= 1.0 {
+            self.opacity = self.target_opacity;
+        }
+        self.opacity
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeMainMenuBackground {
+    choice: UserModeMainMenuChoice,
+    asset_path: &'static str,
+    fade: MainMenuBackgroundFade,
+    load_failure_reported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainMenuBackgroundTarget {
+    Black,
+    Choice(UserModeMainMenuChoice),
+    HoldForLoad,
+    Failed(UserModeMainMenuChoice),
+}
+
 #[derive(Component)]
 pub(crate) struct UserModePlayerCountPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinText;
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinTitleText;
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinSeatCard {
+    seat: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinSeatText {
+    seat: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinReadyText;
+
+#[derive(Component)]
+pub(crate) struct UserModeDeviceJoinClearText;
+
+#[derive(Component)]
+pub(crate) struct UserModeControlsHubPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeControllerTestPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeControllerTestText;
+
+#[derive(Component)]
+pub(crate) struct UserModeVibrationButtonText;
+
+#[derive(Component)]
+pub(crate) struct UserModeHapticStyleButtonText;
 
 #[derive(Component)]
 pub(crate) struct UserModeCharacterSelectPanel;
@@ -1005,6 +1596,9 @@ pub(crate) struct UserModeKeySettingsRowText {
 }
 
 #[derive(Component)]
+pub(crate) struct UserModeKeyResetPanel;
+
+#[derive(Component)]
 pub(crate) struct UserModeControlsPanel;
 
 #[derive(Component)]
@@ -1024,6 +1618,12 @@ pub(crate) struct UserModeCharacterTitleText;
 
 #[derive(Component)]
 pub(crate) struct UserModeBackButton;
+
+#[derive(Component)]
+pub(crate) struct ControllerReconnectOverlay;
+
+#[derive(Component)]
+pub(crate) struct ControllerReconnectText;
 
 #[derive(Component)]
 pub(crate) struct UserModeCharacterPreview;
@@ -1133,6 +1733,55 @@ fn user_mode_back_button() -> impl Bundle {
     )
 }
 
+fn controller_setup_seat_card(seat: usize) -> impl Bundle {
+    (
+        UserModeDeviceJoinSeatCard { seat },
+        Node {
+            width: Val::Percent(23.0),
+            min_width: Val::Px(210.0),
+            max_width: Val::Px(270.0),
+            min_height: Val::Px(190.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(12.0),
+            border: UiRect::all(Val::Px(3.0)),
+            padding: UiRect::all(Val::Px(14.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        children![
+            (
+                Text::new(format!("PLAYER {}", seat + 1)),
+                TextFont {
+                    font_size: 21.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.98, 0.86, 0.58)),
+                TextShadow::default(),
+            ),
+            (
+                UserModeDeviceJoinSeatText { seat },
+                Text::new("WAITING\nPress confirm"),
+                TextFont {
+                    font_size: 17.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.86, 0.82, 0.72)),
+                TextLayout::new_with_justify(Justify::Center),
+            ),
+            user_mode_action_button(
+                "REMOVE",
+                UserModeUiAction::ControllerSetupRemoveSeat(seat),
+                Val::Percent(100.0),
+                38.0,
+                16.0,
+            ),
+        ],
+    )
+}
+
 fn key_settings_column(player: usize) -> impl Bundle {
     (
         Node {
@@ -1177,6 +1826,7 @@ fn key_settings_column(player: usize) -> impl Bundle {
                     key_settings_row(player, ControlAction::Heavy),
                     key_settings_row(player, ControlAction::Light),
                     key_settings_row(player, ControlAction::Jump),
+                    key_settings_row(player, ControlAction::Special),
                 ],
             ),
         ],
@@ -1321,6 +1971,45 @@ pub fn setup_user_mode_ui(
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
 
+    let main_menu_backgrounds = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|parent| {
+            for &(choice, asset_path) in USER_MODE_MAIN_MENU_BACKGROUNDS {
+                parent.spawn((
+                    UserModeMainMenuBackground {
+                        choice,
+                        asset_path,
+                        fade: MainMenuBackgroundFade::default(),
+                        load_failure_reported: false,
+                    },
+                    Node {
+                        display: Display::None,
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    ImageNode::new(asset_server.load(asset_path))
+                        .with_color(Color::srgba(1.0, 1.0, 1.0, 0.0))
+                        .with_mode(NodeImageMode::Stretch),
+                    Pickable::IGNORE,
+                ));
+            }
+        })
+        .id();
+
     let mut user_mode_root = commands.spawn((
         UserModeRoot,
         Node {
@@ -1374,7 +2063,10 @@ pub fn setup_user_mode_ui(
                 UserModeMainMenuPanel,
                 Node {
                     display: Display::None,
-                    width: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(45.0),
                     height: Val::Percent(100.0),
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
@@ -1385,13 +2077,18 @@ pub fn setup_user_mode_ui(
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("ANIMAL FIGHTER CLUB"),
-                        TextFont {
-                            font_size: 46.0,
+                        Node {
+                            width: Val::Px(400.0),
+                            height: Val::Px(300.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                        TextShadow::default(),
+                        ImageNode::new(asset_server.load(USER_MODE_GAME_LOGO_PATH))
+                            .with_rect(Rect {
+                                min: Vec2::new(288.0, 96.0),
+                                max: Vec2::new(1248.0, 816.0),
+                            })
+                            .with_mode(NodeImageMode::Stretch),
+                        Pickable::IGNORE,
                     ),
                     user_mode_action_button(
                         "SINGLE PLAYER",
@@ -1403,6 +2100,13 @@ pub fn setup_user_mode_ui(
                     user_mode_action_button(
                         "MULTIPLAYER",
                         UserModeUiAction::MainMenu(UserModeMainMenuChoice::Multiplayer),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "TUTORIAL",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial),
                         Val::Px(340.0),
                         58.0,
                         24.0,
@@ -1475,6 +2179,187 @@ pub fn setup_user_mode_ui(
                             ..default()
                         },
                         TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
+                ],
+            ),
+            (
+                UserModeControlsHubPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(16.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        Text::new("CONTROLS"),
+                        TextFont {
+                            font_size: 46.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    (
+                        Text::new("Connect, verify, and tune every local player's controls."),
+                        TextFont {
+                            font_size: 19.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.72, 0.7, 0.64)),
+                    ),
+                    user_mode_action_button(
+                        "CONTROLLER SETUP",
+                        UserModeUiAction::ControlsHub(ControlsHubChoice::ControllerSetup),
+                        Val::Px(420.0),
+                        68.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "CONTROLLER TEST",
+                        UserModeUiAction::ControlsHub(ControlsHubChoice::ControllerTest),
+                        Val::Px(420.0),
+                        68.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "KEYBOARD CONTROLS",
+                        UserModeUiAction::ControlsHub(ControlsHubChoice::KeyboardControls),
+                        Val::Px(420.0),
+                        68.0,
+                        24.0,
+                    ),
+                    (
+                        Text::new("Up/Down choose  |  Confirm open  |  Back return"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
+                ],
+            ),
+            (
+                UserModeDeviceJoinPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(16.0),
+                    padding: UiRect::axes(Val::Px(32.0), Val::Px(24.0)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        UserModeDeviceJoinTitleText,
+                        Text::new("CONTROLLER SETUP"),
+                        TextFont {
+                            font_size: 42.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    (
+                        UserModeDeviceJoinText,
+                        Text::new("Connect a controller or use one of the keyboard layouts."),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.92, 0.88, 0.78)),
+                        TextLayout::new_with_justify(Justify::Center),
+                    ),
+                    (
+                        Node {
+                            width: Val::Percent(96.0),
+                            max_width: Val::Px(1160.0),
+                            flex_direction: FlexDirection::Row,
+                            flex_wrap: FlexWrap::Wrap,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Stretch,
+                            column_gap: Val::Px(14.0),
+                            row_gap: Val::Px(14.0),
+                            ..default()
+                        },
+                        children![
+                            controller_setup_seat_card(0),
+                            controller_setup_seat_card(1),
+                            controller_setup_seat_card(2),
+                            controller_setup_seat_card(3),
+                        ],
+                    ),
+                    (
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::Center,
+                            column_gap: Val::Px(12.0),
+                            ..default()
+                        },
+                        children![
+                            user_mode_action_button(
+                                "CHANGE ORDER",
+                                UserModeUiAction::ControllerSetupChangeOrder,
+                                Val::Px(220.0),
+                                48.0,
+                                18.0,
+                            ),
+                            (
+                                Button,
+                                UserModeUiAction::ControllerSetupClear,
+                                Node {
+                                    width: Val::Px(190.0),
+                                    height: Val::Px(48.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                                children![(
+                                    UserModeDeviceJoinClearText,
+                                    Text::new("CLEAR"),
+                                    TextFont {
+                                        font_size: 18.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                                )],
+                            ),
+                            (
+                                Button,
+                                UserModeUiAction::ControllerSetupReady,
+                                Node {
+                                    width: Val::Px(220.0),
+                                    height: Val::Px(48.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                                children![(
+                                    UserModeDeviceJoinReadyText,
+                                    Text::new("READY"),
+                                    TextFont {
+                                        font_size: 18.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                                )],
+                            ),
+                        ],
                     ),
                 ],
             ),
@@ -1683,7 +2568,7 @@ pub fn setup_user_mode_ui(
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("KEY SETTINGS"),
+                        Text::new("KEYBOARD CONTROLS"),
                         TextFont {
                             font_size: 38.0,
                             ..default()
@@ -1717,6 +2602,200 @@ pub fn setup_user_mode_ui(
                             key_settings_column(3)
                         ],
                     ),
+                    user_mode_action_button(
+                        "RESTORE DEFAULTS",
+                        UserModeUiAction::ResetKeys,
+                        Val::Px(240.0),
+                        44.0,
+                        17.0,
+                    ),
+                    (
+                        UserModeKeyResetPanel,
+                        Node {
+                            display: Display::None,
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(25.0),
+                            top: Val::Percent(31.0),
+                            width: Val::Percent(50.0),
+                            min_height: Val::Px(230.0),
+                            flex_direction: FlexDirection::Column,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(18.0),
+                            border: UiRect::all(Val::Px(3.0)),
+                            padding: UiRect::all(Val::Px(24.0)),
+                            ..default()
+                        },
+                        GlobalZIndex(20),
+                        BackgroundColor(Color::srgba(0.025, 0.025, 0.035, 0.98)),
+                        BorderColor::all(Color::srgb(0.95, 0.62, 0.28)),
+                        children![
+                            (
+                                Text::new("RESTORE ALL KEYBOARD CONTROLS?"),
+                                TextFont {
+                                    font_size: 25.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(1.0, 0.82, 0.58)),
+                                TextShadow::default(),
+                            ),
+                            (
+                                Text::new("This replaces every P1-P4 key and cannot be undone."),
+                                TextFont {
+                                    font_size: 18.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.86, 0.82, 0.74)),
+                            ),
+                            (
+                                Node {
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(14.0),
+                                    ..default()
+                                },
+                                children![
+                                    user_mode_action_button(
+                                        "RESTORE",
+                                        UserModeUiAction::ConfirmKeyReset,
+                                        Val::Px(180.0),
+                                        48.0,
+                                        18.0,
+                                    ),
+                                    user_mode_action_button(
+                                        "CANCEL",
+                                        UserModeUiAction::CancelKeyReset,
+                                        Val::Px(180.0),
+                                        48.0,
+                                        18.0,
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            (
+                UserModeControllerTestPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(18.0),
+                    padding: UiRect::axes(Val::Px(48.0), Val::Px(28.0)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        Text::new("CONTROLLER TEST"),
+                        TextFont {
+                            font_size: 42.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
+                    ),
+                    (
+                        UserModeControllerTestText,
+                        Text::new("Connect a controller to inspect it."),
+                        TextFont {
+                            font_size: 19.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.9, 0.86, 0.76)),
+                        TextLayout::new_with_justify(Justify::Center),
+                    ),
+                    (
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(12.0),
+                            ..default()
+                        },
+                        children![
+                            (
+                                Button,
+                                UserModeUiAction::ToggleVibration,
+                                Node {
+                                    width: Val::Px(230.0),
+                                    height: Val::Px(48.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                                children![(
+                                    UserModeVibrationButtonText,
+                                    Text::new("VIBRATION: STANDARD"),
+                                    TextFont {
+                                        font_size: 18.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                                )],
+                            ),
+                            user_mode_action_button(
+                                "TEST VIBRATION",
+                                UserModeUiAction::TestVibration,
+                                Val::Px(230.0),
+                                48.0,
+                                18.0,
+                            ),
+                        ],
+                    ),
+                    (
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(12.0),
+                            ..default()
+                        },
+                        children![
+                            (
+                                Button,
+                                UserModeUiAction::ToggleHapticStyle,
+                                Node {
+                                    width: Val::Px(230.0),
+                                    height: Val::Px(48.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                                children![(
+                                    UserModeHapticStyleButtonText,
+                                    Text::new("STYLE: COMPETITIVE"),
+                                    TextFont {
+                                        font_size: 18.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                                )],
+                            ),
+                            user_mode_action_button(
+                                "TEST COMBAT FEEL",
+                                UserModeUiAction::TestCombatHaptics,
+                                Val::Px(230.0),
+                                48.0,
+                                18.0,
+                            ),
+                        ],
+                    ),
+                    (
+                        Text::new(
+                            "Left/Right choose device  |  Confirm inspect  |  Back return\nHardware test checks both motors; combat preview demonstrates release → block → heavy → ultimate",
+                        ),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                    ),
                 ],
             ),
             (
@@ -1735,7 +2814,7 @@ pub fn setup_user_mode_ui(
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("PC KEYBOARD GAME"),
+                        Text::new("CONTROLS BRIEFING"),
                         TextFont {
                             font_size: 42.0,
                             ..default()
@@ -1826,32 +2905,511 @@ pub fn setup_user_mode_ui(
             user_mode_back_button(),
         ],
     ));
+    user_mode_root.insert_children(0, &[main_menu_backgrounds]);
     if let Some(ui_camera) = ui_camera {
         user_mode_root.insert(UiTargetCamera(ui_camera));
+    }
+
+    let mut reconnect_overlay = commands.spawn((
+        ControllerReconnectOverlay,
+        Node {
+            display: Display::None,
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(18.0),
+            ..default()
+        },
+        GlobalZIndex(1000),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.78)),
+        Pickable::IGNORE,
+        children![
+            (
+                Text::new("CONTROLLER DISCONNECTED"),
+                TextFont {
+                    font_size: 48.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.78, 0.42)),
+                TextShadow::default(),
+            ),
+            (
+                ControllerReconnectText,
+                Text::new("Press Confirm on the original or another unassigned controller"),
+                TextFont {
+                    font_size: 24.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.92, 0.84)),
+                TextLayout::new_with_justify(Justify::Center),
+            ),
+        ],
+    ));
+    if let Some(ui_camera) = ui_camera {
+        reconnect_overlay.insert(UiTargetCamera(ui_camera));
+    }
+}
+
+fn handle_device_join_input(
+    user_mode: &mut UserModeState,
+    keys: &ButtonInput<KeyCode>,
+    bindings: &PlayerKeyBindings,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+    preferences: &ControlPreferences,
+    rumble_requests: &mut MessageWriter<ControllerHapticRequest>,
+) -> Option<String> {
+    let mut messages = Vec::new();
+    let mut departed = Vec::new();
+    for (entity, gamepad) in gamepads {
+        let assignment = LocalInputAssignment::Gamepad(entity);
+        let family = controller_info(entity, metadata)
+            .map(|info| info.family)
+            .unwrap_or_default();
+        if user_mode.assignment_is_joined(assignment) && gamepad_leave_requested(gamepad, family) {
+            if let Some(seat) = user_mode.leave_assignment(assignment) {
+                departed.push(entity);
+                messages.push(format!("P{} controller left", seat + 1));
+            }
+        }
+    }
+
+    for (entity, gamepad) in gamepads {
+        let assignment = LocalInputAssignment::Gamepad(entity);
+        let family = controller_info(entity, metadata)
+            .map(|info| info.family)
+            .unwrap_or_default();
+        if !departed.contains(&entity)
+            && !user_mode.assignment_is_joined(assignment)
+            && gamepad_join_requested(gamepad, family)
+        {
+            let seat = first_missing_controller_seat(user_mode, gamepads)
+                .or_else(|| user_mode.join_assignment(assignment));
+            if let Some(seat) = seat {
+                user_mode.input_assignments[seat] = assignment;
+                user_mode.controller_setup_input_latched = true;
+                let _ = request_controller_rumble(rumble_requests, preferences, entity, 0.28, 0.12);
+                messages.push(format!(
+                    "P{} joined with {}",
+                    seat + 1,
+                    controller_info(entity, metadata)
+                        .map(|info| info.family.display_name())
+                        .unwrap_or("controller")
+                ));
+            }
+        }
+    }
+
+    let mut departed_keyboards = Vec::new();
+    for player in 0..FIGHTER_COUNT {
+        let Some(player_bindings) = bindings.bindings_for_player(player) else {
+            continue;
+        };
+        let assignment = LocalInputAssignment::Keyboard(player);
+        if user_mode.assignment_is_joined(assignment) && keys.just_pressed(player_bindings.aim_grab)
+        {
+            if let Some(seat) = user_mode.leave_assignment(assignment) {
+                departed_keyboards.push(player);
+                messages.push(format!("P{} Keyboard {} left", seat + 1, player + 1));
+            }
+        }
+    }
+    for player in 0..FIGHTER_COUNT {
+        let Some(player_bindings) = bindings.bindings_for_player(player) else {
+            continue;
+        };
+        if !departed_keyboards.contains(&player)
+            && keyboard_join_requested(keys, player_bindings)
+            && !user_mode.assignment_is_joined(LocalInputAssignment::Keyboard(player))
+        {
+            if let Some(seat) = user_mode.join_assignment(LocalInputAssignment::Keyboard(player)) {
+                user_mode.controller_setup_input_latched = true;
+                messages.push(format!("P{} joined with Keyboard {}", seat + 1, player + 1));
+            }
+        }
+    }
+
+    (!messages.is_empty()).then(|| messages.join("  |  "))
+}
+
+fn first_missing_controller_seat(
+    user_mode: &UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+) -> Option<usize> {
+    user_mode
+        .input_assignments
+        .iter()
+        .take(user_mode.controller_setup_target())
+        .position(|assignment| {
+            matches!(
+                assignment,
+                LocalInputAssignment::Gamepad(entity) if gamepads.get(*entity).is_err()
+            )
+        })
+}
+
+fn gamepad_join_requested(gamepad: &Gamepad, family: ControllerFamily) -> bool {
+    gamepad.just_pressed(family.confirm_button())
+}
+
+fn gamepad_leave_requested(gamepad: &Gamepad, family: ControllerFamily) -> bool {
+    gamepad.just_pressed(family.back_button())
+}
+
+fn keyboard_join_requested(keys: &ButtonInput<KeyCode>, bindings: PlayerControlBindings) -> bool {
+    keys.just_pressed(bindings.jump) || keys.just_pressed(bindings.aim_grab)
+}
+
+fn controller_setup_confirm_input_pressed(
+    keys: &ButtonInput<KeyCode>,
+    bindings: &PlayerKeyBindings,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+) -> bool {
+    gamepads.iter().any(|(entity, gamepad)| {
+        let family = controller_info(entity, metadata)
+            .map(|info| info.family)
+            .unwrap_or_default();
+        gamepad.pressed(family.confirm_button())
+    }) || (0..FIGHTER_COUNT).any(|player| {
+        bindings
+            .bindings_for_player(player)
+            .map(|binding| keys.pressed(binding.jump) || keys.pressed(binding.aim_grab))
+            .unwrap_or(false)
+    })
+}
+
+fn controller_setup_assignment_connected(
+    assignment: LocalInputAssignment,
+    gamepads: &Query<(Entity, &Gamepad)>,
+) -> bool {
+    match assignment {
+        LocalInputAssignment::Keyboard(_) => true,
+        LocalInputAssignment::Gamepad(entity) => gamepads.get(entity).is_ok(),
+        LocalInputAssignment::Unassigned => false,
+    }
+}
+
+fn controller_setup_can_finish(
+    user_mode: &UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+) -> bool {
+    let assignments = user_mode
+        .input_assignments
+        .iter()
+        .take(user_mode.controller_setup_target());
+    match user_mode.controller_setup_context {
+        ControllerSetupContext::Match | ControllerSetupContext::Tutorial => assignments
+            .clone()
+            .all(|assignment| controller_setup_assignment_connected(*assignment, gamepads)),
+        ControllerSetupContext::Settings => assignments
+            .filter(|assignment| **assignment != LocalInputAssignment::Unassigned)
+            .all(|assignment| controller_setup_assignment_connected(*assignment, gamepads)),
+    }
+}
+
+fn connected_controller_entities(gamepads: &Query<(Entity, &Gamepad)>) -> Vec<Entity> {
+    let mut entities = gamepads
+        .iter()
+        .map(|(entity, _)| entity)
+        .collect::<Vec<_>>();
+    entities.sort_by_key(|entity| entity.to_bits());
+    entities
+}
+
+fn selected_controller_test_entity(
+    user_mode: &UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+) -> Option<Entity> {
+    if let Some(active) = user_mode.controller_test_active
+        && gamepads.get(active).is_ok()
+    {
+        return Some(active);
+    }
+    let entities = connected_controller_entities(gamepads);
+    (!entities.is_empty()).then(|| entities[user_mode.controller_test_cursor % entities.len()])
+}
+
+fn move_controller_test_cursor(
+    user_mode: &mut UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    direction: isize,
+) {
+    let count = gamepads.iter().count();
+    if count == 0 {
+        user_mode.controller_test_cursor = 0;
+        return;
+    }
+    user_mode.controller_test_cursor =
+        (user_mode.controller_test_cursor as isize + direction).rem_euclid(count as isize) as usize;
+}
+
+fn controller_test_message(
+    user_mode: &UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+) -> String {
+    let entities = connected_controller_entities(gamepads);
+    let Some(entity) = selected_controller_test_entity(user_mode, gamepads) else {
+        return "NO CONTROLLERS DETECTED\n\nPair a controller in the operating system, then press its Confirm button.\nKeyboard and mouse remain available."
+            .to_string();
+    };
+    let Ok((_, gamepad)) = gamepads.get(entity) else {
+        return "The selected controller disconnected.\nChoose another connected controller."
+            .to_string();
+    };
+    let info = controller_info(entity, metadata);
+    let family = info.map(|info| info.family).unwrap_or_default();
+    let name = info
+        .map(|info| info.display_name.as_str())
+        .unwrap_or("Gamepad");
+    let assignment = user_mode
+        .input_assignments
+        .iter()
+        .position(|assignment| *assignment == LocalInputAssignment::Gamepad(entity))
+        .map(|seat| format!("Assigned to P{}", seat + 1))
+        .unwrap_or_else(|| "Unassigned".to_string());
+    let index = entities
+        .iter()
+        .position(|candidate| *candidate == entity)
+        .unwrap_or(0);
+    let haptic_connection_hint =
+        if cfg!(target_os = "macos") && family == crate::control_settings::ControllerFamily::Xbox {
+            "\nmacOS Xbox rumble: pair through Bluetooth; a USB cable may provide input only."
+        } else {
+            ""
+        };
+
+    if user_mode.controller_test_active.is_none() {
+        return format!(
+            "{} / {}  —  {} {}\n{}\n{}  |  HAPTICS {}{}\n\nPress {} to inspect every input.",
+            index + 1,
+            entities.len(),
+            family.display_name(),
+            name,
+            assignment,
+            if info.map(|info| info.connected).unwrap_or(true) {
+                "CONNECTED"
+            } else {
+                "DISCONNECTED"
+            },
+            info.map(|info| info.haptics.label())
+                .unwrap_or("SYSTEM DEPENDENT"),
+            haptic_connection_hint,
+            family.confirm_label(),
+        );
+    }
+
+    let pressed = GamepadButton::all()
+        .into_iter()
+        .filter(|button| gamepad.pressed(*button))
+        .map(|button| family.face_button_label(button))
+        .collect::<Vec<_>>();
+    let pressed = if pressed.is_empty() {
+        "None".to_string()
+    } else {
+        pressed.join("  ")
+    };
+    let left = gamepad.left_stick();
+    let right = gamepad.right_stick();
+    let left_trigger = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+    let right_trigger = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
+    let movement_state = if left.length() >= 0.20 {
+        "ACTIVE"
+    } else {
+        "inside deadzone"
+    };
+    format!(
+        "{} — {}\n{}  |  HAPTICS {}{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  D-Pad Left/Right: vibration  |  Up/Down: style\nStart: motor test  |  {}: combat preview  |  Hold {} for 0.75 seconds to finish.",
+        family.display_name(),
+        name,
+        assignment,
+        info.map(|info| info.haptics.label())
+            .unwrap_or("SYSTEM DEPENDENT"),
+        haptic_connection_hint,
+        left.x,
+        left.y,
+        right.x,
+        right.y,
+        family.face_button_label(GamepadButton::LeftTrigger2),
+        left_trigger,
+        family.face_button_label(GamepadButton::RightTrigger2),
+        right_trigger,
+        family.face_button_label(GamepadButton::South),
+        family.face_button_label(GamepadButton::East),
+        family.face_button_label(GamepadButton::West),
+        family.face_button_label(GamepadButton::North),
+        family.face_button_label(GamepadButton::West),
+        family.back_label(),
+    )
+}
+
+fn handle_character_device_actions(
+    user_mode: &mut UserModeState,
+    keys: &ButtonInput<KeyCode>,
+    bindings: &PlayerKeyBindings,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+    dt: f32,
+    trackers: &mut MenuNavigationTrackers,
+) -> Option<UserModeRoute> {
+    let mut handled = false;
+    for player in 0..user_mode.play_mode.human_player_count() {
+        let assignment = user_mode.input_assignments[player];
+        let Some(action) = assignment_user_mode_action(
+            assignment,
+            UserModeScreen::CharacterSelect,
+            keys,
+            bindings,
+            gamepads,
+            metadata,
+            dt,
+            &mut trackers.seats[player],
+        ) else {
+            continue;
+        };
+        handled = true;
+        user_mode.character_select_player = player;
+
+        if user_mode.character_ready[player] {
+            if action == UserModeUiAction::Back {
+                user_mode.character_ready[player] = false;
+            }
+            continue;
+        }
+        if action == UserModeUiAction::Back && player != 0 {
+            continue;
+        }
+
+        let route = route_user_mode_action(user_mode, action);
+        if route == UserModeRoute::ArenaEntered || route == UserModeRoute::ControlsBack {
+            return Some(route);
+        }
+        if user_mode.screen != UserModeScreen::CharacterSelect {
+            return Some(route);
+        }
+    }
+    handled.then_some(UserModeRoute::None)
+}
+
+fn unassigned_gamepad_user_mode_action(
+    screen: UserModeScreen,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+    dt: f32,
+    tracker: &mut MenuDirectionRepeat,
+) -> Option<UserModeUiAction> {
+    gamepads.iter().find_map(|(entity, gamepad)| {
+        let family = controller_info(entity, metadata)
+            .map(|info| info.family)
+            .unwrap_or_default();
+        gamepad_user_mode_action(screen, gamepad, family, dt, tracker)
+    })
+}
+
+#[derive(SystemParam)]
+pub struct UserModeInputDevices<'w, 's> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    buttons: Res<'w, ButtonInput<MouseButton>>,
+    gamepads: Query<'w, 's, (Entity, &'static Gamepad)>,
+    controller_metadata: Query<'w, 's, &'static ControllerDeviceInfo>,
+    real_time: Res<'w, Time<Real>>,
+    action_buttons:
+        Query<'w, 's, (&'static Interaction, &'static UserModeUiAction), Changed<Interaction>>,
+}
+
+#[derive(SystemParam)]
+pub struct UserModeInputContext<'w, 's> {
+    asset_server: Res<'w, AssetServer>,
+    user_mode: ResMut<'w, UserModeState>,
+    key_bindings: ResMut<'w, PlayerKeyBindings>,
+    control_preferences: ResMut<'w, ControlPreferences>,
+    rumble_requests: MessageWriter<'w, ControllerHapticRequest>,
+    setup: ResMut<'w, LocalSetup>,
+    state: ResMut<'w, MatchState>,
+    gameplay_scene: Res<'w, UserModeGameplayScene>,
+    announcements: ResMut<'w, MatchAnnouncements>,
+    music: Query<'w, 's, Entity, With<UserModeMusic>>,
+    virtual_time: ResMut<'w, Time<Virtual>>,
+    screen_look: ResMut<'w, ScreenLook>,
+    screen_transition: ResMut<'w, ScreenLookTransition>,
+    pause_owners: ResMut<'w, GameplayPauseOwners>,
+    tutorial_transition: ResMut<'w, TutorialTransition>,
+}
+
+pub fn sync_main_menu_pointer_hover(
+    mut user_mode: ResMut<UserModeState>,
+    action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
+) {
+    if user_mode.screen != UserModeScreen::ModeSelect {
+        return;
+    }
+
+    if let Some(choice) = action_buttons.iter().find_map(|(interaction, action)| {
+        if *interaction != Interaction::Hovered {
+            return None;
+        }
+        match action {
+            UserModeUiAction::MainMenu(choice) => Some(*choice),
+            _ => None,
+        }
+    }) {
+        user_mode.main_menu_choice = choice;
     }
 }
 
 pub fn handle_user_mode_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
-    asset_server: Res<AssetServer>,
-    mut user_mode: ResMut<UserModeState>,
-    mut key_bindings: ResMut<PlayerKeyBindings>,
-    mut setup: ResMut<LocalSetup>,
-    mut state: ResMut<MatchState>,
-    gameplay_scene: Res<UserModeGameplayScene>,
-    mut announcements: ResMut<MatchAnnouncements>,
-    music: Query<Entity, With<UserModeMusic>>,
-    mut virtual_time: ResMut<Time<Virtual>>,
-    mut screen_look: ResMut<ScreenLook>,
-    mut screen_transition: ResMut<ScreenLookTransition>,
+    devices: UserModeInputDevices,
+    context: UserModeInputContext,
+    mut menu_navigation: Local<MenuNavigationTrackers>,
     mut commands: Commands,
 ) {
+    let UserModeInputDevices {
+        keys,
+        buttons,
+        gamepads,
+        controller_metadata,
+        real_time,
+        action_buttons,
+    } = devices;
+    let UserModeInputContext {
+        asset_server,
+        mut user_mode,
+        mut key_bindings,
+        mut control_preferences,
+        mut rumble_requests,
+        mut setup,
+        mut state,
+        gameplay_scene,
+        mut announcements,
+        music,
+        mut virtual_time,
+        mut screen_look,
+        mut screen_transition,
+        mut pause_owners,
+        mut tutorial_transition,
+    } = context;
+
+    if tutorial_transition.active() {
+        return;
+    }
+
+    menu_navigation.reset_for_screen(user_mode.screen);
     if user_mode.screen == UserModeScreen::Start {
         if keys.just_pressed(KeyCode::Enter)
             || keys.just_pressed(KeyCode::Space)
             || buttons.just_pressed(MouseButton::Left)
+            || gamepads.iter().any(|(entity, gamepad)| {
+                let family = controller_info(entity, &controller_metadata)
+                    .map(|info| info.family)
+                    .unwrap_or_default();
+                gamepad.just_pressed(family.confirm_button())
+            })
         {
             user_mode.enter_fresh_mode_select();
             start_user_mode_menu_music(&mut commands, &asset_server);
@@ -1882,6 +3440,163 @@ pub fn handle_user_mode_input(
         return;
     }
 
+    if matches!(
+        user_mode.screen,
+        UserModeScreen::TutorialHub
+            | UserModeScreen::TutorialLesson
+            | UserModeScreen::TutorialPause
+            | UserModeScreen::TutorialFinalResult
+    ) {
+        return;
+    }
+
+    let pointer_action = action_buttons.iter().find_map(|(interaction, action)| {
+        (*interaction == Interaction::Pressed).then_some(*action)
+    });
+
+    if user_mode.screen == UserModeScreen::DeviceJoin {
+        let p1_requested_exit = match user_mode.input_assignments[0] {
+            LocalInputAssignment::Gamepad(entity) => gamepads
+                .get(entity)
+                .map(|(_, gamepad)| gamepad.just_pressed(GamepadButton::Start))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if keys.just_pressed(KeyCode::Escape)
+            || p1_requested_exit
+            || pointer_action == Some(UserModeUiAction::Back)
+        {
+            if user_mode.controller_setup_context == ControllerSetupContext::Tutorial {
+                request_tutorial_transition(
+                    &mut tutorial_transition,
+                    &mut pause_owners,
+                    TutorialTransitionAction::LeaveTutorial,
+                );
+            } else {
+                route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+            }
+            return;
+        }
+        if let Some(message) = handle_device_join_input(
+            &mut user_mode,
+            &keys,
+            &key_bindings,
+            &gamepads,
+            &controller_metadata,
+            &control_preferences,
+            &mut rumble_requests,
+        ) {
+            announcements.show(message, 0.9);
+        }
+
+        if user_mode.controller_setup_input_latched
+            && !controller_setup_confirm_input_pressed(
+                &keys,
+                &key_bindings,
+                &gamepads,
+                &controller_metadata,
+            )
+        {
+            user_mode.controller_setup_input_latched = false;
+        }
+
+        let owner_action = if user_mode.input_assignments[0] == LocalInputAssignment::Unassigned {
+            unassigned_gamepad_user_mode_action(
+                UserModeScreen::DeviceJoin,
+                &gamepads,
+                &controller_metadata,
+                real_time.delta_secs(),
+                &mut menu_navigation.unassigned,
+            )
+            .or_else(|| keyboard_user_mode_action(&user_mode, &keys))
+        } else {
+            assignment_user_mode_action(
+                user_mode.input_assignments[0],
+                UserModeScreen::DeviceJoin,
+                &keys,
+                &key_bindings,
+                &gamepads,
+                &controller_metadata,
+                real_time.delta_secs(),
+                &mut menu_navigation.seats[0],
+            )
+            .or_else(|| (keys.just_pressed(KeyCode::Enter)).then_some(UserModeUiAction::Confirm))
+        };
+        let mut action = pointer_action.or(owner_action);
+        if action == Some(UserModeUiAction::Previous) {
+            user_mode.move_controller_setup_action(-1);
+            return;
+        }
+        if action == Some(UserModeUiAction::Next) {
+            user_mode.move_controller_setup_action(1);
+            return;
+        }
+        if action == Some(UserModeUiAction::Confirm) {
+            action = Some(user_mode.selected_controller_setup_action());
+        }
+        let Some(action) = action else {
+            return;
+        };
+        match action {
+            UserModeUiAction::ControllerSetupRemoveSeat(seat) => {
+                if user_mode.remove_assignment_at(seat).is_some() {
+                    user_mode.controller_setup_snapshot = user_mode.input_assignments;
+                    announcements.show(format!("P{} assignment removed", seat + 1), 0.8);
+                }
+            }
+            UserModeUiAction::ControllerSetupChangeOrder => {
+                user_mode.begin_controller_reorder();
+                announcements.show("Confirm devices in the new P1-P4 order", 1.1);
+            }
+            UserModeUiAction::ControllerSetupClear => {
+                if user_mode.arm_or_confirm_clear_assignments() {
+                    announcements.show("All assignments cleared", 0.9);
+                } else {
+                    announcements.show("Choose CLEAR again to confirm", 1.0);
+                }
+            }
+            UserModeUiAction::ControllerSetupReady => {
+                if user_mode.controller_setup_input_latched {
+                    announcements.show("Release Confirm, then choose Ready", 0.8);
+                } else if !controller_setup_can_finish(&user_mode, &gamepads) {
+                    announcements.show("Reconnect or remove every required controller", 1.1);
+                } else if user_mode.controller_setup_phase == ControllerSetupPhase::Reorder {
+                    user_mode.finish_controller_reorder();
+                    announcements.show("Player order saved", 0.9);
+                } else {
+                    if let LocalInputAssignment::Gamepad(entity) = user_mode.input_assignments[0] {
+                        let _ = request_controller_rumble(
+                            &mut rumble_requests,
+                            &control_preferences,
+                            entity,
+                            0.35,
+                            0.16,
+                        );
+                    }
+                    match user_mode.controller_setup_context {
+                        ControllerSetupContext::Settings => {
+                            user_mode.enter_controls_hub();
+                            announcements.show("Controller setup saved for this session", 1.0);
+                        }
+                        ControllerSetupContext::Tutorial => {
+                            request_tutorial_transition(
+                                &mut tutorial_transition,
+                                &mut pause_owners,
+                                TutorialTransitionAction::EnterHub,
+                            );
+                        }
+                        ControllerSetupContext::Match => {
+                            user_mode.enter_character_select();
+                            announcements.show("Choose your characters", 0.9);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     #[cfg(target_arch = "wasm32")]
     if matches!(
         user_mode.screen,
@@ -1904,9 +3619,267 @@ pub fn handle_user_mode_input(
         }
     }
 
-    let pointer_action = action_buttons.iter().find_map(|(interaction, action)| {
-        (*interaction == Interaction::Pressed).then_some(*action)
-    });
+    if user_mode.screen == UserModeScreen::ControllerTest {
+        if user_mode
+            .controller_test_active
+            .is_some_and(|entity| gamepads.get(entity).is_err())
+        {
+            user_mode.controller_test_active = None;
+            user_mode.controller_test_back_hold = 0.0;
+            announcements.show("Test controller disconnected", 0.9);
+        }
+
+        let toggle_vibration = pointer_action == Some(UserModeUiAction::ToggleVibration);
+        let toggle_haptic_style = pointer_action == Some(UserModeUiAction::ToggleHapticStyle);
+        let pointer_test = pointer_action == Some(UserModeUiAction::TestVibration);
+        let pointer_combat_test = pointer_action == Some(UserModeUiAction::TestCombatHaptics);
+        if toggle_vibration {
+            control_preferences.vibration = control_preferences.vibration.next();
+            if !control_preferences.vibration.enabled() {
+                for (gamepad, _) in &gamepads {
+                    rumble_requests.write(ControllerHapticRequest::stop(gamepad));
+                }
+            }
+            match save_control_preferences(&key_bindings, &control_preferences) {
+                Ok(()) => announcements.show(
+                    format!(
+                        "Controller vibration: {}",
+                        control_preferences.vibration.label()
+                    ),
+                    0.9,
+                ),
+                Err(error) => {
+                    warn!("Could not save control preferences: {error}");
+                    announcements.show("Vibration changed for this session; save failed", 1.2);
+                }
+            }
+            return;
+        }
+        if toggle_haptic_style {
+            control_preferences.haptic_style = control_preferences.haptic_style.next();
+            for (gamepad, _) in &gamepads {
+                rumble_requests.write(ControllerHapticRequest::stop(gamepad));
+            }
+            match save_control_preferences(&key_bindings, &control_preferences) {
+                Ok(()) => announcements.show(
+                    format!("Haptic style: {}", control_preferences.haptic_style.label()),
+                    0.9,
+                ),
+                Err(error) => {
+                    warn!("Could not save control preferences: {error}");
+                    announcements.show("Haptic style changed for this session; save failed", 1.2);
+                }
+            }
+            return;
+        }
+
+        if let Some(active) = user_mode.controller_test_active {
+            if keys.just_pressed(KeyCode::Escape) || pointer_action == Some(UserModeUiAction::Back)
+            {
+                user_mode.controller_test_active = None;
+                user_mode.controller_test_back_hold = 0.0;
+                return;
+            }
+            let Ok((_, gamepad)) = gamepads.get(active) else {
+                return;
+            };
+            let family = controller_info(active, &controller_metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            let vibration_direction = if gamepad.just_pressed(GamepadButton::DPadLeft) {
+                -1
+            } else if gamepad.just_pressed(GamepadButton::DPadRight) {
+                1
+            } else {
+                0
+            };
+            if vibration_direction != 0 {
+                control_preferences.vibration = if vibration_direction < 0 {
+                    control_preferences.vibration.previous()
+                } else {
+                    control_preferences.vibration.next()
+                };
+                if !control_preferences.vibration.enabled() {
+                    rumble_requests.write(ControllerHapticRequest::stop(active));
+                }
+                match save_control_preferences(&key_bindings, &control_preferences) {
+                    Ok(()) => announcements.show(
+                        format!("Vibration: {}", control_preferences.vibration.label()),
+                        0.75,
+                    ),
+                    Err(error) => {
+                        warn!("Could not save control preferences: {error}");
+                        announcements.show("Vibration changed; save failed", 1.0);
+                    }
+                }
+                return;
+            }
+            let style_direction = if gamepad.just_pressed(GamepadButton::DPadUp) {
+                -1
+            } else if gamepad.just_pressed(GamepadButton::DPadDown) {
+                1
+            } else {
+                0
+            };
+            if style_direction != 0 {
+                control_preferences.haptic_style = if style_direction < 0 {
+                    control_preferences.haptic_style.previous()
+                } else {
+                    control_preferences.haptic_style.next()
+                };
+                rumble_requests.write(ControllerHapticRequest::stop(active));
+                match save_control_preferences(&key_bindings, &control_preferences) {
+                    Ok(()) => announcements.show(
+                        format!("Haptic style: {}", control_preferences.haptic_style.label()),
+                        0.75,
+                    ),
+                    Err(error) => {
+                        warn!("Could not save control preferences: {error}");
+                        announcements.show("Haptic style changed; save failed", 1.0);
+                    }
+                }
+                return;
+            }
+            if gamepad.pressed(family.back_button()) {
+                user_mode.controller_test_back_hold += real_time.delta_secs();
+                if user_mode.controller_test_back_hold >= 0.75 {
+                    user_mode.controller_test_active = None;
+                    user_mode.controller_test_back_hold = 0.0;
+                    announcements.show("Controller test complete", 0.7);
+                    return;
+                }
+            } else {
+                user_mode.controller_test_back_hold = 0.0;
+            }
+            if pointer_test || gamepad.just_pressed(GamepadButton::Start) {
+                if queue_haptic_pattern(
+                    &mut rumble_requests,
+                    control_preferences.vibration,
+                    active,
+                    controller_test_pattern(),
+                    HapticPurpose::Test,
+                ) {
+                    announcements.show("Checking controller haptics…", 0.8);
+                } else {
+                    announcements.show("Choose Low, Standard, or High to test", 0.9);
+                }
+            } else if pointer_combat_test || gamepad.just_pressed(GamepadButton::West) {
+                if queue_haptic_pattern(
+                    &mut rumble_requests,
+                    control_preferences.vibration,
+                    active,
+                    combat_preview_pattern(control_preferences.haptic_style),
+                    HapticPurpose::Preview,
+                ) {
+                    announcements.show(
+                        format!(
+                            "{} combat preview",
+                            control_preferences.haptic_style.label()
+                        ),
+                        1.1,
+                    );
+                } else {
+                    announcements.show("Choose Low, Standard, or High to preview", 0.9);
+                }
+            }
+            return;
+        }
+
+        if let Some(pressed_entity) = gamepads.iter().find_map(|(entity, gamepad)| {
+            let family = controller_info(entity, &controller_metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            gamepad
+                .just_pressed(family.confirm_button())
+                .then_some(entity)
+        }) {
+            user_mode.controller_test_active = Some(pressed_entity);
+            user_mode.controller_test_back_hold = 0.0;
+            return;
+        }
+
+        let open_navigation = user_mode.input_assignments[0] == LocalInputAssignment::Unassigned;
+        let device_action = if open_navigation {
+            unassigned_gamepad_user_mode_action(
+                UserModeScreen::ControllerTest,
+                &gamepads,
+                &controller_metadata,
+                real_time.delta_secs(),
+                &mut menu_navigation.unassigned,
+            )
+        } else {
+            assignment_user_mode_action(
+                user_mode.input_assignments[0],
+                UserModeScreen::ControllerTest,
+                &keys,
+                &key_bindings,
+                &gamepads,
+                &controller_metadata,
+                real_time.delta_secs(),
+                &mut menu_navigation.seats[0],
+            )
+        };
+        let keyboard_action = open_navigation
+            .then(|| keyboard_user_mode_action(&user_mode, &keys))
+            .flatten();
+        match pointer_action.or(device_action).or(keyboard_action) {
+            Some(UserModeUiAction::Previous) => {
+                move_controller_test_cursor(&mut user_mode, &gamepads, -1)
+            }
+            Some(UserModeUiAction::Next) => {
+                move_controller_test_cursor(&mut user_mode, &gamepads, 1)
+            }
+            Some(UserModeUiAction::Confirm) => {
+                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
+                    user_mode.controller_test_active = Some(entity);
+                    user_mode.controller_test_back_hold = 0.0;
+                } else {
+                    announcements.show("No controller detected", 0.8);
+                }
+            }
+            Some(UserModeUiAction::TestVibration) => {
+                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
+                    if queue_haptic_pattern(
+                        &mut rumble_requests,
+                        control_preferences.vibration,
+                        entity,
+                        controller_test_pattern(),
+                        HapticPurpose::Test,
+                    ) {
+                        announcements.show("Checking controller haptics…", 0.8);
+                    } else {
+                        announcements.show("Choose Low, Standard, or High to test", 0.9);
+                    }
+                }
+            }
+            Some(UserModeUiAction::TestCombatHaptics) => {
+                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
+                    if queue_haptic_pattern(
+                        &mut rumble_requests,
+                        control_preferences.vibration,
+                        entity,
+                        combat_preview_pattern(control_preferences.haptic_style),
+                        HapticPurpose::Preview,
+                    ) {
+                        announcements.show(
+                            format!(
+                                "{} combat preview",
+                                control_preferences.haptic_style.label()
+                            ),
+                            1.1,
+                        );
+                    } else {
+                        announcements.show("Choose Low, Standard, or High to preview", 0.9);
+                    }
+                }
+            }
+            Some(UserModeUiAction::Back) => {
+                route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+            }
+            _ => {}
+        }
+        return;
+    }
 
     if user_mode.key_capture.is_some() {
         if pointer_action == Some(UserModeUiAction::Back) || keys.just_pressed(KeyCode::Escape) {
@@ -1933,7 +3906,13 @@ pub fn handle_user_mode_input(
                             key
                         )
                     };
-                    announcements.show(message, 1.0);
+                    match save_control_preferences(&key_bindings, &control_preferences) {
+                        Ok(()) => announcements.show(message, 1.0),
+                        Err(error) => {
+                            warn!("Could not save control preferences: {error}");
+                            announcements.show(format!("{message} — save failed"), 1.2);
+                        }
+                    }
                 }
                 Err("reserved") => announcements.show("Reserved key", 1.0),
                 _ => announcements.show("Cannot bind key", 1.0),
@@ -1942,9 +3921,69 @@ pub fn handle_user_mode_input(
         return;
     }
 
-    if user_mode.screen == UserModeScreen::KeySettings && keys.just_pressed(KeyCode::KeyR) {
-        *key_bindings = PlayerKeyBindings::default();
-        announcements.show("Controls reset", 1.0);
+    if user_mode.screen == UserModeScreen::KeySettings {
+        let p1_menu_pressed = match user_mode.input_assignments[0] {
+            LocalInputAssignment::Gamepad(entity) => gamepads
+                .get(entity)
+                .map(|(_, gamepad)| gamepad.just_pressed(GamepadButton::Start))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if user_mode.key_reset_confirmation {
+            let controller_action = match user_mode.input_assignments[0] {
+                LocalInputAssignment::Gamepad(entity) => {
+                    gamepads.get(entity).ok().and_then(|(_, gamepad)| {
+                        let family = controller_info(entity, &controller_metadata)
+                            .map(|info| info.family)
+                            .unwrap_or_default();
+                        if gamepad.just_pressed(family.confirm_button()) {
+                            Some(UserModeUiAction::ConfirmKeyReset)
+                        } else if gamepad.just_pressed(family.back_button()) {
+                            Some(UserModeUiAction::CancelKeyReset)
+                        } else {
+                            None
+                        }
+                    })
+                }
+                _ => None,
+            };
+            let action = pointer_action
+                .or(controller_action)
+                .or_else(|| {
+                    keys.just_pressed(KeyCode::Enter)
+                        .then_some(UserModeUiAction::ConfirmKeyReset)
+                })
+                .or_else(|| {
+                    keys.just_pressed(KeyCode::Escape)
+                        .then_some(UserModeUiAction::CancelKeyReset)
+                });
+            match action {
+                Some(UserModeUiAction::ConfirmKeyReset) => {
+                    *key_bindings = PlayerKeyBindings::default();
+                    user_mode.key_reset_confirmation = false;
+                    match save_control_preferences(&key_bindings, &control_preferences) {
+                        Ok(()) => announcements.show("Keyboard controls restored", 1.0),
+                        Err(error) => {
+                            warn!("Could not save control preferences: {error}");
+                            announcements
+                                .show("Controls restored for this session; save failed", 1.2);
+                        }
+                    }
+                }
+                Some(UserModeUiAction::CancelKeyReset | UserModeUiAction::Back) => {
+                    user_mode.key_reset_confirmation = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if pointer_action == Some(UserModeUiAction::ResetKeys)
+            || keys.just_pressed(KeyCode::KeyR)
+            || p1_menu_pressed
+        {
+            user_mode.key_reset_confirmation = true;
+            return;
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1953,12 +3992,95 @@ pub fn handle_user_mode_input(
     #[cfg(not(target_arch = "wasm32"))]
     let web_start_requested = false;
 
+    if pointer_action.is_none() && user_mode.screen == UserModeScreen::CharacterSelect {
+        if let Some(route) = handle_character_device_actions(
+            &mut user_mode,
+            &keys,
+            &key_bindings,
+            &gamepads,
+            &controller_metadata,
+            real_time.delta_secs(),
+            &mut menu_navigation,
+        ) {
+            if route == UserModeRoute::ArenaEntered {
+                set_active_arena_index(user_mode.arena_index);
+                announcements.show("Choose arena", 0.9);
+            } else if user_mode.screen == UserModeScreen::CharacterSelect {
+                announcements.show(
+                    format!(
+                        "P{}: {}{}",
+                        user_mode.character_select_player + 1,
+                        character_label(user_mode.selected_character()),
+                        if user_mode.character_ready[user_mode.character_select_player] {
+                            " ready"
+                        } else {
+                            ""
+                        }
+                    ),
+                    0.5,
+                );
+            }
+            return;
+        }
+    }
+
+    let before_device_join = matches!(
+        user_mode.screen,
+        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect
+    ) || (matches!(
+        user_mode.screen,
+        UserModeScreen::ControlsHub | UserModeScreen::ControllerTest | UserModeScreen::KeySettings
+    ) && user_mode.input_assignments[0]
+        == LocalInputAssignment::Unassigned);
+    let device_action = if before_device_join {
+        unassigned_gamepad_user_mode_action(
+            user_mode.screen,
+            &gamepads,
+            &controller_metadata,
+            real_time.delta_secs(),
+            &mut menu_navigation.unassigned,
+        )
+    } else {
+        assignment_user_mode_action(
+            user_mode.input_assignments[0],
+            user_mode.screen,
+            &keys,
+            &key_bindings,
+            &gamepads,
+            &controller_metadata,
+            real_time.delta_secs(),
+            &mut menu_navigation.seats[0],
+        )
+    };
+    let keyboard_action = before_device_join
+        .then(|| keyboard_user_mode_action(&user_mode, &keys))
+        .flatten()
+        .or_else(|| single_player_enter_action(&user_mode, &keys));
     let action = pointer_action
-        .or_else(|| keyboard_user_mode_action(&user_mode, &keys))
+        .or(device_action)
+        .or(keyboard_action)
         .or_else(|| web_start_requested.then_some(UserModeUiAction::Confirm));
     let Some(action) = action else {
         return;
     };
+
+    let enters_tutorial = user_mode.screen == UserModeScreen::ModeSelect
+        && match action {
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial) => true,
+            UserModeUiAction::Confirm => {
+                user_mode.main_menu_choice == UserModeMainMenuChoice::Tutorial
+            }
+            _ => false,
+        };
+    if enters_tutorial {
+        user_mode.main_menu_choice = UserModeMainMenuChoice::Tutorial;
+        request_tutorial_transition(
+            &mut tutorial_transition,
+            &mut pause_owners,
+            TutorialTransitionAction::EnterDeviceJoin,
+        );
+        return;
+    }
 
     let route = route_user_mode_action(&mut user_mode, action);
     match route {
@@ -2040,6 +4162,47 @@ pub fn handle_user_mode_input(
     }
 }
 
+pub fn announce_haptic_test_results(
+    mut events: MessageReader<HapticPlaybackEvent>,
+    mut announcements: ResMut<MatchAnnouncements>,
+) {
+    for event in events.read() {
+        if !matches!(event.purpose, HapticPurpose::Test | HapticPurpose::Preview) {
+            continue;
+        }
+        match &event.result {
+            HapticPlaybackResult::Started => {
+                let message = match event.purpose {
+                    HapticPurpose::Test => "Testing: left motor → right motor → both",
+                    HapticPurpose::Preview => "Preview: release → block → heavy → ultimate",
+                    _ => unreachable!(),
+                };
+                announcements.show(message, 1.0);
+            }
+            HapticPlaybackResult::Completed => {
+                let message = if event.purpose == HapticPurpose::Preview {
+                    "Combat haptic preview complete"
+                } else if cfg!(target_os = "macos") {
+                    "Haptic command completed; if silent, reconnect the Xbox controller via Bluetooth"
+                } else {
+                    "Vibration test complete"
+                };
+                announcements.show(message, 1.6);
+            }
+            HapticPlaybackResult::Preempted => {
+                announcements.show("Haptic preview replaced by a newer cue", 0.75);
+            }
+            HapticPlaybackResult::Unsupported => {
+                announcements.show("This controller or connection has no haptics", 1.25);
+            }
+            HapticPlaybackResult::Failed(error) => {
+                warn!("Controller haptic playback failed: {error}");
+                announcements.show("Controller haptics failed; reconnect and retry", 1.25);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn sync_web_battle_status(
     time: Res<Time>,
@@ -2090,6 +4253,7 @@ pub fn sync_user_mode_battle_result(
     if user_mode.battle_active
         && state.phase == MatchPhase::Results
         && user_mode.screen != UserModeScreen::BattleResult
+        && !user_mode.tutorial_screen_active()
     {
         user_mode.enter_battle_result(user_mode_result_winner(&state));
         virtual_time.set_relative_speed(USER_MODE_DEATH_SLOW_MOTION_SCALE);
@@ -2136,6 +4300,43 @@ pub fn sync_user_mode_battle_music(
         stop_arena_music(&mut commands, &arena_music);
         user_mode.battle_bot_ai_pending = false;
         user_mode.battle_active = false;
+    }
+}
+
+fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
+    matches!(
+        user_mode.screen,
+        UserModeScreen::ModeSelect
+            | UserModeScreen::PlayerCountSelect
+            | UserModeScreen::DeviceJoin
+            | UserModeScreen::ControlsHub
+            | UserModeScreen::ControllerTest
+            | UserModeScreen::KeySettings
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::TutorialHub
+    )
+}
+
+pub fn sync_user_mode_menu_music(
+    asset_server: Res<AssetServer>,
+    user_mode: Res<UserModeState>,
+    menu_music: Query<Entity, (With<UserModeMusic>, Without<ArenaMusic>)>,
+    mut commands: Commands,
+) {
+    let should_play = user_mode_menu_music_enabled(&user_mode);
+    let mut desired_track_kept = false;
+
+    for entity in &menu_music {
+        if should_play && !desired_track_kept {
+            desired_track_kept = true;
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    if should_play && !desired_track_kept {
+        start_user_mode_menu_music(&mut commands, &asset_server);
     }
 }
 
@@ -2199,6 +4400,149 @@ pub fn sync_user_mode_controllers(
             &mut controller,
             has_bot_brain,
         );
+    }
+}
+
+fn disconnected_controller_seats(
+    user_mode: &UserModeState,
+    gamepads: &Query<(Entity, &Gamepad)>,
+) -> [bool; FIGHTER_COUNT] {
+    std::array::from_fn(|seat| {
+        seat < user_mode.play_mode.human_player_count()
+            && matches!(
+                user_mode.input_assignments[seat],
+                LocalInputAssignment::Gamepad(entity) if gamepads.get(entity).is_err()
+            )
+    })
+}
+
+pub fn handle_local_controller_reconnect(
+    mut user_mode: ResMut<UserModeState>,
+    mut setup: ResMut<LocalSetup>,
+    state: Res<MatchState>,
+    gamepads: Query<(Entity, &Gamepad)>,
+    metadata: Query<&ControllerDeviceInfo>,
+    mut reconnect: ResMut<LocalControllerReconnect>,
+    mut pause_owners: ResMut<GameplayPauseOwners>,
+    mut fighters: Query<(&Controller, &mut FighterInput)>,
+) {
+    if !user_mode.battle_active || state.phase != MatchPhase::Fighting {
+        if !reconnect.blocks_gameplay() && !reconnect.any_missing() {
+            return;
+        }
+        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
+        reconnect.clear();
+        return;
+    }
+
+    let mut missing = disconnected_controller_seats(&user_mode, &gamepads);
+    if missing.iter().any(|seat| *seat) {
+        if reconnect.missing_seats != missing {
+            reconnect.missing_seats = missing;
+        }
+        if reconnect.resume_delay_frames != 0 {
+            reconnect.resume_delay_frames = 0;
+        }
+        if !reconnect.paused_by_reconnect {
+            reconnect.paused_by_reconnect = true;
+            pause_owners.set(GameplayPauseOwner::ControllerReconnect, true);
+        }
+
+        for (controller, mut input) in &mut fighters {
+            if missing[controller.slot.index()] {
+                *input = FighterInput::default();
+            }
+        }
+
+        for (entity, gamepad) in &gamepads {
+            let assignment = LocalInputAssignment::Gamepad(entity);
+            let family = controller_info(entity, &metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            if user_mode.assignment_is_joined(assignment)
+                || !gamepad.just_pressed(family.confirm_button())
+            {
+                continue;
+            }
+            let Some(seat) = missing.iter().position(|seat| *seat) else {
+                break;
+            };
+            user_mode.input_assignments[seat] = assignment;
+            setup.slots[seat].input = assignment;
+            missing[seat] = false;
+        }
+
+        if reconnect.missing_seats != missing {
+            reconnect.missing_seats = missing;
+        }
+        if reconnect.any_missing() {
+            return;
+        }
+        reconnect.resume_delay_frames = 1;
+        return;
+    }
+
+    if reconnect.missing_seats != [false; FIGHTER_COUNT] {
+        reconnect.missing_seats = [false; FIGHTER_COUNT];
+    }
+    if reconnect.resume_delay_frames > 0 {
+        reconnect.resume_delay_frames -= 1;
+        return;
+    }
+    if reconnect.paused_by_reconnect {
+        reconnect.paused_by_reconnect = false;
+        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
+    }
+}
+
+pub fn update_controller_reconnect_overlay(
+    user_mode: Res<UserModeState>,
+    reconnect: Res<LocalControllerReconnect>,
+    gamepads: Query<(Entity, &Gamepad)>,
+    metadata: Query<&ControllerDeviceInfo>,
+    mut overlays: Query<&mut Node, With<ControllerReconnectOverlay>>,
+    mut texts: Query<&mut Text, With<ControllerReconnectText>>,
+) {
+    let visible = reconnect.blocks_gameplay();
+    for mut node in &mut overlays {
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    let missing = reconnect
+        .missing_seats
+        .iter()
+        .enumerate()
+        .filter_map(|(seat, missing)| missing.then_some(format!("P{}", seat + 1)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut prompts = gamepads
+        .iter()
+        .filter(|(entity, _)| {
+            !user_mode.assignment_is_joined(LocalInputAssignment::Gamepad(*entity))
+        })
+        .map(|(entity, _)| {
+            let family = controller_info(entity, &metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            format!("{} {}", family.display_name(), family.confirm_label())
+        })
+        .collect::<Vec<_>>();
+    prompts.sort();
+    prompts.dedup();
+    let prompt = if prompts.is_empty() {
+        "Confirm on the original or another unassigned controller".to_string()
+    } else {
+        format!("Press {} to reclaim a seat", prompts.join(" or "))
+    };
+    for mut text in &mut texts {
+        **text = if reconnect.any_missing() {
+            format!("{missing} disconnected\n{prompt}")
+        } else {
+            "Controllers restored — resuming...".to_string()
+        };
     }
 }
 
@@ -2326,9 +4670,91 @@ pub fn sync_user_mode_ui_camera(
     }
 }
 
+fn main_menu_background_path(choice: UserModeMainMenuChoice) -> Option<&'static str> {
+    USER_MODE_MAIN_MENU_BACKGROUNDS
+        .iter()
+        .find_map(|&(mapped_choice, path)| (mapped_choice == choice).then_some(path))
+}
+
+fn desired_main_menu_background(user_mode: &UserModeState) -> Option<UserModeMainMenuChoice> {
+    (user_mode.screen() == UserModeScreen::ModeSelect).then_some(user_mode.main_menu_choice)
+}
+
+pub fn update_user_mode_main_menu_backgrounds(
+    user_mode: Res<UserModeState>,
+    real_time: Res<Time<Real>>,
+    asset_server: Res<AssetServer>,
+    mut backgrounds: ParamSet<(
+        Query<(&UserModeMainMenuBackground, &ImageNode)>,
+        Query<(&mut UserModeMainMenuBackground, &mut Node, &mut ImageNode)>,
+    )>,
+) {
+    let desired_choice = desired_main_menu_background(&user_mode);
+    let target = {
+        let background_query = backgrounds.p0();
+        match desired_choice {
+            None => MainMenuBackgroundTarget::Black,
+            Some(choice) if main_menu_background_path(choice).is_none() => {
+                MainMenuBackgroundTarget::Black
+            }
+            Some(choice) => match background_query
+                .iter()
+                .find(|(background, _)| background.choice == choice)
+            {
+                None => MainMenuBackgroundTarget::Black,
+                Some((_, image)) if asset_server.is_loaded_with_dependencies(image.image.id()) => {
+                    MainMenuBackgroundTarget::Choice(choice)
+                }
+                Some((_, image))
+                    if matches!(
+                        asset_server.load_state(image.image.id()),
+                        LoadState::Failed(_)
+                    ) =>
+                {
+                    MainMenuBackgroundTarget::Failed(choice)
+                }
+                Some(_) => MainMenuBackgroundTarget::HoldForLoad,
+            },
+        }
+    };
+
+    if target == MainMenuBackgroundTarget::HoldForLoad {
+        return;
+    }
+
+    for (mut background, mut node, mut image) in &mut backgrounds.p1() {
+        if target == MainMenuBackgroundTarget::Failed(background.choice)
+            && !background.load_failure_reported
+        {
+            warn!(
+                "Could not load main-menu background asset {}",
+                background.asset_path
+            );
+            background.load_failure_reported = true;
+        }
+
+        let target_opacity = if target == MainMenuBackgroundTarget::Choice(background.choice) {
+            1.0
+        } else {
+            0.0
+        };
+        let opacity = background
+            .fade
+            .advance(target_opacity, real_time.delta_secs());
+        image.color = Color::srgba(1.0, 1.0, 1.0, opacity);
+        node.display = if opacity > 0.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
 pub fn update_user_mode_ui(
     user_mode: Res<UserModeState>,
     bindings: Res<PlayerKeyBindings>,
+    gamepads: Query<Entity, With<Gamepad>>,
+    controller_metadata: Query<&ControllerDeviceInfo>,
     mut roots: Query<(&mut Node, &mut BackgroundColor), With<UserModeRoot>>,
     mut back_buttons: Query<&mut Node, (With<UserModeBackButton>, Without<UserModeRoot>)>,
     mut panels: Query<
@@ -2337,6 +4763,9 @@ pub fn update_user_mode_ui(
             Option<&UserModeStartPanel>,
             Option<&UserModeMainMenuPanel>,
             Option<&UserModePlayerCountPanel>,
+            Option<&UserModeControlsHubPanel>,
+            Option<&UserModeDeviceJoinPanel>,
+            Option<&UserModeControllerTestPanel>,
             Option<&UserModeCharacterSelectPanel>,
             Option<&UserModeArenaSelectPanel>,
             Option<&UserModeKeySettingsPanel>,
@@ -2345,10 +4774,14 @@ pub fn update_user_mode_ui(
         (
             Without<UserModeRoot>,
             Without<UserModeBackButton>,
+            Without<UserModeDeviceJoinSeatCard>,
             Or<(
                 With<UserModeStartPanel>,
                 With<UserModeMainMenuPanel>,
                 With<UserModePlayerCountPanel>,
+                With<UserModeControlsHubPanel>,
+                With<UserModeDeviceJoinPanel>,
+                With<UserModeControllerTestPanel>,
                 With<UserModeCharacterSelectPanel>,
                 With<UserModeArenaSelectPanel>,
                 With<UserModeKeySettingsPanel>,
@@ -2368,6 +4801,11 @@ pub fn update_user_mode_ui(
         ),
         (
             Without<UserModeControlsText>,
+            Without<UserModeDeviceJoinText>,
+            Without<UserModeDeviceJoinTitleText>,
+            Without<UserModeDeviceJoinReadyText>,
+            Without<UserModeDeviceJoinClearText>,
+            Without<UserModeDeviceJoinSeatText>,
             Or<(
                 With<UserModeChoiceText>,
                 With<UserModeCharacterTitleText>,
@@ -2375,6 +4813,55 @@ pub fn update_user_mode_ui(
                 With<UserModeKeySettingsRowText>,
                 With<UserModeResultText>,
             )>,
+        ),
+    >,
+    mut join_texts: Query<&mut Text, With<UserModeDeviceJoinText>>,
+    mut join_title_texts: Query<
+        &mut Text,
+        (
+            With<UserModeDeviceJoinTitleText>,
+            Without<UserModeDeviceJoinText>,
+            Without<UserModeDeviceJoinReadyText>,
+            Without<UserModeDeviceJoinClearText>,
+            Without<UserModeDeviceJoinSeatText>,
+        ),
+    >,
+    mut join_ready_texts: Query<
+        &mut Text,
+        (
+            With<UserModeDeviceJoinReadyText>,
+            Without<UserModeDeviceJoinTitleText>,
+            Without<UserModeDeviceJoinText>,
+            Without<UserModeDeviceJoinClearText>,
+            Without<UserModeDeviceJoinSeatText>,
+        ),
+    >,
+    mut join_clear_texts: Query<
+        &mut Text,
+        (
+            With<UserModeDeviceJoinClearText>,
+            Without<UserModeDeviceJoinReadyText>,
+            Without<UserModeDeviceJoinText>,
+            Without<UserModeDeviceJoinTitleText>,
+            Without<UserModeDeviceJoinSeatText>,
+        ),
+    >,
+    mut seat_cards: Query<
+        (
+            &UserModeDeviceJoinSeatCard,
+            &mut Node,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        (Without<UserModeRoot>, Without<UserModeBackButton>),
+    >,
+    mut seat_texts: Query<
+        (&UserModeDeviceJoinSeatText, &mut Text),
+        (
+            Without<UserModeDeviceJoinText>,
+            Without<UserModeDeviceJoinTitleText>,
+            Without<UserModeDeviceJoinReadyText>,
+            Without<UserModeDeviceJoinClearText>,
         ),
     >,
     mut key_settings_scrolls: Query<(&UserModeKeySettingsScroll, &mut ScrollPosition)>,
@@ -2395,6 +4882,9 @@ pub fn update_user_mode_ui(
     let back_visible = matches!(
         user_mode.screen(),
         UserModeScreen::PlayerCountSelect
+            | UserModeScreen::DeviceJoin
+            | UserModeScreen::ControlsHub
+            | UserModeScreen::ControllerTest
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
             | UserModeScreen::KeySettings
@@ -2407,10 +4897,15 @@ pub fn update_user_mode_ui(
             Display::None
         };
     }
-    for (mut node, start, main, player_count, character, arena, keys, result) in &mut panels {
+    for (mut node, start, main, player_count, hub, join, test, character, arena, keys, result) in
+        &mut panels
+    {
         let visible = (start.is_some() && user_mode.screen() == UserModeScreen::Start)
             || (main.is_some() && user_mode.screen() == UserModeScreen::ModeSelect)
             || (player_count.is_some() && user_mode.screen() == UserModeScreen::PlayerCountSelect)
+            || (hub.is_some() && user_mode.screen() == UserModeScreen::ControlsHub)
+            || (join.is_some() && user_mode.screen() == UserModeScreen::DeviceJoin)
+            || (test.is_some() && user_mode.screen() == UserModeScreen::ControllerTest)
             || (character.is_some() && user_mode.screen() == UserModeScreen::CharacterSelect)
             || (arena.is_some() && user_mode.screen() == UserModeScreen::ArenaSelect)
             || (keys.is_some() && key_settings_visible)
@@ -2420,6 +4915,61 @@ pub fn update_user_mode_ui(
         } else {
             Display::None
         };
+    }
+    for mut text in &mut join_texts {
+        **text = device_join_message(&user_mode, &bindings, &gamepads, &controller_metadata);
+    }
+    for mut text in &mut join_title_texts {
+        **text = match (
+            user_mode.controller_setup_context,
+            user_mode.controller_setup_phase,
+        ) {
+            (_, ControllerSetupPhase::Reorder) => "CHANGE PLAYER ORDER",
+            (ControllerSetupContext::Settings, _) => "CONTROLLER SETUP",
+            (ControllerSetupContext::Match, _) => "READY YOUR FIGHTERS",
+            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
+        }
+        .to_string();
+    }
+    for mut text in &mut join_ready_texts {
+        **text = match (
+            user_mode.controller_setup_context,
+            user_mode.controller_setup_phase,
+        ) {
+            (_, ControllerSetupPhase::Reorder) => "SAVE ORDER",
+            (ControllerSetupContext::Settings, _) => "DONE",
+            (ControllerSetupContext::Match, _) => "READY",
+            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
+        }
+        .to_string();
+    }
+    for mut text in &mut join_clear_texts {
+        **text = if user_mode.controller_setup_clear_confirmation {
+            "CONFIRM CLEAR"
+        } else {
+            "CLEAR"
+        }
+        .to_string();
+    }
+    let target = user_mode.controller_setup_target();
+    for (card, mut node, mut background, mut border) in &mut seat_cards {
+        let visible = user_mode.screen() == UserModeScreen::DeviceJoin && card.seat < target;
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        let (background_color, border_color) =
+            controller_setup_seat_colors(user_mode.input_assignments[card.seat], &gamepads);
+        *background = BackgroundColor(background_color);
+        *border = BorderColor::all(border_color);
+    }
+    for (seat, mut text) in &mut seat_texts {
+        **text = controller_setup_seat_message(
+            user_mode.input_assignments[seat.seat],
+            &gamepads,
+            &controller_metadata,
+        );
     }
 
     let selected_key_target = user_mode.selected_key_target();
@@ -2469,6 +5019,16 @@ fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction
             user_mode.screen == UserModeScreen::PlayerCountSelect
                 && user_mode.player_count_choice == choice
         }
+        UserModeUiAction::ControlsHub(choice) => {
+            user_mode.screen == UserModeScreen::ControlsHub
+                && user_mode.controls_hub_choice == choice
+        }
+        UserModeUiAction::ControllerSetupChangeOrder
+        | UserModeUiAction::ControllerSetupClear
+        | UserModeUiAction::ControllerSetupReady => {
+            user_mode.screen == UserModeScreen::DeviceJoin
+                && user_mode.selected_controller_setup_action() == action
+        }
         UserModeUiAction::KeyBinding(capture) => {
             user_mode.screen == UserModeScreen::KeySettings
                 && user_mode.selected_key_target() == capture
@@ -2515,6 +5075,7 @@ pub fn update_user_mode_controls_ui(
     user_mode: Res<UserModeState>,
     bindings: Res<PlayerKeyBindings>,
     scene: Res<UserModeGameplayScene>,
+    metadata: Query<&ControllerDeviceInfo>,
     mut panels: Query<&mut Node, With<UserModeControlsPanel>>,
     mut texts: Query<&mut Text, With<UserModeControlsText>>,
 ) {
@@ -2527,7 +5088,67 @@ pub fn update_user_mode_controls_ui(
         };
     }
     for mut text in &mut texts {
-        **text = controls_briefing_message(&user_mode, &bindings, scene.ready_for_battle());
+        **text = controls_briefing_message_for_family(
+            &user_mode,
+            &bindings,
+            scene.ready_for_battle(),
+            |entity| {
+                controller_info(entity, &metadata)
+                    .map(|info| info.family)
+                    .unwrap_or_default()
+            },
+        );
+    }
+}
+
+pub fn update_control_settings_ui(
+    user_mode: Res<UserModeState>,
+    preferences: Res<ControlPreferences>,
+    gamepads: Query<(Entity, &Gamepad)>,
+    metadata: Query<&ControllerDeviceInfo>,
+    mut test_texts: Query<
+        &mut Text,
+        (
+            With<UserModeControllerTestText>,
+            Without<UserModeVibrationButtonText>,
+        ),
+    >,
+    mut vibration_texts: Query<
+        &mut Text,
+        (
+            With<UserModeVibrationButtonText>,
+            Without<UserModeControllerTestText>,
+        ),
+    >,
+    mut haptic_style_texts: Query<
+        &mut Text,
+        (
+            With<UserModeHapticStyleButtonText>,
+            Without<UserModeControllerTestText>,
+            Without<UserModeVibrationButtonText>,
+        ),
+    >,
+    mut reset_panels: Query<&mut Node, With<UserModeKeyResetPanel>>,
+) {
+    if user_mode.screen() == UserModeScreen::ControllerTest {
+        for mut text in &mut test_texts {
+            **text = controller_test_message(&user_mode, &gamepads, &metadata);
+        }
+    }
+    for mut text in &mut vibration_texts {
+        **text = format!("VIBRATION: {}", preferences.vibration.label());
+    }
+    for mut text in &mut haptic_style_texts {
+        **text = format!("STYLE: {}", preferences.haptic_style.label());
+    }
+    for mut node in &mut reset_panels {
+        node.display = if user_mode.screen() == UserModeScreen::KeySettings
+            && user_mode.key_reset_confirmation
+        {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -2536,13 +5157,198 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         UserModeScreen::Start
         | UserModeScreen::ModeSelect
         | UserModeScreen::PlayerCountSelect
+        | UserModeScreen::DeviceJoin
+        | UserModeScreen::ControlsHub
+        | UserModeScreen::ControllerTest
         | UserModeScreen::KeySettings
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
-        | UserModeScreen::ControlsBriefing => 1.0,
+        | UserModeScreen::ControlsBriefing
+        | UserModeScreen::TutorialHub => 1.0,
         UserModeScreen::BattleResult if user_mode.result_menu_ready => 0.58,
         UserModeScreen::BattleResult => 0.0,
+        UserModeScreen::TutorialPause | UserModeScreen::TutorialFinalResult => 0.42,
+        UserModeScreen::TutorialLesson => 0.0,
         UserModeScreen::Dev => 0.0,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct MenuDirectionRepeat {
+    direction: IVec2,
+    held_seconds: f32,
+    next_repeat: f32,
+}
+
+#[derive(Default)]
+pub(crate) struct MenuNavigationTrackers {
+    screen: Option<UserModeScreen>,
+    seats: [MenuDirectionRepeat; FIGHTER_COUNT],
+    unassigned: MenuDirectionRepeat,
+}
+
+impl MenuNavigationTrackers {
+    fn reset_for_screen(&mut self, screen: UserModeScreen) {
+        if self.screen == Some(screen) {
+            return;
+        }
+        self.screen = Some(screen);
+        self.seats = [MenuDirectionRepeat::default(); FIGHTER_COUNT];
+        self.unassigned = MenuDirectionRepeat::default();
+    }
+}
+
+fn gamepad_menu_direction(gamepad: &Gamepad) -> IVec2 {
+    let dpad = gamepad.dpad();
+    let axis = if dpad.length_squared() > 0.0 {
+        dpad
+    } else {
+        gamepad.left_stick()
+    };
+    if axis.x.abs() >= axis.y.abs() && axis.x.abs() >= USER_MODE_MENU_STICK_THRESHOLD {
+        IVec2::new(axis.x.signum() as i32, 0)
+    } else if axis.y.abs() >= USER_MODE_MENU_STICK_THRESHOLD {
+        IVec2::new(0, axis.y.signum() as i32)
+    } else {
+        IVec2::ZERO
+    }
+}
+
+fn repeated_menu_direction(
+    direction: IVec2,
+    dt: f32,
+    tracker: &mut MenuDirectionRepeat,
+) -> Option<IVec2> {
+    if direction == IVec2::ZERO {
+        *tracker = MenuDirectionRepeat::default();
+        return None;
+    }
+    if tracker.direction != direction {
+        tracker.direction = direction;
+        tracker.held_seconds = 0.0;
+        tracker.next_repeat = USER_MODE_MENU_REPEAT_DELAY;
+        return Some(direction);
+    }
+
+    tracker.held_seconds += dt;
+    if tracker.held_seconds < tracker.next_repeat {
+        return None;
+    }
+    tracker.next_repeat += USER_MODE_MENU_REPEAT_INTERVAL;
+    Some(direction)
+}
+
+fn direction_to_user_mode_action(
+    screen: UserModeScreen,
+    direction: IVec2,
+) -> Option<UserModeUiAction> {
+    match screen {
+        UserModeScreen::ModeSelect
+        | UserModeScreen::PlayerCountSelect
+        | UserModeScreen::ControlsHub => {
+            if direction.y > 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.y < 0 {
+                Some(UserModeUiAction::Next)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::DeviceJoin
+        | UserModeScreen::ControllerTest
+        | UserModeScreen::CharacterSelect
+        | UserModeScreen::ArenaSelect
+        | UserModeScreen::BattleResult => {
+            if direction.x < 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.x > 0 {
+                Some(UserModeUiAction::Next)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::KeySettings => {
+            if direction.x < 0 {
+                Some(UserModeUiAction::PreviousColumn)
+            } else if direction.x > 0 {
+                Some(UserModeUiAction::NextColumn)
+            } else if direction.y > 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.y < 0 {
+                Some(UserModeUiAction::Next)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn gamepad_user_mode_action(
+    screen: UserModeScreen,
+    gamepad: &Gamepad,
+    family: ControllerFamily,
+    dt: f32,
+    tracker: &mut MenuDirectionRepeat,
+) -> Option<UserModeUiAction> {
+    if gamepad.just_pressed(family.back_button()) {
+        return Some(UserModeUiAction::Back);
+    }
+    if gamepad.just_pressed(family.confirm_button()) {
+        return Some(UserModeUiAction::Confirm);
+    }
+    repeated_menu_direction(gamepad_menu_direction(gamepad), dt, tracker)
+        .and_then(|direction| direction_to_user_mode_action(screen, direction))
+}
+
+fn keyboard_assignment_user_mode_action(
+    screen: UserModeScreen,
+    keys: &ButtonInput<KeyCode>,
+    bindings: PlayerControlBindings,
+) -> Option<UserModeUiAction> {
+    if keys.just_pressed(bindings.aim_grab) {
+        return Some(UserModeUiAction::Back);
+    }
+    if keys.just_pressed(bindings.jump) {
+        return Some(UserModeUiAction::Confirm);
+    }
+    let direction = if keys.just_pressed(bindings.left) {
+        IVec2::NEG_X
+    } else if keys.just_pressed(bindings.right) {
+        IVec2::X
+    } else if keys.just_pressed(bindings.up) {
+        IVec2::Y
+    } else if keys.just_pressed(bindings.down) {
+        IVec2::NEG_Y
+    } else {
+        IVec2::ZERO
+    };
+    direction_to_user_mode_action(screen, direction)
+}
+
+fn assignment_user_mode_action(
+    assignment: LocalInputAssignment,
+    screen: UserModeScreen,
+    keys: &ButtonInput<KeyCode>,
+    bindings: &PlayerKeyBindings,
+    gamepads: &Query<(Entity, &Gamepad)>,
+    metadata: &Query<&ControllerDeviceInfo>,
+    dt: f32,
+    tracker: &mut MenuDirectionRepeat,
+) -> Option<UserModeUiAction> {
+    match assignment {
+        LocalInputAssignment::Keyboard(player) => bindings
+            .bindings_for_player(player)
+            .and_then(|bindings| keyboard_assignment_user_mode_action(screen, keys, bindings)),
+        LocalInputAssignment::Gamepad(entity) => {
+            gamepads.get(entity).ok().and_then(|(_, gamepad)| {
+                let family = controller_info(entity, metadata)
+                    .map(|info| info.family)
+                    .unwrap_or_default();
+                gamepad_user_mode_action(screen, gamepad, family, dt, tracker)
+            })
+        }
+        LocalInputAssignment::Unassigned => None,
     }
 }
 
@@ -2569,7 +5375,9 @@ fn keyboard_user_mode_action(
     }
 
     match user_mode.screen {
-        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect => {
+        UserModeScreen::ModeSelect
+        | UserModeScreen::PlayerCountSelect
+        | UserModeScreen::ControlsHub => {
             if vertical_previous_pressed(keys) {
                 Some(UserModeUiAction::Previous)
             } else if vertical_next_pressed(keys) {
@@ -2580,7 +5388,10 @@ fn keyboard_user_mode_action(
                 None
             }
         }
-        UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect => {
+        UserModeScreen::DeviceJoin
+        | UserModeScreen::ControllerTest
+        | UserModeScreen::CharacterSelect
+        | UserModeScreen::ArenaSelect => {
             if select_previous_pressed(keys) {
                 Some(UserModeUiAction::Previous)
             } else if select_next_pressed(keys) {
@@ -2620,6 +5431,21 @@ fn keyboard_user_mode_action(
         }
         _ => None,
     }
+}
+
+fn single_player_enter_action(
+    user_mode: &UserModeState,
+    keys: &ButtonInput<KeyCode>,
+) -> Option<UserModeUiAction> {
+    (user_mode.play_mode == UserPlayMode::SinglePlayer
+        && matches!(
+            user_mode.screen,
+            UserModeScreen::CharacterSelect
+                | UserModeScreen::ArenaSelect
+                | UserModeScreen::ControlsBriefing
+        )
+        && keys.just_pressed(KeyCode::Enter))
+    .then_some(UserModeUiAction::Confirm)
 }
 
 fn select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -2680,16 +5506,159 @@ fn arena_preview_camera_transform(selected_index: usize) -> Transform {
 
 fn user_mode_choice_message(user_mode: &UserModeState) -> String {
     match user_mode.screen {
-        UserModeScreen::CharacterSelect => character_select_message(user_mode.selected_character()),
+        UserModeScreen::CharacterSelect => (0..user_mode.play_mode.human_player_count())
+            .map(|player| {
+                format!(
+                    "P{} {}{}",
+                    player + 1,
+                    character_label(user_mode.player_characters[player]).to_ascii_uppercase(),
+                    if user_mode.character_ready[player] {
+                        " [READY]"
+                    } else if player == user_mode.character_select_player {
+                        " <"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("   "),
         UserModeScreen::ArenaSelect => arena_select_message(user_mode.arena_index),
         _ => String::new(),
     }
 }
 
 fn character_select_title_message(user_mode: &UserModeState) -> String {
+    if user_mode.play_mode.is_single_player() {
+        "SELECT A CHARACTER".to_string()
+    } else {
+        format!(
+            "P{} SELECTING — EVERY PLAYER CONFIRMS",
+            user_mode.character_select_player + 1
+        )
+    }
+}
+
+fn controller_setup_seat_message(
+    assignment: LocalInputAssignment,
+    gamepads: &Query<Entity, With<Gamepad>>,
+    metadata: &Query<&ControllerDeviceInfo>,
+) -> String {
+    match assignment {
+        LocalInputAssignment::Keyboard(player) => {
+            format!("KEYBOARD {}\nCONNECTED\nCustom layout", player + 1)
+        }
+        LocalInputAssignment::Gamepad(entity) => {
+            let info = controller_info(entity, metadata);
+            let family = info
+                .map(|info| info.family.display_name())
+                .unwrap_or("Gamepad");
+            let name = info
+                .map(|info| info.display_name.as_str())
+                .unwrap_or("Controller");
+            let connection = if gamepads.get(entity).is_ok() {
+                "CONNECTED"
+            } else {
+                "MISSING — reconnect or replace"
+            };
+            format!("{family}\n{name}\n{connection}")
+        }
+        LocalInputAssignment::Unassigned => "WAITING\nPress Confirm to join".to_string(),
+    }
+}
+
+fn controller_setup_seat_colors(
+    assignment: LocalInputAssignment,
+    gamepads: &Query<Entity, With<Gamepad>>,
+) -> (Color, Color) {
+    match assignment {
+        LocalInputAssignment::Unassigned => (
+            Color::srgba(0.045, 0.045, 0.055, 0.94),
+            Color::srgb(0.34, 0.33, 0.31),
+        ),
+        LocalInputAssignment::Gamepad(entity) if gamepads.get(entity).is_err() => (
+            Color::srgba(0.16, 0.055, 0.035, 0.95),
+            Color::srgb(1.0, 0.48, 0.27),
+        ),
+        _ => (
+            Color::srgba(0.045, 0.115, 0.09, 0.95),
+            Color::srgb(0.38, 0.9, 0.62),
+        ),
+    }
+}
+
+fn device_join_message(
+    user_mode: &UserModeState,
+    bindings: &PlayerKeyBindings,
+    gamepads: &Query<Entity, With<Gamepad>>,
+    metadata: &Query<&ControllerDeviceInfo>,
+) -> String {
+    let target = user_mode.controller_setup_target();
+    let mut controller_prompts = gamepads
+        .iter()
+        .map(|entity| {
+            let family = controller_info(entity, metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            format!(
+                "{}: {} join / {} leave",
+                family.display_name(),
+                family.confirm_label(),
+                family.back_label()
+            )
+        })
+        .collect::<Vec<_>>();
+    controller_prompts.sort();
+    controller_prompts.dedup();
+    if controller_prompts.is_empty() {
+        controller_prompts.push("Controller: Confirm join / Back leave".to_string());
+    }
+    let keyboard_shortcuts = (0..FIGHTER_COUNT)
+        .map(|player| {
+            format!(
+                "K{}: {} or {}",
+                player + 1,
+                control_key_label(bindings, player, ControlAction::Jump),
+                control_key_label(bindings, player, ControlAction::AimGrab)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  |  ");
+    let status = match (
+        user_mode.controller_setup_context,
+        user_mode.controller_setup_phase,
+    ) {
+        (_, ControllerSetupPhase::Reorder) => {
+            format!(
+                "Choose devices in order — {} selected",
+                user_mode.joined_player_count()
+            )
+        }
+        (ControllerSetupContext::Settings, _) => format!(
+            "{} session assignment{}",
+            user_mode.joined_player_count(),
+            if user_mode.joined_player_count() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ),
+        (ControllerSetupContext::Match, _) => {
+            format!(
+                "{} / {target} required players ready",
+                user_mode.joined_player_count()
+            )
+        }
+        (ControllerSetupContext::Tutorial, _) => {
+            format!(
+                "{} / 1 trainee ready  |  progress is saved separately",
+                user_mode.joined_player_count()
+            )
+        }
+    };
     format!(
-        "P{} SELECT A CHARACTER",
-        user_mode.character_select_player + 1
+        "{}\nKeyboard: press that layout's Jump or Aim/Grab\n{keyboard_shortcuts}\n{status}  |  P1: Left/Right actions, Menu/Esc back",
+        controller_prompts.join("  |  "),
     )
 }
 
@@ -2701,7 +5670,8 @@ fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
             capture.action.label()
         );
     }
-    "Up/Down row  |  Left/Right player  |  Enter change key  |  R reset  |  Esc back".to_string()
+    "Up/Down row  |  Left/Right player  |  Confirm change  |  Menu/R restore defaults  |  Back"
+        .to_string()
 }
 
 fn key_settings_row_message(action: ControlAction, key: KeyCode, selected: bool) -> String {
@@ -2733,21 +5703,75 @@ fn controls_briefing_message(
     bindings: &PlayerKeyBindings,
     ready_for_battle: bool,
 ) -> String {
+    controls_briefing_message_for_family(user_mode, bindings, ready_for_battle, |_| {
+        ControllerFamily::Xbox
+    })
+}
+
+fn controls_briefing_message_for_family(
+    user_mode: &UserModeState,
+    bindings: &PlayerKeyBindings,
+    ready_for_battle: bool,
+    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
+) -> String {
+    let p1_assignment = effective_assignment(user_mode, 0);
     let status = if ready_for_battle {
-        "Press Enter or click to fight"
+        match p1_assignment {
+            LocalInputAssignment::Gamepad(entity) => {
+                return controls_briefing_message_with_status(
+                    user_mode,
+                    bindings,
+                    &format!(
+                        "P1 press {} or click to fight",
+                        family_for(entity).confirm_label()
+                    ),
+                    family_for,
+                );
+            }
+            LocalInputAssignment::Keyboard(player) => {
+                return controls_briefing_message_with_status(
+                    user_mode,
+                    bindings,
+                    &format!(
+                        "P1 press {} or click to fight",
+                        control_key_label(bindings, player, ControlAction::Jump)
+                    ),
+                    family_for,
+                );
+            }
+            LocalInputAssignment::Unassigned => unreachable!(),
+        }
     } else {
         "Loading battle..."
     };
+    controls_briefing_message_with_status(user_mode, bindings, status, family_for)
+}
+
+fn controls_briefing_message_with_status(
+    user_mode: &UserModeState,
+    bindings: &PlayerKeyBindings,
+    status: &str,
+    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
+) -> String {
     let arena = arena_definitions()[user_mode
         .arena_index
         .min(arena_definitions().len().saturating_sub(1))]
     .name;
 
     if user_mode.play_mode.is_single_player() {
+        if matches!(
+            effective_assignment(user_mode, 0),
+            LocalInputAssignment::Gamepad(_)
+        ) {
+            return format!(
+                "Defeat the bot.\nArena: {arena}\n\n{}\n\n{status}",
+                controls_player_message(0, user_mode, bindings, family_for)
+            );
+        }
         return format!(
             "Defeat the bot.\nArena: {}\n\n{}\n\nDash: double-tap movement\nGuard: {} + {}\n\n{}",
             arena,
-            controls_player_message(0, bindings),
+            controls_player_message(0, user_mode, bindings, family_for),
             control_key_label(bindings, 0, ControlAction::Heavy),
             control_key_label(bindings, 0, ControlAction::Light),
             status,
@@ -2756,17 +5780,51 @@ fn controls_briefing_message(
 
     let player_count = user_mode.play_mode.human_player_count();
     let player_controls = (0..player_count)
-        .map(|player| controls_player_compact_message(player, bindings))
+        .map(|player| controls_player_compact_message(player, user_mode, bindings, family_for))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{player_count} players share this keyboard.\nArena: {arena}\n\n{player_controls}\n\nDash: double-tap movement  |  Guard: Heavy + Light\n\n{status}"
+        "{player_count} local players.\nArena: {arena}\n\n{player_controls}\n\nKeyboard: double-tap dash, Heavy + Light guard\nController prompts match each detected device family.\n\n{status}"
     )
 }
 
-fn controls_player_message(player: usize, bindings: &PlayerKeyBindings) -> String {
+fn effective_assignment(user_mode: &UserModeState, player: usize) -> LocalInputAssignment {
+    match user_mode.input_assignments[player] {
+        LocalInputAssignment::Unassigned => LocalInputAssignment::Keyboard(player),
+        assignment => assignment,
+    }
+}
+
+fn controls_player_message(
+    player: usize,
+    user_mode: &UserModeState,
+    bindings: &PlayerKeyBindings,
+    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
+) -> String {
+    if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
+        let family = family_for(entity);
+        return format!(
+            "P{} — {} Controller\nMove: Left stick / D-pad\n{} Jump  |  {} Light  |  {} Heavy  |  {} Aim/Grab\n{} Dash  |  {} Guard  |  {} Ultimate  |  {} Special\n{}+{} Trap  |  {}+{} Hazard  |  {}+{} Shockwave",
+            player + 1,
+            family.display_name(),
+            family.face_button_label(GamepadButton::South),
+            family.face_button_label(GamepadButton::West),
+            family.face_button_label(GamepadButton::North),
+            family.face_button_label(GamepadButton::East),
+            family.face_button_label(GamepadButton::RightTrigger2),
+            family.face_button_label(GamepadButton::LeftTrigger),
+            family.face_button_label(GamepadButton::LeftTrigger2),
+            family.face_button_label(GamepadButton::RightTrigger),
+            family.face_button_label(GamepadButton::RightTrigger),
+            family.face_button_label(GamepadButton::LeftTrigger),
+            family.face_button_label(GamepadButton::RightTrigger),
+            family.face_button_label(GamepadButton::North),
+            family.face_button_label(GamepadButton::RightTrigger),
+            family.face_button_label(GamepadButton::East),
+        );
+    }
     format!(
-        "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
+        "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}\nSpecial: {}  |  +Light Trap  +Aim Shockwave  +Heavy Drift Field",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -2776,12 +5834,34 @@ fn controls_player_message(player: usize, bindings: &PlayerKeyBindings) -> Strin
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
+        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
-fn controls_player_compact_message(player: usize, bindings: &PlayerKeyBindings) -> String {
+fn controls_player_compact_message(
+    player: usize,
+    user_mode: &UserModeState,
+    bindings: &PlayerKeyBindings,
+    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
+) -> String {
+    if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
+        let family = family_for(entity);
+        return format!(
+            "P{}  {}: Stick/D-pad move | {} jump | {} light | {} heavy | {} aim | {} dash | {} guard | {} ult | {} special",
+            player + 1,
+            family.display_name(),
+            family.face_button_label(GamepadButton::South),
+            family.face_button_label(GamepadButton::West),
+            family.face_button_label(GamepadButton::North),
+            family.face_button_label(GamepadButton::East),
+            family.face_button_label(GamepadButton::RightTrigger2),
+            family.face_button_label(GamepadButton::LeftTrigger),
+            family.face_button_label(GamepadButton::LeftTrigger2),
+            family.face_button_label(GamepadButton::RightTrigger),
+        );
+    }
     format!(
-        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}",
+        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}  |  Special {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -2791,6 +5871,7 @@ fn controls_player_compact_message(player: usize, bindings: &PlayerKeyBindings) 
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
+        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
@@ -2844,7 +5925,7 @@ fn result_sfx_kind(user_mode: &UserModeState) -> Option<CombatSfxKind> {
     user_mode.result_winner.map(|_| CombatSfxKind::ResultWin)
 }
 
-fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
+pub(crate) fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
     commands.spawn((
         UserModeMusic,
         AudioPlayer::new(asset_server.load(USER_MODE_MENU_MUSIC_PATH)),
@@ -2906,7 +5987,10 @@ fn reconcile_arena_music(
     }
 }
 
-fn stop_user_mode_music(commands: &mut Commands, music: &Query<Entity, With<UserModeMusic>>) {
+pub(crate) fn stop_user_mode_music(
+    commands: &mut Commands,
+    music: &Query<Entity, With<UserModeMusic>>,
+) {
     for entity in music {
         commands.entity(entity).despawn();
     }
@@ -2941,6 +6025,7 @@ fn prepare_user_mode_match(
     state: &mut MatchState,
 ) -> UserModeMatchStartFlow {
     let player_character = user_mode.player_characters[0];
+    user_mode.ensure_test_or_web_assignments();
 
     setup.set_rule(USER_MODE_STOCK_RULE_INDEX);
     setup.arena_index = user_mode
@@ -2959,6 +6044,9 @@ fn prepare_user_mode_match(
             user_mode.player_characters,
             user_mode.play_mode.human_player_count(),
         ),
+    }
+    for player in 0..user_mode.play_mode.human_player_count() {
+        setup.slots[player].input = user_mode.input_assignments[player];
     }
     state.rule_index = setup.rule_index;
     state.rules = setup.active_rule();
@@ -3030,7 +6118,52 @@ fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{LocalInputAssignment, ParticipantKind};
+    use crate::components::{LocalInputAssignment, ParticipantKind, PlayerSlotId};
+
+    #[derive(Resource, Default)]
+    struct ReconnectGameplayTicks(u32);
+
+    fn count_reconnect_gameplay_ticks(mut ticks: ResMut<ReconnectGameplayTicks>) {
+        ticks.0 += 1;
+    }
+
+    fn reconnect_test_app(
+        play_mode: UserPlayMode,
+        assignments: [LocalInputAssignment; FIGHTER_COUNT],
+    ) -> App {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = play_mode;
+        user_mode.input_assignments = assignments;
+        user_mode.battle_active = true;
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .insert_resource(LocalSetup::default())
+            .insert_resource(state)
+            .init_resource::<LocalControllerReconnect>()
+            .init_resource::<GameplayPauseOwners>()
+            .init_resource::<Time<Virtual>>()
+            .init_resource::<ReconnectGameplayTicks>()
+            .add_systems(
+                Update,
+                (
+                    handle_local_controller_reconnect,
+                    crate::game_state::sync_virtual_time_pause,
+                    count_reconnect_gameplay_ticks
+                        .run_if(crate::game_state::match_accepts_gameplay),
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    fn pressed_a_gamepad() -> Gamepad {
+        let mut gamepad = Gamepad::default();
+        gamepad.digital_mut().press(GamepadButton::South);
+        gamepad
+    }
 
     #[test]
     fn shift_u_enters_user_mode() {
@@ -3058,10 +6191,11 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_cycles_and_wraps_three_vertical_choices() {
+    fn main_menu_cycles_and_wraps_four_vertical_choices() {
         let choices = [
             UserModeMainMenuChoice::SinglePlayer,
             UserModeMainMenuChoice::Multiplayer,
+            UserModeMainMenuChoice::Tutorial,
             UserModeMainMenuChoice::Settings,
         ];
         let mut choice = UserModeMainMenuChoice::SinglePlayer;
@@ -3074,6 +6208,130 @@ mod tests {
             UserModeMainMenuChoice::SinglePlayer.previous(),
             UserModeMainMenuChoice::Settings
         );
+    }
+
+    #[test]
+    fn main_menu_background_catalog_maps_every_choice_to_existing_art() {
+        let expected = [
+            (
+                UserModeMainMenuChoice::SinglePlayer,
+                USER_MODE_SINGLE_PLAYER_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Multiplayer,
+                USER_MODE_MULTIPLAYER_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Tutorial,
+                USER_MODE_TUTORIAL_BACKGROUND_PATH,
+            ),
+            (
+                UserModeMainMenuChoice::Settings,
+                USER_MODE_SETTINGS_BACKGROUND_PATH,
+            ),
+        ];
+
+        for (choice, path) in expected {
+            assert_eq!(main_menu_background_path(choice), Some(path));
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(path)
+                    .is_file(),
+                "missing main-menu background: {path}"
+            );
+        }
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(USER_MODE_GAME_LOGO_PATH)
+                .is_file(),
+            "missing main-menu logo: {USER_MODE_GAME_LOGO_PATH}"
+        );
+    }
+
+    #[test]
+    fn main_menu_background_fade_eases_and_reverses_without_a_jump() {
+        let mut fade = MainMenuBackgroundFade::default();
+
+        assert_eq!(fade.advance(1.0, 0.0), 0.0);
+        assert!(
+            (fade.advance(1.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS * 0.5) - 0.5).abs() < 0.001
+        );
+        let before_reverse = fade.opacity;
+        assert_eq!(fade.advance(0.0, 0.0), before_reverse);
+        assert!(fade.advance(0.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS * 0.5) < before_reverse);
+        assert_eq!(
+            fade.advance(0.0, USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS),
+            0.0
+        );
+    }
+
+    #[test]
+    fn hovering_a_main_menu_button_moves_selection_without_activating_it() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, sync_main_menu_pointer_hover);
+        app.world_mut().spawn((
+            Interaction::Hovered,
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial),
+        ));
+
+        app.update();
+
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(user_mode.main_menu_choice, UserModeMainMenuChoice::Tutorial);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+    }
+
+    #[test]
+    fn tutorial_routes_through_one_player_device_setup_and_back_to_main_menu() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+
+        activate_main_menu_choice(&mut user_mode, UserModeMainMenuChoice::Tutorial);
+
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
+        assert_eq!(
+            user_mode.controller_setup_context,
+            ControllerSetupContext::Tutorial
+        );
+        assert_eq!(user_mode.controller_setup_target(), 1);
+        assert!(user_mode.tutorial_screen_active());
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+    }
+
+    #[test]
+    fn tutorial_lesson_keeps_normal_bot_specials_available() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_tutorial_lesson();
+
+        assert!(user_mode.battle_active);
+        assert_eq!(user_mode.single_player_camera_target_id(), Some(0));
+        assert!(!user_mode.restricts_bot_special_inputs());
+    }
+
+    #[test]
+    fn tutorial_match_screens_keep_the_gameplay_hud_visible() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        assert!(!user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_hub();
+        assert!(!user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_lesson();
+        assert!(user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_pause();
+        assert!(user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_final_result();
+        assert!(user_mode.shows_gameplay_hud());
     }
 
     #[test]
@@ -3102,7 +6360,7 @@ mod tests {
             &mut single,
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::SinglePlayer),
         );
-        assert_eq!(single.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(single.screen(), UserModeScreen::DeviceJoin);
         assert_eq!(single.play_mode, UserPlayMode::SinglePlayer);
 
         let mut multiplayer = UserModeState::default();
@@ -3133,7 +6391,7 @@ mod tests {
         ] {
             let mut state = multiplayer.clone();
             route_user_mode_action(&mut state, UserModeUiAction::PlayerCount(choice));
-            assert_eq!(state.screen(), UserModeScreen::CharacterSelect);
+            assert_eq!(state.screen(), UserModeScreen::DeviceJoin);
             assert_eq!(state.play_mode, play_mode);
         }
 
@@ -3143,7 +6401,7 @@ mod tests {
             &mut settings,
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::Settings),
         );
-        assert_eq!(settings.screen(), UserModeScreen::KeySettings);
+        assert_eq!(settings.screen(), UserModeScreen::ControlsHub);
     }
 
     #[test]
@@ -3185,6 +6443,8 @@ mod tests {
         assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
         assert_eq!(user_mode.key_capture, None);
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
 
         user_mode.play_mode = UserPlayMode::FourPlayers;
@@ -3194,10 +6454,14 @@ mod tests {
             assert_eq!(user_mode.character_select_player, previous_player);
         }
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::PlayerCountSelect);
 
         user_mode.play_mode = UserPlayMode::SinglePlayer;
         user_mode.enter_character_select();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
 
@@ -3236,6 +6500,334 @@ mod tests {
             keys.press(key);
             assert_eq!(keyboard_user_mode_action(&user_mode, &keys), Some(expected));
         }
+    }
+
+    #[test]
+    fn mixed_devices_join_in_order_without_duplicate_ownership() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        user_mode.enter_device_join();
+        let first_gamepad = Entity::from_raw_u32(11).expect("valid entity");
+        let second_gamepad = Entity::from_raw_u32(12).expect("valid entity");
+
+        assert_eq!(
+            user_mode.join_assignment(LocalInputAssignment::Gamepad(first_gamepad)),
+            Some(0)
+        );
+        assert_eq!(
+            user_mode.join_assignment(LocalInputAssignment::Keyboard(2)),
+            Some(1)
+        );
+        assert_eq!(
+            user_mode.join_assignment(LocalInputAssignment::Gamepad(second_gamepad)),
+            Some(2)
+        );
+        assert_eq!(
+            user_mode.join_assignment(LocalInputAssignment::Keyboard(0)),
+            Some(3)
+        );
+        assert_eq!(
+            user_mode.join_assignment(LocalInputAssignment::Gamepad(first_gamepad)),
+            None
+        );
+        assert_eq!(user_mode.joined_player_count(), FIGHTER_COUNT);
+        assert_eq!(
+            user_mode.input_assignments,
+            [
+                LocalInputAssignment::Gamepad(first_gamepad),
+                LocalInputAssignment::Keyboard(2),
+                LocalInputAssignment::Gamepad(second_gamepad),
+                LocalInputAssignment::Keyboard(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaving_device_compacts_join_order_and_frees_the_last_seat() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::ThreePlayers;
+        user_mode.enter_device_join();
+        let gamepad = Entity::from_raw_u32(21).expect("valid entity");
+        for assignment in [
+            LocalInputAssignment::Keyboard(0),
+            LocalInputAssignment::Gamepad(gamepad),
+            LocalInputAssignment::Keyboard(3),
+        ] {
+            user_mode.join_assignment(assignment).unwrap();
+        }
+
+        assert_eq!(
+            user_mode.leave_assignment(LocalInputAssignment::Gamepad(gamepad)),
+            Some(1)
+        );
+        assert_eq!(
+            user_mode.input_assignments,
+            [
+                LocalInputAssignment::Keyboard(0),
+                LocalInputAssignment::Keyboard(3),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_keyboard_layout_can_join_with_jump_or_aim_grab() {
+        let bindings = PlayerKeyBindings::default();
+        for player in 0..FIGHTER_COUNT {
+            let player_bindings = bindings.bindings_for_player(player).unwrap();
+            for key in [player_bindings.jump, player_bindings.aim_grab] {
+                let mut keys = ButtonInput::default();
+                keys.press(key);
+                assert!(keyboard_join_requested(&keys, player_bindings));
+            }
+        }
+    }
+
+    #[test]
+    fn xbox_a_joins_and_b_leaves() {
+        let mut join = Gamepad::default();
+        join.digital_mut().press(GamepadButton::South);
+        assert!(gamepad_join_requested(&join, ControllerFamily::Xbox));
+        assert!(!gamepad_leave_requested(&join, ControllerFamily::Xbox));
+
+        let mut leave = Gamepad::default();
+        leave.digital_mut().press(GamepadButton::East);
+        assert!(gamepad_leave_requested(&leave, ControllerFamily::Xbox));
+        assert!(!gamepad_join_requested(&leave, ControllerFamily::Xbox));
+    }
+
+    #[test]
+    fn held_gamepad_menu_direction_repeats_after_delay() {
+        let mut tracker = MenuDirectionRepeat::default();
+        assert_eq!(
+            repeated_menu_direction(IVec2::X, 0.0, &mut tracker),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_menu_direction(IVec2::X, USER_MODE_MENU_REPEAT_DELAY - 0.01, &mut tracker),
+            None
+        );
+        assert_eq!(
+            repeated_menu_direction(IVec2::X, 0.02, &mut tracker),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_menu_direction(IVec2::ZERO, 0.0, &mut tracker),
+            None
+        );
+        assert_eq!(tracker, MenuDirectionRepeat::default());
+    }
+
+    #[test]
+    fn gamepad_menu_stick_uses_threshold_and_dpad_priority() {
+        let mut gamepad = Gamepad::default();
+        gamepad.analog_mut().set(
+            GamepadAxis::LeftStickX,
+            USER_MODE_MENU_STICK_THRESHOLD - 0.01,
+        );
+        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::ZERO);
+
+        gamepad
+            .analog_mut()
+            .set(GamepadAxis::LeftStickX, USER_MODE_MENU_STICK_THRESHOLD);
+        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::X);
+
+        gamepad.analog_mut().set(GamepadButton::DPadUp, 1.0);
+        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::Y);
+    }
+
+    #[test]
+    fn shared_menu_keyboard_action_comes_from_p1_assignment() {
+        let bindings = PlayerKeyBindings::default();
+        let p1 = bindings.bindings_for_player(0).unwrap();
+        let p2 = bindings.bindings_for_player(1).unwrap();
+        let mut keys = ButtonInput::default();
+        keys.press(p2.jump);
+
+        assert_eq!(
+            keyboard_assignment_user_mode_action(UserModeScreen::ArenaSelect, &keys, p1),
+            None
+        );
+        assert_eq!(
+            keyboard_assignment_user_mode_action(UserModeScreen::ArenaSelect, &keys, p2),
+            Some(UserModeUiAction::Confirm)
+        );
+    }
+
+    #[test]
+    fn enter_confirms_single_player_character_arena_and_fight() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Enter);
+
+        user_mode.enter_character_select();
+        let character_action = single_player_enter_action(&user_mode, &keys);
+        assert_eq!(character_action, Some(UserModeUiAction::Confirm));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, character_action.unwrap()),
+            UserModeRoute::ArenaEntered
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+
+        let arena_action = single_player_enter_action(&user_mode, &keys);
+        assert_eq!(arena_action, Some(UserModeUiAction::Confirm));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, arena_action.unwrap()),
+            UserModeRoute::PrepareMatch
+        );
+
+        user_mode.enter_controls_briefing();
+        let fight_action = single_player_enter_action(&user_mode, &keys);
+        assert_eq!(fight_action, Some(UserModeUiAction::Confirm));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, fight_action.unwrap()),
+            UserModeRoute::ConfirmBattle
+        );
+
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        assert_eq!(
+            single_player_enter_action(&user_mode, &keys),
+            None,
+            "multiplayer confirmation must remain scoped to each assigned seat"
+        );
+    }
+
+    #[test]
+    fn one_disconnect_neutralizes_and_gates_until_a_delayed_resume() {
+        let disconnected = Entity::from_raw_u32(51).expect("valid entity");
+        let mut app = reconnect_test_app(
+            UserPlayMode::SinglePlayer,
+            [
+                LocalInputAssignment::Gamepad(disconnected),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ],
+        );
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Controller::new(
+                    PlayerSlotId::new(0).unwrap(),
+                    ParticipantKind::Human,
+                    LocalInputAssignment::Gamepad(disconnected),
+                ),
+                FighterInput {
+                    jump: true,
+                    light: true,
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .any_missing()
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert!(app.world().resource::<Time<Virtual>>().is_paused());
+        let input = app.world().get::<FighterInput>(fighter).unwrap();
+        assert_eq!(input.movement, Vec2::ZERO);
+        assert!(!input.jump);
+        assert!(!input.light);
+        assert!(!input.heavy);
+        assert!(!input.dash);
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 0);
+
+        let replacement = app.world_mut().spawn(pressed_a_gamepad()).id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(replacement)
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+
+        app.update();
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 0);
+
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 1);
+    }
+
+    #[test]
+    fn multiple_missing_seats_require_distinct_replacement_controllers() {
+        let first_missing = Entity::from_raw_u32(61).expect("valid entity");
+        let second_missing = Entity::from_raw_u32(62).expect("valid entity");
+        let mut app = reconnect_test_app(
+            UserPlayMode::TwoPlayers,
+            [
+                LocalInputAssignment::Gamepad(first_missing),
+                LocalInputAssignment::Gamepad(second_missing),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ],
+        );
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .missing_seats,
+            [true, true, false, false]
+        );
+
+        let first_replacement = app.world_mut().spawn(pressed_a_gamepad()).id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(first_replacement)
+        );
+        assert_eq!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .missing_seats,
+            [false, true, false, false]
+        );
+
+        let second_replacement = app.world_mut().spawn(pressed_a_gamepad()).id();
+        app.update();
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(
+            user_mode.input_assignments[0],
+            LocalInputAssignment::Gamepad(first_replacement)
+        );
+        assert_eq!(
+            user_mode.input_assignments[1],
+            LocalInputAssignment::Gamepad(second_replacement)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[1].input,
+            LocalInputAssignment::Gamepad(second_replacement)
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
     }
 
     #[test]
@@ -3571,6 +7163,29 @@ mod tests {
     }
 
     #[test]
+    fn user_mode_prepare_preserves_mixed_device_assignments() {
+        let mut user_mode = UserModeState::default();
+        let mut setup = LocalSetup::default();
+        let mut state = MatchState::default();
+        let gamepad = Entity::from_raw_u32(31).expect("valid entity");
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.input_assignments = [
+            LocalInputAssignment::Gamepad(gamepad),
+            LocalInputAssignment::Keyboard(3),
+            LocalInputAssignment::Unassigned,
+            LocalInputAssignment::Unassigned,
+        ];
+        user_mode.screen = UserModeScreen::CharacterSelect;
+
+        prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+
+        assert_eq!(setup.slots[0].input, LocalInputAssignment::Gamepad(gamepad));
+        assert_eq!(setup.slots[1].input, LocalInputAssignment::Keyboard(3));
+        assert_eq!(setup.slots[2].input, LocalInputAssignment::Unassigned);
+        assert_eq!(setup.slots[3].input, LocalInputAssignment::Unassigned);
+    }
+
+    #[test]
     fn four_player_default_bindings_are_complete_and_unique() {
         let bindings = PlayerKeyBindings::default();
 
@@ -3584,7 +7199,10 @@ mod tests {
                 assert!(bindings.key_for(player, action).is_some());
             }
         }
-        assert_eq!(bindings.all_keys().len(), FIGHTER_COUNT * 8);
+        assert_eq!(
+            bindings.all_keys().len(),
+            FIGHTER_COUNT * ControlAction::ALL.len()
+        );
         assert!(!bindings.has_duplicate_keys());
     }
 
@@ -3603,7 +7221,29 @@ mod tests {
         assert!(message.contains("Light / Pickup / Item: C"));
         assert!(message.contains("Jump: V"));
         assert!(message.contains("Guard: X + C"));
-        assert!(message.contains("Press Enter or click to fight"));
+        assert!(message.contains("P1 press V or click to fight"));
+    }
+
+    #[test]
+    fn controls_briefing_shows_xbox_assignment_and_full_layout() {
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments[0] =
+            LocalInputAssignment::Gamepad(Entity::from_raw_u32(41).expect("valid entity"));
+        let bindings = PlayerKeyBindings::default();
+
+        let message = controls_briefing_message(&user_mode, &bindings, true);
+
+        assert!(message.contains("Xbox Controller"));
+        assert!(message.contains("A Jump"));
+        assert!(message.contains("X Light"));
+        assert!(message.contains("Y Heavy"));
+        assert!(message.contains("B Aim/Grab"));
+        assert!(message.contains("RT Dash"));
+        assert!(message.contains("LB Guard"));
+        assert!(message.contains("LT Ultimate"));
+        assert!(message.contains("RB Special"));
+        assert!(message.contains("RB+LB Trap"));
+        assert!(message.contains("P1 press A or click to fight"));
     }
 
     #[test]
@@ -3614,7 +7254,7 @@ mod tests {
 
         let message = controls_briefing_message(&user_mode, &bindings, false);
 
-        assert!(message.contains("2 players share this keyboard"));
+        assert!(message.contains("2 local players"));
         assert!(message.contains("Arena: Crown Ring"));
         assert!(message.contains("P1  Move Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
         assert!(message.contains("P2  Move A/D/W/S"));
@@ -3629,7 +7269,7 @@ mod tests {
 
         let message = controls_briefing_message(&user_mode, &bindings, true);
 
-        assert!(message.contains("4 players share this keyboard"));
+        assert!(message.contains("4 local players"));
         assert!(message.contains("P1  Move"));
         assert!(message.contains("P2  Move"));
         assert!(message.contains("P3  Move F/H/R/G"));
@@ -3678,6 +7318,14 @@ mod tests {
             &mut user_mode,
             UserModeUiAction::PlayerCount(UserModePlayerCountChoice::TwoPlayers),
         );
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
+        user_mode
+            .join_assignment(LocalInputAssignment::Keyboard(0))
+            .unwrap();
+        user_mode
+            .join_assignment(LocalInputAssignment::Keyboard(1))
+            .unwrap();
+        user_mode.enter_character_select();
         assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
 
         let first_character = user_mode.selected_character();
@@ -3885,12 +7533,12 @@ mod tests {
         user_mode.begin_key_capture();
 
         let result = user_mode
-            .apply_key_capture(&mut bindings, KeyCode::KeyE)
+            .apply_key_capture(&mut bindings, KeyCode::KeyQ)
             .unwrap();
 
         assert_eq!(
             bindings.key_for(result.capture.player, result.capture.action),
-            Some(KeyCode::KeyE)
+            Some(KeyCode::KeyQ)
         );
         assert_eq!(result.swapped, None);
         assert_eq!(user_mode.key_capture, None);
@@ -4055,6 +7703,45 @@ mod tests {
     }
 
     #[test]
+    fn menu_music_is_enabled_for_menu_screens_only() {
+        let mut user_mode = UserModeState::default();
+
+        for screen in [
+            UserModeScreen::ModeSelect,
+            UserModeScreen::PlayerCountSelect,
+            UserModeScreen::DeviceJoin,
+            UserModeScreen::ControlsHub,
+            UserModeScreen::ControllerTest,
+            UserModeScreen::KeySettings,
+            UserModeScreen::CharacterSelect,
+            UserModeScreen::ArenaSelect,
+            UserModeScreen::TutorialHub,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                user_mode_menu_music_enabled(&user_mode),
+                "menu music should play on {screen:?}"
+            );
+        }
+
+        for screen in [
+            UserModeScreen::Dev,
+            UserModeScreen::Start,
+            UserModeScreen::ControlsBriefing,
+            UserModeScreen::BattleResult,
+            UserModeScreen::TutorialLesson,
+            UserModeScreen::TutorialPause,
+            UserModeScreen::TutorialFinalResult,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                !user_mode_menu_music_enabled(&user_mode),
+                "menu music should not play on {screen:?}"
+            );
+        }
+    }
+
+    #[test]
     fn dev_mode_music_yields_to_user_mode_screens_and_battles() {
         let mut user_mode = UserModeState::default();
         assert!(dev_mode_music_enabled(&user_mode));
@@ -4068,6 +7755,240 @@ mod tests {
 
         user_mode.clear_battle_state();
         assert!(dev_mode_music_enabled(&user_mode));
+    }
+
+    #[test]
+    fn controls_hub_cycles_and_opens_each_focused_subpage() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_controls_hub();
+        assert_eq!(
+            user_mode.controls_hub_choice,
+            ControlsHubChoice::ControllerSetup
+        );
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(
+            user_mode.controls_hub_choice,
+            ControlsHubChoice::ControllerTest
+        );
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControllerTest);
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        user_mode.controls_hub_choice = ControlsHubChoice::KeyboardControls;
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
+    }
+
+    #[test]
+    fn settings_roster_prefills_match_setup_without_auto_clearing() {
+        let controller = Entity::from_raw_u32(71).expect("valid entity");
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments = [
+            LocalInputAssignment::Gamepad(controller),
+            LocalInputAssignment::Keyboard(2),
+            LocalInputAssignment::Keyboard(0),
+            LocalInputAssignment::Unassigned,
+        ];
+        user_mode.enter_settings_device_join();
+        user_mode.enter_controls_hub();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_device_join();
+
+        assert_eq!(user_mode.controller_setup_target(), 2);
+        assert_eq!(
+            user_mode.input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert_eq!(
+            user_mode.input_assignments[1],
+            LocalInputAssignment::Keyboard(2)
+        );
+        assert_eq!(
+            user_mode.input_assignments[2],
+            LocalInputAssignment::Keyboard(0)
+        );
+    }
+
+    #[test]
+    fn controller_reorder_cancel_restores_snapshot_and_save_commits_order() {
+        let original = [
+            LocalInputAssignment::Keyboard(0),
+            LocalInputAssignment::Keyboard(1),
+            LocalInputAssignment::Unassigned,
+            LocalInputAssignment::Unassigned,
+        ];
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments = original;
+        user_mode.enter_settings_device_join();
+
+        user_mode.begin_controller_reorder();
+        assert_eq!(
+            user_mode.input_assignments,
+            [LocalInputAssignment::Unassigned; FIGHTER_COUNT]
+        );
+        user_mode.join_assignment(LocalInputAssignment::Keyboard(3));
+        user_mode.cancel_controller_reorder();
+        assert_eq!(user_mode.input_assignments, original);
+
+        user_mode.begin_controller_reorder();
+        user_mode.join_assignment(LocalInputAssignment::Keyboard(1));
+        user_mode.join_assignment(LocalInputAssignment::Keyboard(0));
+        user_mode.finish_controller_reorder();
+        assert_eq!(
+            user_mode.input_assignments,
+            [
+                LocalInputAssignment::Keyboard(1),
+                LocalInputAssignment::Keyboard(0),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ]
+        );
+    }
+
+    #[test]
+    fn clearing_controller_setup_requires_two_confirmations() {
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments[0] = LocalInputAssignment::Keyboard(0);
+        user_mode.enter_settings_device_join();
+
+        assert!(!user_mode.arm_or_confirm_clear_assignments());
+        assert_eq!(
+            user_mode.input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert!(user_mode.arm_or_confirm_clear_assignments());
+        assert_eq!(
+            user_mode.input_assignments,
+            [LocalInputAssignment::Unassigned; FIGHTER_COUNT]
+        );
+    }
+
+    #[test]
+    fn nintendo_menu_uses_a_to_confirm_and_b_to_go_back() {
+        let mut confirm = Gamepad::default();
+        confirm.digital_mut().press(GamepadButton::East);
+        let mut tracker = MenuDirectionRepeat::default();
+        assert_eq!(
+            gamepad_user_mode_action(
+                UserModeScreen::ControlsHub,
+                &confirm,
+                ControllerFamily::Nintendo,
+                0.0,
+                &mut tracker,
+            ),
+            Some(UserModeUiAction::Confirm)
+        );
+
+        let mut back = Gamepad::default();
+        back.digital_mut().press(GamepadButton::South);
+        assert_eq!(
+            gamepad_user_mode_action(
+                UserModeScreen::ControlsHub,
+                &back,
+                ControllerFamily::Nintendo,
+                0.0,
+                &mut tracker,
+            ),
+            Some(UserModeUiAction::Back)
+        );
+    }
+
+    #[test]
+    fn controller_test_copy_uses_live_family_buttons_and_deadzone() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let mut gamepad = Gamepad::default();
+        gamepad.digital_mut().press(GamepadButton::South);
+        let entity = world
+            .spawn((
+                gamepad,
+                ControllerDeviceInfo {
+                    display_name: "Switch Pro Controller".to_string(),
+                    family: ControllerFamily::Nintendo,
+                    vendor_id: Some(0x057e),
+                    product_id: None,
+                    connected: true,
+                    haptics: crate::controller_haptics::HapticAvailability::Supported,
+                },
+            ))
+            .id();
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments[0] = LocalInputAssignment::Gamepad(entity);
+        user_mode.enter_controller_test();
+        user_mode.controller_test_active = Some(entity);
+
+        let mut system_state: SystemState<(
+            Query<(Entity, &Gamepad)>,
+            Query<&ControllerDeviceInfo>,
+        )> = SystemState::new(&mut world);
+        let (gamepads, metadata) = system_state.get(&world);
+        let message = controller_test_message(&user_mode, &gamepads, &metadata);
+
+        assert!(message.contains("Nintendo"));
+        assert!(message.contains("Pressed: B"));
+        assert!(message.contains("B Jump"));
+        assert!(message.contains("Movement deadzone: 0.20"));
+    }
+
+    #[test]
+    fn match_ready_requires_every_required_assignment_to_be_connected() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let controller = world.spawn(Gamepad::default()).id();
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.input_assignments = [
+            LocalInputAssignment::Gamepad(controller),
+            LocalInputAssignment::Keyboard(0),
+            LocalInputAssignment::Unassigned,
+            LocalInputAssignment::Unassigned,
+        ];
+        user_mode.enter_device_join();
+
+        let mut system_state: SystemState<Query<(Entity, &Gamepad)>> = SystemState::new(&mut world);
+        {
+            let gamepads = system_state.get(&world);
+            assert!(controller_setup_can_finish(&user_mode, &gamepads));
+        }
+        world.entity_mut(controller).remove::<Gamepad>();
+        {
+            let gamepads = system_state.get(&world);
+            assert!(!controller_setup_can_finish(&user_mode, &gamepads));
+        }
+    }
+
+    #[test]
+    fn nintendo_briefing_uses_physical_gameplay_button_labels() {
+        let controller = Entity::from_raw_u32(72).expect("valid entity");
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments[0] = LocalInputAssignment::Gamepad(controller);
+        let message = controls_briefing_message_for_family(
+            &user_mode,
+            &PlayerKeyBindings::default(),
+            true,
+            |_| ControllerFamily::Nintendo,
+        );
+
+        assert!(message.contains("Nintendo Controller"));
+        assert!(message.contains("B Jump"));
+        assert!(message.contains("Y Light"));
+        assert!(message.contains("A Aim/Grab"));
+        assert!(message.contains("press A"));
+    }
+
+    #[test]
+    fn back_cancels_key_reset_confirmation_before_leaving_keyboard_settings() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_key_settings();
+        user_mode.key_reset_confirmation = true;
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+
+        assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
+        assert!(!user_mode.key_reset_confirmation);
     }
 
     #[test]

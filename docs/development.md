@@ -14,6 +14,7 @@ boundaries, and include measurements when they change a hot path.
 | Instrumented runtime | `cargo run --profile profiling --features perf` | Release optimization with debug symbols. |
 | Tracy capture | `cargo run --profile profiling --features trace` | Native-only Tracy instrumentation. |
 | Web distribution | `./scripts/build_web.sh` | Writes only to repository-root `web_dist/`. |
+| itch.io archive | `./scripts/package_itch.sh` | Validates and writes `target/itch/animal-fighter-club-web.zip`. |
 
 The `perf` feature is the gate for low-overhead counters and benchmark scenarios.
 The `trace` feature includes `perf` and Bevy's Tracy integration. Neither belongs
@@ -67,4 +68,11 @@ linking; it is suitable only for an explicitly local iteration configuration.
 Install the `wasm32-unknown-unknown` target, matching `wasm-bindgen-cli`, and
 Binaryen's `wasm-opt`. The build script runs `wasm-opt -O3`, reports raw and final
 WASM sizes, enforces the documented guardrail, copies static assets, and writes the
-complete GitHub Pages artifact to `web_dist/`.
+complete itch.io-ready static artifact to `web_dist/`. The tracked `web/index.html`
+template keeps `pkg/` and `assets/` references relative and sizes the Bevy canvas
+to its containing iframe. Run `./scripts/package_itch.sh` to verify itch.io's
+HTML5 limits and create a root-layout ZIP without a wrapping `web_dist/` folder.
+Before publishing, upload the ZIP as a draft HTML Game with click-to-launch
+fullscreen enabled, then verify controller discovery, audio startup, reconnect,
+and replacement-controller behavior in current Chrome and Safari with real
+hardware.

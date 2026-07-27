@@ -137,6 +137,26 @@ struct BotPersonality {
     panic_health: f32,
 }
 
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BotDifficulty {
+    #[default]
+    Standard,
+    Tutorial,
+}
+
+impl BotDifficulty {
+    fn attack_recovery_scale(self) -> f32 {
+        match self {
+            Self::Standard => 1.0,
+            Self::Tutorial => 1.65,
+        }
+    }
+
+    fn normal_grab_allowed(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BotTargetSnapshot {
     position: Vec3,
@@ -289,6 +309,7 @@ pub fn bot_input(
         &FighterEquipment,
         &FighterStats,
         &FighterActionState,
+        Option<&BotDifficulty>,
     )>,
     all_fighters: Query<(&Fighter, &Transform, &FighterActionState, &FighterMotor)>,
     items: Query<(&ArenaItem, &Transform)>,
@@ -313,6 +334,7 @@ pub fn bot_input(
         equipment,
         stats,
         action,
+        difficulty,
     ) in &mut bots
     {
         if !controller.is_bot() {
@@ -323,7 +345,8 @@ pub fn bot_input(
             continue;
         }
         let tuning = style_tuning(style.kind);
-        let personality = bot_personality(style.kind, equipment.kind);
+        let difficulty = difficulty.copied().unwrap_or_default();
+        let personality = bot_personality_for_difficulty(style.kind, equipment.kind, difficulty);
         *input = FighterInput::default();
 
         #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -347,7 +370,7 @@ pub fn bot_input(
         brain.decision_timer -= dt;
         brain.movement_plan_timer -= dt;
         brain.dash_timer -= dt;
-        brain.attack_timer -= dt;
+        brain.attack_timer -= dt / difficulty.attack_recovery_scale();
 
         let mut nearest: Option<BotTargetSnapshot> = None;
         for (other, other_transform, other_action, other_motor) in &all_fighters {
@@ -667,7 +690,8 @@ pub fn bot_input(
             brain.dash_timer = bot_movement_dash_cooldown(brain.movement_plan, bot.id);
         }
 
-        if distance < 0.9
+        if difficulty.normal_grab_allowed()
+            && distance < 0.9
             && brain.attack_timer <= 0.0
             && (time.elapsed_secs() * (bot.id as f32 + 3.3)).sin() > 0.55
         {
@@ -933,6 +957,22 @@ fn bot_personality(
         EquipmentKind::HeavySeal => personality.item_greed *= 1.08,
     }
 
+    personality
+}
+
+fn bot_personality_for_difficulty(
+    style: crate::styles::FighterStyleKind,
+    equipment: EquipmentKind,
+    difficulty: BotDifficulty,
+) -> BotPersonality {
+    let mut personality = bot_personality(style, equipment);
+    if difficulty == BotDifficulty::Tutorial {
+        personality.aggression *= 0.62;
+        personality.item_greed *= 0.82;
+        personality.special_bias *= 0.7;
+        personality.mistake_rate = (personality.mistake_rate + 0.24).clamp(0.24, 0.38);
+        personality.panic_health += 12.0;
+    }
     personality
 }
 
@@ -1828,6 +1868,32 @@ mod tests {
                 )
                 .item_greed
         );
+    }
+
+    #[test]
+    fn tutorial_difficulty_is_forgiving_but_bounded() {
+        let normal = bot_personality_for_difficulty(
+            crate::styles::FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+            BotDifficulty::Standard,
+        );
+        let tutorial = bot_personality_for_difficulty(
+            crate::styles::FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+            BotDifficulty::Tutorial,
+        );
+
+        assert!(tutorial.aggression < normal.aggression);
+        assert!(tutorial.special_bias < normal.special_bias);
+        assert!(tutorial.mistake_rate > normal.mistake_rate);
+        assert!((0.0..=0.4).contains(&tutorial.mistake_rate));
+        assert!(BotDifficulty::Tutorial.attack_recovery_scale() > 1.0);
+    }
+
+    #[test]
+    fn tutorial_difficulty_disables_normal_grabs_only() {
+        assert!(BotDifficulty::Standard.normal_grab_allowed());
+        assert!(!BotDifficulty::Tutorial.normal_grab_allowed());
     }
 
     #[test]

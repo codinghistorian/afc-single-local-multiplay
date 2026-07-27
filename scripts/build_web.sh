@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 OUT_DIR="web_dist"
 PKG_DIR="$OUT_DIR/pkg"
 WASM_TARGET_DIR="target/wasm32-unknown-unknown/release"
+WASM_BINARY_NAME="ffc-prototype"
 WASM_SIZE_TARGET_BYTES="${WASM_SIZE_TARGET_BYTES:-61498982}"
 WASM_SIZE_BUDGET_BYTES="${WASM_SIZE_BUDGET_BYTES:-64573931}"
 
@@ -31,11 +32,16 @@ require_tool wasm-opt "Install Binaryen (macOS: brew install binaryen)."
 rm -rf "$OUT_DIR"
 mkdir -p "$PKG_DIR"
 
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features web
+cargo build \
+  --release \
+  --target wasm32-unknown-unknown \
+  --no-default-features \
+  --features web \
+  --bin "$WASM_BINARY_NAME"
 
-WASM_FILE="$(find "$WASM_TARGET_DIR" -maxdepth 1 -name '*.wasm' | head -n 1)"
-if [[ -z "$WASM_FILE" ]]; then
-  echo "No wasm file found in $WASM_TARGET_DIR" >&2
+WASM_FILE="$WASM_TARGET_DIR/$WASM_BINARY_NAME.wasm"
+if [[ ! -f "$WASM_FILE" ]]; then
+  echo "Expected web game binary was not found at $WASM_FILE" >&2
   exit 1
 fi
 

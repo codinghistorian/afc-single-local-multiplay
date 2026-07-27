@@ -9,9 +9,10 @@ use crate::combat::{
 };
 use crate::components::{
     Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterSpecialState,
-    FighterStats,
+    FighterStats, SpecialInputKind,
 };
 use crate::constants::*;
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, FeedbackPackageId, spawn_feedback_package};
 use crate::equipment::{
     FighterEquipment, LoadoutContext, loadout_special_cooldown_scale, loadout_special_cost_scale,
@@ -208,7 +209,12 @@ pub fn handle_special_inputs(
         feedback.push_feedback_cue(special_cue(kind), ImpactSource::MatchFlow, 20);
         set_special_action(&mut action);
         input.special = false;
+        input.light = false;
+        input.light_held = false;
+        input.raw_light_pressed = false;
         input.heavy = false;
+        input.heavy_held = false;
+        input.raw_heavy_pressed = false;
         input.grab = false;
     }
 }
@@ -240,6 +246,14 @@ fn can_cast_special(action: FighterAction) -> bool {
 }
 
 fn requested_special_kind(input: &FighterInput) -> SpecialKind {
+    if let Some(kind) = input.special_kind {
+        return match kind {
+            SpecialInputKind::Projectile => SpecialKind::Projectile,
+            SpecialInputKind::Trap => SpecialKind::Trap,
+            SpecialInputKind::Hazard => SpecialKind::Hazard,
+            SpecialInputKind::Shockwave => SpecialKind::Shockwave,
+        };
+    }
     if input.guard {
         SpecialKind::Trap
     } else if input.heavy {
@@ -502,6 +516,7 @@ pub fn update_specials(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut specials: Query<(Entity, &mut ActiveSpecial, &mut Transform), Without<Fighter>>,
     mut fighters: Query<
@@ -598,8 +613,10 @@ pub fn update_specials(
                 &mut commands,
                 &effect_assets,
                 &mut camera_effects,
+                &mut haptics,
                 &mut hitstop,
                 &state,
+                target.id,
                 &mut stats,
                 &mut motor,
                 &mut action,
@@ -975,6 +992,19 @@ mod tests {
 
         assert!(special.stamina_disrupt > 0.0);
         assert_eq!(profile.damage, SPECIAL_PROJECTILE_DAMAGE);
+    }
+
+    #[test]
+    fn explicit_controller_special_kind_overrides_combat_button_state() {
+        let input = FighterInput {
+            special: true,
+            guard: true,
+            heavy: true,
+            grab: true,
+            special_kind: Some(SpecialInputKind::Shockwave),
+            ..default()
+        };
+        assert_eq!(requested_special_kind(&input), SpecialKind::Shockwave);
     }
 
     fn test_special(kind: SpecialKind) -> ActiveSpecial {

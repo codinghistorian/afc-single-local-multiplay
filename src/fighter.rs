@@ -23,13 +23,16 @@ use crate::combat::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, ground_impact_priority};
 use crate::components::{
-    Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterBody,
-    FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory, FighterMarker,
-    FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState, FighterStats,
-    FighterUltimateState, FighterVisualRoot, PlayerControlBindings, PlayerKeyBindings,
-    PlayerSlotId,
+    Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState,
+    FighterBody, FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory,
+    FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState,
+    FighterStats, FighterUltimateState, FighterVisualRoot, LocalInputAssignment,
+    PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SpecialInputKind,
 };
 use crate::constants::*;
+use crate::controller_haptics::{
+    CombatHapticCue, CombatHapticQueue, HapticContactOutcome, HapticImpactWeight,
+};
 use crate::effects::{
     EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_drunk_bubble, spawn_dust_puff,
     spawn_guard_flash, spawn_respawn_column, spawn_ringout_burst,
@@ -60,6 +63,8 @@ use crate::techniques::{
 use crate::user_mode::UserModeState;
 
 const DOUBLE_TAP_DASH_WINDOW: f32 = 0.28;
+pub(crate) const GAMEPAD_MOVEMENT_DEADZONE: f32 = 0.20;
+const GAMEPAD_FLICK_DASH_THRESHOLD: f32 = 0.80;
 const FIGHTER_BODY_SEPARATION_ITERATIONS: usize = 3;
 const KNOCKDOWN_HEAD_LOW_PITCH: f32 = 2.72;
 const JUMP_ATTACK_QUEUE_GRACE: f32 = 0.18;
@@ -81,6 +86,16 @@ const CHICK_DASH_C_BACKSTEP_SPEED: f32 =
     CHICK_DASH_C_BACKSTEP_DISTANCE / CHICK_DASH_BACKSTEP_DURATION;
 const CHICK_DASH_X_BACKSTEP_SPEED: f32 =
     CHICK_DASH_X_BACKSTEP_DISTANCE / CHICK_DASH_BACKSTEP_DURATION;
+const AIM_ACQUIRE_DISTANCE: f32 = 7.5;
+const AIM_RETAIN_DISTANCE: f32 = 9.0;
+const AIM_ACQUIRE_COS: f32 = 0.866_025_4;
+const AIM_BREAK_COS: f32 = 0.5;
+const AIM_FREE_DISTANCE: f32 = 2.4;
+const AIM_TORSO_HEIGHT: f32 = 1.05;
+const AIM_MARKER_SMOOTHING: f32 = 22.0;
+const AIM_MARKER_FADE_IN: f32 = 0.06;
+const AIM_MARKER_FADE_OUT: f32 = 0.14;
+const AIM_MARKER_BASE_SCALE: f32 = 0.72;
 
 #[derive(Component)]
 pub(crate) struct FighterStyleAccent {
@@ -112,6 +127,12 @@ pub(crate) struct FighterTintMaterial {
     tint: Handle<StandardMaterial>,
 }
 
+#[derive(Component)]
+pub(crate) struct FighterAimMarker {
+    fighter_id: usize,
+    material: Handle<StandardMaterial>,
+}
+
 pub fn spawn_fighters(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -129,6 +150,8 @@ pub fn spawn_fighters(
     let equipment_chip_mesh = meshes.add(Cuboid::new(0.18, 0.16, 0.09));
     let guard_shield_mesh = meshes.add(Cuboid::new(1.28, 1.05, 0.045));
     let light_punch_corner_mesh = meshes.add(light_punch_corner_tint_mesh());
+    let aim_ring_mesh = meshes.add(Torus::new(0.32, 0.025));
+    let aim_tick_mesh = meshes.add(Cuboid::new(0.16, 0.035, 0.025));
 
     for id in 0..spawned_fighter_count() {
         let arena = active_arena_definition();
@@ -186,6 +209,7 @@ pub fn spawn_fighters(
         });
         let light_punch_corner_material =
             materials.add(light_punch_corner_tint_material(character_kind));
+        let aim_marker_material = materials.add(aim_marker_material(color));
 
         let slot_id = PlayerSlotId::new(id).expect("spawned fighter id should be a valid slot");
         let controller = setup
@@ -231,6 +255,13 @@ pub fn spawn_fighters(
             Transform::from_translation(arena.spawn_points[id]),
             visibility,
         ));
+        entity.insert(FighterAimState {
+            direction: if id % 2 == 0 { Vec3::X } else { -Vec3::X },
+            marker_position: arena.spawn_points[id]
+                + Vec3::Y * AIM_TORSO_HEIGHT
+                + if id % 2 == 0 { Vec3::X } else { -Vec3::X } * AIM_FREE_DISTANCE,
+            ..default()
+        });
         entity.insert(DrunkStatus::default());
         entity.insert(FighterCharacter::new(character_kind));
 
@@ -350,6 +381,35 @@ pub fn spawn_fighters(
                 Name::new(format!("{} guard shield", FIGHTER_NAMES[id])),
             ));
         });
+        commands
+            .spawn((
+                FighterAimMarker {
+                    fighter_id: id,
+                    material: aim_marker_material.clone(),
+                },
+                Transform::from_translation(arena.spawn_points[id]),
+                Visibility::Hidden,
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    Mesh3d(aim_ring_mesh.clone()),
+                    MeshMaterial3d(aim_marker_material.clone()),
+                    Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                ));
+                for (translation, rotation) in [
+                    (Vec3::new(0.0, 0.42, 0.0), 0.0),
+                    (Vec3::new(0.0, -0.42, 0.0), 0.0),
+                    (Vec3::new(0.42, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                    (Vec3::new(-0.42, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                ] {
+                    parent.spawn((
+                        Mesh3d(aim_tick_mesh.clone()),
+                        MeshMaterial3d(aim_marker_material.clone()),
+                        Transform::from_translation(translation)
+                            .with_rotation(Quat::from_rotation_z(rotation)),
+                    ));
+                }
+            });
     }
 }
 
@@ -441,6 +501,18 @@ fn light_punch_corner_tint_material(character: CharacterKind) -> StandardMateria
     }
 }
 
+fn aim_marker_material(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color.with_alpha(0.0),
+        emissive: LinearRgba::from(color.to_linear()) * 0.8,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        depth_bias: 90.0,
+        unlit: true,
+        ..default()
+    }
+}
+
 fn fighter_marker_transform() -> Transform {
     Transform::from_xyz(0.0, 2.28, 0.0).with_rotation(Quat::from_rotation_x(std::f32::consts::PI))
 }
@@ -451,6 +523,7 @@ fn guard_shield_transform() -> Transform {
 
 pub fn collect_player_input(
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     time: Res<Time>,
     camera_control: Res<GameplayCameraControl>,
     user_mode: Res<UserModeState>,
@@ -458,7 +531,6 @@ pub fn collect_player_input(
     mut trackers: Local<PlayerInputTrackers>,
     mut fighters: Query<(&Controller, &mut FighterInput)>,
 ) {
-    let PlayerInputTrackers { dash, guard } = &mut *trackers;
     let reserve_camera_inputs = !user_mode.blocks_dev_input();
 
     for (controller, mut input) in &mut fighters {
@@ -467,18 +539,37 @@ pub fn collect_player_input(
         }
 
         *input = FighterInput::default();
-        let Some(bindings) = bindings.bindings_for_assignment(controller.input) else {
-            continue;
-        };
         let slot_index = controller.slot.index();
-        collect_bound_player_input(
-            &keys,
+        trackers.reset_if_assignment_changed(slot_index, controller.input);
+        let sample = match controller.input {
+            LocalInputAssignment::Keyboard(_) => {
+                let Some(bindings) = bindings.bindings_for_assignment(controller.input) else {
+                    continue;
+                };
+                keyboard_action_sample(&keys, bindings, reserve_camera_inputs)
+            }
+            LocalInputAssignment::Gamepad(entity) => {
+                let Ok(gamepad) = gamepads.get(entity) else {
+                    continue;
+                };
+                gamepad_action_sample(gamepad)
+            }
+            LocalInputAssignment::Unassigned => continue,
+        };
+
+        let PlayerInputTrackers {
+            dash,
+            guard,
+            stick_flick,
+            ..
+        } = &mut *trackers;
+        collect_device_player_input(
+            sample,
             time.elapsed_secs(),
             camera_control.yaw,
-            bindings,
             &mut dash[slot_index],
             &mut guard[slot_index],
-            reserve_camera_inputs,
+            &mut stick_flick[slot_index],
             &mut input,
         );
     }
@@ -556,12 +647,211 @@ pub fn update_drunk_status(
     }
 }
 
-#[derive(Default)]
 pub(crate) struct PlayerInputTrackers {
     dash: [DashTapTracker; FIGHTER_COUNT],
     guard: [GuardChordTracker; FIGHTER_COUNT],
+    stick_flick: [StickFlickTracker; FIGHTER_COUNT],
+    assignment: [LocalInputAssignment; FIGHTER_COUNT],
 }
 
+impl Default for PlayerInputTrackers {
+    fn default() -> Self {
+        Self {
+            dash: std::array::from_fn(|_| DashTapTracker::default()),
+            guard: std::array::from_fn(|_| GuardChordTracker::default()),
+            stick_flick: std::array::from_fn(|_| StickFlickTracker::default()),
+            assignment: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
+        }
+    }
+}
+
+impl PlayerInputTrackers {
+    fn reset_if_assignment_changed(&mut self, slot_index: usize, assignment: LocalInputAssignment) {
+        if self.assignment[slot_index] == assignment {
+            return;
+        }
+        self.assignment[slot_index] = assignment;
+        self.dash[slot_index] = DashTapTracker::default();
+        self.guard[slot_index] = GuardChordTracker::default();
+        self.stick_flick[slot_index] = StickFlickTracker::default();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct DeviceActionSample {
+    movement: Vec2,
+    movement_just: [bool; 4],
+    aim_held: bool,
+    jump_just: bool,
+    dash_just: bool,
+    light_just: bool,
+    light_held: bool,
+    heavy_just: bool,
+    heavy_held: bool,
+    heavy_released: bool,
+    grab_just: bool,
+    grab_held: bool,
+    guard_held: bool,
+    ultimate_just: bool,
+    special_just: bool,
+    special_kind: Option<SpecialInputKind>,
+}
+
+fn keyboard_action_sample(
+    keys: &ButtonInput<KeyCode>,
+    bindings: PlayerControlBindings,
+    reserve_camera_inputs: bool,
+) -> DeviceActionSample {
+    let camera_movement_blocked =
+        reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings);
+    let light_blocked =
+        reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
+    let special_just = keys.just_pressed(bindings.special);
+    let special_kind = special_just.then(|| {
+        if keys.pressed(bindings.light) {
+            SpecialInputKind::Trap
+        } else if keys.pressed(bindings.aim_grab) {
+            SpecialInputKind::Shockwave
+        } else if keys.pressed(bindings.heavy) {
+            SpecialInputKind::Hazard
+        } else {
+            SpecialInputKind::Projectile
+        }
+    });
+    DeviceActionSample {
+        movement: if camera_movement_blocked {
+            Vec2::ZERO
+        } else {
+            key_axis(
+                keys,
+                bindings.left,
+                bindings.right,
+                bindings.down,
+                bindings.up,
+            )
+        },
+        movement_just: if camera_movement_blocked {
+            [false; 4]
+        } else {
+            [
+                keys.just_pressed(bindings.left),
+                keys.just_pressed(bindings.right),
+                keys.just_pressed(bindings.down),
+                keys.just_pressed(bindings.up),
+            ]
+        },
+        aim_held: keys.pressed(bindings.aim_grab),
+        jump_just: keys.just_pressed(bindings.jump),
+        light_just: keys.just_pressed(bindings.light) && !light_blocked,
+        light_held: keys.pressed(bindings.light) && !light_blocked,
+        heavy_just: keys.just_pressed(bindings.heavy),
+        heavy_held: keys.pressed(bindings.heavy),
+        heavy_released: keys.just_released(bindings.heavy),
+        grab_just: keys.just_pressed(bindings.aim_grab),
+        grab_held: keys.pressed(bindings.aim_grab),
+        special_just,
+        special_kind,
+        ..default()
+    }
+}
+
+fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
+    let dpad = gamepad.dpad();
+    let stick = apply_gamepad_movement_deadzone(gamepad.left_stick());
+    let movement = if dpad.length_squared() > 0.0 {
+        Vec2::new(dpad.x, -dpad.y).normalize_or_zero()
+    } else {
+        Vec2::new(stick.x, -stick.y)
+    };
+    let special_just = gamepad.just_pressed(GamepadButton::RightTrigger);
+    let special_kind = special_just.then(|| {
+        if gamepad.pressed(GamepadButton::LeftTrigger) {
+            SpecialInputKind::Trap
+        } else if gamepad.pressed(GamepadButton::North) {
+            SpecialInputKind::Hazard
+        } else if gamepad.pressed(GamepadButton::East) {
+            SpecialInputKind::Shockwave
+        } else {
+            SpecialInputKind::Projectile
+        }
+    });
+
+    DeviceActionSample {
+        movement,
+        movement_just: [
+            gamepad.just_pressed(GamepadButton::DPadLeft),
+            gamepad.just_pressed(GamepadButton::DPadRight),
+            gamepad.just_pressed(GamepadButton::DPadDown),
+            gamepad.just_pressed(GamepadButton::DPadUp),
+        ],
+        aim_held: gamepad.pressed(GamepadButton::East),
+        jump_just: gamepad.just_pressed(GamepadButton::South),
+        dash_just: gamepad.just_pressed(GamepadButton::RightTrigger2),
+        light_just: gamepad.just_pressed(GamepadButton::West),
+        light_held: gamepad.pressed(GamepadButton::West),
+        heavy_just: gamepad.just_pressed(GamepadButton::North),
+        heavy_held: gamepad.pressed(GamepadButton::North),
+        heavy_released: gamepad.just_released(GamepadButton::North),
+        grab_just: gamepad.just_pressed(GamepadButton::East),
+        grab_held: gamepad.pressed(GamepadButton::East),
+        guard_held: gamepad.pressed(GamepadButton::LeftTrigger),
+        ultimate_just: gamepad.just_pressed(GamepadButton::LeftTrigger2),
+        special_just,
+        special_kind,
+    }
+}
+
+fn apply_gamepad_movement_deadzone(axis: Vec2) -> Vec2 {
+    let magnitude = axis.length();
+    if magnitude <= GAMEPAD_MOVEMENT_DEADZONE {
+        return Vec2::ZERO;
+    }
+    let scaled_magnitude =
+        ((magnitude - GAMEPAD_MOVEMENT_DEADZONE) / (1.0 - GAMEPAD_MOVEMENT_DEADZONE)).min(1.0);
+    axis.normalize_or_zero() * scaled_magnitude
+}
+
+fn collect_device_player_input(
+    sample: DeviceActionSample,
+    now: f32,
+    camera_yaw: f32,
+    dash_taps: &mut DashTapTracker,
+    guard_chord: &mut GuardChordTracker,
+    stick_flick: &mut StickFlickTracker,
+    input: &mut FighterInput,
+) {
+    let chord = resolve_guard_chord_input(
+        guard_chord,
+        sample.light_just,
+        sample.heavy_just,
+        sample.grab_just,
+        sample.light_held,
+        sample.heavy_held,
+        sample.grab_held,
+        now,
+    );
+
+    input.movement = camera_relative_direction(sample.movement, camera_yaw).normalize_or_zero();
+    input.aim = sample.aim_held;
+    input.jump = sample.jump_just;
+    input.dash = sample.dash_just
+        || movement_double_tapped(sample.movement_just, now, dash_taps)
+        || stick_flick.update(sample.movement);
+    input.light = chord.light;
+    input.light_held = sample.light_held;
+    input.raw_light_pressed = sample.light_just;
+    input.heavy = chord.heavy;
+    input.heavy_held = sample.heavy_held;
+    input.raw_heavy_pressed = sample.heavy_just;
+    input.heavy_released = sample.heavy_released;
+    input.grab = chord.grab;
+    input.guard = sample.guard_held || chord.guard;
+    input.ultimate = sample.ultimate_just || chord.ultimate;
+    input.special = sample.special_just;
+    input.special_kind = sample.special_kind;
+}
+
+#[cfg(test)]
 fn collect_bound_player_input(
     keys: &ButtonInput<KeyCode>,
     now: f32,
@@ -572,36 +862,16 @@ fn collect_bound_player_input(
     reserve_camera_inputs: bool,
     input: &mut FighterInput,
 ) {
-    let light_blocked =
-        reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
-    let raw_light_pressed = keys.just_pressed(bindings.light) && !light_blocked;
-    let raw_heavy_pressed = keys.just_pressed(bindings.heavy);
-    let chord = resolve_guard_chord_input(
-        guard_chord,
-        raw_light_pressed,
-        raw_heavy_pressed,
-        keys.just_pressed(bindings.aim_grab),
-        keys.pressed(bindings.light) && !light_blocked,
-        keys.pressed(bindings.heavy),
-        keys.pressed(bindings.aim_grab),
+    let mut stick_flick = StickFlickTracker::default();
+    collect_device_player_input(
+        keyboard_action_sample(keys, bindings, reserve_camera_inputs),
         now,
+        camera_yaw,
+        dash_taps,
+        guard_chord,
+        &mut stick_flick,
+        input,
     );
-
-    input.movement = player_movement_input(keys, camera_yaw, bindings, reserve_camera_inputs);
-    input.aim = keys.pressed(bindings.aim_grab);
-    input.jump = keys.just_pressed(bindings.jump);
-    input.dash = player_dash_input(keys, now, dash_taps, bindings, reserve_camera_inputs);
-    input.light = chord.light;
-    input.light_held = keys.pressed(bindings.light) && !light_blocked;
-    input.raw_light_pressed = raw_light_pressed;
-    input.heavy = chord.heavy;
-    input.heavy_held = keys.pressed(bindings.heavy);
-    input.raw_heavy_pressed = raw_heavy_pressed;
-    input.heavy_released = keys.just_released(bindings.heavy);
-    input.grab = chord.grab;
-    input.guard = chord.guard;
-    input.ultimate = chord.ultimate;
-    input.special = false;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -821,25 +1091,15 @@ pub(crate) struct DashTapTracker {
     up: Option<f32>,
 }
 
-fn movement_double_tapped(
-    keys: &ButtonInput<KeyCode>,
-    now: f32,
-    tracker: &mut DashTapTracker,
-    bindings: PlayerControlBindings,
-) -> bool {
-    double_tap_key(keys, bindings.left, now, &mut tracker.left)
-        || double_tap_key(keys, bindings.right, now, &mut tracker.right)
-        || double_tap_key(keys, bindings.down, now, &mut tracker.down)
-        || double_tap_key(keys, bindings.up, now, &mut tracker.up)
+fn movement_double_tapped(just_pressed: [bool; 4], now: f32, tracker: &mut DashTapTracker) -> bool {
+    double_tap_direction(just_pressed[0], now, &mut tracker.left)
+        || double_tap_direction(just_pressed[1], now, &mut tracker.right)
+        || double_tap_direction(just_pressed[2], now, &mut tracker.down)
+        || double_tap_direction(just_pressed[3], now, &mut tracker.up)
 }
 
-fn double_tap_key(
-    keys: &ButtonInput<KeyCode>,
-    key: KeyCode,
-    now: f32,
-    last_tap: &mut Option<f32>,
-) -> bool {
-    if !keys.just_pressed(key) {
+fn double_tap_direction(just_pressed: bool, now: f32, last_tap: &mut Option<f32>) -> bool {
+    if !just_pressed {
         return false;
     }
 
@@ -848,6 +1108,27 @@ fn double_tap_key(
     dash
 }
 
+#[derive(Default)]
+struct StickFlickTracker {
+    engaged: bool,
+}
+
+impl StickFlickTracker {
+    fn update(&mut self, movement: Vec2) -> bool {
+        let magnitude = movement.length();
+        if magnitude <= f32::EPSILON {
+            self.engaged = false;
+            return false;
+        }
+        if self.engaged || magnitude < GAMEPAD_FLICK_DASH_THRESHOLD {
+            return false;
+        }
+        self.engaged = true;
+        true
+    }
+}
+
+#[cfg(test)]
 fn player_movement_input(
     keys: &ButtonInput<KeyCode>,
     camera_yaw: f32,
@@ -868,6 +1149,7 @@ fn player_movement_input(
     camera_relative_direction(raw, camera_yaw).normalize_or_zero()
 }
 
+#[cfg(test)]
 fn player_dash_input(
     keys: &ButtonInput<KeyCode>,
     now: f32,
@@ -875,8 +1157,8 @@ fn player_dash_input(
     bindings: PlayerControlBindings,
     reserve_camera_inputs: bool,
 ) -> bool {
-    !(reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings))
-        && movement_double_tapped(keys, now, tracker, bindings)
+    let sample = keyboard_action_sample(keys, bindings, reserve_camera_inputs);
+    movement_double_tapped(sample.movement_just, now, tracker)
 }
 
 fn camera_shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -1081,6 +1363,14 @@ fn clear_buffered_button(action: &mut FighterActionState) {
 fn movement_input_direction(movement: Vec2) -> Option<Vec3> {
     (movement.length_squared() > 0.01)
         .then(|| Vec3::new(movement.x, 0.0, movement.y).normalize_or_zero())
+}
+
+fn update_facing_from_movement(motor: &mut FighterMotor, input: &FighterInput) {
+    if !input.aim {
+        if let Some(direction) = movement_input_direction(input.movement) {
+            motor.facing = direction;
+        }
+    }
 }
 
 fn dash_finisher_for_input(
@@ -1493,60 +1783,295 @@ fn slide_cancel_requested(input: &FighterInput) -> bool {
         || input.dash
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AimTargetSnapshot {
+    entity: Entity,
+    fighter_id: usize,
+    position: Vec3,
+    valid: bool,
+}
+
+fn planar_aim_direction(from: Vec3, to: Vec3) -> Option<Vec3> {
+    let direction = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+    (direction.length_squared() > f32::EPSILON).then(|| direction.normalize())
+}
+
+fn aim_target_is_opponent(state: &MatchState, owner_id: usize, target_id: usize) -> bool {
+    owner_id != target_id
+        && (!state.rules.team_scoring || !state.fighters_share_team(owner_id, target_id))
+}
+
+fn select_aim_target(
+    owner_id: usize,
+    owner_position: Vec3,
+    aim_direction: Vec3,
+    state: &MatchState,
+    snapshots: &[Option<AimTargetSnapshot>; FIGHTER_COUNT],
+) -> Option<Entity> {
+    let aim_direction = normalized_planar_or_forward(aim_direction);
+    let mut best: Option<(Entity, f32, f32)> = None;
+    for snapshot in snapshots.iter().flatten().filter(|snapshot| {
+        snapshot.valid && aim_target_is_opponent(state, owner_id, snapshot.fighter_id)
+    }) {
+        let distance_squared = owner_position.distance_squared(snapshot.position);
+        if distance_squared > AIM_ACQUIRE_DISTANCE * AIM_ACQUIRE_DISTANCE {
+            continue;
+        }
+        let Some(direction) = planar_aim_direction(owner_position, snapshot.position) else {
+            continue;
+        };
+        let alignment = aim_direction.dot(direction);
+        if alignment < AIM_ACQUIRE_COS {
+            continue;
+        }
+        let replace = best.is_none_or(|(_, best_alignment, best_distance_squared)| {
+            alignment > best_alignment
+                || (alignment == best_alignment && distance_squared < best_distance_squared)
+        });
+        if replace {
+            best = Some((snapshot.entity, alignment, distance_squared));
+        }
+    }
+    best.map(|(entity, _, _)| entity)
+}
+
 pub fn apply_aim_assist(
     state: Res<MatchState>,
     mut fighters: Query<(
+        Entity,
         &Fighter,
         &FighterInput,
         &mut FighterMotor,
+        &mut FighterAimState,
         &Transform,
         &FighterActionState,
     )>,
 ) {
-    let snapshots: Vec<_> = fighters
-        .iter()
-        .filter(|(fighter, _, _, _, action)| {
-            state.fighter_active(fighter.id)
+    let mut snapshots = [None; FIGHTER_COUNT];
+    for (entity, fighter, _, _, _, transform, action) in fighters.iter() {
+        snapshots[fighter.id] = Some(AimTargetSnapshot {
+            entity,
+            fighter_id: fighter.id,
+            position: transform.translation,
+            valid: state.fighter_can_participate(fighter.id)
                 && !matches!(
                     action.action,
                     FighterAction::RingOut | FighterAction::Respawning
-                )
-        })
-        .map(|(fighter, _, _, transform, _)| (fighter.id, transform.translation))
-        .collect();
+                ),
+        });
+    }
 
-    for (fighter, input, mut motor, transform, action) in &mut fighters {
-        if !input.aim
-            || !state.fighter_active(fighter.id)
-            || matches!(
+    for (_, fighter, input, mut motor, mut aim, transform, action) in &mut fighters {
+        let owner_valid = state.fighter_can_participate(fighter.id)
+            && !matches!(
+                action.action,
+                FighterAction::RingOut | FighterAction::Respawning
+            );
+        if !owner_valid || !input.aim {
+            aim.locked_target = None;
+            aim.aim_pressed = false;
+            continue;
+        }
+
+        let movement_direction = movement_input_direction(input.movement);
+        let just_pressed = !aim.aim_pressed;
+        aim.aim_pressed = true;
+        if just_pressed {
+            aim.direction = normalized_planar_or_forward(motor.facing);
+            if aim.marker_opacity <= 0.001 {
+                aim.marker_position = transform.translation
+                    + Vec3::Y * AIM_TORSO_HEIGHT
+                    + aim.direction * AIM_FREE_DISTANCE;
+            }
+        }
+
+        let mut broke_lock = false;
+        if let Some(target_entity) = aim.locked_target {
+            let retained = snapshots.iter().flatten().find(|snapshot| {
+                snapshot.entity == target_entity
+                    && snapshot.valid
+                    && aim_target_is_opponent(&state, fighter.id, snapshot.fighter_id)
+                    && transform.translation.distance_squared(snapshot.position)
+                        <= AIM_RETAIN_DISTANCE * AIM_RETAIN_DISTANCE
+            });
+            if let Some(target) = retained {
+                let target_direction = planar_aim_direction(transform.translation, target.position)
+                    .unwrap_or(aim.direction);
+                if movement_direction
+                    .is_some_and(|movement| movement.dot(target_direction) < AIM_BREAK_COS)
+                {
+                    aim.locked_target = None;
+                    aim.manual_unlock_count = aim.manual_unlock_count.saturating_add(1);
+                    aim.direction = movement_direction.unwrap();
+                    broke_lock = true;
+                } else {
+                    aim.direction = target_direction;
+                }
+            } else {
+                aim.locked_target = None;
+            }
+        }
+
+        if aim.locked_target.is_none() {
+            if let Some(movement) = movement_direction {
+                aim.direction = movement;
+            }
+            if !broke_lock {
+                aim.locked_target = select_aim_target(
+                    fighter.id,
+                    transform.translation,
+                    aim.direction,
+                    &state,
+                    &snapshots,
+                );
+                if let Some(target) = aim.locked_target.and_then(|target| {
+                    snapshots
+                        .iter()
+                        .flatten()
+                        .find(|item| item.entity == target)
+                }) {
+                    aim.direction = planar_aim_direction(transform.translation, target.position)
+                        .unwrap_or(aim.direction);
+                }
+            }
+        }
+        motor.facing = aim.direction;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AimMarkerSnapshot {
+    color: Color,
+    human: bool,
+    valid: bool,
+    locked: bool,
+    opacity: f32,
+    position: Vec3,
+}
+
+fn advance_aim_marker_opacity(opacity: f32, held: bool, dt: f32) -> f32 {
+    if held {
+        (opacity + dt / AIM_MARKER_FADE_IN).min(1.0)
+    } else {
+        (opacity - dt / AIM_MARKER_FADE_OUT).max(0.0)
+    }
+}
+
+fn aim_marker_smoothing(dt: f32) -> f32 {
+    1.0 - (-AIM_MARKER_SMOOTHING * dt).exp()
+}
+
+pub fn update_aim_markers(
+    time: Res<Time>,
+    state: Res<MatchState>,
+    camera: Query<&GlobalTransform, With<crate::camera::ArenaCamera>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fighters: Query<
+        (
+            Entity,
+            &Fighter,
+            &Controller,
+            &FighterInput,
+            &FighterActionState,
+            &Transform,
+            &mut FighterAimState,
+        ),
+        Without<FighterAimMarker>,
+    >,
+    mut markers: Query<(&FighterAimMarker, &mut Transform, &mut Visibility), Without<Fighter>>,
+) {
+    let dt = time.delta_secs();
+    let mut target_positions = [None; FIGHTER_COUNT];
+    for (entity, fighter, _, _, action, transform, _) in fighters.iter() {
+        if state.fighter_can_participate(fighter.id)
+            && !matches!(
                 action.action,
                 FighterAction::RingOut | FighterAction::Respawning
             )
         {
-            continue;
+            target_positions[fighter.id] = Some((entity, transform.translation));
         }
+    }
 
-        let Some((_, target_position)) = snapshots
-            .iter()
-            .filter(|(target_id, _)| *target_id != fighter.id)
-            .min_by(|(_, a), (_, b)| {
-                transform
-                    .translation
-                    .distance_squared(*a)
-                    .total_cmp(&transform.translation.distance_squared(*b))
-            })
-        else {
+    let mut visual_snapshots = [None; FIGHTER_COUNT];
+    for (_, fighter, controller, input, action, transform, mut aim) in &mut fighters {
+        let valid = state.is_fighting()
+            && state.fighter_can_participate(fighter.id)
+            && controller.is_human()
+            && !matches!(
+                action.action,
+                FighterAction::RingOut | FighterAction::Respawning
+            );
+        if !valid {
+            aim.locked_target = None;
+            aim.aim_pressed = false;
+            aim.marker_opacity = 0.0;
+        } else {
+            let target_position = aim
+                .locked_target
+                .and_then(|entity| {
+                    target_positions
+                        .iter()
+                        .flatten()
+                        .find_map(|(target_entity, position)| {
+                            (*target_entity == entity).then_some(*position)
+                        })
+                })
+                .unwrap_or(transform.translation + aim.direction * AIM_FREE_DISTANCE);
+            if input.aim {
+                aim.marker_opacity = advance_aim_marker_opacity(aim.marker_opacity, true, dt);
+                let smoothing = aim_marker_smoothing(dt);
+                aim.marker_position = aim
+                    .marker_position
+                    .lerp(target_position + Vec3::Y * AIM_TORSO_HEIGHT, smoothing);
+            } else {
+                aim.marker_opacity = advance_aim_marker_opacity(aim.marker_opacity, false, dt);
+            }
+        }
+        visual_snapshots[fighter.id] = Some(AimMarkerSnapshot {
+            color: fighter.color,
+            human: controller.is_human(),
+            valid,
+            locked: aim.locked_target.is_some(),
+            opacity: aim.marker_opacity,
+            position: aim.marker_position,
+        });
+    }
+
+    let camera_position = camera.single().ok().map(GlobalTransform::translation);
+    let pulse = 0.88 + (time.elapsed_secs() * 8.0).sin() * 0.12;
+    for (marker, mut transform, mut visibility) in &mut markers {
+        let Some(snapshot) = visual_snapshots[marker.fighter_id] else {
+            *visibility = Visibility::Hidden;
             continue;
         };
-
-        let direction = Vec3::new(
-            target_position.x - transform.translation.x,
-            0.0,
-            target_position.z - transform.translation.z,
-        )
-        .normalize_or_zero();
-        if direction.length_squared() > 0.01 {
-            motor.facing = direction;
+        let visible = snapshot.human && snapshot.valid && snapshot.opacity > 0.001;
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        transform.translation = snapshot.position;
+        let scale = AIM_MARKER_BASE_SCALE
+            * snapshot.opacity
+            * if snapshot.locked {
+                1.0 + pulse * 0.08
+            } else {
+                1.0
+            };
+        transform.scale = Vec3::splat(scale);
+        if let Some(camera_position) = camera_position {
+            transform.look_at(camera_position, Vec3::Y);
+        }
+        if let Some(material) = materials.get_mut(&marker.material) {
+            let brightness = if snapshot.locked {
+                1.0 + pulse * 0.55
+            } else {
+                0.8
+            };
+            material.base_color = snapshot.color.lighter(0.25).with_alpha(snapshot.opacity);
+            material.emissive =
+                LinearRgba::from(snapshot.color.to_linear()) * brightness * snapshot.opacity;
         }
     }
 }
@@ -2071,9 +2596,7 @@ pub fn update_fighter_state(
             continue;
         }
 
-        if input.movement.length_squared() > 0.01 {
-            motor.facing = Vec3::new(input.movement.x, 0.0, input.movement.y).normalize_or_zero();
-        }
+        update_facing_from_movement(&mut motor, &input);
 
         if !motor.grounded {
             if input.jump && can_start_ground_jump(&motor) {
@@ -2296,6 +2819,7 @@ pub fn update_grab_holds(
     state: Res<MatchState>,
     feel: Res<CombatFeelTuning>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut hitstop: ResMut<Hitstop>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut fighters: Query<(
@@ -2426,7 +2950,7 @@ pub fn update_grab_holds(
     for resolution in resolutions {
         for (
             entity,
-            _,
+            fighter,
             _,
             mut stats,
             mut motor,
@@ -2476,8 +3000,10 @@ pub fn update_grab_holds(
                             &mut commands,
                             &effect_assets,
                             &mut camera_effects,
+                            &mut haptics,
                             &mut hitstop,
                             &state,
+                            fighter.id,
                             &mut stats,
                             &mut motor,
                             &mut action,
@@ -4084,9 +4610,11 @@ pub fn apply_fighter_movement(
     hitstop: Res<Hitstop>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     penguin_surfaces: Query<(&ActivePenguinSurface, &Transform), Without<Fighter>>,
     mut fighters: Query<
         (
+            &Fighter,
             &FighterInput,
             &FighterStyle,
             &FighterCharacter,
@@ -4104,7 +4632,8 @@ pub fn apply_fighter_movement(
 
     let dt = time.delta_secs();
 
-    for (input, style, character, mut stats, mut motor, mut action, mut transform) in &mut fighters
+    for (fighter, input, style, character, mut stats, mut motor, mut action, mut transform) in
+        &mut fighters
     {
         let tuning = style_tuning(style.kind);
         let body = character_catalog.body(character.kind);
@@ -4280,6 +4809,7 @@ pub fn apply_fighter_movement(
                 transform.translation,
                 52,
             ));
+            haptics.push(CombatHapticCue::secondary(fighter.id));
         }
         if !did_wall_bounce && should_cancel_axis_velocity(motor.velocity.x, correction.x) {
             motor.velocity.x = 0.0;
@@ -4348,6 +4878,7 @@ pub fn apply_fighter_movement(
                         transform.translation,
                         ground_impact_priority(aftermath.family),
                     ));
+                    haptics.push(CombatHapticCue::secondary(fighter.id));
                 } else if motor.knockdown_on_land {
                     if motor.reaction_bounces > 0 && previous_y_velocity < -4.6 {
                         motor.reaction_bounces = motor.reaction_bounces.saturating_sub(1);
@@ -4375,6 +4906,7 @@ pub fn apply_fighter_movement(
                             transform.translation,
                             50,
                         ));
+                        haptics.push(CombatHapticCue::secondary(fighter.id));
                         continue;
                     }
                     motor.knockdown_on_land = false;
@@ -4396,6 +4928,7 @@ pub fn apply_fighter_movement(
                         transform.translation,
                         46,
                     ));
+                    haptics.push(CombatHapticCue::secondary(fighter.id));
                 } else if motor.jump_attack_landing_recovery {
                     motor.jump_attack_landing_recovery = false;
                     clear_bee_air_dash_state(&mut motor);
@@ -4575,6 +5108,7 @@ pub fn ringout_and_respawn(
     mut commands: Commands,
     effect_assets: Res<EffectAssets>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut state: ResMut<MatchState>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut announcements: ResMut<MatchAnnouncements>,
@@ -4669,6 +5203,12 @@ pub fn ringout_and_respawn(
             ultimate_state.target = None;
             ultimate_state.owner = None;
             if out {
+                haptics.push(CombatHapticCue::contact(
+                    resolution.awarded_to,
+                    fighter.id,
+                    HapticContactOutcome::Clean,
+                    HapticImpactWeight::Terminal,
+                ));
                 spawn_ringout_burst(&mut commands, &effect_assets, transform.translation);
                 let ringout_feedback = crate::combat::impact_feedback_profile(
                     ImpactSource::RingOut,
@@ -6035,6 +6575,172 @@ pub fn sync_loadout_visuals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gamepad_with_buttons(buttons: &[GamepadButton]) -> Gamepad {
+        let mut gamepad = Gamepad::default();
+        for button in buttons {
+            gamepad.digital_mut().press(*button);
+        }
+        gamepad
+    }
+
+    #[test]
+    fn gamepad_movement_deadzone_is_radial_and_rescaled() {
+        assert_eq!(
+            apply_gamepad_movement_deadzone(Vec2::new(GAMEPAD_MOVEMENT_DEADZONE, 0.0)),
+            Vec2::ZERO
+        );
+        assert_eq!(
+            apply_gamepad_movement_deadzone(Vec2::new(0.12, 0.12)),
+            Vec2::ZERO
+        );
+        let outside = apply_gamepad_movement_deadzone(Vec2::new(0.6, 0.0));
+        assert_vec2_close(outside, Vec2::new(0.5, 0.0), 0.001);
+    }
+
+    #[test]
+    fn xbox_buttons_map_to_fixed_actions() {
+        let gamepad = gamepad_with_buttons(&[
+            GamepadButton::South,
+            GamepadButton::West,
+            GamepadButton::North,
+            GamepadButton::East,
+            GamepadButton::RightTrigger2,
+            GamepadButton::LeftTrigger,
+            GamepadButton::LeftTrigger2,
+            GamepadButton::RightTrigger,
+        ]);
+        let sample = gamepad_action_sample(&gamepad);
+
+        assert!(sample.jump_just);
+        assert!(sample.light_just);
+        assert!(sample.heavy_just);
+        assert!(sample.grab_just);
+        assert!(sample.aim_held);
+        assert!(sample.dash_just);
+        assert!(sample.guard_held);
+        assert!(sample.ultimate_just);
+        assert!(sample.special_just);
+        assert_eq!(sample.special_kind, Some(SpecialInputKind::Trap));
+    }
+
+    #[test]
+    fn xbox_special_modifiers_use_documented_precedence() {
+        for (modifier, expected) in [
+            (None, SpecialInputKind::Projectile),
+            (Some(GamepadButton::East), SpecialInputKind::Shockwave),
+            (Some(GamepadButton::North), SpecialInputKind::Hazard),
+            (Some(GamepadButton::LeftTrigger), SpecialInputKind::Trap),
+        ] {
+            let mut buttons = vec![GamepadButton::RightTrigger];
+            if let Some(modifier) = modifier {
+                buttons.push(modifier);
+            }
+            assert_eq!(
+                gamepad_action_sample(&gamepad_with_buttons(&buttons)).special_kind,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_special_chords_select_all_four_shared_specials() {
+        let bindings = PlayerControlBindings::player_one_default();
+        for (modifier, expected) in [
+            (None, SpecialInputKind::Projectile),
+            (Some(bindings.heavy), SpecialInputKind::Hazard),
+            (Some(bindings.aim_grab), SpecialInputKind::Shockwave),
+            (Some(bindings.light), SpecialInputKind::Trap),
+        ] {
+            let mut keys = ButtonInput::default();
+            if let Some(modifier) = modifier {
+                keys.press(modifier);
+            }
+            keys.press(bindings.special);
+            let sample = keyboard_action_sample(&keys, bindings, false);
+            assert!(sample.special_just);
+            assert_eq!(sample.special_kind, Some(expected));
+        }
+    }
+
+    #[test]
+    fn keyboard_special_modifier_precedence_is_light_then_aim_then_heavy() {
+        let bindings = PlayerControlBindings::player_one_default();
+        let mut keys = ButtonInput::default();
+        keys.press(bindings.light);
+        keys.press(bindings.aim_grab);
+        keys.press(bindings.heavy);
+        keys.press(bindings.special);
+
+        assert_eq!(
+            keyboard_action_sample(&keys, bindings, false).special_kind,
+            Some(SpecialInputKind::Trap)
+        );
+    }
+
+    #[test]
+    fn xbox_shortcuts_keep_guard_and_ultimate_chords() {
+        let mut dash = DashTapTracker::default();
+        let mut guard = GuardChordTracker::default();
+        let mut flick = StickFlickTracker::default();
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            gamepad_action_sample(&gamepad_with_buttons(&[
+                GamepadButton::West,
+                GamepadButton::North,
+            ])),
+            1.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
+        );
+        assert!(input.guard);
+
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            gamepad_action_sample(&gamepad_with_buttons(&[
+                GamepadButton::East,
+                GamepadButton::West,
+                GamepadButton::North,
+            ])),
+            2.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
+        );
+        assert!(input.ultimate);
+    }
+
+    #[test]
+    fn gamepad_flick_dash_requires_neutral_reset() {
+        let mut tracker = StickFlickTracker::default();
+        assert!(!tracker.update(Vec2::splat(0.4)));
+        assert!(tracker.update(Vec2::X));
+        assert!(!tracker.update(Vec2::X));
+        assert!(!tracker.update(Vec2::ZERO));
+        assert!(tracker.update(Vec2::NEG_X));
+    }
+
+    #[test]
+    fn changing_seat_device_resets_all_gesture_trackers() {
+        let first = Entity::from_raw_u32(11).expect("valid entity");
+        let second = Entity::from_raw_u32(12).expect("valid entity");
+        let mut trackers = PlayerInputTrackers::default();
+        trackers.reset_if_assignment_changed(0, LocalInputAssignment::Gamepad(first));
+        trackers.dash[0].left = Some(1.0);
+        trackers.guard[0].guard_latched = true;
+        trackers.stick_flick[0].engaged = true;
+
+        trackers.reset_if_assignment_changed(0, LocalInputAssignment::Gamepad(second));
+
+        assert_eq!(trackers.dash[0].left, None);
+        assert!(!trackers.guard[0].guard_latched);
+        assert!(!trackers.stick_flick[0].engaged);
+    }
 
     fn assert_vec3_close(actual: Vec3, expected: Vec3, tolerance: f32) {
         assert!(
@@ -10128,5 +10834,356 @@ mod tests {
         tick_practice_health_refill(&mut stats, &action);
         assert_eq!(stats.health, MAX_HEALTH * 0.5);
         assert_eq!(stats.health_refill_timer, 0.0);
+    }
+
+    fn aim_test_snapshot(
+        entity: Entity,
+        fighter_id: usize,
+        position: Vec3,
+    ) -> Option<AimTargetSnapshot> {
+        Some(AimTargetSnapshot {
+            entity,
+            fighter_id,
+            position,
+            valid: true,
+        })
+    }
+
+    #[test]
+    fn aim_acquisition_uses_thirty_degree_cone_and_distance_limit() {
+        let mut world = World::new();
+        let inside = world.spawn_empty().id();
+        let outside_angle = world.spawn_empty().id();
+        let outside_distance = world.spawn_empty().id();
+        let state = MatchState::default();
+        let angle_29 = 29.0_f32.to_radians();
+        let angle_31 = 31.0_f32.to_radians();
+        let snapshots = [
+            None,
+            aim_test_snapshot(
+                inside,
+                1,
+                Vec3::new(angle_29.cos(), 0.0, angle_29.sin()) * 7.49,
+            ),
+            aim_test_snapshot(
+                outside_angle,
+                2,
+                Vec3::new(angle_31.cos(), 0.0, angle_31.sin()) * 4.0,
+            ),
+            aim_test_snapshot(outside_distance, 3, Vec3::X * 7.51),
+        ];
+
+        assert_eq!(
+            select_aim_target(0, Vec3::ZERO, Vec3::X, &state, &snapshots),
+            Some(inside)
+        );
+    }
+
+    #[test]
+    fn aim_acquisition_prefers_angle_then_distance_and_filters_invalid_opponents() {
+        let mut world = World::new();
+        let near_wider = world.spawn_empty().id();
+        let far_centered = world.spawn_empty().id();
+        let same_angle_near = world.spawn_empty().id();
+        let mut state = MatchState::default();
+        state.active_slots = [true; FIGHTER_COUNT];
+        state.rules.team_scoring = false;
+        let snapshots = [
+            None,
+            aim_test_snapshot(near_wider, 1, Vec3::new(2.0, 0.0, 0.3)),
+            aim_test_snapshot(far_centered, 2, Vec3::X * 7.0),
+            aim_test_snapshot(same_angle_near, 3, Vec3::X * 3.0),
+        ];
+
+        assert_eq!(
+            select_aim_target(0, Vec3::ZERO, Vec3::X, &state, &snapshots),
+            Some(same_angle_near),
+            "equal angular error must use nearest distance"
+        );
+
+        let mut invalid_snapshots = snapshots;
+        invalid_snapshots[3].as_mut().unwrap().valid = false;
+        assert_eq!(
+            select_aim_target(0, Vec3::ZERO, Vec3::X, &state, &invalid_snapshots),
+            Some(far_centered),
+            "a smaller angular error wins even when farther away"
+        );
+    }
+
+    fn spawn_aim_test_fighter(
+        world: &mut World,
+        id: usize,
+        position: Vec3,
+        facing: Vec3,
+        input: FighterInput,
+    ) -> Entity {
+        world
+            .spawn((
+                Fighter {
+                    id,
+                    name: "Aim test",
+                    color: Color::WHITE,
+                    spawn: position,
+                },
+                input,
+                FighterMotor {
+                    facing,
+                    ..default()
+                },
+                FighterAimState {
+                    direction: facing,
+                    ..default()
+                },
+                FighterActionState::default(),
+                Transform::from_translation(position),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn aim_lock_retains_to_nine_meters_then_cleans_up() {
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .add_systems(Update, apply_aim_assist);
+        let owner = spawn_aim_test_fighter(
+            app.world_mut(),
+            0,
+            Vec3::ZERO,
+            Vec3::X,
+            FighterInput {
+                aim: true,
+                ..default()
+            },
+        );
+        let target = spawn_aim_test_fighter(
+            app.world_mut(),
+            1,
+            Vec3::X * 7.0,
+            Vec3::NEG_X,
+            FighterInput::default(),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(target)
+        );
+
+        app.world_mut()
+            .entity_mut(target)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::X * 8.9;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(target)
+        );
+
+        app.world_mut()
+            .entity_mut(target)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::X * 9.1;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            None
+        );
+    }
+
+    #[test]
+    fn aim_movement_retains_toward_target_and_breaks_beyond_sixty_degrees() {
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .add_systems(Update, apply_aim_assist);
+        let owner = spawn_aim_test_fighter(
+            app.world_mut(),
+            0,
+            Vec3::ZERO,
+            Vec3::X,
+            FighterInput {
+                aim: true,
+                movement: Vec2::X,
+                ..default()
+            },
+        );
+        let target = spawn_aim_test_fighter(
+            app.world_mut(),
+            1,
+            Vec3::X * 4.0,
+            Vec3::NEG_X,
+            FighterInput::default(),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(target)
+        );
+
+        app.world_mut()
+            .entity_mut(owner)
+            .get_mut::<FighterInput>()
+            .unwrap()
+            .movement = Vec2::Y;
+        app.update();
+        let aim = app.world().get::<FighterAimState>(owner).unwrap();
+        assert_eq!(aim.locked_target, None);
+        assert_eq!(aim.manual_unlock_count, 1);
+        assert_vec3_close(aim.direction, Vec3::Z, 0.001);
+        assert_vec3_close(
+            app.world().get::<FighterMotor>(owner).unwrap().facing,
+            Vec3::Z,
+            0.001,
+        );
+    }
+
+    #[test]
+    fn ordinary_movement_facing_does_not_overwrite_aim_owned_facing() {
+        let mut motor = FighterMotor {
+            facing: Vec3::X,
+            ..default()
+        };
+        update_facing_from_movement(
+            &mut motor,
+            &FighterInput {
+                aim: true,
+                movement: Vec2::Y,
+                ..default()
+            },
+        );
+        assert_eq!(motor.facing, Vec3::X);
+    }
+
+    #[test]
+    fn aim_marker_transitions_are_frame_rate_independent_reversible_and_pause_safe() {
+        let half_faded = advance_aim_marker_opacity(1.0, false, AIM_MARKER_FADE_OUT * 0.5);
+        assert!((half_faded - 0.5).abs() < 0.001);
+        let reversed = advance_aim_marker_opacity(half_faded, true, AIM_MARKER_FADE_IN * 0.25);
+        assert!((reversed - 0.75).abs() < 0.001);
+        assert_eq!(advance_aim_marker_opacity(reversed, true, 0.0), reversed);
+
+        let one_frame = aim_marker_smoothing(1.0 / 60.0);
+        let two_half_frames = 1.0 - (1.0 - aim_marker_smoothing(1.0 / 120.0)).powi(2);
+        assert!((one_frame - two_half_frames).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn aim_markers_are_human_only_player_colored_and_clean_up_outside_fighting() {
+        use crate::components::ParticipantKind;
+        use crate::game_state::MatchPhase;
+
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .insert_resource(Time::<()>::default())
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, update_aim_markers);
+
+        let red = Color::srgb(0.9, 0.1, 0.2);
+        let blue = Color::srgb(0.1, 0.3, 0.9);
+        for (id, color, participant) in [
+            (0, red, ParticipantKind::Human),
+            (1, blue, ParticipantKind::Bot),
+        ] {
+            app.world_mut().spawn((
+                Fighter {
+                    id,
+                    name: "Marker test",
+                    color,
+                    spawn: Vec3::ZERO,
+                },
+                Controller::new(
+                    PlayerSlotId::new(id).unwrap(),
+                    participant,
+                    LocalInputAssignment::Unassigned,
+                ),
+                FighterInput {
+                    aim: true,
+                    ..default()
+                },
+                FighterActionState::default(),
+                Transform::from_translation(Vec3::X * id as f32),
+                FighterAimState {
+                    direction: Vec3::X,
+                    marker_position: Vec3::X * id as f32,
+                    marker_opacity: 1.0,
+                    aim_pressed: true,
+                    ..default()
+                },
+            ));
+        }
+
+        let handles: Vec<_> = [0usize, 1]
+            .into_iter()
+            .map(|id| {
+                let color = if id == 0 { red } else { blue };
+                let handle = app
+                    .world_mut()
+                    .resource_mut::<Assets<StandardMaterial>>()
+                    .add(aim_marker_material(color));
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        FighterAimMarker {
+                            fighter_id: id,
+                            material: handle.clone(),
+                        },
+                        Transform::default(),
+                        Visibility::Hidden,
+                    ))
+                    .id();
+                (entity, handle)
+            })
+            .collect();
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(handles[0].0),
+            Some(&Visibility::Visible)
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(handles[1].0),
+            Some(&Visibility::Hidden),
+            "bots must never display an aim marker"
+        );
+        let human_material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handles[0].1)
+            .unwrap();
+        let tint = human_material.base_color.to_srgba();
+        assert!(tint.red > tint.blue, "the marker must retain P1's red tint");
+
+        app.world_mut().resource_mut::<MatchState>().phase = MatchPhase::Results;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(handles[0].0),
+            Some(&Visibility::Hidden)
+        );
+        let mut aims = app
+            .world_mut()
+            .query_filtered::<&FighterAimState, With<Fighter>>();
+        assert!(aims.iter(app.world()).all(|aim| aim.marker_opacity == 0.0));
     }
 }
