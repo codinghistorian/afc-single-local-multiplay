@@ -42,6 +42,7 @@ const TUTORIAL_PROGRESS_STORAGE_KEY: &str = "animal-fighter-club.tutorial.v1";
 
 pub const TUTORIAL_PLAYER_ID: usize = 0;
 pub const TUTORIAL_DUMMY_ID: usize = 1;
+const TUTORIAL_ARENA_INDEX: usize = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -468,27 +469,27 @@ const BASICS_STEPS: &[TutorialStep] = &[
         ScriptedDummyMode::Passive,
     ),
     lesson_step(
-        "Camera-relative depth",
-        "Move forward and back. The same inputs remain screen-relative as the camera turns.",
-        TutorialObjective::Movement {
-            direction: TutorialDirection::Forward,
-            distance: 2.0,
-        },
-        &[TutorialPromptAction::Move],
-        "Move toward the top of the screen.",
-        "Use P1's Up binding; the game converts it through the current camera yaw.",
-        ScriptedDummyMode::Passive,
-    ),
-    lesson_step(
-        "Move back",
-        "Move toward the bottom of the screen to verify all four camera-relative directions.",
+        "Move down",
+        "Move toward the bottom of the screen. The same inputs remain screen-relative as the camera turns.",
         TutorialObjective::Movement {
             direction: TutorialDirection::Back,
             distance: 2.0,
         },
         &[TutorialPromptAction::Move],
         "Move toward the bottom of the screen.",
-        "Use P1's Down binding; movement remains relative to the gameplay camera.",
+        "Use P1's Down binding; the game converts it through the current camera yaw.",
+        ScriptedDummyMode::Passive,
+    ),
+    lesson_step(
+        "Move up",
+        "Move toward the top of the screen to verify all four camera-relative directions.",
+        TutorialObjective::Movement {
+            direction: TutorialDirection::Forward,
+            distance: 2.0,
+        },
+        &[TutorialPromptAction::Move],
+        "Move toward the top of the screen.",
+        "Use P1's Up binding; movement remains relative to the gameplay camera.",
         ScriptedDummyMode::Passive,
     ),
     lesson_step(
@@ -874,7 +875,7 @@ const HUD_STEPS: &[TutorialStep] = &[
     ),
     lesson_step(
         "Boundary ring-out",
-        "Knock Pig beyond Crown Ring's boundary to take one life.",
+        "Knock Pig beyond Split Causeway's boundary to take one life.",
         TutorialObjective::RingOutOpponent,
         &[TutorialPromptAction::Heavy, TutorialPromptAction::Light],
         "Build damage, then use Heavy attacks near the edge.",
@@ -883,7 +884,7 @@ const HUD_STEPS: &[TutorialStep] = &[
     ),
     lesson_step(
         "Lose a life",
-        "Cross Crown Ring's boundary once. Practice lessons restart this step instead of consuming the rest of the match.",
+        "Cross Split Causeway's boundary once. Practice lessons restart this step instead of consuming the rest of the match.",
         TutorialObjective::LoseLife,
         &[TutorialPromptAction::Move],
         "Walk outward from the near edge until Cat rings out.",
@@ -1222,7 +1223,7 @@ const CHICK_LAB_STEPS: &[TutorialStep] = &[
 
 const FINAL_EXAM_STEPS: &[TutorialStep] = &[lesson_step(
     "Final Exam",
-    "Defeat the tutorial-difficulty Pig in a normal three-life Crown Ring match.",
+    "Defeat the tutorial-difficulty Pig in a normal three-life Split Causeway match.",
     TutorialObjective::MatchResult { win: true },
     &[
         TutorialPromptAction::Move,
@@ -1339,7 +1340,7 @@ pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
         id: TutorialChapterId::FinalExam,
         number: 12,
         title: "Final Exam",
-        summary: "Cat versus a forgiving normal-rules Pig: three lives, Crown Ring items, last fighter standing.",
+        summary: "Cat versus a forgiving normal-rules Pig: three lives, Split Causeway items, last fighter standing.",
         player_character: CharacterKind::Cat,
         steps: FINAL_EXAM_STEPS,
         final_exam: true,
@@ -1917,15 +1918,15 @@ pub fn configure_tutorial_match(
         session.return_setup = Some(setup.clone());
     }
     setup.set_rule(2);
-    setup.arena_index = 0;
+    setup.arena_index = TUTORIAL_ARENA_INDEX;
     setup.configure_single_player_duel(chapter.player_character, CharacterKind::Pig);
     setup.slots[TUTORIAL_PLAYER_ID].input = assignment;
     state.rule_index = setup.rule_index;
     state.rules = setup.active_rule();
-    state.arena_index = 0;
+    state.arena_index = TUTORIAL_ARENA_INDEX;
     state.apply_local_setup(setup);
     state.replay_seed = setup.replay_seed;
-    set_active_arena_index(0);
+    set_active_arena_index(TUTORIAL_ARENA_INDEX);
     session.start(chapter_id);
     pause_owners.set(GameplayPauseOwner::TutorialPrompt, true);
     pause_owners.set(GameplayPauseOwner::TutorialMenu, false);
@@ -4375,6 +4376,34 @@ mod tests {
             .map(TutorialChapterId::stable_id)
             .collect::<BTreeSet<_>>();
         assert_eq!(stable_ids.len(), 12);
+    }
+
+    #[test]
+    fn tutorial_uses_split_causeway_arena() {
+        assert_eq!(
+            crate::arena_defs::arena_definition(TUTORIAL_ARENA_INDEX).name,
+            "Split Causeway"
+        );
+    }
+
+    #[test]
+    fn basics_teaches_camera_depth_down_then_up() {
+        assert_eq!(
+            BASICS_STEPS[3].objective,
+            TutorialObjective::Movement {
+                direction: TutorialDirection::Back,
+                distance: 2.0,
+            }
+        );
+        assert_eq!(
+            BASICS_STEPS[4].objective,
+            TutorialObjective::Movement {
+                direction: TutorialDirection::Forward,
+                distance: 2.0,
+            }
+        );
+        assert_eq!(BASICS_STEPS[3].title, "Move down");
+        assert_eq!(BASICS_STEPS[4].title, "Move up");
     }
 
     #[test]
