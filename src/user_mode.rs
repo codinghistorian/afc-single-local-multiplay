@@ -4303,6 +4303,43 @@ pub fn sync_user_mode_battle_music(
     }
 }
 
+fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
+    matches!(
+        user_mode.screen,
+        UserModeScreen::ModeSelect
+            | UserModeScreen::PlayerCountSelect
+            | UserModeScreen::DeviceJoin
+            | UserModeScreen::ControlsHub
+            | UserModeScreen::ControllerTest
+            | UserModeScreen::KeySettings
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::TutorialHub
+    )
+}
+
+pub fn sync_user_mode_menu_music(
+    asset_server: Res<AssetServer>,
+    user_mode: Res<UserModeState>,
+    menu_music: Query<Entity, (With<UserModeMusic>, Without<ArenaMusic>)>,
+    mut commands: Commands,
+) {
+    let should_play = user_mode_menu_music_enabled(&user_mode);
+    let mut desired_track_kept = false;
+
+    for entity in &menu_music {
+        if should_play && !desired_track_kept {
+            desired_track_kept = true;
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    if should_play && !desired_track_kept {
+        start_user_mode_menu_music(&mut commands, &asset_server);
+    }
+}
+
 pub fn sync_dev_mode_music(
     asset_server: Res<AssetServer>,
     user_mode: Res<UserModeState>,
@@ -7663,6 +7700,45 @@ mod tests {
             normalized_arena_music_index(USER_MODE_BATTLE_MUSIC_PATHS.len()),
             0
         );
+    }
+
+    #[test]
+    fn menu_music_is_enabled_for_menu_screens_only() {
+        let mut user_mode = UserModeState::default();
+
+        for screen in [
+            UserModeScreen::ModeSelect,
+            UserModeScreen::PlayerCountSelect,
+            UserModeScreen::DeviceJoin,
+            UserModeScreen::ControlsHub,
+            UserModeScreen::ControllerTest,
+            UserModeScreen::KeySettings,
+            UserModeScreen::CharacterSelect,
+            UserModeScreen::ArenaSelect,
+            UserModeScreen::TutorialHub,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                user_mode_menu_music_enabled(&user_mode),
+                "menu music should play on {screen:?}"
+            );
+        }
+
+        for screen in [
+            UserModeScreen::Dev,
+            UserModeScreen::Start,
+            UserModeScreen::ControlsBriefing,
+            UserModeScreen::BattleResult,
+            UserModeScreen::TutorialLesson,
+            UserModeScreen::TutorialPause,
+            UserModeScreen::TutorialFinalResult,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                !user_mode_menu_music_enabled(&user_mode),
+                "menu music should not play on {screen:?}"
+            );
+        }
     }
 
     #[test]

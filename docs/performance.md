@@ -49,7 +49,8 @@ script.
 | Date | Hardware and platform | Scenario/build | Result | Status |
 | --- | --- | --- | --- | --- |
 | 2026-07-22 | Apple M2 Max, macOS | Existing generated WASM | Approximately 78.2 MiB before the optimization program | Planning baseline; replace with exact scripted result. |
-| 2026-07-26 | Apple M2 Max, macOS | itch.io web release with Bevy Gilrs | Optimized WASM 12,515,927 bytes; `web_dist/` 64,722,014 extracted bytes across 207 files; ZIP 48,525,710 bytes. | Size/package baseline; draft itch.io Chrome and Safari runtime measurements remain pending. |
+| 2026-07-26 | Apple M2 Max, macOS | itch.io web release with Bevy Gilrs | Optimized WASM 12,515,927 bytes; `web_dist/` 64,722,014 extracted bytes across 207 files; ZIP 48,525,710 bytes. | Invalid packaging measurement: the build script selected a stale headless dedicated-server WASM; superseded below. |
+| 2026-07-27 | Apple M2 Max, macOS | Corrected itch.io web release | Optimized game WASM 44,263,596 bytes; `web_dist/` 103,509,569 extracted bytes across 214 files; ZIP 64,575,622 bytes. | Corrected size/package baseline after pinning the `ffc-prototype` browser-game binary; Chrome and Safari runtime measurements remain pending. |
 | Pending | Apple M2 Max, macOS | `FourBotStress`, profiling profile | Capture median, p95, p99, CPU/GPU time, allocations, entities, assets, and memory. | Required before accepting hot-path gains. |
 | Pending | Apple M2 Max, macOS | `MapCycle100` and `Soak10Minutes` | Capture peak/end counts and memory. | Required before accepting cache or pool changes. |
 | Pending | Current Chrome and Safari | Optimized web release | Capture p95/p99 frame time, WASM, and distribution size. | Required before changing the accepted web baseline. |

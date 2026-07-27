@@ -232,6 +232,7 @@ pub fn build_app() -> App {
                     .chain(),
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
+                user_mode::sync_user_mode_menu_music,
                 user_mode::sync_user_mode_battle_music,
                 user_mode::sync_dev_mode_music,
                 user_mode::sync_user_mode_preview_scene,
