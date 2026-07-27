@@ -472,7 +472,7 @@ const BASICS_STEPS: &[TutorialStep] = &[
         "Move down",
         "Move toward the bottom of the screen. The same inputs remain screen-relative as the camera turns.",
         TutorialObjective::Movement {
-            direction: TutorialDirection::Back,
+            direction: TutorialDirection::Forward,
             distance: 2.0,
         },
         &[TutorialPromptAction::Move],
@@ -484,7 +484,7 @@ const BASICS_STEPS: &[TutorialStep] = &[
         "Move up",
         "Move toward the top of the screen to verify all four camera-relative directions.",
         TutorialObjective::Movement {
-            direction: TutorialDirection::Forward,
+            direction: TutorialDirection::Back,
             distance: 2.0,
         },
         &[TutorialPromptAction::Move],
@@ -4391,19 +4391,27 @@ mod tests {
         assert_eq!(
             BASICS_STEPS[3].objective,
             TutorialObjective::Movement {
-                direction: TutorialDirection::Back,
+                direction: TutorialDirection::Forward,
                 distance: 2.0,
             }
         );
         assert_eq!(
             BASICS_STEPS[4].objective,
             TutorialObjective::Movement {
-                direction: TutorialDirection::Forward,
+                direction: TutorialDirection::Back,
                 distance: 2.0,
             }
         );
         assert_eq!(BASICS_STEPS[3].title, "Move down");
         assert_eq!(BASICS_STEPS[4].title, "Move up");
+        assert!(tutorial_direction_pressed(
+            TutorialDirection::Forward,
+            Vec2::Y
+        ));
+        assert!(tutorial_direction_pressed(
+            TutorialDirection::Back,
+            Vec2::NEG_Y
+        ));
     }
 
     #[test]
