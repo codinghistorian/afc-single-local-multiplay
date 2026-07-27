@@ -3896,7 +3896,8 @@ pub fn handle_user_mode_input(
     };
     let keyboard_action = before_device_join
         .then(|| keyboard_user_mode_action(&user_mode, &keys))
-        .flatten();
+        .flatten()
+        .or_else(|| single_player_selection_enter_action(&user_mode, &keys));
     let action = pointer_action
         .or(device_action)
         .or(keyboard_action)
@@ -5157,6 +5158,19 @@ fn keyboard_user_mode_action(
     }
 }
 
+fn single_player_selection_enter_action(
+    user_mode: &UserModeState,
+    keys: &ButtonInput<KeyCode>,
+) -> Option<UserModeUiAction> {
+    (user_mode.play_mode == UserPlayMode::SinglePlayer
+        && matches!(
+            user_mode.screen,
+            UserModeScreen::CharacterSelect | UserModeScreen::ArenaSelect
+        )
+        && keys.just_pressed(KeyCode::Enter))
+    .then_some(UserModeUiAction::Confirm)
+}
+
 fn select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyQ)
 }
@@ -6285,6 +6299,37 @@ mod tests {
         assert_eq!(
             keyboard_assignment_user_mode_action(UserModeScreen::ArenaSelect, &keys, p2),
             Some(UserModeUiAction::Confirm)
+        );
+    }
+
+    #[test]
+    fn enter_confirms_single_player_character_and_arena_selection() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Enter);
+
+        user_mode.enter_character_select();
+        let character_action = single_player_selection_enter_action(&user_mode, &keys);
+        assert_eq!(character_action, Some(UserModeUiAction::Confirm));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, character_action.unwrap()),
+            UserModeRoute::ArenaEntered
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+
+        let arena_action = single_player_selection_enter_action(&user_mode, &keys);
+        assert_eq!(arena_action, Some(UserModeUiAction::Confirm));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, arena_action.unwrap()),
+            UserModeRoute::PrepareMatch
+        );
+
+        user_mode.play_mode = UserPlayMode::FourPlayers;
+        assert_eq!(
+            single_player_selection_enter_action(&user_mode, &keys),
+            None,
+            "multiplayer confirmation must remain scoped to each assigned seat"
         );
     }
 
