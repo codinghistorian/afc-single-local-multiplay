@@ -16,7 +16,9 @@ use std::time::Duration;
 ))]
 use bevy::input::gamepad::{GamepadRumbleIntensity, GamepadRumbleRequest};
 
-use crate::components::{Controller, LocalInputAssignment};
+use crate::components::{
+    Controller, Fighter, FighterAction, FighterActionState, LocalInputAssignment,
+};
 use crate::control_settings::ControlPreferences;
 
 #[cfg(target_arch = "wasm32")]
@@ -28,7 +30,7 @@ use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
-const MAX_HAPTIC_SEGMENTS: usize = 3;
+const MAX_HAPTIC_SEGMENTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +40,41 @@ pub enum VibrationLevel {
     #[default]
     Standard,
     High,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HapticStyle {
+    Minimal,
+    #[default]
+    Competitive,
+    Cinematic,
+}
+
+impl HapticStyle {
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Minimal => Self::Competitive,
+            Self::Competitive => Self::Cinematic,
+            Self::Cinematic => Self::Minimal,
+        }
+    }
+
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Minimal => Self::Cinematic,
+            Self::Competitive => Self::Minimal,
+            Self::Cinematic => Self::Competitive,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "MINIMAL",
+            Self::Competitive => "COMPETITIVE",
+            Self::Cinematic => "CINEMATIC",
+        }
+    }
 }
 
 impl VibrationLevel {
@@ -157,10 +194,18 @@ impl HapticPattern {
         third: Option<HapticSegment>,
         priority: u8,
     ) -> Self {
-        Self {
-            segments: [Some(first), second, third],
-            priority,
-        }
+        let mut segments = [None; MAX_HAPTIC_SEGMENTS];
+        segments[0] = Some(first);
+        segments[1] = second;
+        segments[2] = third;
+        Self { segments, priority }
+    }
+
+    pub const fn sequence(
+        segments: [Option<HapticSegment>; MAX_HAPTIC_SEGMENTS],
+        priority: u8,
+    ) -> Self {
+        Self { segments, priority }
     }
 
     pub const fn simple(strength: f32, duration_secs: f32, priority: u8) -> Self {
@@ -187,6 +232,19 @@ impl HapticPattern {
         scaled
     }
 
+    pub fn scaled_duration(self, scale: f32) -> Self {
+        let mut scaled = self;
+        for segment in scaled.segments.iter_mut().flatten() {
+            segment.start_ms = (f32::from(segment.start_ms) * scale)
+                .round()
+                .clamp(0.0, f32::from(u16::MAX)) as u16;
+            segment.duration_ms = (f32::from(segment.duration_ms) * scale)
+                .round()
+                .clamp(1.0, f32::from(u16::MAX)) as u16;
+        }
+        scaled
+    }
+
     pub fn duration_ms(self) -> u16 {
         self.segments()
             .map(|segment| segment.start_ms.saturating_add(segment.duration_ms))
@@ -204,102 +262,118 @@ pub const fn controller_test_pattern() -> HapticPattern {
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub fn combat_preview_pattern(style: HapticStyle) -> HapticPattern {
+    let attack_release =
+        (style != HapticStyle::Minimal).then_some(HapticSegment::transient(0, 20, 0.04, 0.22));
+    let pattern = HapticPattern::sequence(
+        [
+            attack_release,
+            Some(HapticSegment::transient(260, 24, 0.04, 0.26)),
+            Some(HapticSegment::transient(520, 36, 0.18, 0.65)),
+            Some(HapticSegment::continuous(568, 42, 0.22, 0.12)),
+            Some(HapticSegment::transient(900, 30, 0.16, 0.55)),
+            Some(HapticSegment::continuous(945, 50, 0.42, 0.32)),
+            Some(HapticSegment::continuous(1005, 95, 0.68, 0.12)),
+            None,
+        ],
+        100,
+    );
+    if style == HapticStyle::Cinematic {
+        pattern.scaled_duration(1.18)
+    } else {
+        pattern
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CombatHapticRole {
     Attacker,
     Defender,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CombatHapticKind {
+pub enum HapticMoveClass {
     Light,
-    Guard,
     Heavy,
+    Special,
+    Guard,
+    Counter,
     Ultimate,
-    Finisher,
-    Secondary,
 }
 
-pub const fn combat_haptic_pattern(
-    kind: CombatHapticKind,
-    role: CombatHapticRole,
-) -> HapticPattern {
-    match (kind, role) {
-        (CombatHapticKind::Light, CombatHapticRole::Attacker) => {
-            HapticPattern::new(HapticSegment::transient(0, 28, 0.08, 0.42), None, None, 40)
-        }
-        (CombatHapticKind::Light, CombatHapticRole::Defender) => {
-            HapticPattern::new(HapticSegment::continuous(0, 58, 0.44, 0.18), None, None, 40)
-        }
-        (CombatHapticKind::Guard, CombatHapticRole::Attacker) => {
-            HapticPattern::new(HapticSegment::transient(0, 24, 0.05, 0.30), None, None, 55)
-        }
-        (CombatHapticKind::Guard, CombatHapticRole::Defender) => {
-            HapticPattern::new(HapticSegment::transient(0, 38, 0.18, 0.48), None, None, 55)
-        }
-        (CombatHapticKind::Heavy, CombatHapticRole::Attacker) => HapticPattern::new(
-            HapticSegment::transient(0, 32, 0.14, 0.62),
-            Some(HapticSegment::continuous(40, 40, 0.18, 0.16)),
-            None,
-            70,
-        ),
-        (CombatHapticKind::Heavy, CombatHapticRole::Defender) => HapticPattern::new(
-            HapticSegment::transient(0, 32, 0.55, 0.55),
-            Some(HapticSegment::continuous(32, 78, 0.68, 0.12)),
-            None,
-            70,
-        ),
-        (CombatHapticKind::Ultimate, CombatHapticRole::Attacker) => HapticPattern::new(
-            HapticSegment::transient(0, 35, 0.20, 0.75),
-            Some(HapticSegment::continuous(55, 70, 0.42, 0.25)),
-            None,
-            90,
-        ),
-        (CombatHapticKind::Ultimate, CombatHapticRole::Defender) => HapticPattern::new(
-            HapticSegment::transient(0, 35, 0.78, 0.70),
-            Some(HapticSegment::continuous(35, 115, 0.88, 0.12)),
-            None,
-            90,
-        ),
-        (CombatHapticKind::Finisher, CombatHapticRole::Attacker) => HapticPattern::new(
-            HapticSegment::transient(0, 35, 0.18, 0.65),
-            Some(HapticSegment::continuous(55, 80, 0.40, 0.18)),
-            None,
-            100,
-        ),
-        (CombatHapticKind::Finisher, CombatHapticRole::Defender) => HapticPattern::new(
-            HapticSegment::transient(0, 35, 0.82, 0.65),
-            Some(HapticSegment::continuous(35, 180, 0.85, 0.10)),
-            None,
-            100,
-        ),
-        (CombatHapticKind::Secondary, CombatHapticRole::Defender) => {
-            HapticPattern::new(HapticSegment::continuous(0, 70, 0.38, 0.12), None, None, 25)
-        }
-        (CombatHapticKind::Secondary, CombatHapticRole::Attacker) => {
-            HapticPattern::new(HapticSegment::transient(0, 1, 0.0, 0.0), None, None, 0)
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HapticActionPhase {
+    Startup,
+    Release,
+    Charge,
+    Lock,
+    Aftermath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HapticImpactWeight {
+    Light,
+    Heavy,
+    Ultimate,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HapticContactOutcome {
+    Clean,
+    Guarded,
+    Counter,
+    Grab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HapticSecondaryKind {
+    Bounce,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CombatHapticCue {
-    pub attacker: Option<usize>,
-    pub defender: usize,
-    pub kind: CombatHapticKind,
+pub enum CombatHapticCue {
+    Action {
+        slot: usize,
+        class: HapticMoveClass,
+        phase: HapticActionPhase,
+    },
+    Contact {
+        attacker: Option<usize>,
+        defender: usize,
+        outcome: HapticContactOutcome,
+        weight: HapticImpactWeight,
+    },
+    Secondary {
+        slot: usize,
+        kind: HapticSecondaryKind,
+    },
 }
 
 impl CombatHapticCue {
-    pub const fn impact(attacker: Option<usize>, defender: usize, kind: CombatHapticKind) -> Self {
-        Self {
+    pub const fn action(slot: usize, class: HapticMoveClass, phase: HapticActionPhase) -> Self {
+        Self::Action { slot, class, phase }
+    }
+
+    pub const fn contact(
+        attacker: Option<usize>,
+        defender: usize,
+        outcome: HapticContactOutcome,
+        weight: HapticImpactWeight,
+    ) -> Self {
+        Self::Contact {
             attacker,
             defender,
-            kind,
+            outcome,
+            weight,
         }
     }
 
-    pub const fn secondary(defender: usize) -> Self {
-        Self::impact(None, defender, CombatHapticKind::Secondary)
+    pub const fn secondary(slot: usize) -> Self {
+        Self::Secondary {
+            slot,
+            kind: HapticSecondaryKind::Bounce,
+        }
     }
 }
 
@@ -318,12 +392,80 @@ impl CombatHapticQueue {
     }
 }
 
+#[derive(Resource, Default)]
+pub struct FighterHapticTracker {
+    actions: HashMap<Entity, FighterAction>,
+}
+
+pub const fn haptic_move_class_for_action(action: FighterAction) -> Option<HapticMoveClass> {
+    match action {
+        FighterAction::LightAttack1
+        | FighterAction::LightAttack2
+        | FighterAction::DashAttack
+        | FighterAction::JumpAttack => Some(HapticMoveClass::Light),
+        FighterAction::ComboFinisher
+        | FighterAction::HeavyAttack
+        | FighterAction::HeavyAttack2
+        | FighterAction::JumpHeavyAttack
+        | FighterAction::GrabStartup
+        | FighterAction::Throwing
+        | FighterAction::ItemSwing
+        | FighterAction::ItemThrow => Some(HapticMoveClass::Heavy),
+        FighterAction::SpecialCast => Some(HapticMoveClass::Special),
+        FighterAction::Guarding => Some(HapticMoveClass::Guard),
+        FighterAction::GuardCounter => Some(HapticMoveClass::Counter),
+        FighterAction::UltimateStartup | FighterAction::UltimateRush => {
+            Some(HapticMoveClass::Ultimate)
+        }
+        _ => None,
+    }
+}
+
+fn action_transition_phase(action: FighterAction) -> HapticActionPhase {
+    match action {
+        FighterAction::UltimateRush => HapticActionPhase::Lock,
+        FighterAction::Throwing | FighterAction::ItemThrow | FighterAction::SpecialCast => {
+            HapticActionPhase::Release
+        }
+        _ => HapticActionPhase::Startup,
+    }
+}
+
+pub fn queue_fighter_action_haptics(
+    fighters: Query<(Entity, &Fighter, &Controller, &FighterActionState)>,
+    mut tracker: ResMut<FighterHapticTracker>,
+    mut haptics: ResMut<CombatHapticQueue>,
+) {
+    for (entity, fighter, controller, action) in &fighters {
+        if !controller.is_human() || !matches!(controller.input, LocalInputAssignment::Gamepad(_)) {
+            continue;
+        }
+        let previous = tracker.actions.insert(entity, action.action);
+        if previous.is_none() || previous == Some(action.action) {
+            continue;
+        }
+        if let Some(class) = haptic_move_class_for_action(action.action) {
+            haptics.push(CombatHapticCue::action(
+                fighter.id,
+                class,
+                action_transition_phase(action.action),
+            ));
+        }
+    }
+    tracker.actions.retain(|entity, _| {
+        fighters.get(*entity).is_ok_and(|(_, _, controller, _)| {
+            controller.is_human() && matches!(controller.input, LocalInputAssignment::Gamepad(_))
+        })
+    });
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HapticPurpose {
     #[default]
     Gameplay,
     Join,
     Test,
+    Preview,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -386,6 +528,7 @@ impl Plugin for ControllerHapticsPlugin {
         app.add_message::<ControllerHapticRequest>()
             .add_message::<HapticPlaybackEvent>()
             .init_resource::<CombatHapticQueue>()
+            .init_resource::<FighterHapticTracker>()
             .init_resource::<CombatHapticMixer>()
             .configure_sets(
                 PostUpdate,
@@ -422,10 +565,27 @@ impl Plugin for ControllerHapticsPlugin {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RoutedHapticKind {
+    Action(HapticMoveClass, HapticActionPhase),
+    Contact(HapticContactOutcome, HapticImpactWeight, CombatHapticRole),
+    Secondary(HapticSecondaryKind),
+}
+
+impl RoutedHapticKind {
+    const fn category_rank(self) -> u8 {
+        match self {
+            Self::Action(_, _) => 1,
+            Self::Secondary(_) => 2,
+            Self::Contact(_, _, _) => 3,
+        }
+    }
+}
+
+#[derive(Default)]
 struct MixedHapticState {
-    last_kind: CombatHapticKind,
-    last_started: f64,
+    last_started: HashMap<RoutedHapticKind, f64>,
+    active_kind: Option<RoutedHapticKind>,
     active_priority: u8,
     active_until: f64,
 }
@@ -437,14 +597,273 @@ struct CombatHapticMixer {
 
 #[derive(Clone, Copy)]
 struct RoutedCombatHaptic {
-    kind: CombatHapticKind,
+    kind: RoutedHapticKind,
     role: CombatHapticRole,
     pattern: HapticPattern,
+    retrigger_ms: u16,
+}
+
+fn action_haptic_pattern(class: HapticMoveClass, phase: HapticActionPhase) -> HapticPattern {
+    match (class, phase) {
+        (HapticMoveClass::Light, HapticActionPhase::Startup) => {
+            HapticPattern::new(HapticSegment::transient(0, 18, 0.03, 0.16), None, None, 10)
+        }
+        (HapticMoveClass::Light, HapticActionPhase::Release) => {
+            HapticPattern::new(HapticSegment::transient(0, 20, 0.04, 0.22), None, None, 20)
+        }
+        (HapticMoveClass::Heavy, HapticActionPhase::Startup) => {
+            HapticPattern::new(HapticSegment::transient(0, 22, 0.06, 0.18), None, None, 12)
+        }
+        (HapticMoveClass::Heavy, HapticActionPhase::Release) => HapticPattern::new(
+            HapticSegment::transient(0, 22, 0.10, 0.30),
+            Some(HapticSegment::continuous(36, 34, 0.16, 0.08)),
+            None,
+            25,
+        ),
+        (HapticMoveClass::Special, HapticActionPhase::Startup) => {
+            HapticPattern::new(HapticSegment::transient(0, 22, 0.04, 0.20), None, None, 13)
+        }
+        (HapticMoveClass::Special, HapticActionPhase::Release) => HapticPattern::new(
+            HapticSegment::transient(0, 24, 0.07, 0.28),
+            Some(HapticSegment::continuous(42, 30, 0.12, 0.07)),
+            None,
+            27,
+        ),
+        (HapticMoveClass::Guard, HapticActionPhase::Startup) => {
+            HapticPattern::new(HapticSegment::transient(0, 24, 0.05, 0.20), None, None, 18)
+        }
+        (HapticMoveClass::Counter, HapticActionPhase::Startup) => HapticPattern::new(
+            HapticSegment::transient(0, 26, 0.12, 0.36),
+            Some(HapticSegment::continuous(48, 32, 0.20, 0.10)),
+            None,
+            48,
+        ),
+        (HapticMoveClass::Ultimate, HapticActionPhase::Startup) => HapticPattern::new(
+            HapticSegment::transient(0, 40, 0.10, 0.38),
+            Some(HapticSegment::continuous(55, 65, 0.28, 0.12)),
+            None,
+            82,
+        ),
+        (HapticMoveClass::Ultimate, HapticActionPhase::Charge) => HapticPattern::new(
+            HapticSegment::transient(0, 24, 0.12, 0.40),
+            Some(HapticSegment::continuous(38, 36, 0.25, 0.10)),
+            None,
+            86,
+        ),
+        (HapticMoveClass::Ultimate, HapticActionPhase::Lock) => HapticPattern::new(
+            HapticSegment::transient(0, 34, 0.25, 0.55),
+            Some(HapticSegment::continuous(46, 44, 0.34, 0.12)),
+            None,
+            90,
+        ),
+        (_, HapticActionPhase::Charge) => {
+            HapticPattern::new(HapticSegment::transient(0, 26, 0.10, 0.24), None, None, 22)
+        }
+        (_, HapticActionPhase::Aftermath) => {
+            HapticPattern::new(HapticSegment::continuous(0, 54, 0.16, 0.06), None, None, 16)
+        }
+        (_, HapticActionPhase::Lock) => {
+            HapticPattern::new(HapticSegment::transient(0, 28, 0.12, 0.30), None, None, 35)
+        }
+        (HapticMoveClass::Guard, HapticActionPhase::Release)
+        | (HapticMoveClass::Counter, HapticActionPhase::Release) => {
+            HapticPattern::new(HapticSegment::transient(0, 24, 0.08, 0.26), None, None, 28)
+        }
+        (HapticMoveClass::Ultimate, HapticActionPhase::Release) => HapticPattern::new(
+            HapticSegment::transient(0, 30, 0.16, 0.55),
+            Some(HapticSegment::continuous(45, 50, 0.42, 0.32)),
+            Some(HapticSegment::continuous(105, 95, 0.68, 0.12)),
+            96,
+        ),
+    }
+}
+
+fn clean_contact_pattern(weight: HapticImpactWeight, role: CombatHapticRole) -> HapticPattern {
+    match (weight, role) {
+        (HapticImpactWeight::Light, CombatHapticRole::Attacker) => {
+            HapticPattern::new(HapticSegment::transient(0, 32, 0.08, 0.48), None, None, 55)
+        }
+        (HapticImpactWeight::Light, CombatHapticRole::Defender) => {
+            HapticPattern::new(HapticSegment::continuous(0, 60, 0.50, 0.16), None, None, 60)
+        }
+        (HapticImpactWeight::Heavy, CombatHapticRole::Attacker) => HapticPattern::new(
+            HapticSegment::transient(0, 36, 0.18, 0.65),
+            Some(HapticSegment::continuous(48, 42, 0.22, 0.12)),
+            None,
+            72,
+        ),
+        (HapticImpactWeight::Heavy, CombatHapticRole::Defender) => HapticPattern::new(
+            HapticSegment::transient(0, 34, 0.62, 0.48),
+            Some(HapticSegment::continuous(34, 88, 0.72, 0.10)),
+            None,
+            78,
+        ),
+        (HapticImpactWeight::Ultimate, CombatHapticRole::Attacker) => HapticPattern::new(
+            HapticSegment::transient(0, 28, 0.12, 0.58),
+            Some(HapticSegment::continuous(42, 48, 0.34, 0.14)),
+            None,
+            92,
+        ),
+        (HapticImpactWeight::Ultimate, CombatHapticRole::Defender) => HapticPattern::new(
+            HapticSegment::transient(0, 38, 0.78, 0.62),
+            Some(HapticSegment::continuous(38, 122, 0.90, 0.14)),
+            Some(HapticSegment::continuous(175, 80, 0.42, 0.08)),
+            96,
+        ),
+        (HapticImpactWeight::Terminal, CombatHapticRole::Attacker) => HapticPattern::new(
+            HapticSegment::transient(0, 35, 0.20, 0.70),
+            Some(HapticSegment::continuous(50, 90, 0.45, 0.18)),
+            None,
+            100,
+        ),
+        (HapticImpactWeight::Terminal, CombatHapticRole::Defender) => HapticPattern::new(
+            HapticSegment::transient(0, 40, 0.90, 0.60),
+            Some(HapticSegment::continuous(40, 180, 0.88, 0.08)),
+            None,
+            100,
+        ),
+    }
+}
+
+fn contact_haptic_pattern(
+    outcome: HapticContactOutcome,
+    weight: HapticImpactWeight,
+    role: CombatHapticRole,
+) -> HapticPattern {
+    if weight == HapticImpactWeight::Terminal {
+        return clean_contact_pattern(weight, role);
+    }
+    match (outcome, role) {
+        (HapticContactOutcome::Clean, _) => clean_contact_pattern(weight, role),
+        (HapticContactOutcome::Guarded, CombatHapticRole::Attacker) => {
+            let heavy = matches!(
+                weight,
+                HapticImpactWeight::Heavy | HapticImpactWeight::Ultimate
+            );
+            HapticPattern::new(
+                HapticSegment::transient(
+                    0,
+                    if heavy { 28 } else { 24 },
+                    if heavy { 0.08 } else { 0.04 },
+                    if heavy { 0.34 } else { 0.26 },
+                ),
+                None,
+                None,
+                if heavy { 62 } else { 58 },
+            )
+        }
+        (HapticContactOutcome::Guarded, CombatHapticRole::Defender) => {
+            let heavy = matches!(
+                weight,
+                HapticImpactWeight::Heavy | HapticImpactWeight::Ultimate
+            );
+            HapticPattern::new(
+                HapticSegment::transient(
+                    0,
+                    if heavy { 40 } else { 34 },
+                    if heavy { 0.28 } else { 0.20 },
+                    if heavy { 0.66 } else { 0.58 },
+                ),
+                Some(HapticSegment::continuous(
+                    if heavy { 42 } else { 38 },
+                    if heavy { 44 } else { 32 },
+                    if heavy { 0.24 } else { 0.16 },
+                    0.10,
+                )),
+                None,
+                if heavy { 68 } else { 64 },
+            )
+        }
+        (HapticContactOutcome::Counter, CombatHapticRole::Attacker) => HapticPattern::new(
+            HapticSegment::transient(0, 28, 0.12, 0.58),
+            Some(HapticSegment::transient(52, 22, 0.08, 0.38)),
+            None,
+            80,
+        ),
+        (HapticContactOutcome::Counter, CombatHapticRole::Defender) => HapticPattern::new(
+            HapticSegment::transient(0, 36, 0.70, 0.35),
+            Some(HapticSegment::continuous(52, 70, 0.55, 0.10)),
+            None,
+            84,
+        ),
+        (HapticContactOutcome::Grab, CombatHapticRole::Attacker) => {
+            if weight == HapticImpactWeight::Ultimate {
+                HapticPattern::new(
+                    HapticSegment::transient(0, 34, 0.25, 0.55),
+                    Some(HapticSegment::continuous(46, 44, 0.34, 0.12)),
+                    None,
+                    90,
+                )
+            } else {
+                HapticPattern::new(HapticSegment::transient(0, 34, 0.14, 0.48), None, None, 68)
+            }
+        }
+        (HapticContactOutcome::Grab, CombatHapticRole::Defender) => {
+            if weight == HapticImpactWeight::Ultimate {
+                HapticPattern::new(
+                    HapticSegment::transient(0, 42, 0.62, 0.44),
+                    Some(HapticSegment::continuous(42, 86, 0.68, 0.12)),
+                    None,
+                    92,
+                )
+            } else {
+                HapticPattern::new(
+                    HapticSegment::transient(0, 46, 0.48, 0.22),
+                    Some(HapticSegment::continuous(52, 42, 0.30, 0.08)),
+                    None,
+                    72,
+                )
+            }
+        }
+    }
+}
+
+fn routed_haptic_pattern(
+    kind: RoutedHapticKind,
+    style: HapticStyle,
+) -> Option<(HapticPattern, u16)> {
+    let pattern = match kind {
+        RoutedHapticKind::Action(class, phase) => {
+            if style == HapticStyle::Minimal {
+                return None;
+            }
+            if phase == HapticActionPhase::Aftermath && style != HapticStyle::Cinematic {
+                return None;
+            }
+            action_haptic_pattern(class, phase)
+        }
+        RoutedHapticKind::Contact(outcome, weight, role) => {
+            contact_haptic_pattern(outcome, weight, role)
+        }
+        RoutedHapticKind::Secondary(_) => {
+            if style == HapticStyle::Minimal {
+                return None;
+            }
+            HapticPattern::new(HapticSegment::continuous(0, 62, 0.34, 0.10), None, None, 30)
+        }
+    };
+    let pattern = if style == HapticStyle::Cinematic {
+        pattern.scaled_duration(1.18)
+    } else {
+        pattern
+    };
+    let retrigger_ms = match kind {
+        RoutedHapticKind::Action(HapticMoveClass::Ultimate, _) => 70,
+        RoutedHapticKind::Action(_, _) => 35,
+        RoutedHapticKind::Contact(_, HapticImpactWeight::Light, _) => 45,
+        RoutedHapticKind::Contact(_, HapticImpactWeight::Heavy, _) => 60,
+        RoutedHapticKind::Contact(_, HapticImpactWeight::Ultimate, _) => 70,
+        RoutedHapticKind::Contact(_, HapticImpactWeight::Terminal, _) => 200,
+        RoutedHapticKind::Secondary(_) => 80,
+    };
+    Some((pattern, retrigger_ms))
 }
 
 fn route_combat_haptics(
     time: Res<Time<Real>>,
     preferences: Res<ControlPreferences>,
+    state: Option<Res<crate::game_state::MatchState>>,
+    reconnect: Option<Res<crate::user_mode::LocalControllerReconnect>>,
     controllers: Query<&Controller>,
     connected_gamepads: Query<(), With<Gamepad>>,
     mut queue: ResMut<CombatHapticQueue>,
@@ -452,7 +871,11 @@ fn route_combat_haptics(
     mut requests: MessageWriter<ControllerHapticRequest>,
 ) {
     let cues: Vec<_> = queue.drain().collect();
-    if !preferences.vibration.enabled() {
+    let gameplay_blocked = state.as_ref().is_some_and(|state| !state.is_fighting())
+        || reconnect
+            .as_ref()
+            .is_some_and(|reconnect| reconnect.blocks_gameplay());
+    if !preferences.vibration.enabled() || gameplay_blocked {
         for gamepad in mixer.devices.keys().copied() {
             requests.write(ControllerHapticRequest::stop(gamepad));
         }
@@ -475,22 +898,49 @@ fn route_combat_haptics(
         })
     };
 
-    let mut strongest_by_gamepad = HashMap::<Entity, RoutedCombatHaptic>::new();
-    let mut route = |gamepad: Entity, kind: CombatHapticKind, role: CombatHapticRole| {
-        if kind == CombatHapticKind::Secondary && role == CombatHapticRole::Attacker {
-            return;
+    mixer.devices.retain(|gamepad, _| {
+        let assigned = controllers.iter().any(|controller| {
+            controller.is_human()
+                && matches!(
+                    controller.input,
+                    LocalInputAssignment::Gamepad(assigned_gamepad)
+                        if assigned_gamepad == *gamepad
+                            && connected_gamepads.get(*gamepad).is_ok()
+                )
+        });
+        if !assigned {
+            requests.write(ControllerHapticRequest::stop(*gamepad));
         }
-        let pattern = combat_haptic_pattern(kind, role);
+        assigned
+    });
+
+    let mut strongest_by_gamepad = HashMap::<Entity, RoutedCombatHaptic>::new();
+    let mut route = |gamepad: Entity, kind: RoutedHapticKind, role: CombatHapticRole| {
+        let Some((pattern, retrigger_ms)) = routed_haptic_pattern(kind, preferences.haptic_style)
+        else {
+            return;
+        };
         let candidate = RoutedCombatHaptic {
             kind,
             role,
             pattern,
+            retrigger_ms,
         };
         strongest_by_gamepad
             .entry(gamepad)
             .and_modify(|current| {
-                if candidate.pattern.priority > current.pattern.priority
-                    || (candidate.pattern.priority == current.pattern.priority
+                let candidate_rank = candidate.kind.category_rank();
+                let current_rank = current.kind.category_rank();
+                let defender_contact_wins = matches!(candidate.kind, RoutedHapticKind::Contact(..))
+                    && matches!(current.kind, RoutedHapticKind::Contact(..))
+                    && candidate.role == CombatHapticRole::Defender
+                    && current.role == CombatHapticRole::Attacker;
+                if candidate_rank > current_rank
+                    || defender_contact_wins
+                    || (candidate_rank == current_rank
+                        && candidate.pattern.priority > current.pattern.priority)
+                    || (candidate_rank == current_rank
+                        && candidate.pattern.priority == current.pattern.priority
                         && candidate.role == CombatHapticRole::Defender)
                 {
                     *current = candidate;
@@ -500,14 +950,49 @@ fn route_combat_haptics(
     };
 
     for cue in cues {
-        if let Some(attacker) = cue.attacker
-            && attacker != cue.defender
-            && let Some(gamepad) = gamepad_for_slot(attacker)
-        {
-            route(gamepad, cue.kind, CombatHapticRole::Attacker);
-        }
-        if let Some(gamepad) = gamepad_for_slot(cue.defender) {
-            route(gamepad, cue.kind, CombatHapticRole::Defender);
+        match cue {
+            CombatHapticCue::Action { slot, class, phase } => {
+                if let Some(gamepad) = gamepad_for_slot(slot) {
+                    route(
+                        gamepad,
+                        RoutedHapticKind::Action(class, phase),
+                        CombatHapticRole::Attacker,
+                    );
+                }
+            }
+            CombatHapticCue::Contact {
+                attacker,
+                defender,
+                outcome,
+                weight,
+            } => {
+                if let Some(attacker) = attacker
+                    && attacker != defender
+                    && let Some(gamepad) = gamepad_for_slot(attacker)
+                {
+                    route(
+                        gamepad,
+                        RoutedHapticKind::Contact(outcome, weight, CombatHapticRole::Attacker),
+                        CombatHapticRole::Attacker,
+                    );
+                }
+                if let Some(gamepad) = gamepad_for_slot(defender) {
+                    route(
+                        gamepad,
+                        RoutedHapticKind::Contact(outcome, weight, CombatHapticRole::Defender),
+                        CombatHapticRole::Defender,
+                    );
+                }
+            }
+            CombatHapticCue::Secondary { slot, kind } => {
+                if let Some(gamepad) = gamepad_for_slot(slot) {
+                    route(
+                        gamepad,
+                        RoutedHapticKind::Secondary(kind),
+                        CombatHapticRole::Defender,
+                    );
+                }
+            }
         }
     }
 
@@ -515,11 +1000,22 @@ fn route_combat_haptics(
     for (gamepad, routed) in strongest_by_gamepad {
         if let Some(state) = mixer.devices.get(&gamepad) {
             let duplicate_inside_gate =
-                state.last_kind == routed.kind && now - state.last_started < 0.025;
-            let protected_finisher = state.active_until > now
-                && state.active_priority >= 90
-                && routed.pattern.priority < state.active_priority;
-            if duplicate_inside_gate || protected_finisher {
+                state
+                    .last_started
+                    .get(&routed.kind)
+                    .is_some_and(|last_started| {
+                        now - last_started < f64::from(routed.retrigger_ms) / 1000.0
+                    });
+            let active_rank = state
+                .active_kind
+                .map(RoutedHapticKind::category_rank)
+                .unwrap_or(0);
+            let routed_rank = routed.kind.category_rank();
+            let protected_stronger_cue = state.active_until > now
+                && (active_rank > routed_rank
+                    || (active_rank == routed_rank
+                        && routed.pattern.priority < state.active_priority));
+            if duplicate_inside_gate || protected_stronger_cue {
                 continue;
             }
         }
@@ -529,15 +1025,11 @@ fn route_combat_haptics(
             HapticPurpose::Gameplay,
             pattern,
         ));
-        mixer.devices.insert(
-            gamepad,
-            MixedHapticState {
-                last_kind: routed.kind,
-                last_started: now,
-                active_priority: pattern.priority,
-                active_until: now + f64::from(pattern.duration_ms()) / 1000.0,
-            },
-        );
+        let device = mixer.devices.entry(gamepad).or_default();
+        device.last_started.insert(routed.kind, now);
+        device.active_kind = Some(routed.kind);
+        device.active_priority = pattern.priority;
+        device.active_until = now + f64::from(pattern.duration_ms()) / 1000.0;
     }
 }
 
@@ -1082,9 +1574,21 @@ mod tests {
     }
 
     #[test]
+    fn haptic_styles_cycle_and_change_preview_density() {
+        assert_eq!(HapticStyle::Minimal.next(), HapticStyle::Competitive);
+        assert_eq!(HapticStyle::Minimal.previous(), HapticStyle::Cinematic);
+        let minimal = combat_preview_pattern(HapticStyle::Minimal);
+        let competitive = combat_preview_pattern(HapticStyle::Competitive);
+        let cinematic = combat_preview_pattern(HapticStyle::Cinematic);
+        assert_eq!(minimal.segments().count(), 6);
+        assert_eq!(competitive.segments().count(), 7);
+        assert!(cinematic.duration_ms() > competitive.duration_ms());
+    }
+
+    #[test]
     fn combat_palette_keeps_attacker_crisp_and_defender_deep() {
-        let attacker = combat_haptic_pattern(CombatHapticKind::Light, CombatHapticRole::Attacker);
-        let defender = combat_haptic_pattern(CombatHapticKind::Light, CombatHapticRole::Defender);
+        let attacker = clean_contact_pattern(HapticImpactWeight::Light, CombatHapticRole::Attacker);
+        let defender = clean_contact_pattern(HapticImpactWeight::Light, CombatHapticRole::Defender);
         let attacker = attacker.segments().next().unwrap();
         let defender = defender.segments().next().unwrap();
         assert!(attacker.weak > attacker.strong);
@@ -1094,11 +1598,363 @@ mod tests {
 
     #[test]
     fn finisher_has_priority_and_duration_headroom() {
-        let heavy = combat_haptic_pattern(CombatHapticKind::Heavy, CombatHapticRole::Defender);
+        let heavy = clean_contact_pattern(HapticImpactWeight::Heavy, CombatHapticRole::Defender);
         let finisher =
-            combat_haptic_pattern(CombatHapticKind::Finisher, CombatHapticRole::Defender);
+            clean_contact_pattern(HapticImpactWeight::Terminal, CombatHapticRole::Defender);
         assert!(finisher.priority > heavy.priority);
-        assert_eq!(finisher.duration_ms(), 215);
+        assert_eq!(finisher.duration_ms(), 220);
+    }
+
+    #[test]
+    fn haptic_styles_filter_density_without_weakening_contact() {
+        let action = RoutedHapticKind::Action(HapticMoveClass::Light, HapticActionPhase::Startup);
+        let contact = RoutedHapticKind::Contact(
+            HapticContactOutcome::Clean,
+            HapticImpactWeight::Light,
+            CombatHapticRole::Attacker,
+        );
+        assert!(routed_haptic_pattern(action, HapticStyle::Minimal).is_none());
+        assert!(routed_haptic_pattern(action, HapticStyle::Competitive).is_some());
+        assert_eq!(
+            routed_haptic_pattern(contact, HapticStyle::Minimal)
+                .unwrap()
+                .0,
+            routed_haptic_pattern(contact, HapticStyle::Competitive)
+                .unwrap()
+                .0
+        );
+        assert!(
+            routed_haptic_pattern(contact, HapticStyle::Cinematic)
+                .unwrap()
+                .0
+                .duration_ms()
+                > routed_haptic_pattern(contact, HapticStyle::Competitive)
+                    .unwrap()
+                    .0
+                    .duration_ms()
+        );
+    }
+
+    #[test]
+    fn guarded_contact_is_dry_for_attacker_and_bright_for_defender() {
+        let attacker = contact_haptic_pattern(
+            HapticContactOutcome::Guarded,
+            HapticImpactWeight::Light,
+            CombatHapticRole::Attacker,
+        );
+        let defender = contact_haptic_pattern(
+            HapticContactOutcome::Guarded,
+            HapticImpactWeight::Light,
+            CombatHapticRole::Defender,
+        );
+        let attacker = attacker.segments().next().unwrap();
+        let defender = defender.segments().next().unwrap();
+        assert!(attacker.weak > attacker.strong);
+        assert!(defender.weak > attacker.weak);
+        assert!(defender.strong > attacker.strong);
+    }
+
+    #[test]
+    fn ultimate_grab_has_a_longer_victim_capture_than_normal_grab() {
+        let normal = contact_haptic_pattern(
+            HapticContactOutcome::Grab,
+            HapticImpactWeight::Heavy,
+            CombatHapticRole::Defender,
+        );
+        let ultimate = contact_haptic_pattern(
+            HapticContactOutcome::Grab,
+            HapticImpactWeight::Ultimate,
+            CombatHapticRole::Defender,
+        );
+        assert!(ultimate.priority > normal.priority);
+        assert!(ultimate.duration_ms() > normal.duration_ms());
+    }
+
+    #[test]
+    fn fighter_actions_map_to_shared_haptic_language() {
+        assert_eq!(
+            haptic_move_class_for_action(FighterAction::LightAttack1),
+            Some(HapticMoveClass::Light)
+        );
+        assert_eq!(
+            haptic_move_class_for_action(FighterAction::ComboFinisher),
+            Some(HapticMoveClass::Heavy)
+        );
+        assert_eq!(
+            haptic_move_class_for_action(FighterAction::Guarding),
+            Some(HapticMoveClass::Guard)
+        );
+        assert_eq!(
+            haptic_move_class_for_action(FighterAction::GuardCounter),
+            Some(HapticMoveClass::Counter)
+        );
+        assert_eq!(
+            haptic_move_class_for_action(FighterAction::UltimateRush),
+            Some(HapticMoveClass::Ultimate)
+        );
+        assert_eq!(haptic_move_class_for_action(FighterAction::Idle), None);
+    }
+
+    #[test]
+    fn guarded_contact_beats_even_stronger_same_frame_release_feedback() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        let mut queue = app.world_mut().resource_mut::<CombatHapticQueue>();
+        queue.push(CombatHapticCue::action(
+            0,
+            HapticMoveClass::Ultimate,
+            HapticActionPhase::Release,
+        ));
+        queue.push(CombatHapticCue::contact(
+            Some(0),
+            1,
+            HapticContactOutcome::Guarded,
+            HapticImpactWeight::Light,
+        ));
+
+        app.update();
+
+        let requests: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(requests.len(), 1);
+        let ControllerHapticCommand::Play(pattern) = requests[0].command else {
+            panic!("contact should play");
+        };
+        assert_eq!(pattern.priority, 58);
+    }
+
+    #[test]
+    fn active_contact_cannot_be_preempted_by_action_feedback() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::contact(
+                Some(1),
+                0,
+                HapticContactOutcome::Clean,
+                HapticImpactWeight::Heavy,
+            ));
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::action(
+                0,
+                HapticMoveClass::Light,
+                HapticActionPhase::Startup,
+            ));
+
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<ControllerHapticRequest>>()
+                .drain()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn contact_preempts_an_active_action_regardless_of_numeric_priority() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::action(
+                0,
+                HapticMoveClass::Ultimate,
+                HapticActionPhase::Release,
+            ));
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::contact(
+                Some(0),
+                1,
+                HapticContactOutcome::Guarded,
+                HapticImpactWeight::Light,
+            ));
+
+        app.update();
+
+        let request = app
+            .world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .drain()
+            .next()
+            .expect("guard contact should replace the release");
+        let ControllerHapticCommand::Play(pattern) = request.command else {
+            panic!("guard contact should play");
+        };
+        assert_eq!(pattern.priority, 58);
+    }
+
+    #[test]
+    fn duplicate_multi_hit_contact_is_rate_limited() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        let cue = CombatHapticCue::contact(
+            Some(1),
+            0,
+            HapticContactOutcome::Clean,
+            HapticImpactWeight::Light,
+        );
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(cue);
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(cue);
+
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<ControllerHapticRequest>>()
+                .drain()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn setup_phase_gates_queued_gameplay_haptics() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .init_resource::<crate::game_state::MatchState>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::contact(
+                Some(1),
+                0,
+                HapticContactOutcome::Clean,
+                HapticImpactWeight::Heavy,
+            ));
+
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<ControllerHapticRequest>>()
+                .drain()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn disconnected_active_gamepad_is_stopped_and_removed_from_mixer() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut().spawn(Controller::new(
+            PlayerSlotId::new(0).unwrap(),
+            ParticipantKind::Human,
+            LocalInputAssignment::Gamepad(gamepad),
+        ));
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(CombatHapticCue::contact(
+                Some(1),
+                0,
+                HapticContactOutcome::Clean,
+                HapticImpactWeight::Heavy,
+            ));
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .clear();
+        app.world_mut().entity_mut(gamepad).remove::<Gamepad>();
+
+        app.update();
+
+        let request = app
+            .world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .drain()
+            .next()
+            .expect("disconnect should stop active haptics");
+        assert_eq!(request.command, ControllerHapticCommand::Stop);
+        assert!(
+            app.world()
+                .resource::<CombatHapticMixer>()
+                .devices
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1124,7 +1980,12 @@ mod tests {
         ));
         app.world_mut()
             .resource_mut::<CombatHapticQueue>()
-            .push(CombatHapticCue::impact(Some(0), 1, CombatHapticKind::Light));
+            .push(CombatHapticCue::contact(
+                Some(0),
+                1,
+                HapticContactOutcome::Clean,
+                HapticImpactWeight::Light,
+            ));
 
         app.update();
 
@@ -1175,7 +2036,12 @@ mod tests {
         ));
         app.world_mut()
             .resource_mut::<CombatHapticQueue>()
-            .push(CombatHapticCue::impact(None, 0, CombatHapticKind::Heavy));
+            .push(CombatHapticCue::contact(
+                None,
+                0,
+                HapticContactOutcome::Clean,
+                HapticImpactWeight::Heavy,
+            ));
 
         app.update();
 

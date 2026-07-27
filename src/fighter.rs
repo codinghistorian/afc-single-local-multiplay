@@ -30,7 +30,9 @@ use crate::components::{
     PlayerKeyBindings, PlayerSlotId, SpecialInputKind,
 };
 use crate::constants::*;
-use crate::controller_haptics::{CombatHapticCue, CombatHapticKind, CombatHapticQueue};
+use crate::controller_haptics::{
+    CombatHapticCue, CombatHapticQueue, HapticContactOutcome, HapticImpactWeight,
+};
 use crate::effects::{
     EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_drunk_bubble, spawn_dust_puff,
     spawn_guard_flash, spawn_respawn_column, spawn_ringout_burst,
@@ -4879,10 +4881,11 @@ pub fn ringout_and_respawn(
             ultimate_state.target = None;
             ultimate_state.owner = None;
             if out {
-                haptics.push(CombatHapticCue::impact(
+                haptics.push(CombatHapticCue::contact(
                     resolution.awarded_to,
                     fighter.id,
-                    CombatHapticKind::Finisher,
+                    HapticContactOutcome::Clean,
+                    HapticImpactWeight::Terminal,
                 ));
                 spawn_ringout_burst(&mut commands, &effect_assets, transform.translation);
                 let ringout_feedback = crate::combat::impact_feedback_profile(

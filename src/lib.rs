@@ -270,6 +270,7 @@ pub fn build_app() -> App {
                 combat::spawn_attack_hitboxes,
                 items::spawn_item_hitboxes,
                 combat::resolve_hitboxes,
+                controller_haptics::queue_fighter_action_haptics,
             )
                 .chain()
                 .in_set(GameSet::Action)

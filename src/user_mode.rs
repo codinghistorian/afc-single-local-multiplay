@@ -26,7 +26,7 @@ use crate::control_settings::{
 };
 use crate::controller_haptics::{
     ControllerHapticRequest, HapticPlaybackEvent, HapticPlaybackResult, HapticPurpose,
-    controller_test_pattern, queue_haptic_pattern,
+    combat_preview_pattern, controller_test_pattern, queue_haptic_pattern,
 };
 use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
@@ -273,7 +273,9 @@ pub(crate) enum UserModeUiAction {
     ControllerSetupClear,
     ControllerSetupRemoveSeat(usize),
     ToggleVibration,
+    ToggleHapticStyle,
     TestVibration,
+    TestCombatHaptics,
     ResetKeys,
     ConfirmKeyReset,
     CancelKeyReset,
@@ -1387,6 +1389,9 @@ pub(crate) struct UserModeControllerTestText;
 
 #[derive(Component)]
 pub(crate) struct UserModeVibrationButtonText;
+
+#[derive(Component)]
+pub(crate) struct UserModeHapticStyleButtonText;
 
 #[derive(Component)]
 pub(crate) struct UserModeCharacterSelectPanel;
@@ -2509,8 +2514,47 @@ pub fn setup_user_mode_ui(
                         ],
                     ),
                     (
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(12.0),
+                            ..default()
+                        },
+                        children![
+                            (
+                                Button,
+                                UserModeUiAction::ToggleHapticStyle,
+                                Node {
+                                    width: Val::Px(230.0),
+                                    height: Val::Px(48.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                                children![(
+                                    UserModeHapticStyleButtonText,
+                                    Text::new("STYLE: COMPETITIVE"),
+                                    TextFont {
+                                        font_size: 18.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                                )],
+                            ),
+                            user_mode_action_button(
+                                "TEST COMBAT FEEL",
+                                UserModeUiAction::TestCombatHaptics,
+                                Val::Px(230.0),
+                                48.0,
+                                18.0,
+                            ),
+                        ],
+                    ),
+                    (
                         Text::new(
-                            "Left/Right choose device  |  Confirm inspect  |  Back return\nVibration reports hardware support and playback failures when available",
+                            "Left/Right choose device  |  Confirm inspect  |  Back return\nHardware test checks both motors; combat preview demonstrates release → block → heavy → ultimate",
                         ),
                         TextFont {
                             font_size: 18.0,
@@ -2946,7 +2990,7 @@ fn controller_test_message(
         "inside deadzone"
     };
     format!(
-        "{} — {}\n{}  |  HAPTICS {}{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  D-Pad Left/Right: vibration level\nMenu: test left → right → both motors  |  Hold {} for 0.75 seconds to finish testing.",
+        "{} — {}\n{}  |  HAPTICS {}{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  D-Pad Left/Right: vibration  |  Up/Down: style\nStart: motor test  |  {}: combat preview  |  Hold {} for 0.75 seconds to finish.",
         family.display_name(),
         name,
         assignment,
@@ -2965,6 +3009,7 @@ fn controller_test_message(
         family.face_button_label(GamepadButton::East),
         family.face_button_label(GamepadButton::West),
         family.face_button_label(GamepadButton::North),
+        family.face_button_label(GamepadButton::West),
         family.back_label(),
     )
 }
@@ -3296,7 +3341,9 @@ pub fn handle_user_mode_input(
         }
 
         let toggle_vibration = pointer_action == Some(UserModeUiAction::ToggleVibration);
+        let toggle_haptic_style = pointer_action == Some(UserModeUiAction::ToggleHapticStyle);
         let pointer_test = pointer_action == Some(UserModeUiAction::TestVibration);
+        let pointer_combat_test = pointer_action == Some(UserModeUiAction::TestCombatHaptics);
         if toggle_vibration {
             control_preferences.vibration = control_preferences.vibration.next();
             if !control_preferences.vibration.enabled() {
@@ -3315,6 +3362,23 @@ pub fn handle_user_mode_input(
                 Err(error) => {
                     warn!("Could not save control preferences: {error}");
                     announcements.show("Vibration changed for this session; save failed", 1.2);
+                }
+            }
+            return;
+        }
+        if toggle_haptic_style {
+            control_preferences.haptic_style = control_preferences.haptic_style.next();
+            for (gamepad, _) in &gamepads {
+                rumble_requests.write(ControllerHapticRequest::stop(gamepad));
+            }
+            match save_control_preferences(&key_bindings, &control_preferences) {
+                Ok(()) => announcements.show(
+                    format!("Haptic style: {}", control_preferences.haptic_style.label()),
+                    0.9,
+                ),
+                Err(error) => {
+                    warn!("Could not save control preferences: {error}");
+                    announcements.show("Haptic style changed for this session; save failed", 1.2);
                 }
             }
             return;
@@ -3361,6 +3425,32 @@ pub fn handle_user_mode_input(
                 }
                 return;
             }
+            let style_direction = if gamepad.just_pressed(GamepadButton::DPadUp) {
+                -1
+            } else if gamepad.just_pressed(GamepadButton::DPadDown) {
+                1
+            } else {
+                0
+            };
+            if style_direction != 0 {
+                control_preferences.haptic_style = if style_direction < 0 {
+                    control_preferences.haptic_style.previous()
+                } else {
+                    control_preferences.haptic_style.next()
+                };
+                rumble_requests.write(ControllerHapticRequest::stop(active));
+                match save_control_preferences(&key_bindings, &control_preferences) {
+                    Ok(()) => announcements.show(
+                        format!("Haptic style: {}", control_preferences.haptic_style.label()),
+                        0.75,
+                    ),
+                    Err(error) => {
+                        warn!("Could not save control preferences: {error}");
+                        announcements.show("Haptic style changed; save failed", 1.0);
+                    }
+                }
+                return;
+            }
             if gamepad.pressed(family.back_button()) {
                 user_mode.controller_test_back_hold += real_time.delta_secs();
                 if user_mode.controller_test_back_hold >= 0.75 {
@@ -3383,6 +3473,24 @@ pub fn handle_user_mode_input(
                     announcements.show("Checking controller haptics…", 0.8);
                 } else {
                     announcements.show("Choose Low, Standard, or High to test", 0.9);
+                }
+            } else if pointer_combat_test || gamepad.just_pressed(GamepadButton::West) {
+                if queue_haptic_pattern(
+                    &mut rumble_requests,
+                    control_preferences.vibration,
+                    active,
+                    combat_preview_pattern(control_preferences.haptic_style),
+                    HapticPurpose::Preview,
+                ) {
+                    announcements.show(
+                        format!(
+                            "{} combat preview",
+                            control_preferences.haptic_style.label()
+                        ),
+                        1.1,
+                    );
+                } else {
+                    announcements.show("Choose Low, Standard, or High to preview", 0.9);
                 }
             }
             return;
@@ -3452,6 +3560,27 @@ pub fn handle_user_mode_input(
                         announcements.show("Checking controller haptics…", 0.8);
                     } else {
                         announcements.show("Choose Low, Standard, or High to test", 0.9);
+                    }
+                }
+            }
+            Some(UserModeUiAction::TestCombatHaptics) => {
+                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
+                    if queue_haptic_pattern(
+                        &mut rumble_requests,
+                        control_preferences.vibration,
+                        entity,
+                        combat_preview_pattern(control_preferences.haptic_style),
+                        HapticPurpose::Preview,
+                    ) {
+                        announcements.show(
+                            format!(
+                                "{} combat preview",
+                                control_preferences.haptic_style.label()
+                            ),
+                            1.1,
+                        );
+                    } else {
+                        announcements.show("Choose Low, Standard, or High to preview", 0.9);
                     }
                 }
             }
@@ -3730,15 +3859,22 @@ pub fn announce_haptic_test_results(
     mut announcements: ResMut<MatchAnnouncements>,
 ) {
     for event in events.read() {
-        if event.purpose != HapticPurpose::Test {
+        if !matches!(event.purpose, HapticPurpose::Test | HapticPurpose::Preview) {
             continue;
         }
         match &event.result {
             HapticPlaybackResult::Started => {
-                announcements.show("Testing: left motor → right motor → both", 1.0);
+                let message = match event.purpose {
+                    HapticPurpose::Test => "Testing: left motor → right motor → both",
+                    HapticPurpose::Preview => "Preview: release → block → heavy → ultimate",
+                    _ => unreachable!(),
+                };
+                announcements.show(message, 1.0);
             }
             HapticPlaybackResult::Completed => {
-                let message = if cfg!(target_os = "macos") {
+                let message = if event.purpose == HapticPurpose::Preview {
+                    "Combat haptic preview complete"
+                } else if cfg!(target_os = "macos") {
                     "Haptic command completed; if silent, reconnect the Xbox controller via Bluetooth"
                 } else {
                     "Vibration test complete"
@@ -3746,7 +3882,7 @@ pub fn announce_haptic_test_results(
                 announcements.show(message, 1.6);
             }
             HapticPlaybackResult::Preempted => {
-                announcements.show("Vibration test replaced by a newer cue", 0.75);
+                announcements.show("Haptic preview replaced by a newer cue", 0.75);
             }
             HapticPlaybackResult::Unsupported => {
                 announcements.show("This controller or connection has no haptics", 1.25);
@@ -4558,6 +4694,14 @@ pub fn update_control_settings_ui(
             Without<UserModeControllerTestText>,
         ),
     >,
+    mut haptic_style_texts: Query<
+        &mut Text,
+        (
+            With<UserModeHapticStyleButtonText>,
+            Without<UserModeControllerTestText>,
+            Without<UserModeVibrationButtonText>,
+        ),
+    >,
     mut reset_panels: Query<&mut Node, With<UserModeKeyResetPanel>>,
 ) {
     if user_mode.screen() == UserModeScreen::ControllerTest {
@@ -4567,6 +4711,9 @@ pub fn update_control_settings_ui(
     }
     for mut text in &mut vibration_texts {
         **text = format!("VIBRATION: {}", preferences.vibration.label());
+    }
+    for mut text in &mut haptic_style_texts {
+        **text = format!("STYLE: {}", preferences.haptic_style.label());
     }
     for mut node in &mut reset_panels {
         node.display = if user_mode.screen() == UserModeScreen::KeySettings

@@ -17,7 +17,10 @@ use crate::components::{
     FighterMotor, FighterStats, FighterUltimateState, Hitbox,
 };
 use crate::constants::*;
-use crate::controller_haptics::{CombatHapticCue, CombatHapticKind, CombatHapticQueue};
+use crate::controller_haptics::{
+    CombatHapticCue, CombatHapticQueue, HapticActionPhase, HapticContactOutcome,
+    HapticImpactWeight, HapticMoveClass, haptic_move_class_for_action,
+};
 use crate::effects::{
     EffectAssets, FeedbackPackageId, FirePunchPalette, HitImpactEffectId,
     feedback_package_for_named_cue, feedback_package_for_timeline_cue,
@@ -923,6 +926,30 @@ fn start_hitbox_landing_linger(hitbox: &mut Hitbox, owner_grounded: bool) {
     }
 }
 
+fn queue_attack_release_haptic(
+    haptics: &mut CombatHapticQueue,
+    slot: usize,
+    action: FighterAction,
+    payload_id: Option<AttackPayloadId>,
+) {
+    let Some(class) = haptic_move_class_for_action(action) else {
+        return;
+    };
+    let phase = if class == HapticMoveClass::Ultimate {
+        match payload_id {
+            Some(payload_id) if payload_is_ultimate_bomb(payload_id) => HapticActionPhase::Release,
+            Some(payload_id) if payload_is_ultimate_catch(payload_id) => HapticActionPhase::Lock,
+            Some(payload_id) if payload_is_ultimate_scratch(payload_id) => {
+                HapticActionPhase::Charge
+            }
+            _ => HapticActionPhase::Release,
+        }
+    } else {
+        HapticActionPhase::Release
+    };
+    haptics.push(CombatHapticCue::action(slot, class, phase));
+}
+
 pub fn spawn_attack_hitboxes(
     mut commands: Commands,
     visual_assets: Res<CombatVisualAssets>,
@@ -935,6 +962,7 @@ pub fn spawn_attack_hitboxes(
     feel: Res<CombatFeelTuning>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     active_penguin_skills: Query<(Entity, &ActivePenguinSkill, &Transform), Without<Fighter>>,
     active_chick_skills: Query<(Entity, &ActiveChickSkill, &Transform), Without<Fighter>>,
     mut fighters: ParamSet<(
@@ -1056,6 +1084,12 @@ pub fn spawn_attack_hitboxes(
                 }
 
                 action.hitbox_spawned = true;
+                queue_attack_release_haptic(
+                    &mut haptics,
+                    fighter.id,
+                    action.action,
+                    Some(payload_id),
+                );
                 let facing = motor.facing.normalize_or_zero();
                 let item_size = stats.item_size_multiplier();
                 let base_range = config.range;
@@ -1178,6 +1212,7 @@ pub fn spawn_attack_hitboxes(
                         skill_id,
                         &skill_targets,
                     );
+                    queue_attack_release_haptic(&mut haptics, fighter.id, action.action, None);
                     feedback.push_feedback_cue(
                         "release_special_projectile",
                         ImpactSource::Projectile,
@@ -1225,6 +1260,7 @@ pub fn spawn_attack_hitboxes(
                         )
                     };
                     if spawned {
+                        queue_attack_release_haptic(&mut haptics, fighter.id, action.action, None);
                         feedback.push_feedback_cue(
                             "release_special_projectile",
                             ImpactSource::Projectile,
@@ -1250,6 +1286,7 @@ pub fn spawn_attack_hitboxes(
                         &skill_targets,
                         &active_chick_skill_snapshots,
                     );
+                    queue_attack_release_haptic(&mut haptics, fighter.id, action.action, None);
                     feedback.push_feedback_cue(
                         "release_special_projectile",
                         ImpactSource::Projectile,
@@ -1258,6 +1295,25 @@ pub fn spawn_attack_hitboxes(
                     stats.hud_flash = stats.hud_flash.max(0.12);
                 }
                 MoveTimelineEventKind::Feedback(phase, cue) => {
+                    if let Some(class) = haptic_move_class_for_action(action.action) {
+                        match phase {
+                            FeedbackPhase::PreHit if class == HapticMoveClass::Ultimate => {
+                                haptics.push(CombatHapticCue::action(
+                                    fighter.id,
+                                    class,
+                                    HapticActionPhase::Charge,
+                                ));
+                            }
+                            FeedbackPhase::Aftermath => {
+                                haptics.push(CombatHapticCue::action(
+                                    fighter.id,
+                                    class,
+                                    HapticActionPhase::Aftermath,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
                     let phase_profile = timeline_feedback_profile(phase, cue);
                     let package = feedback_package_for_timeline_cue(phase, cue);
                     feedback.push_feedback_cue(
@@ -2442,10 +2498,21 @@ pub fn apply_impact(
         stats.hud_flash = feedback.guard_hud_flash;
         apply_damage_side_effects(stats, effects, source, feedback.priority, damage_outcome);
         update_element_carryover(stats, profile.element, damage_outcome, true);
-        haptics.push(CombatHapticCue::impact(
+        let haptic_weight = if profile
+            .payload_id
+            .is_some_and(payload_is_ultimate_camera_hit)
+        {
+            HapticImpactWeight::Ultimate
+        } else if feedback.heavy_spark {
+            HapticImpactWeight::Heavy
+        } else {
+            HapticImpactWeight::Light
+        };
+        haptics.push(CombatHapticCue::contact(
             impact_owner_can_receive_credit(profile.owner_id).then_some(profile.owner_id),
             defender_id,
-            CombatHapticKind::Guard,
+            HapticContactOutcome::Guarded,
+            haptic_weight,
         ));
         action.clear_reaction_visual();
         motor.open_guard_counter_window(origin);
@@ -2546,29 +2613,33 @@ pub fn apply_impact(
             .saturating_add(reaction_weight.priority_bonus),
     ));
 
-    let damage_outcome = resolve_authored_damage(
-        &profile,
-        damage_context_for_defender(
-            state, stats, motor, action, &profile, guarded, false, defender,
-        ),
+    let damage_context = damage_context_for_defender(
+        state, stats, motor, action, &profile, guarded, false, defender,
     );
+    let counter_hit = damage_context.counter_hit;
+    let damage_outcome = resolve_authored_damage(&profile, damage_context);
     let committed_damage = commit_health_damage(stats, damage_outcome);
-    let haptic_kind = if stats.health <= 0.0 {
-        CombatHapticKind::Finisher
+    let haptic_weight = if stats.health <= 0.0 {
+        HapticImpactWeight::Terminal
     } else if profile
         .payload_id
         .is_some_and(payload_is_ultimate_camera_hit)
     {
-        CombatHapticKind::Ultimate
+        HapticImpactWeight::Ultimate
     } else if feedback.heavy_spark {
-        CombatHapticKind::Heavy
+        HapticImpactWeight::Heavy
     } else {
-        CombatHapticKind::Light
+        HapticImpactWeight::Light
     };
-    haptics.push(CombatHapticCue::impact(
+    haptics.push(CombatHapticCue::contact(
         impact_owner_can_receive_credit(profile.owner_id).then_some(profile.owner_id),
         defender_id,
-        haptic_kind,
+        if counter_hit {
+            HapticContactOutcome::Counter
+        } else {
+            HapticContactOutcome::Clean
+        },
+        haptic_weight,
     ));
     record_impact_telemetry(
         telemetry,
@@ -3074,10 +3145,15 @@ pub fn resolve_hitboxes(
                 action.reaction_getup_ms = None;
                 action.reaction_recover_ms = None;
                 action.clear_reaction_visual();
-                haptics.push(CombatHapticCue::impact(
+                haptics.push(CombatHapticCue::contact(
                     impact_owner_can_receive_credit(hitbox.owner_id).then_some(hitbox.owner_id),
                     target.id,
-                    CombatHapticKind::Heavy,
+                    HapticContactOutcome::Grab,
+                    if hitbox.payload_id.is_some_and(payload_is_ultimate_catch) {
+                        HapticImpactWeight::Ultimate
+                    } else {
+                        HapticImpactWeight::Heavy
+                    },
                 ));
                 hitbox.already_hit.push(target_entity);
                 grabbed_victim_by_holder.insert_first(hitbox.owner, target_entity);

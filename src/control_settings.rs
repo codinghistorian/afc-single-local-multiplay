@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{PlayerKeyBindings, reserved_binding_key};
 use crate::controller_haptics::{
-    ControllerHapticRequest, HapticAvailability, HapticPurpose, VibrationLevel, queue_simple_haptic,
+    ControllerHapticRequest, HapticAvailability, HapticPurpose, HapticStyle, VibrationLevel,
+    queue_simple_haptic,
 };
 
-const CONTROL_PREFERENCES_VERSION: u32 = 2;
+const CONTROL_PREFERENCES_VERSION: u32 = 3;
 #[cfg(target_arch = "wasm32")]
 const CONTROL_PREFERENCES_STORAGE_KEY: &str = "animal-fighter-club.controls.v1";
 
@@ -225,18 +226,28 @@ pub fn controller_info<'a>(
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct ControlPreferences {
     pub vibration: VibrationLevel,
+    pub haptic_style: HapticStyle,
 }
 
 impl Default for ControlPreferences {
     fn default() -> Self {
         Self {
             vibration: VibrationLevel::Standard,
+            haptic_style: HapticStyle::Competitive,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredControlPreferences {
+    version: u32,
+    vibration: VibrationLevel,
+    haptic_style: HapticStyle,
+    key_bindings: PlayerKeyBindings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct VersionTwoStoredControlPreferences {
     version: u32,
     vibration: VibrationLevel,
     key_bindings: PlayerKeyBindings,
@@ -261,6 +272,7 @@ fn encode_control_preferences(
     let stored = StoredControlPreferences {
         version: CONTROL_PREFERENCES_VERSION,
         vibration: preferences.vibration,
+        haptic_style: preferences.haptic_style,
         key_bindings: bindings.clone(),
     };
     ron::ser::to_string_pretty(&stored, ron::ser::PrettyConfig::new())
@@ -272,7 +284,7 @@ fn decode_control_preferences(
 ) -> Result<(PlayerKeyBindings, ControlPreferences), String> {
     let header: StoredControlPreferencesHeader =
         ron::from_str(contents).map_err(|error| format!("could not parse controls: {error}"))?;
-    let (key_bindings, vibration) = match header.version {
+    let (key_bindings, vibration, haptic_style) = match header.version {
         1 => {
             let stored: LegacyStoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse legacy controls: {error}"))?;
@@ -283,12 +295,22 @@ fn decode_control_preferences(
                 } else {
                     VibrationLevel::Off
                 },
+                HapticStyle::Competitive,
+            )
+        }
+        2 => {
+            let stored: VersionTwoStoredControlPreferences = ron::from_str(contents)
+                .map_err(|error| format!("could not parse version 2 controls: {error}"))?;
+            (
+                stored.key_bindings,
+                stored.vibration,
+                HapticStyle::Competitive,
             )
         }
         CONTROL_PREFERENCES_VERSION => {
             let stored: StoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse controls: {error}"))?;
-            (stored.key_bindings, stored.vibration)
+            (stored.key_bindings, stored.vibration, stored.haptic_style)
         }
         version => return Err(format!("unsupported controls version {version}")),
     };
@@ -302,7 +324,13 @@ fn decode_control_preferences(
     {
         return Err("saved controls contain reserved keys".to_string());
     }
-    Ok((key_bindings, ControlPreferences { vibration }))
+    Ok((
+        key_bindings,
+        ControlPreferences {
+            vibration,
+            haptic_style,
+        },
+    ))
 }
 
 pub fn load_control_preferences(
@@ -502,6 +530,7 @@ mod tests {
         let bindings = PlayerKeyBindings::default();
         let preferences = ControlPreferences {
             vibration: VibrationLevel::Off,
+            haptic_style: HapticStyle::Cinematic,
         };
         let encoded = encode_control_preferences(&bindings, &preferences).unwrap();
         let decoded = decode_control_preferences(&encoded).unwrap();
@@ -515,7 +544,7 @@ mod tests {
             &ControlPreferences::default(),
         )
         .unwrap()
-        .replacen("version: 2", "version: 99", 1);
+        .replacen("version: 3", "version: 99", 1);
         assert!(decode_control_preferences(&encoded).is_err());
     }
 
@@ -538,6 +567,7 @@ mod tests {
     fn disabled_vibration_does_not_emit_a_request() {
         let preferences = ControlPreferences {
             vibration: VibrationLevel::Off,
+            haptic_style: HapticStyle::Competitive,
         };
         assert!(!preferences.vibration.enabled());
     }
@@ -560,5 +590,22 @@ mod tests {
             decode_control_preferences(&disabled).unwrap().1.vibration,
             VibrationLevel::Off
         );
+        assert_eq!(
+            decode_control_preferences(&enabled).unwrap().1.haptic_style,
+            HapticStyle::Competitive
+        );
+    }
+
+    #[test]
+    fn version_two_controls_migrate_to_competitive_haptics() {
+        let encoded = ron::ser::to_string(&VersionTwoStoredControlPreferences {
+            version: 2,
+            vibration: VibrationLevel::High,
+            key_bindings: PlayerKeyBindings::default(),
+        })
+        .unwrap();
+        let preferences = decode_control_preferences(&encoded).unwrap().1;
+        assert_eq!(preferences.vibration, VibrationLevel::High);
+        assert_eq!(preferences.haptic_style, HapticStyle::Competitive);
     }
 }
