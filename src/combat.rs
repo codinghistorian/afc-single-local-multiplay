@@ -17,6 +17,7 @@ use crate::components::{
     FighterMotor, FighterStats, FighterUltimateState, Hitbox,
 };
 use crate::constants::*;
+use crate::controller_haptics::{CombatHapticCue, CombatHapticKind, CombatHapticQueue};
 use crate::effects::{
     EffectAssets, FeedbackPackageId, FirePunchPalette, HitImpactEffectId,
     feedback_package_for_named_cue, feedback_package_for_timeline_cue,
@@ -2383,8 +2384,10 @@ pub fn apply_impact(
     commands: &mut Commands,
     effect_assets: &EffectAssets,
     effects: &mut HitEffects,
+    haptics: &mut CombatHapticQueue,
     hitstop: &mut Hitstop,
     state: &MatchState,
+    defender_id: usize,
     stats: &mut FighterStats,
     motor: &mut FighterMotor,
     action: &mut FighterActionState,
@@ -2439,6 +2442,11 @@ pub fn apply_impact(
         stats.hud_flash = feedback.guard_hud_flash;
         apply_damage_side_effects(stats, effects, source, feedback.priority, damage_outcome);
         update_element_carryover(stats, profile.element, damage_outcome, true);
+        haptics.push(CombatHapticCue::impact(
+            impact_owner_can_receive_credit(profile.owner_id).then_some(profile.owner_id),
+            defender_id,
+            CombatHapticKind::Guard,
+        ));
         action.clear_reaction_visual();
         motor.open_guard_counter_window(origin);
         let guard_package = feedback_package_for_named_cue("guard_clang");
@@ -2545,6 +2553,23 @@ pub fn apply_impact(
         ),
     );
     let committed_damage = commit_health_damage(stats, damage_outcome);
+    let haptic_kind = if stats.health <= 0.0 {
+        CombatHapticKind::Finisher
+    } else if profile
+        .payload_id
+        .is_some_and(payload_is_ultimate_camera_hit)
+    {
+        CombatHapticKind::Ultimate
+    } else if feedback.heavy_spark {
+        CombatHapticKind::Heavy
+    } else {
+        CombatHapticKind::Light
+    };
+    haptics.push(CombatHapticCue::impact(
+        impact_owner_can_receive_credit(profile.owner_id).then_some(profile.owner_id),
+        defender_id,
+        haptic_kind,
+    ));
     record_impact_telemetry(
         telemetry,
         source,
@@ -2962,6 +2987,7 @@ pub fn resolve_hitboxes(
         >,
     )>,
     mut effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut hitstop: ResMut<Hitstop>,
     mut telemetry: ResMut<MatchTelemetry>,
 ) {
@@ -3048,6 +3074,11 @@ pub fn resolve_hitboxes(
                 action.reaction_getup_ms = None;
                 action.reaction_recover_ms = None;
                 action.clear_reaction_visual();
+                haptics.push(CombatHapticCue::impact(
+                    impact_owner_can_receive_credit(hitbox.owner_id).then_some(hitbox.owner_id),
+                    target.id,
+                    CombatHapticKind::Heavy,
+                ));
                 hitbox.already_hit.push(target_entity);
                 grabbed_victim_by_holder.insert_first(hitbox.owner, target_entity);
                 consumed_grab = true;
@@ -3073,8 +3104,10 @@ pub fn resolve_hitboxes(
                 &mut commands,
                 &effect_assets,
                 &mut effects,
+                &mut haptics,
                 &mut hitstop,
                 &state,
+                target.id,
                 &mut stats,
                 &mut motor,
                 &mut action,

@@ -1,14 +1,13 @@
-use std::time::Duration;
-
-use bevy::input::gamepad::{
-    GamepadConnection, GamepadConnectionEvent, GamepadRumbleIntensity, GamepadRumbleRequest,
-};
+use bevy::input::gamepad::{GamepadConnection, GamepadConnectionEvent};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{PlayerKeyBindings, reserved_binding_key};
+use crate::controller_haptics::{
+    ControllerHapticRequest, HapticAvailability, HapticPurpose, VibrationLevel, queue_simple_haptic,
+};
 
-const CONTROL_PREFERENCES_VERSION: u32 = 1;
+const CONTROL_PREFERENCES_VERSION: u32 = 2;
 #[cfg(target_arch = "wasm32")]
 const CONTROL_PREFERENCES_STORAGE_KEY: &str = "animal-fighter-club.controls.v1";
 
@@ -142,6 +141,7 @@ pub struct ControllerDeviceInfo {
     pub vendor_id: Option<u16>,
     pub product_id: Option<u16>,
     pub connected: bool,
+    pub haptics: HapticAvailability,
 }
 
 impl ControllerDeviceInfo {
@@ -156,6 +156,7 @@ impl ControllerDeviceInfo {
             vendor_id,
             product_id,
             connected: true,
+            haptics: HapticAvailability::Unknown,
         }
     }
 
@@ -166,6 +167,7 @@ impl ControllerDeviceInfo {
             vendor_id: None,
             product_id: None,
             connected: false,
+            haptics: HapticAvailability::Unknown,
         }
     }
 }
@@ -222,13 +224,13 @@ pub fn controller_info<'a>(
 
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct ControlPreferences {
-    pub vibration_enabled: bool,
+    pub vibration: VibrationLevel,
 }
 
 impl Default for ControlPreferences {
     fn default() -> Self {
         Self {
-            vibration_enabled: true,
+            vibration: VibrationLevel::Standard,
         }
     }
 }
@@ -236,8 +238,20 @@ impl Default for ControlPreferences {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredControlPreferences {
     version: u32,
+    vibration: VibrationLevel,
+    key_bindings: PlayerKeyBindings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyStoredControlPreferences {
+    version: u32,
     vibration_enabled: bool,
     key_bindings: PlayerKeyBindings,
+}
+
+#[derive(Deserialize)]
+struct StoredControlPreferencesHeader {
+    version: u32,
 }
 
 fn encode_control_preferences(
@@ -246,7 +260,7 @@ fn encode_control_preferences(
 ) -> Result<String, String> {
     let stored = StoredControlPreferences {
         version: CONTROL_PREFERENCES_VERSION,
-        vibration_enabled: preferences.vibration_enabled,
+        vibration: preferences.vibration,
         key_bindings: bindings.clone(),
     };
     ron::ser::to_string_pretty(&stored, ron::ser::PrettyConfig::new())
@@ -256,28 +270,39 @@ fn encode_control_preferences(
 fn decode_control_preferences(
     contents: &str,
 ) -> Result<(PlayerKeyBindings, ControlPreferences), String> {
-    let stored: StoredControlPreferences =
+    let header: StoredControlPreferencesHeader =
         ron::from_str(contents).map_err(|error| format!("could not parse controls: {error}"))?;
-    if stored.version != CONTROL_PREFERENCES_VERSION {
-        return Err(format!("unsupported controls version {}", stored.version));
-    }
-    if stored.key_bindings.has_duplicate_keys() {
+    let (key_bindings, vibration) = match header.version {
+        1 => {
+            let stored: LegacyStoredControlPreferences = ron::from_str(contents)
+                .map_err(|error| format!("could not parse legacy controls: {error}"))?;
+            (
+                stored.key_bindings,
+                if stored.vibration_enabled {
+                    VibrationLevel::Standard
+                } else {
+                    VibrationLevel::Off
+                },
+            )
+        }
+        CONTROL_PREFERENCES_VERSION => {
+            let stored: StoredControlPreferences = ron::from_str(contents)
+                .map_err(|error| format!("could not parse controls: {error}"))?;
+            (stored.key_bindings, stored.vibration)
+        }
+        version => return Err(format!("unsupported controls version {version}")),
+    };
+    if key_bindings.has_duplicate_keys() {
         return Err("saved controls contain duplicate keys".to_string());
     }
-    if stored
-        .key_bindings
+    if key_bindings
         .all_keys()
         .into_iter()
         .any(reserved_binding_key)
     {
         return Err("saved controls contain reserved keys".to_string());
     }
-    Ok((
-        stored.key_bindings,
-        ControlPreferences {
-            vibration_enabled: stored.vibration_enabled,
-        },
-    ))
+    Ok((key_bindings, ControlPreferences { vibration }))
 }
 
 pub fn load_control_preferences(
@@ -305,25 +330,20 @@ pub fn save_control_preferences(
 }
 
 pub fn request_controller_rumble(
-    requests: &mut MessageWriter<GamepadRumbleRequest>,
+    requests: &mut MessageWriter<ControllerHapticRequest>,
     preferences: &ControlPreferences,
     gamepad: Entity,
     strength: f32,
     duration_secs: f32,
 ) -> bool {
-    if !preferences.vibration_enabled {
-        return false;
-    }
-    let strength = strength.clamp(0.0, 1.0);
-    requests.write(GamepadRumbleRequest::Add {
+    queue_simple_haptic(
+        requests,
+        preferences.vibration,
         gamepad,
-        duration: Duration::from_secs_f32(duration_secs.max(0.0)),
-        intensity: GamepadRumbleIntensity {
-            strong_motor: strength,
-            weak_motor: strength * 0.65,
-        },
-    });
-    true
+        strength,
+        duration_secs,
+        HapticPurpose::Join,
+    )
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -481,7 +501,7 @@ mod tests {
     fn control_preferences_roundtrip() {
         let bindings = PlayerKeyBindings::default();
         let preferences = ControlPreferences {
-            vibration_enabled: false,
+            vibration: VibrationLevel::Off,
         };
         let encoded = encode_control_preferences(&bindings, &preferences).unwrap();
         let decoded = decode_control_preferences(&encoded).unwrap();
@@ -495,7 +515,7 @@ mod tests {
             &ControlPreferences::default(),
         )
         .unwrap()
-        .replacen("version: 1", "version: 99", 1);
+        .replacen("version: 2", "version: 99", 1);
         assert!(decode_control_preferences(&encoded).is_err());
     }
 
@@ -517,8 +537,28 @@ mod tests {
     #[test]
     fn disabled_vibration_does_not_emit_a_request() {
         let preferences = ControlPreferences {
-            vibration_enabled: false,
+            vibration: VibrationLevel::Off,
         };
-        assert!(!preferences.vibration_enabled);
+        assert!(!preferences.vibration.enabled());
+    }
+
+    #[test]
+    fn legacy_vibration_boolean_migrates_to_level() {
+        let bindings = PlayerKeyBindings::default();
+        let enabled = ron::ser::to_string(&LegacyStoredControlPreferences {
+            version: 1,
+            vibration_enabled: true,
+            key_bindings: bindings.clone(),
+        })
+        .unwrap();
+        let disabled = enabled.replacen("true", "false", 1);
+        assert_eq!(
+            decode_control_preferences(&enabled).unwrap().1.vibration,
+            VibrationLevel::Standard
+        );
+        assert_eq!(
+            decode_control_preferences(&disabled).unwrap().1.vibration,
+            VibrationLevel::Off
+        );
     }
 }

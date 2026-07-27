@@ -13,6 +13,7 @@ mod combat_sfx;
 mod components;
 mod constants;
 mod control_settings;
+mod controller_haptics;
 mod effects;
 mod equipment;
 mod feel;
@@ -113,6 +114,7 @@ pub fn build_app() -> App {
     let mut app = App::new();
 
     app.add_plugins(default_plugins);
+    app.add_plugins(controller_haptics::ControllerHapticsPlugin);
 
     #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
     app.add_plugins(macos_gamepad::MacOsGamepadPlugin);
@@ -204,6 +206,7 @@ pub fn build_app() -> App {
                     user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
+                user_mode::announce_haptic_test_results,
                 game_state::handle_global_input,
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,

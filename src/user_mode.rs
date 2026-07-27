@@ -1,6 +1,5 @@
 use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
-use bevy::input::gamepad::GamepadRumbleRequest;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::scene::SceneInstanceReady;
@@ -24,6 +23,10 @@ use crate::constants::FIGHTER_COUNT;
 use crate::control_settings::{
     ControlPreferences, ControllerDeviceInfo, ControllerFamily, controller_info,
     request_controller_rumble, save_control_preferences,
+};
+use crate::controller_haptics::{
+    ControllerHapticRequest, HapticPlaybackEvent, HapticPlaybackResult, HapticPurpose,
+    controller_test_pattern, queue_haptic_pattern,
 };
 use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
@@ -2488,7 +2491,7 @@ pub fn setup_user_mode_ui(
                                 BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
                                 children![(
                                     UserModeVibrationButtonText,
-                                    Text::new("VIBRATION: ON"),
+                                    Text::new("VIBRATION: STANDARD"),
                                     TextFont {
                                         font_size: 18.0,
                                         ..default()
@@ -2507,7 +2510,7 @@ pub fn setup_user_mode_ui(
                     ),
                     (
                         Text::new(
-                            "Left/Right choose device  |  Confirm inspect  |  Back return\nVibration is best-effort and browser/device support varies",
+                            "Left/Right choose device  |  Confirm inspect  |  Back return\nVibration reports hardware support and playback failures when available",
                         ),
                         TextFont {
                             font_size: 18.0,
@@ -2680,7 +2683,7 @@ fn handle_device_join_input(
     gamepads: &Query<(Entity, &Gamepad)>,
     metadata: &Query<&ControllerDeviceInfo>,
     preferences: &ControlPreferences,
-    rumble_requests: &mut MessageWriter<GamepadRumbleRequest>,
+    rumble_requests: &mut MessageWriter<ControllerHapticRequest>,
 ) -> Option<String> {
     let mut messages = Vec::new();
     let mut departed = Vec::new();
@@ -2896,10 +2899,16 @@ fn controller_test_message(
         .iter()
         .position(|candidate| *candidate == entity)
         .unwrap_or(0);
+    let haptic_connection_hint =
+        if cfg!(target_os = "macos") && family == crate::control_settings::ControllerFamily::Xbox {
+            "\nmacOS Xbox rumble: pair through Bluetooth; a USB cable may provide input only."
+        } else {
+            ""
+        };
 
     if user_mode.controller_test_active.is_none() {
         return format!(
-            "{} / {}  —  {} {}\n{}\n{}\n\nPress {} to inspect every input.",
+            "{} / {}  —  {} {}\n{}\n{}  |  HAPTICS {}{}\n\nPress {} to inspect every input.",
             index + 1,
             entities.len(),
             family.display_name(),
@@ -2910,6 +2919,9 @@ fn controller_test_message(
             } else {
                 "DISCONNECTED"
             },
+            info.map(|info| info.haptics.label())
+                .unwrap_or("SYSTEM DEPENDENT"),
+            haptic_connection_hint,
             family.confirm_label(),
         );
     }
@@ -2934,10 +2946,13 @@ fn controller_test_message(
         "inside deadzone"
     };
     format!(
-        "{} — {}\n{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  Menu: test vibration\nHold {} for 0.75 seconds to finish testing.",
+        "{} — {}\n{}  |  HAPTICS {}{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  D-Pad Left/Right: vibration level\nMenu: test left → right → both motors  |  Hold {} for 0.75 seconds to finish testing.",
         family.display_name(),
         name,
         assignment,
+        info.map(|info| info.haptics.label())
+            .unwrap_or("SYSTEM DEPENDENT"),
+        haptic_connection_hint,
         left.x,
         left.y,
         right.x,
@@ -3034,7 +3049,7 @@ pub struct UserModeInputContext<'w, 's> {
     user_mode: ResMut<'w, UserModeState>,
     key_bindings: ResMut<'w, PlayerKeyBindings>,
     control_preferences: ResMut<'w, ControlPreferences>,
-    rumble_requests: MessageWriter<'w, GamepadRumbleRequest>,
+    rumble_requests: MessageWriter<'w, ControllerHapticRequest>,
     setup: ResMut<'w, LocalSetup>,
     state: ResMut<'w, MatchState>,
     gameplay_scene: Res<'w, UserModeGameplayScene>,
@@ -3283,16 +3298,17 @@ pub fn handle_user_mode_input(
         let toggle_vibration = pointer_action == Some(UserModeUiAction::ToggleVibration);
         let pointer_test = pointer_action == Some(UserModeUiAction::TestVibration);
         if toggle_vibration {
-            control_preferences.vibration_enabled = !control_preferences.vibration_enabled;
+            control_preferences.vibration = control_preferences.vibration.next();
+            if !control_preferences.vibration.enabled() {
+                for (gamepad, _) in &gamepads {
+                    rumble_requests.write(ControllerHapticRequest::stop(gamepad));
+                }
+            }
             match save_control_preferences(&key_bindings, &control_preferences) {
                 Ok(()) => announcements.show(
                     format!(
-                        "Controller vibration {}",
-                        if control_preferences.vibration_enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
+                        "Controller vibration: {}",
+                        control_preferences.vibration.label()
                     ),
                     0.9,
                 ),
@@ -3317,6 +3333,34 @@ pub fn handle_user_mode_input(
             let family = controller_info(active, &controller_metadata)
                 .map(|info| info.family)
                 .unwrap_or_default();
+            let vibration_direction = if gamepad.just_pressed(GamepadButton::DPadLeft) {
+                -1
+            } else if gamepad.just_pressed(GamepadButton::DPadRight) {
+                1
+            } else {
+                0
+            };
+            if vibration_direction != 0 {
+                control_preferences.vibration = if vibration_direction < 0 {
+                    control_preferences.vibration.previous()
+                } else {
+                    control_preferences.vibration.next()
+                };
+                if !control_preferences.vibration.enabled() {
+                    rumble_requests.write(ControllerHapticRequest::stop(active));
+                }
+                match save_control_preferences(&key_bindings, &control_preferences) {
+                    Ok(()) => announcements.show(
+                        format!("Vibration: {}", control_preferences.vibration.label()),
+                        0.75,
+                    ),
+                    Err(error) => {
+                        warn!("Could not save control preferences: {error}");
+                        announcements.show("Vibration changed; save failed", 1.0);
+                    }
+                }
+                return;
+            }
             if gamepad.pressed(family.back_button()) {
                 user_mode.controller_test_back_hold += real_time.delta_secs();
                 if user_mode.controller_test_back_hold >= 0.75 {
@@ -3329,16 +3373,16 @@ pub fn handle_user_mode_input(
                 user_mode.controller_test_back_hold = 0.0;
             }
             if pointer_test || gamepad.just_pressed(GamepadButton::Start) {
-                if request_controller_rumble(
+                if queue_haptic_pattern(
                     &mut rumble_requests,
-                    &control_preferences,
+                    control_preferences.vibration,
                     active,
-                    0.55,
-                    0.35,
+                    controller_test_pattern(),
+                    HapticPurpose::Test,
                 ) {
-                    announcements.show("Vibration request sent", 0.8);
+                    announcements.show("Checking controller haptics…", 0.8);
                 } else {
-                    announcements.show("Enable vibration to run the test", 0.9);
+                    announcements.show("Choose Low, Standard, or High to test", 0.9);
                 }
             }
             return;
@@ -3398,16 +3442,16 @@ pub fn handle_user_mode_input(
             }
             Some(UserModeUiAction::TestVibration) => {
                 if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
-                    if request_controller_rumble(
+                    if queue_haptic_pattern(
                         &mut rumble_requests,
-                        &control_preferences,
+                        control_preferences.vibration,
                         entity,
-                        0.55,
-                        0.35,
+                        controller_test_pattern(),
+                        HapticPurpose::Test,
                     ) {
-                        announcements.show("Vibration request sent", 0.8);
+                        announcements.show("Checking controller haptics…", 0.8);
                     } else {
-                        announcements.show("Enable vibration to run the test", 0.9);
+                        announcements.show("Choose Low, Standard, or High to test", 0.9);
                     }
                 }
             }
@@ -3676,6 +3720,40 @@ pub fn handle_user_mode_input(
                 );
                 user_mode.exit_to_dev();
                 announcements.show("Dev setup", 0.8);
+            }
+        }
+    }
+}
+
+pub fn announce_haptic_test_results(
+    mut events: MessageReader<HapticPlaybackEvent>,
+    mut announcements: ResMut<MatchAnnouncements>,
+) {
+    for event in events.read() {
+        if event.purpose != HapticPurpose::Test {
+            continue;
+        }
+        match &event.result {
+            HapticPlaybackResult::Started => {
+                announcements.show("Testing: left motor → right motor → both", 1.0);
+            }
+            HapticPlaybackResult::Completed => {
+                let message = if cfg!(target_os = "macos") {
+                    "Haptic command completed; if silent, reconnect the Xbox controller via Bluetooth"
+                } else {
+                    "Vibration test complete"
+                };
+                announcements.show(message, 1.6);
+            }
+            HapticPlaybackResult::Preempted => {
+                announcements.show("Vibration test replaced by a newer cue", 0.75);
+            }
+            HapticPlaybackResult::Unsupported => {
+                announcements.show("This controller or connection has no haptics", 1.25);
+            }
+            HapticPlaybackResult::Failed(error) => {
+                warn!("Controller haptic playback failed: {error}");
+                announcements.show("Controller haptics failed; reconnect and retry", 1.25);
             }
         }
     }
@@ -4488,14 +4566,7 @@ pub fn update_control_settings_ui(
         }
     }
     for mut text in &mut vibration_texts {
-        **text = format!(
-            "VIBRATION: {}",
-            if preferences.vibration_enabled {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
+        **text = format!("VIBRATION: {}", preferences.vibration.label());
     }
     for mut node in &mut reset_panels {
         node.display = if user_mode.screen() == UserModeScreen::KeySettings
@@ -7029,6 +7100,7 @@ mod tests {
                     vendor_id: Some(0x057e),
                     product_id: None,
                     connected: true,
+                    haptics: crate::controller_haptics::HapticAvailability::Supported,
                 },
             ))
             .id();

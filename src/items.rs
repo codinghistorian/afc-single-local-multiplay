@@ -15,6 +15,7 @@ use crate::components::{
     FighterInventory, FighterMotor, FighterStats, Hitbox,
 };
 use crate::constants::*;
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{
     EffectAssets, spawn_alcohol_spray, spawn_dust_puff, spawn_guard_flash, spawn_pop_bomb_blast,
 };
@@ -1300,6 +1301,7 @@ pub fn update_moving_items(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut items: Query<(
         Entity,
@@ -1378,8 +1380,10 @@ pub fn update_moving_items(
                         &mut commands,
                         &effect_assets,
                         &mut camera_effects,
+                        &mut haptics,
                         &mut hitstop,
                         &state,
+                        target.id,
                         &mut stats,
                         &mut motor,
                         &mut action,
@@ -1715,8 +1719,10 @@ pub fn update_moving_items(
                         &mut commands,
                         &effect_assets,
                         &mut camera_effects,
+                        &mut haptics,
                         &mut hitstop,
                         &state,
+                        fighter.id,
                         &mut stats,
                         &mut motor,
                         &mut action,

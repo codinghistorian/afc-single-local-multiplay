@@ -11,6 +11,7 @@ use crate::combat::{
 };
 use crate::components::{Fighter, FighterActionState, FighterMotor, FighterStats};
 use crate::constants::{ARENA_TOP_Y, FIGHTER_HEIGHT, FIGHTER_RADIUS};
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, FeedbackPackageId, spawn_feedback_package};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
@@ -1216,6 +1217,7 @@ pub fn update_chick_skills(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut skills: Query<(Entity, &mut ActiveChickSkill, &mut Transform), Without<Fighter>>,
     mut fighters: ParamSet<(
@@ -1276,8 +1278,10 @@ pub fn update_chick_skills(
                     &mut commands,
                     &effect_assets,
                     &mut camera_effects,
+                    &mut haptics,
                     &mut hitstop,
                     &state,
+                    target.id,
                     &mut stats,
                     &mut motor,
                     &mut action,

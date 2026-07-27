@@ -30,6 +30,7 @@ use crate::components::{
     PlayerKeyBindings, PlayerSlotId, SpecialInputKind,
 };
 use crate::constants::*;
+use crate::controller_haptics::{CombatHapticCue, CombatHapticKind, CombatHapticQueue};
 use crate::effects::{
     EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_drunk_bubble, spawn_dust_puff,
     spawn_guard_flash, spawn_respawn_column, spawn_ringout_burst,
@@ -2494,6 +2495,7 @@ pub fn update_grab_holds(
     state: Res<MatchState>,
     feel: Res<CombatFeelTuning>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut hitstop: ResMut<Hitstop>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut fighters: Query<(
@@ -2624,7 +2626,7 @@ pub fn update_grab_holds(
     for resolution in resolutions {
         for (
             entity,
-            _,
+            fighter,
             _,
             mut stats,
             mut motor,
@@ -2674,8 +2676,10 @@ pub fn update_grab_holds(
                             &mut commands,
                             &effect_assets,
                             &mut camera_effects,
+                            &mut haptics,
                             &mut hitstop,
                             &state,
+                            fighter.id,
                             &mut stats,
                             &mut motor,
                             &mut action,
@@ -4282,9 +4286,11 @@ pub fn apply_fighter_movement(
     hitstop: Res<Hitstop>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     penguin_surfaces: Query<(&ActivePenguinSurface, &Transform), Without<Fighter>>,
     mut fighters: Query<
         (
+            &Fighter,
             &FighterInput,
             &FighterStyle,
             &FighterCharacter,
@@ -4302,7 +4308,8 @@ pub fn apply_fighter_movement(
 
     let dt = time.delta_secs();
 
-    for (input, style, character, mut stats, mut motor, mut action, mut transform) in &mut fighters
+    for (fighter, input, style, character, mut stats, mut motor, mut action, mut transform) in
+        &mut fighters
     {
         let tuning = style_tuning(style.kind);
         let body = character_catalog.body(character.kind);
@@ -4478,6 +4485,7 @@ pub fn apply_fighter_movement(
                 transform.translation,
                 52,
             ));
+            haptics.push(CombatHapticCue::secondary(fighter.id));
         }
         if !did_wall_bounce && should_cancel_axis_velocity(motor.velocity.x, correction.x) {
             motor.velocity.x = 0.0;
@@ -4546,6 +4554,7 @@ pub fn apply_fighter_movement(
                         transform.translation,
                         ground_impact_priority(aftermath.family),
                     ));
+                    haptics.push(CombatHapticCue::secondary(fighter.id));
                 } else if motor.knockdown_on_land {
                     if motor.reaction_bounces > 0 && previous_y_velocity < -4.6 {
                         motor.reaction_bounces = motor.reaction_bounces.saturating_sub(1);
@@ -4573,6 +4582,7 @@ pub fn apply_fighter_movement(
                             transform.translation,
                             50,
                         ));
+                        haptics.push(CombatHapticCue::secondary(fighter.id));
                         continue;
                     }
                     motor.knockdown_on_land = false;
@@ -4594,6 +4604,7 @@ pub fn apply_fighter_movement(
                         transform.translation,
                         46,
                     ));
+                    haptics.push(CombatHapticCue::secondary(fighter.id));
                 } else if motor.jump_attack_landing_recovery {
                     motor.jump_attack_landing_recovery = false;
                     clear_bee_air_dash_state(&mut motor);
@@ -4773,6 +4784,7 @@ pub fn ringout_and_respawn(
     mut commands: Commands,
     effect_assets: Res<EffectAssets>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut state: ResMut<MatchState>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut announcements: ResMut<MatchAnnouncements>,
@@ -4867,6 +4879,11 @@ pub fn ringout_and_respawn(
             ultimate_state.target = None;
             ultimate_state.owner = None;
             if out {
+                haptics.push(CombatHapticCue::impact(
+                    resolution.awarded_to,
+                    fighter.id,
+                    CombatHapticKind::Finisher,
+                ));
                 spawn_ringout_burst(&mut commands, &effect_assets, transform.translation);
                 let ringout_feedback = crate::combat::impact_feedback_profile(
                     ImpactSource::RingOut,

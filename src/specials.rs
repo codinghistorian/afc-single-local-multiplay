@@ -12,6 +12,7 @@ use crate::components::{
     FighterStats, SpecialInputKind,
 };
 use crate::constants::*;
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, FeedbackPackageId, spawn_feedback_package};
 use crate::equipment::{
     FighterEquipment, LoadoutContext, loadout_special_cooldown_scale, loadout_special_cost_scale,
@@ -510,6 +511,7 @@ pub fn update_specials(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut specials: Query<(Entity, &mut ActiveSpecial, &mut Transform), Without<Fighter>>,
     mut fighters: Query<
@@ -606,8 +608,10 @@ pub fn update_specials(
                 &mut commands,
                 &effect_assets,
                 &mut camera_effects,
+                &mut haptics,
                 &mut hitstop,
                 &state,
+                target.id,
                 &mut stats,
                 &mut motor,
                 &mut action,

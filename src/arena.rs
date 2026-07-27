@@ -32,6 +32,7 @@ use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
+use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
@@ -2759,6 +2760,7 @@ pub fn update_powder_keg_cannons(
     effect_assets: Res<EffectAssets>,
     mut hitstop: ResMut<Hitstop>,
     mut feedback: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut bombs: Query<(Entity, &mut ArenaCannonBomb, &mut Transform)>,
     mut fighters: Query<
@@ -2848,8 +2850,10 @@ pub fn update_powder_keg_cannons(
                 &mut commands,
                 &effect_assets,
                 &mut feedback,
+                &mut haptics,
                 &mut hitstop,
                 &match_state,
+                fighter.id,
                 &mut stats,
                 &mut motor,
                 &mut action,
@@ -3238,6 +3242,7 @@ pub fn update_arena_hazards(
     feel: Res<CombatFeelTuning>,
     mut hitstop: ResMut<Hitstop>,
     mut camera_effects: ResMut<HitEffects>,
+    mut haptics: ResMut<CombatHapticQueue>,
     mut telemetry: ResMut<MatchTelemetry>,
     mut burns: Query<(Entity, &mut ArenaFighterBurn)>,
     mut fighters: Query<(
@@ -3348,8 +3353,10 @@ pub fn update_arena_hazards(
                 &mut commands,
                 &effect_assets,
                 &mut camera_effects,
+                &mut haptics,
                 &mut hitstop,
                 &match_state,
+                fighter.id,
                 &mut stats,
                 &mut motor,
                 &mut action,
