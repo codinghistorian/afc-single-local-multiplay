@@ -80,6 +80,30 @@ requested by the `perf` feature, but observed presentation remained paced near
 This is a functional-change regression record, not a reproduced optimization
 gain, so it does not replace the accepted baseline rows or change any target.
 
+The manual-aim and floating-crosshair change was checked with one paired
+`FourBotStress` run on 2026-07-27. Both builds used the same Apple M2 Max,
+macOS 26.5.1, profiling profile with `perf`, 1280x720 window, `FFC00001` seed,
+Crank Yard, six normal items, two arena hazards, and four Catalyst bots. Each
+valid run warmed up for 30 seconds and sampled for 300 seconds. The before run
+used commit `3ae0a97`; the after run used the manual-aim working tree.
+
+| Build | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Before: `3ae0a97` | 16.6110 / 19.8663 / 21.1332 ms | 0.0802 / 0.1356 / 0.1748 ms | 82.66% total; 6.89% normalized | 0.3337 / 0.3337 GiB | 714 / 710 | 125 / 125 | 125 / 113 / 38 / 44 |
+| After: manual aim working tree | 16.6464 / 17.7631 / 19.7412 ms | 0.0826 / 0.1326 / 0.1654 ms | 89.61% total; 7.47% normalized | 0.3439 / 0.3439 GiB | 734 / 734 | 127 / 127 | 127 / 117 / 38 / 44 |
+
+Frame median changed by +0.21%, p95 by -10.59%, and p99 by -6.59%. Render
+CPU-span median changed by +2.99%, p95 by -2.21%, and p99 by -5.38%; total
+process CPU changed by +6.95 percentage points. The persistent procedural
+crosshairs account for 24 fixed entities, two shared meshes, and four
+player-colored materials. Counts and RSS were flat within the after sample, so
+there is no evidence of per-frame aim allocation or entity growth. Metal did
+not expose GPU timestamps.
+
+This is a functional-change regression record, not an accepted performance
+baseline change. The paired samples show no material frame-time regression, so
+the baseline rows and targets remain unchanged.
+
 ## Measurement rules
 
 1. Warm up the scenario for 30 seconds, then sample for at least five minutes.

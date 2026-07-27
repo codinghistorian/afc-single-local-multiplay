@@ -190,6 +190,29 @@ pub struct FighterInput {
     pub special_kind: Option<SpecialInputKind>,
 }
 
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FighterAimState {
+    pub direction: Vec3,
+    pub locked_target: Option<Entity>,
+    pub marker_position: Vec3,
+    pub marker_opacity: f32,
+    pub aim_pressed: bool,
+    pub manual_unlock_count: u64,
+}
+
+impl Default for FighterAimState {
+    fn default() -> Self {
+        Self {
+            direction: Vec3::Z,
+            locked_target: None,
+            marker_position: Vec3::ZERO,
+            marker_opacity: 0.0,
+            aim_pressed: false,
+            manual_unlock_count: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpecialInputKind {
     Projectile,

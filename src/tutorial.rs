@@ -17,8 +17,9 @@ use crate::chick_skills::ActiveChickSkill;
 use crate::combat::HitEffects;
 use crate::components::{
     BotBehaviorMode, BotBrain, ControlAction, Controller, DrunkStatus, Fighter, FighterAction,
-    FighterActionState, FighterGrabState, FighterInput, FighterInventory, FighterMotor,
-    FighterSpecialState, FighterStats, Hitbox, LocalInputAssignment, PlayerKeyBindings,
+    FighterActionState, FighterAimState, FighterGrabState, FighterInput, FighterInventory,
+    FighterMotor, FighterSpecialState, FighterStats, Hitbox, LocalInputAssignment,
+    PlayerKeyBindings,
 };
 use crate::constants::{ARENA_TOP_Y, FIGHTER_COUNT, MAX_HEALTH, STOCK_LIVES};
 use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
@@ -329,7 +330,7 @@ pub enum TutorialObjective {
         direction: TutorialDirection,
         distance: f32,
     },
-    Input(ControlAction),
+    AimUnlock,
     Action(FighterAction),
     ActivateTechnique {
         technique: TechniqueId,
@@ -361,6 +362,7 @@ impl TutorialObjective {
             Self::ConfirmedHits { count }
             | Self::Guarding { count }
             | Self::ItemUse { uses: count, .. } => count as u32,
+            Self::AimUnlock => 3,
             _ => 1,
         }
     }
@@ -511,12 +513,12 @@ const BASICS_STEPS: &[TutorialStep] = &[
         ScriptedDummyMode::Passive,
     ),
     lesson_step(
-        "Aim and face",
-        "Hold Aim while moving to turn without committing to an attack.",
-        TutorialObjective::Input(ControlAction::AimGrab),
+        "Lock, break, and release",
+        "Hold Aim to lock onto Pig, then keep holding Aim and move more than 60 degrees away to break the lock.",
+        TutorialObjective::AimUnlock,
         &[TutorialPromptAction::Aim, TutorialPromptAction::Move],
-        "Hold Aim and nudge a movement direction.",
-        "Keep the displayed Aim control held for a moment.",
+        "Acquire Pig, move away to break lock, then release Aim and wait for the crosshair to fade.",
+        "Hold Aim while facing Pig. Keep it held, press left or right to break lock, then release it.",
         ScriptedDummyMode::Positioning,
     ),
 ];
@@ -1375,7 +1377,6 @@ const TUTORIAL_FADE_OUT_SECONDS: f32 = 0.18;
 const TUTORIAL_FADE_HOLD_SECONDS: f32 = 0.06;
 const TUTORIAL_FADE_IN_SECONDS: f32 = 0.26;
 const TUTORIAL_SETTLE_STABLE_SECONDS: f32 = 0.18;
-const TUTORIAL_AIM_HOLD_SECONDS: f32 = 0.35;
 const TUTORIAL_SUCCESS_REVEAL_SECONDS: f32 = 0.14;
 const TUTORIAL_SUCCESS_MIN_SECONDS: f32 = 0.25;
 const TUTORIAL_SUCCESS_AUTO_SECONDS: f32 = 1.1;
@@ -1542,6 +1543,7 @@ pub struct TutorialObjectiveBaseline {
     pub item_durability: i32,
     pub lesson_item_entity: Option<Entity>,
     pub item_count: usize,
+    pub aim_unlock_count: u64,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -1564,7 +1566,6 @@ pub struct TutorialSession {
     pub item_was_held: bool,
     pub completion_state: TutorialCompletionState,
     pub completion_stable_elapsed: f32,
-    pub completion_hold_elapsed: f32,
     pub completion_saw_airborne: bool,
     pub completion_world_effect_seen: bool,
     pub success_elapsed: f32,
@@ -1594,7 +1595,6 @@ impl Default for TutorialSession {
             item_was_held: false,
             completion_state: TutorialCompletionState::Observing,
             completion_stable_elapsed: 0.0,
-            completion_hold_elapsed: 0.0,
             completion_saw_airborne: false,
             completion_world_effect_seen: false,
             success_elapsed: 0.0,
@@ -1689,7 +1689,6 @@ impl TutorialSession {
     pub fn reset_completion(&mut self) {
         self.completion_state = TutorialCompletionState::Observing;
         self.completion_stable_elapsed = 0.0;
-        self.completion_hold_elapsed = 0.0;
         self.completion_saw_airborne = false;
         self.completion_world_effect_seen = false;
         self.success_elapsed = 0.0;
@@ -1888,7 +1887,7 @@ fn tutorial_settlement_status(session: &TutorialSession) -> Option<&'static str>
     }
     Some(match session.current_step()?.objective {
         TutorialObjective::Movement { .. } => "RELEASE MOVEMENT TO FINISH",
-        TutorialObjective::Input(_) => "RELEASE AIM TO FINISH",
+        TutorialObjective::AimUnlock => "RELEASE AIM - WAIT FOR THE CROSSHAIR TO FADE",
         TutorialObjective::Action(FighterAction::Jumping) => "FINISH THE JUMP AND LAND",
         TutorialObjective::Action(FighterAction::Dashing) => "LET THE DASH FINISH",
         TutorialObjective::ActivateTechnique { .. } if session.completion_saw_airborne => {
@@ -1956,6 +1955,10 @@ fn practice_positions(objective: TutorialObjective) -> [Vec3; 2] {
             Vec3::new(-2.2, ARENA_TOP_Y, 0.0),
             Vec3::new(3.6, ARENA_TOP_Y, 2.8),
         ],
+        TutorialObjective::AimUnlock => [
+            Vec3::new(-1.35, ARENA_TOP_Y, 0.0),
+            Vec3::new(1.35, ARENA_TOP_Y, 0.0),
+        ],
         _ => [
             Vec3::new(-1.35, ARENA_TOP_Y, 0.0),
             Vec3::new(1.35, ARENA_TOP_Y, 0.0),
@@ -1991,6 +1994,7 @@ pub fn reset_tutorial_step(
         &mut FighterStats,
         &mut FighterMotor,
         &mut FighterInput,
+        &mut FighterAimState,
         &mut FighterActionState,
         &mut FighterInventory,
         &mut FighterGrabState,
@@ -2045,6 +2049,7 @@ pub fn reset_tutorial_step(
         mut stats,
         mut motor,
         mut input,
+        mut aim,
         mut action,
         mut inventory,
         mut grab,
@@ -2076,6 +2081,7 @@ pub fn reset_tutorial_step(
             Vec3::NEG_X
         };
         *input = FighterInput::default();
+        let manual_unlock_count = aim.manual_unlock_count;
         *action = FighterActionState::default();
         *inventory = FighterInventory::default();
         *grab = FighterGrabState::default();
@@ -2089,6 +2095,12 @@ pub fn reset_tutorial_step(
                 player_position = transform.translation;
             }
         }
+        *aim = FighterAimState {
+            direction: motor.facing,
+            marker_position: transform.translation + Vec3::Y * 1.05 + motor.facing * 2.4,
+            manual_unlock_count,
+            ..default()
+        };
         *visibility = if fighter.id <= TUTORIAL_DUMMY_ID {
             Visibility::Inherited
         } else {
@@ -2164,6 +2176,12 @@ pub fn reset_tutorial_step(
         item_durability: baseline_item_durability,
         lesson_item_entity,
         item_count,
+        aim_unlock_count: fighters
+            .iter()
+            .find_map(|(fighter, _, _, _, aim, _, _, _, _, _, _, _, _)| {
+                (fighter.id == TUTORIAL_PLAYER_ID).then_some(aim.manual_unlock_count)
+            })
+            .unwrap_or(0),
     };
     session.objective_progress = 0;
     session.objective_latched = false;
@@ -2241,6 +2259,7 @@ pub fn observe_tutorial_objective(
     fighters: Query<(
         &Fighter,
         &FighterInput,
+        Option<&FighterAimState>,
         &FighterActionState,
         &FighterStats,
         &FighterMotor,
@@ -2271,15 +2290,16 @@ pub fn observe_tutorial_objective(
         return;
     }
 
-    let dummy_state = fighters
-        .iter()
-        .find_map(|(fighter, _, action, _, motor, transform, _)| {
-            (fighter.id == TUTORIAL_DUMMY_ID).then_some((action, motor, transform.translation))
-        });
-    let Some((input, action, _stats, motor, transform, inventory)) = fighters.iter().find_map(
-        |(fighter, input, action, stats, motor, transform, inventory)| {
+    let dummy_state =
+        fighters
+            .iter()
+            .find_map(|(fighter, _, _, action, _, motor, transform, _)| {
+                (fighter.id == TUTORIAL_DUMMY_ID).then_some((action, motor, transform.translation))
+            });
+    let Some((input, aim, action, _stats, motor, transform, inventory)) = fighters.iter().find_map(
+        |(fighter, input, aim, action, stats, motor, transform, inventory)| {
             (fighter.id == TUTORIAL_PLAYER_ID)
-                .then_some((input, action, stats, motor, transform, inventory))
+                .then_some((input, aim, action, stats, motor, transform, inventory))
         },
     ) else {
         return;
@@ -2318,17 +2338,24 @@ pub fn observe_tutorial_objective(
             }
             session.objective_progress >= (distance * 10.0).round() as u32
         }
-        TutorialObjective::Input(control) => {
-            let active = tutorial_control_is_active(control, input);
-            if control == ControlAction::AimGrab {
-                if active && input.movement.length_squared() > 0.12 {
-                    session.completion_hold_elapsed += time.delta_secs();
-                } else {
-                    session.completion_hold_elapsed = 0.0;
+        TutorialObjective::AimUnlock => {
+            if let Some(aim) = aim {
+                if session.objective_progress == 0 && input.aim && aim.locked_target.is_some() {
+                    session.objective_progress = 1;
                 }
-                session.completion_hold_elapsed >= TUTORIAL_AIM_HOLD_SECONDS
+                if session.objective_progress == 1
+                    && aim.manual_unlock_count > session.objective_baseline.aim_unlock_count
+                {
+                    session.objective_progress = 2;
+                }
+                if session.objective_progress == 2 && !input.aim {
+                    session.objective_progress = 3;
+                    true
+                } else {
+                    false
+                }
             } else {
-                active
+                false
             }
         }
         TutorialObjective::Action(expected) => action.action == expected,
@@ -2445,8 +2472,8 @@ pub fn observe_tutorial_objective(
         TutorialObjective::Movement { .. } => {
             input.movement.length_squared() <= 0.04 && player_recovered
         }
-        TutorialObjective::Input(control) => {
-            !tutorial_control_is_active(control, input) && player_recovered
+        TutorialObjective::AimUnlock => {
+            aim.is_some_and(|aim| aim.marker_opacity <= 0.001) && player_recovered
         }
         TutorialObjective::Action(FighterAction::Jumping) => {
             session.completion_saw_airborne && player_recovered
@@ -2507,20 +2534,6 @@ fn tutorial_direction_pressed(direction: TutorialDirection, movement: Vec2) -> b
         TutorialDirection::Forward => movement.y > 0.35,
         TutorialDirection::Back => movement.y < -0.35,
         TutorialDirection::Any => movement.length_squared() > 0.12,
-    }
-}
-
-fn tutorial_control_is_active(control: ControlAction, input: &FighterInput) -> bool {
-    match control {
-        ControlAction::Left => input.movement.x < -0.35,
-        ControlAction::Right => input.movement.x > 0.35,
-        ControlAction::Up => input.movement.y > 0.35,
-        ControlAction::Down => input.movement.y < -0.35,
-        ControlAction::AimGrab => input.aim,
-        ControlAction::Heavy => input.heavy || input.heavy_held,
-        ControlAction::Light => input.light || input.light_held,
-        ControlAction::Jump => input.jump,
-        ControlAction::Special => input.special,
     }
 }
 
@@ -4825,7 +4838,7 @@ mod tests {
     }
 
     #[test]
-    fn aim_objective_requires_a_deliberate_hold_then_release() {
+    fn aim_objective_requires_acquire_then_manual_break_then_release_and_fade() {
         let mut app = App::new();
         let mut session = TutorialSession::default();
         session.start(TutorialChapterId::Basics);
@@ -4852,8 +4865,12 @@ mod tests {
                     spawn: Vec3::ZERO,
                 },
                 FighterInput {
-                    movement: Vec2::X,
                     aim: true,
+                    ..default()
+                },
+                FighterAimState {
+                    locked_target: Some(Entity::PLACEHOLDER),
+                    marker_opacity: 1.0,
                     ..default()
                 },
                 FighterActionState::default(),
@@ -4865,24 +4882,47 @@ mod tests {
             ))
             .id();
 
-        advance_virtual_time(&mut app, TUTORIAL_AIM_HOLD_SECONDS - 0.01);
         app.update();
         assert_eq!(
-            app.world().resource::<TutorialSession>().completion_state,
-            TutorialCompletionState::Observing
+            app.world().resource::<TutorialSession>().objective_progress,
+            1,
+            "acquisition is the first required stage"
         );
 
-        advance_virtual_time(&mut app, 0.02);
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            let mut aim = entity.get_mut::<FighterAimState>().unwrap();
+            aim.locked_target = None;
+            aim.manual_unlock_count = 1;
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<TutorialSession>().objective_progress,
+            2,
+            "manual unlock is the second required stage"
+        );
+
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            entity.get_mut::<FighterInput>().unwrap().aim = false;
+            entity.get_mut::<FighterAimState>().unwrap().marker_opacity = 0.5;
+        }
         app.update();
         assert_eq!(
             app.world().resource::<TutorialSession>().completion_state,
             TutorialCompletionState::Settling
         );
+        assert_eq!(
+            app.world().resource::<TutorialSession>().phase,
+            TutorialPhase::Playing,
+            "release alone must wait for the marker fade"
+        );
 
-        *app.world_mut()
+        app.world_mut()
             .entity_mut(player)
-            .get_mut::<FighterInput>()
-            .unwrap() = FighterInput::default();
+            .get_mut::<FighterAimState>()
+            .unwrap()
+            .marker_opacity = 0.0;
         advance_virtual_time(&mut app, TUTORIAL_SETTLE_STABLE_SECONDS);
         app.update();
         assert_eq!(
