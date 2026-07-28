@@ -19,6 +19,7 @@ mod equipment;
 mod feel;
 mod fighter;
 mod game_state;
+mod game_transition;
 mod hud;
 mod items;
 #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
@@ -141,7 +142,7 @@ pub fn build_app() -> App {
         .init_resource::<control_settings::ControlPreferences>()
         .init_resource::<tutorial::TutorialProgress>()
         .init_resource::<tutorial::TutorialSession>()
-        .init_resource::<tutorial::TutorialTransition>()
+        .init_resource::<game_transition::GameTransition>()
         .init_resource::<user_mode::UserModeState>()
         .init_resource::<user_mode::UserModeGameplayScene>()
         .init_resource::<user_mode::LocalControllerReconnect>()
@@ -199,6 +200,10 @@ pub fn build_app() -> App {
             tutorial::setup_tutorial_ui.after(user_mode::setup_user_mode_ui),
         )
         .add_systems(
+            Startup,
+            game_transition::setup_game_transition_overlay.after(tutorial::setup_tutorial_ui),
+        )
+        .add_systems(
             Update,
             (
                 control_settings::sync_controller_device_info,
@@ -223,8 +228,10 @@ pub fn build_app() -> App {
                     game_state::handle_global_input,
                     tutorial::observe_tutorial_objective,
                     tutorial::advance_tutorial_success,
-                    tutorial::advance_tutorial_transition
-                        .run_if(tutorial::tutorial_transition_active),
+                    game_transition::advance_game_transition
+                        .run_if(game_transition::game_transition_active),
+                    user_mode::commit_pending_user_mode_transition,
+                    tutorial::commit_pending_tutorial_transition,
                     tutorial::reset_tutorial_step,
                     tutorial::cleanup_tutorial_session,
                     game_state::sync_virtual_time_pause,
@@ -402,6 +409,7 @@ pub fn build_app() -> App {
                     user_mode::update_controller_reconnect_overlay,
                     tutorial::update_tutorial_ui,
                     tutorial::update_tutorial_button_styles,
+                    game_transition::update_game_transition_overlay,
                 )
                     .chain(),
             )

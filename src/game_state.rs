@@ -619,48 +619,48 @@ pub const DEFAULT_REPLAY_SEED: u64 = 0xFFC0_0001;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameplayPauseOwner {
     ControllerReconnect,
+    GameTransition,
     TutorialPrompt,
     TutorialMenu,
     TutorialSuccess,
-    TutorialTransition,
 }
 
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct GameplayPauseOwners {
     controller_reconnect: bool,
+    game_transition: bool,
     tutorial_prompt: bool,
     tutorial_menu: bool,
     tutorial_success: bool,
-    tutorial_transition: bool,
 }
 
 impl GameplayPauseOwners {
     pub fn set(&mut self, owner: GameplayPauseOwner, active: bool) {
         match owner {
             GameplayPauseOwner::ControllerReconnect => self.controller_reconnect = active,
+            GameplayPauseOwner::GameTransition => self.game_transition = active,
             GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt = active,
             GameplayPauseOwner::TutorialMenu => self.tutorial_menu = active,
             GameplayPauseOwner::TutorialSuccess => self.tutorial_success = active,
-            GameplayPauseOwner::TutorialTransition => self.tutorial_transition = active,
         }
     }
 
     pub fn contains(&self, owner: GameplayPauseOwner) -> bool {
         match owner {
             GameplayPauseOwner::ControllerReconnect => self.controller_reconnect,
+            GameplayPauseOwner::GameTransition => self.game_transition,
             GameplayPauseOwner::TutorialPrompt => self.tutorial_prompt,
             GameplayPauseOwner::TutorialMenu => self.tutorial_menu,
             GameplayPauseOwner::TutorialSuccess => self.tutorial_success,
-            GameplayPauseOwner::TutorialTransition => self.tutorial_transition,
         }
     }
 
     pub fn blocks_gameplay(&self) -> bool {
         self.contains(GameplayPauseOwner::ControllerReconnect)
+            || self.contains(GameplayPauseOwner::GameTransition)
             || self.contains(GameplayPauseOwner::TutorialPrompt)
             || self.contains(GameplayPauseOwner::TutorialMenu)
             || self.contains(GameplayPauseOwner::TutorialSuccess)
-            || self.contains(GameplayPauseOwner::TutorialTransition)
     }
 
     pub fn clear_tutorial_overlays(&mut self) {
