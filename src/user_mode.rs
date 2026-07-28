@@ -153,14 +153,6 @@ impl ControlsHubChoice {
         }
     }
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Controller => "CONTROLLER",
-            Self::Keyboard => "KEYBOARD",
-            Self::Sound => "SOUND",
-        }
-    }
-
     const fn icon_path(self) -> &'static str {
         match self {
             Self::Controller => USER_MODE_CONTROLLER_ICON_PATH,
@@ -2015,17 +2007,6 @@ fn settings_icon_button(asset_server: &AssetServer, choice: ControlsHubChoice) -
                 ImageNode::new(asset_server.load(choice.icon_path()))
                     .with_rect(choice.icon_source_rect())
                     .with_mode(NodeImageMode::Stretch),
-                Pickable::IGNORE,
-            ),
-            (
-                Text::new(choice.label()),
-                TextFont {
-                    font_size: 23.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                TextShadow::default(),
-                TextLayout::new_with_justify(Justify::Center),
                 Pickable::IGNORE,
             ),
         ],
