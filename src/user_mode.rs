@@ -1314,21 +1314,21 @@ impl UserModeState {
     }
 
     fn selected_key_target(&self) -> KeyBindingCapture {
-        let action_index = self.key_settings_cursor % ControlAction::ALL.len();
+        let action_index = self.key_settings_cursor % ControlAction::ACTIVE.len();
         KeyBindingCapture {
-            player: self.key_settings_cursor / ControlAction::ALL.len(),
-            action: ControlAction::ALL[action_index],
+            player: self.key_settings_cursor / ControlAction::ACTIVE.len(),
+            action: ControlAction::ACTIVE[action_index],
         }
     }
 
     fn move_key_cursor(&mut self, direction: isize) {
-        let total = ControlAction::ALL.len() * FIGHTER_COUNT;
+        let total = ControlAction::ACTIVE.len() * FIGHTER_COUNT;
         self.key_settings_cursor =
             (self.key_settings_cursor as isize + direction).rem_euclid(total as isize) as usize;
     }
 
     fn move_key_column(&mut self, direction: isize) {
-        let action_count = ControlAction::ALL.len();
+        let action_count = ControlAction::ACTIVE.len();
         let action_index = self.key_settings_cursor % action_count;
         let player = self.key_settings_cursor / action_count;
         let next_player =
@@ -1582,9 +1582,11 @@ fn route_user_mode_action(
             UserModeRoute::None
         }
         (UserModeScreen::KeySettings, UserModeUiAction::KeyBinding(capture)) => {
-            user_mode.key_settings_cursor = capture.player * ControlAction::ALL.len()
-                + key_settings_action_index(capture.action);
-            user_mode.begin_key_capture();
+            if let Some(action_index) = key_settings_action_index(capture.action) {
+                user_mode.key_settings_cursor =
+                    capture.player * ControlAction::ACTIVE.len() + action_index;
+                user_mode.begin_key_capture();
+            }
             UserModeRoute::None
         }
         (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
@@ -1997,19 +1999,17 @@ fn settings_icon_button(asset_server: &AssetServer, choice: ControlsHubChoice) -
         },
         BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
         BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
-        children![
-            (
-                Node {
-                    width: Val::Px(248.0),
-                    height: Val::Px(186.0),
-                    ..default()
-                },
-                ImageNode::new(asset_server.load(choice.icon_path()))
-                    .with_rect(choice.icon_source_rect())
-                    .with_mode(NodeImageMode::Stretch),
-                Pickable::IGNORE,
-            ),
-        ],
+        children![(
+            Node {
+                width: Val::Px(248.0),
+                height: Val::Px(186.0),
+                ..default()
+            },
+            ImageNode::new(asset_server.load(choice.icon_path()))
+                .with_rect(choice.icon_source_rect())
+                .with_mode(NodeImageMode::Stretch),
+            Pickable::IGNORE,
+        ),],
     )
 }
 
@@ -2234,7 +2234,6 @@ fn key_settings_column(player: usize) -> impl Bundle {
                     key_settings_row(player, ControlAction::Heavy),
                     key_settings_row(player, ControlAction::Light),
                     key_settings_row(player, ControlAction::Jump),
-                    key_settings_row(player, ControlAction::Special),
                 ],
             ),
         ],
@@ -5703,7 +5702,8 @@ pub fn update_user_mode_ui(
         if key_settings_visible {
             scroll_position.x = 0.0;
             scroll_position.y = if scroll.player == selected_key_target.player {
-                let action_index = key_settings_action_index(selected_key_target.action);
+                let action_index = key_settings_action_index(selected_key_target.action)
+                    .expect("selected key-setting action is active");
                 key_settings_scroll_offset(action_index)
             } else {
                 0.0
@@ -6481,11 +6481,10 @@ fn key_settings_row_color(selected: bool) -> TextColor {
     }
 }
 
-fn key_settings_action_index(action: ControlAction) -> usize {
-    ControlAction::ALL
+fn key_settings_action_index(action: ControlAction) -> Option<usize> {
+    ControlAction::ACTIVE
         .iter()
         .position(|candidate| *candidate == action)
-        .expect("control action should be in ControlAction::ALL")
 }
 
 fn key_settings_scroll_offset(action_index: usize) -> f32 {
@@ -6598,7 +6597,7 @@ fn controls_player_message(
     if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
         let family = family_for(entity);
         return format!(
-            "P{} — {} Controller\nMove: Left stick / D-pad\n{} Jump  |  {} Light  |  {} Heavy  |  {} Aim/Grab\n{} Dash  |  {} Guard  |  {} Ultimate  |  {} Special\n{}+{} Trap  |  {}+{} Hazard  |  {}+{} Shockwave",
+            "P{} — {} Controller\nMove: Left stick / D-pad\n{} Jump  |  {} Light  |  {} Heavy  |  {} Aim/Grab\n{} Dash  |  {} Guard  |  {} Ultimate",
             player + 1,
             family.display_name(),
             family.face_button_label(GamepadButton::South),
@@ -6608,17 +6607,10 @@ fn controls_player_message(
             family.face_button_label(GamepadButton::RightTrigger2),
             family.face_button_label(GamepadButton::LeftTrigger),
             family.face_button_label(GamepadButton::LeftTrigger2),
-            family.face_button_label(GamepadButton::RightTrigger),
-            family.face_button_label(GamepadButton::RightTrigger),
-            family.face_button_label(GamepadButton::LeftTrigger),
-            family.face_button_label(GamepadButton::RightTrigger),
-            family.face_button_label(GamepadButton::North),
-            family.face_button_label(GamepadButton::RightTrigger),
-            family.face_button_label(GamepadButton::East),
         );
     }
     format!(
-        "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}\nSpecial: {}  |  +Light Trap  +Aim Shockwave  +Heavy Drift Field",
+        "P{}\nMove: {}/{}/{}/{}\nAim: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -6628,7 +6620,6 @@ fn controls_player_message(
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
-        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
@@ -6641,7 +6632,7 @@ fn controls_player_compact_message(
     if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
         let family = family_for(entity);
         return format!(
-            "P{}  {}: Stick/D-pad move | {} jump | {} light | {} heavy | {} aim | {} dash | {} guard | {} ult | {} special",
+            "P{}  {}: Stick/D-pad move | {} jump | {} light | {} heavy | {} aim | {} dash | {} guard | {} ult",
             player + 1,
             family.display_name(),
             family.face_button_label(GamepadButton::South),
@@ -6651,11 +6642,10 @@ fn controls_player_compact_message(
             family.face_button_label(GamepadButton::RightTrigger2),
             family.face_button_label(GamepadButton::LeftTrigger),
             family.face_button_label(GamepadButton::LeftTrigger2),
-            family.face_button_label(GamepadButton::RightTrigger),
         );
     }
     format!(
-        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}  |  Special {}",
+        "P{}  Move {}/{}/{}/{}  |  Aim {}  |  Heavy {}  |  Light {}  |  Jump {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -6665,7 +6655,6 @@ fn controls_player_compact_message(
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
-        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
@@ -7233,7 +7222,7 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_lesson_keeps_normal_bot_specials_available() {
+    fn tutorial_lesson_does_not_apply_user_mode_bot_input_restrictions() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_tutorial_lesson();
 
@@ -8117,9 +8106,11 @@ mod tests {
     }
 
     #[test]
-    fn four_player_default_bindings_are_complete_and_unique() {
+    fn key_settings_exposes_eight_active_actions_and_preserves_legacy_bindings() {
         let bindings = PlayerKeyBindings::default();
 
+        assert_eq!(ControlAction::ACTIVE.len(), 8);
+        assert!(!ControlAction::ACTIVE.contains(&ControlAction::Special));
         for player in 0..FIGHTER_COUNT {
             assert!(
                 bindings
@@ -8131,10 +8122,14 @@ mod tests {
             }
         }
         assert_eq!(
-            bindings.all_keys().len(),
-            FIGHTER_COUNT * ControlAction::ALL.len()
+            bindings.active_keys().len(),
+            FIGHTER_COUNT * ControlAction::ACTIVE.len()
         );
         assert!(!bindings.has_duplicate_keys());
+        assert_eq!(
+            bindings.key_for(0, ControlAction::Special),
+            Some(KeyCode::KeyE)
+        );
     }
 
     #[test]
@@ -8172,8 +8167,8 @@ mod tests {
         assert!(message.contains("RT Dash"));
         assert!(message.contains("LB Guard"));
         assert!(message.contains("LT Ultimate"));
-        assert!(message.contains("RB Special"));
-        assert!(message.contains("RB+LB Trap"));
+        assert!(!message.contains("Special"));
+        assert!(!message.contains("RB+"));
         assert!(message.contains("P1 press A or click to fight"));
     }
 
@@ -8505,6 +8500,39 @@ mod tests {
         );
         assert_eq!(result.swapped, None);
         assert_eq!(user_mode.key_capture, None);
+    }
+
+    #[test]
+    fn key_settings_can_rebind_a_former_special_key_without_changing_saved_special_data() {
+        let mut user_mode = UserModeState::default();
+        let mut bindings = PlayerKeyBindings::default();
+        user_mode.enter_key_settings();
+        user_mode.begin_key_capture();
+
+        let result = user_mode
+            .apply_key_capture(&mut bindings, KeyCode::KeyE)
+            .unwrap();
+
+        assert_eq!(result.swapped, None);
+        assert_eq!(
+            bindings.key_for(0, ControlAction::Left),
+            Some(KeyCode::KeyE)
+        );
+        assert_eq!(
+            bindings.key_for(0, ControlAction::Special),
+            Some(KeyCode::KeyE)
+        );
+        assert!(!bindings.has_duplicate_keys());
+    }
+
+    #[test]
+    fn inactive_special_binding_cannot_be_selected_for_rebinding() {
+        let mut bindings = PlayerKeyBindings::default();
+        assert_eq!(
+            bindings.try_set_key_swapping(0, ControlAction::Special, KeyCode::KeyQ),
+            Err("inactive")
+        );
+        assert_eq!(key_settings_action_index(ControlAction::Special), None);
     }
 
     #[test]

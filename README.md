@@ -89,7 +89,7 @@ User Mode Local Multiplayer:
 - Choose single-player or two, three, or four local players from the mode screen.
 - Join in P1-P4 order with Xbox A or any keyboard layout's Jump/Aim key; Xbox B leaves.
 - Xbox: Left stick/D-pad move; A jump; X light; Y heavy; B aim/grab; RT dash;
-  LB guard; LT ultimate; RB special.
+  LB guard; LT ultimate.
 - Open **Settings → Controls** to register or reorder local devices, remove or
   clear assignments, inspect live controller inputs, test vibration, and edit or
   restore all four keyboard layouts. Controller order is retained for the current
@@ -98,13 +98,13 @@ User Mode Local Multiplayer:
 - P2: A/D/W/S move; T/Y/U/I actions.
 - P3: F/H/R/G move; B/N/M/Comma actions.
 - P4: J/L/O/K move; 7/8/9/0 actions.
-- Key Settings exposes all four layouts and swaps duplicate assignments safely.
+- Key Settings exposes eight active actions across all four layouts and swaps duplicate assignments safely.
 
 Native Dev Hotkeys:
 - Shift+U: enter user mode from the dev setup screen.
 - In user mode, choose player count, one character per player, and an arena before the controls briefing.
 - F2: toggle map editor while in setup.
-- H: toggle hitbox, hurtbox, item, special, impact-source, reaction, technique-window, and feedback-cue debug overlays.
+- H: toggle hitbox, hurtbox, item, impact-source, reaction, technique-window, and feedback-cue debug overlays.
 - Shift+Up/Down: pan the gameplay camera forward/back.
 - Shift+Left/Right: rotate the gameplay camera.
 - Shift+Cmd/Ctrl+Up/Down: raise/lower the gameplay camera.
@@ -117,7 +117,7 @@ Native Dev Hotkeys:
 - Dev hotkeys are native-only and are blocked while user mode is active.
 
 Debug:
-- H: toggle hitbox, hurtbox, item, special, impact-source, reaction, technique-window, and feedback-cue debug overlays
+- H: toggle hitbox, hurtbox, item, impact-source, reaction, technique-window, and feedback-cue debug overlays
 - 1: timed team score rules
 - 2: free-for-all score rules
 - 3: stock ring-out rules
@@ -133,16 +133,10 @@ Pickups:
 - Stone Crate: heavy prop with stronger close swings and throws.
 - Guard Kite: shield-like prop with a short bash and high durability.
 
-Specials:
-- Pulse Dart: straight stamina projectile.
-- Trip Plate: placed trap.
-- Snap Wave: close expanding shockwave.
-- Drift Field: short lingering hazard.
-
 Styles:
 - Anchor: slower, sturdier guard economy, stronger ring-control throws, a longer-invulnerable brace step, and stamina-paid heavy startup armor with longer whiff recovery.
 - Vector: faster pressure movement and attacks, weaker guard economy, a shorter dash-attack flow, and a narrow dash-attack-to-light branch window.
-- Catalyst: mid-range preference, stronger special usage bias, cheaper/faster special cycling, and stamina-disrupting special hits.
+- Catalyst: balanced movement and defense with the roster's longest mid-range preference.
 - Style identity is visible through compact HUD taglines and small in-match accent rings.
 
 Equipment:
@@ -161,29 +155,28 @@ must be picked up with grab.
 - Arena definitions provide ground shapes, visual themes, spawn points, item anchors, ring-out bounds, camera hints, platform blocks, and phased hazard data. All ten arenas can be selected in user mode or cycled in native dev setup.
 - The camera follows the center of living fighters from a high angled arcade view, while single-player user mode follows the controlled fighter with the saved single-player camera preset.
 - Movement uses simple acceleration, friction, gravity, jump, dash stamina cost, radius-aware platform support, ledge jump grace, side pushout, limited wall bounce, and manual ground checks.
-- Combat uses Rust-side technique definitions for startup, active, recovery, cancel/branch windows, stamina hooks, and impact payloads across the light chain, dash attack, jump attack, heavy attacks, guard counter, item actions, specials, and stateful grab/throw.
+- Combat uses Rust-side technique definitions for startup, active, recovery, cancel/branch windows, stamina hooks, and impact payloads across the light chain, dash attack, jump attack, heavy attacks, guard counter, item actions, and stateful grab/throw.
 - Heavy hits, combo finishers, throws, thrown items, and Pop Bombs can launch fighters into reaction profiles, limited ground/wall bounce, knockdown, and get-up states.
 - Knocked-down fighters wake automatically after a short pause and gain brief invulnerability while standing.
 - Guard reduces front-facing damage and knockback, but stamina pressure can cause guard break. A precisely timed guard prevents chip damage and starts a quick counter.
 - Guard plus dash performs a short defensive step, and knocked-down fighters can quick stand or recovery roll instead of waiting for automatic get-up.
 - Primitive hit sparks, guard flashes, dash trails, dust puffs, respawn beams, and item effects make combat state easier to read without external assets.
 - Simple arena items add arcade match chaos: stamina recovery, a carried melee prop, and a carried short-fuse bomb.
-- Specials add a small projectile, trap, shockwave, and lingering hazard layer with stamina costs, cooldowns, owner grace, and reset cleanup.
 - Arena hazards now include launch pulses, slowing snare fields, and bumper nodes with per-hazard phase offsets that apply neutral shared-impact pressure without awarding ring-out credit.
 - HUD rows tint and show EDGE danger when fighters drift near arena ring-out bounds or fall toward the lower blast plane.
 - Fighters use shared action rules with style tuning for movement, stamina economy, guard pressure, attack timing, throw pressure, and bot range preference. User mode supports one player against a bot or up to four local keyboard players.
 - Equipped modifiers each affect one move, show effect text/cooldown status in the fighter HUD row, flash on trigger, route a feedback cue, and add a small visual accent.
-- Move, item, special, style, and equipment tuning now live in internal Rust-side definition structs for faster iteration.
+- Move, item, style, and equipment tuning now live in internal Rust-side definition structs for faster iteration.
 - Match flow now runs through countdown, fighting, time-up, results, reset/rematch, and return-to-setup phases.
 - Rule presets cover timed team score, timed free-for-all score, and stock ring-out matches.
-- Team-score rules now use centralized even-vs-odd team membership and explicit friendly-fire policy to block self/teammate strikes, grabs, item hits, bombs, and specials from awarding damage or ring-out credit.
+- Team-score rules now use centralized even-vs-odd team membership and explicit friendly-fire policy to block self/teammate strikes, grabs, item hits, and bombs from awarding damage or ring-out credit.
 - A lightweight local setup shell selects, previews, and applies the mode, arena, active fighter slots, fighter styles, equipment, and replay seed before countdown.
 - Local match telemetry tracks ring-outs, uncredited falls, item hits, throw hits, guard breaks, and total damage for result/debug displays.
 - Ring-outs happen when a fighter falls below the arena or gets pushed too far out. The last attacker gets a score point; stock rules also remove lives and can end the match.
 - Bots pick the nearest opponent, move toward them, strafe, attack in range, and sometimes dash.
 - Bots can chain light attacks, sometimes grab at close range, occasionally use dash or jump attacks, and make role-aware item choices: ranged pokes at distance, explosives near mid-range, utility when stamina is missing, heavy props for ring pressure, and defensive props for guarding.
-- Bots now quick-stand or recovery-roll from knockdown, guard against readable incoming attacks, avoid active arena hazards/enemy specials/thrown items/armed bombs, and use style/equipment-aware personality weights with small deterministic mistakes.
-- The HUD now shows phase/rule state, results, held item status, special/equipment cooldowns, debug overlays, timer, scores, health, and stamina.
+- Bots now quick-stand or recovery-roll from knockdown, guard against readable incoming attacks, avoid active arena hazards/thrown items/armed bombs, and use style/equipment-aware personality weights with small deterministic mistakes.
+- The HUD now shows phase/rule state, results, held item status, equipment cooldowns, debug overlays, timer, scores, health, and stamina.
 
 ## Next Steps
 

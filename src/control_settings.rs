@@ -537,7 +537,7 @@ fn decode_control_preferences(
         return Err("saved controls contain duplicate keys".to_string());
     }
     if key_bindings
-        .all_keys()
+        .active_keys()
         .into_iter()
         .any(reserved_binding_key)
     {
@@ -758,6 +758,20 @@ mod tests {
         let encoded = encode_control_preferences(&bindings, &preferences).unwrap();
         let decoded = decode_control_preferences(&encoded).unwrap();
         assert_eq!(decoded, (bindings, preferences));
+    }
+
+    #[test]
+    fn control_preferences_preserve_inactive_special_bindings_and_allow_active_overlap() {
+        let mut bindings = PlayerKeyBindings::default();
+        bindings.p1.left = bindings.p1.special;
+        let encoded =
+            encode_control_preferences(&bindings, &ControlPreferences::default()).unwrap();
+
+        let (decoded, _) = decode_control_preferences(&encoded).unwrap();
+
+        assert_eq!(decoded.p1.left, KeyCode::KeyE);
+        assert_eq!(decoded.p1.special, KeyCode::KeyE);
+        assert_eq!(decoded, bindings);
     }
 
     #[test]

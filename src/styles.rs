@@ -144,7 +144,7 @@ pub fn style_mechanics(kind: FighterStyleKind) -> StyleMechanics {
             special_stamina_disrupt: 0.0,
         },
         FighterStyleKind::Catalyst => StyleMechanics {
-            hook_label: "special flow",
+            hook_label: "mid-range flow",
             guard_step_invulnerability: 1.0,
             dash_attack_duration: 1.0,
             special_cost: 0.88,
@@ -171,7 +171,7 @@ pub fn style_identity(kind: FighterStyleKind) -> StyleIdentity {
             marker_scale: 0.92,
         },
         FighterStyleKind::Catalyst => StyleIdentity {
-            tagline: "special zone",
+            tagline: "mid-range control",
             accent: Color::srgb(0.58, 1.0, 0.42),
             marker_scale: 1.02,
         },
@@ -222,6 +222,21 @@ mod tests {
             assert!(!identity.tagline.is_empty());
             assert!(identity.marker_scale > 0.0);
         }
+    }
+
+    #[test]
+    fn catalyst_visible_identity_uses_its_existing_mid_range_role() {
+        let identity = style_identity(FighterStyleKind::Catalyst);
+        let mechanics = style_mechanics(FighterStyleKind::Catalyst);
+
+        assert!(identity.tagline.contains("mid-range"));
+        assert!(mechanics.hook_label.contains("mid-range"));
+        assert!(!identity.tagline.contains("special"));
+        assert!(!mechanics.hook_label.contains("special"));
+        assert_eq!(
+            style_tuning(FighterStyleKind::Catalyst).bot_preferred_range,
+            2.0
+        );
     }
 
     #[test]
