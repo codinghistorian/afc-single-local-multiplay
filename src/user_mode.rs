@@ -2084,8 +2084,9 @@ pub fn setup_user_mode_ui(
                         },
                         ImageNode::new(asset_server.load(USER_MODE_GAME_LOGO_PATH))
                             .with_rect(Rect {
-                                min: Vec2::new(288.0, 96.0),
-                                max: Vec2::new(1248.0, 816.0),
+                                // Center the visible artwork over the menu-button column.
+                                min: Vec2::new(230.0, 96.0),
+                                max: Vec2::new(1190.0, 816.0),
                             })
                             .with_mode(NodeImageMode::Stretch),
                         Pickable::IGNORE,
