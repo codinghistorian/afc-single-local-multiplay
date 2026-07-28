@@ -2627,14 +2627,6 @@ pub fn setup_user_mode_ui(
                         TextShadow::default(),
                     ),
                     (
-                        Text::new("Choose what you want to configure."),
-                        TextFont {
-                            font_size: 19.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.7, 0.64)),
-                    ),
-                    (
                         Node {
                             width: Val::Percent(100.0),
                             flex_direction: FlexDirection::Row,
@@ -2649,14 +2641,6 @@ pub fn setup_user_mode_ui(
                             settings_icon_button(&asset_server, ControlsHubChoice::Keyboard),
                             settings_icon_button(&asset_server, ControlsHubChoice::Sound),
                         ],
-                    ),
-                    (
-                        Text::new("Left/Right choose  |  Confirm open  |  Back return"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
                     ),
                 ],
             ),
