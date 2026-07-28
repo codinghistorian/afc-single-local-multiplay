@@ -90,15 +90,15 @@ User Mode Local Multiplayer:
 - Join in P1-P4 order with Xbox A or any keyboard layout's Jump/Aim key; Xbox B leaves.
 - Xbox: Left stick/D-pad move; A jump; X light; Y heavy; B aim/grab; RT dash;
   LB guard; LT ultimate.
-- Open **Settings → Controls** to register or reorder local devices, remove or
-  clear assignments, inspect live controller inputs, test vibration, and edit or
-  restore all four keyboard layouts. Controller order is retained for the current
-  session; keyboard bindings and vibration preference persist between launches.
+- Open **Settings → Controls**. Controller opens registration; Keyboard edits or
+  restores all four layouts; Sound controls audio preferences.
+  Controller order is retained for the current session, while keyboard bindings
+  and audio preferences persist between launches.
 - P1: Arrow keys move; Z/X/C/V actions.
 - P2: A/D/W/S move; T/Y/U/I actions.
 - P3: F/H/R/G move; B/N/M/Comma actions.
 - P4: J/L/O/K move; 7/8/9/0 actions.
-- Key Settings exposes eight active actions across all four layouts and swaps duplicate assignments safely.
+- Key Settings shows one complete eight-action layout at a time and swaps duplicate assignments safely.
 
 Native Dev Hotkeys:
 - Shift+U: enter user mode from the dev setup screen.

@@ -27,10 +27,7 @@ use crate::control_settings::{
     ControlPreferences, ControllerDeviceInfo, ControllerFamily, controller_info,
     request_controller_rumble, save_control_preferences,
 };
-use crate::controller_haptics::{
-    ControllerHapticRequest, HapticPlaybackEvent, HapticPlaybackResult, HapticPurpose,
-    combat_preview_pattern, controller_test_pattern, queue_haptic_pattern,
-};
+use crate::controller_haptics::ControllerHapticRequest;
 use crate::game_state::{
     GameplayPauseOwner, GameplayPauseOwners, LocalSetup, MatchAnnouncements, MatchPhase,
     MatchState, reconcile_fighter_control_from_setup,
@@ -112,7 +109,6 @@ pub enum UserModeScreen {
     PlayerCountSelect,
     DeviceJoin,
     ControlsHub,
-    ControllerTest,
     KeySettings,
     SoundSettings,
     CharacterSelect,
@@ -226,13 +222,6 @@ enum ControllerSetupContext {
     Match,
     Settings,
     Tutorial,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ControllerSetupPhase {
-    #[default]
-    Normal,
-    Reorder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,7 +365,6 @@ pub(crate) enum UserModeUiAction {
     MainMenu(UserModeMainMenuChoice),
     PlayerCount(UserModePlayerCountChoice),
     ControlsHub(ControlsHubChoice),
-    OpenControllerSetup,
     SelectSoundChannel(SoundSettingsChannel),
     ToggleSoundChannel(SoundSettingsChannel),
     AdjustSoundChannel(SoundSettingsChannel, SoundVolumeStep),
@@ -387,13 +375,8 @@ pub(crate) enum UserModeUiAction {
     Confirm,
     Back,
     ControllerSetupReady,
-    ControllerSetupChangeOrder,
     ControllerSetupClear,
     ControllerSetupRemoveSeat(usize),
-    ToggleVibration,
-    ToggleHapticStyle,
-    TestVibration,
-    TestCombatHaptics,
     ResetKeys,
     ConfirmKeyReset,
     CancelKeyReset,
@@ -455,14 +438,9 @@ pub struct UserModeState {
     controls_hub_choice: ControlsHubChoice,
     sound_settings_channel: SoundSettingsChannel,
     controller_setup_context: ControllerSetupContext,
-    controller_setup_phase: ControllerSetupPhase,
-    controller_setup_snapshot: [LocalInputAssignment; FIGHTER_COUNT],
     controller_setup_action_cursor: usize,
     controller_setup_input_latched: bool,
     controller_setup_clear_confirmation: bool,
-    controller_test_cursor: usize,
-    controller_test_active: Option<Entity>,
-    controller_test_back_hold: f32,
     key_reset_confirmation: bool,
     controls_briefing_seen: bool,
     battle_music_pending: bool,
@@ -802,14 +780,9 @@ impl Default for UserModeState {
             controls_hub_choice: ControlsHubChoice::Controller,
             sound_settings_channel: SoundSettingsChannel::BackgroundMusic,
             controller_setup_context: ControllerSetupContext::Match,
-            controller_setup_phase: ControllerSetupPhase::Normal,
-            controller_setup_snapshot: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
-            controller_setup_action_cursor: 2,
+            controller_setup_action_cursor: 1,
             controller_setup_input_latched: false,
             controller_setup_clear_confirmation: false,
-            controller_test_cursor: 0,
-            controller_test_active: None,
-            controller_test_back_hold: 0.0,
             key_reset_confirmation: false,
             controls_briefing_seen: false,
             battle_music_pending: false,
@@ -956,14 +929,9 @@ impl UserModeState {
         self.controls_hub_choice = ControlsHubChoice::Controller;
         self.sound_settings_channel = SoundSettingsChannel::BackgroundMusic;
         self.controller_setup_context = ControllerSetupContext::Match;
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_snapshot = [LocalInputAssignment::Unassigned; FIGHTER_COUNT];
-        self.controller_setup_action_cursor = 2;
+        self.controller_setup_action_cursor = 1;
         self.controller_setup_input_latched = false;
         self.controller_setup_clear_confirmation = false;
-        self.controller_test_cursor = 0;
-        self.controller_test_active = None;
-        self.controller_test_back_hold = 0.0;
         self.key_reset_confirmation = false;
         self.controls_briefing_seen = false;
         self.clear_battle_state();
@@ -994,9 +962,7 @@ impl UserModeState {
     fn enter_device_join(&mut self) {
         self.screen = UserModeScreen::DeviceJoin;
         self.controller_setup_context = ControllerSetupContext::Match;
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_snapshot = self.input_assignments;
-        self.controller_setup_action_cursor = 2;
+        self.controller_setup_action_cursor = 1;
         self.controller_setup_input_latched = false;
         self.controller_setup_clear_confirmation = false;
         self.character_ready = [false; FIGHTER_COUNT];
@@ -1009,9 +975,7 @@ impl UserModeState {
         self.screen = UserModeScreen::DeviceJoin;
         self.play_mode = UserPlayMode::SinglePlayer;
         self.controller_setup_context = ControllerSetupContext::Tutorial;
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_snapshot = self.input_assignments;
-        self.controller_setup_action_cursor = 2;
+        self.controller_setup_action_cursor = 1;
         self.controller_setup_input_latched = false;
         self.controller_setup_clear_confirmation = false;
         self.character_ready = [false; FIGHTER_COUNT];
@@ -1023,9 +987,7 @@ impl UserModeState {
     fn enter_settings_device_join(&mut self) {
         self.screen = UserModeScreen::DeviceJoin;
         self.controller_setup_context = ControllerSetupContext::Settings;
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_snapshot = self.input_assignments;
-        self.controller_setup_action_cursor = 2;
+        self.controller_setup_action_cursor = 1;
         self.controller_setup_input_latched = false;
         self.controller_setup_clear_confirmation = false;
         self.key_capture = None;
@@ -1036,17 +998,6 @@ impl UserModeState {
         self.screen = UserModeScreen::ControlsHub;
         self.key_capture = None;
         self.key_reset_confirmation = false;
-        self.controller_test_active = None;
-        self.controller_test_back_hold = 0.0;
-        self.clear_battle_state();
-    }
-
-    fn enter_controller_test(&mut self) {
-        self.screen = UserModeScreen::ControllerTest;
-        self.controller_test_cursor = 0;
-        self.controller_test_active = None;
-        self.controller_test_back_hold = 0.0;
-        self.key_capture = None;
         self.clear_battle_state();
     }
 
@@ -1254,35 +1205,10 @@ impl UserModeState {
         Some(removed)
     }
 
-    fn begin_controller_reorder(&mut self) {
-        if self.controller_setup_phase == ControllerSetupPhase::Reorder {
-            return;
-        }
-        self.controller_setup_snapshot = self.input_assignments;
-        self.clear_input_assignments();
-        self.controller_setup_phase = ControllerSetupPhase::Reorder;
-        self.controller_setup_input_latched = true;
-        self.controller_setup_clear_confirmation = false;
-    }
-
-    fn finish_controller_reorder(&mut self) {
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_snapshot = self.input_assignments;
-        self.controller_setup_clear_confirmation = false;
-    }
-
-    fn cancel_controller_reorder(&mut self) {
-        self.input_assignments = self.controller_setup_snapshot;
-        self.controller_setup_phase = ControllerSetupPhase::Normal;
-        self.controller_setup_input_latched = false;
-        self.controller_setup_clear_confirmation = false;
-    }
-
     fn arm_or_confirm_clear_assignments(&mut self) -> bool {
         if self.controller_setup_clear_confirmation {
             self.clear_input_assignments();
             self.controller_setup_clear_confirmation = false;
-            self.controller_setup_snapshot = self.input_assignments;
             true
         } else {
             self.controller_setup_clear_confirmation = true;
@@ -1292,13 +1218,12 @@ impl UserModeState {
 
     fn move_controller_setup_action(&mut self, direction: isize) {
         self.controller_setup_action_cursor =
-            (self.controller_setup_action_cursor as isize + direction).rem_euclid(3) as usize;
+            (self.controller_setup_action_cursor as isize + direction).rem_euclid(2) as usize;
     }
 
     fn selected_controller_setup_action(&self) -> UserModeUiAction {
         match self.controller_setup_action_cursor {
-            0 => UserModeUiAction::ControllerSetupChangeOrder,
-            1 => UserModeUiAction::ControllerSetupClear,
+            0 => UserModeUiAction::ControllerSetupClear,
             _ => UserModeUiAction::ControllerSetupReady,
         }
     }
@@ -1403,10 +1328,6 @@ fn route_user_mode_action(
                 user_mode.controller_setup_clear_confirmation = false;
                 return UserModeRoute::None;
             }
-            if user_mode.controller_setup_phase == ControllerSetupPhase::Reorder {
-                user_mode.cancel_controller_reorder();
-                return UserModeRoute::None;
-            }
         }
         return match user_mode.screen {
             UserModeScreen::ModeSelect => {
@@ -1423,9 +1344,7 @@ fn route_user_mode_action(
                 user_mode.enter_mode_select();
                 UserModeRoute::None
             }
-            UserModeScreen::ControllerTest
-            | UserModeScreen::KeySettings
-            | UserModeScreen::SoundSettings => {
+            UserModeScreen::KeySettings | UserModeScreen::SoundSettings => {
                 user_mode.enter_controls_hub();
                 UserModeRoute::None
             }
@@ -1499,7 +1418,7 @@ fn route_user_mode_action(
         (UserModeScreen::ControlsHub, UserModeUiAction::ControlsHub(choice)) => {
             user_mode.controls_hub_choice = choice;
             match choice {
-                ControlsHubChoice::Controller => user_mode.enter_controller_test(),
+                ControlsHubChoice::Controller => user_mode.enter_settings_device_join(),
                 ControlsHubChoice::Keyboard => user_mode.enter_key_settings(),
                 ControlsHubChoice::Sound => user_mode.enter_sound_settings(),
             }
@@ -1515,7 +1434,7 @@ fn route_user_mode_action(
         }
         (UserModeScreen::ControlsHub, UserModeUiAction::Confirm) => {
             match user_mode.controls_hub_choice {
-                ControlsHubChoice::Controller => user_mode.enter_controller_test(),
+                ControlsHubChoice::Controller => user_mode.enter_settings_device_join(),
                 ControlsHubChoice::Keyboard => user_mode.enter_key_settings(),
                 ControlsHubChoice::Sound => user_mode.enter_sound_settings(),
             }
@@ -1536,10 +1455,6 @@ fn route_user_mode_action(
             | UserModeUiAction::AdjustSoundChannel(channel, _),
         ) => {
             user_mode.sound_settings_channel = channel;
-            UserModeRoute::None
-        }
-        (UserModeScreen::ControllerTest, UserModeUiAction::OpenControllerSetup) => {
-            user_mode.enter_settings_device_join();
             UserModeRoute::None
         }
         (UserModeScreen::CharacterSelect, UserModeUiAction::Previous) => {
@@ -1637,8 +1552,7 @@ fn user_mode_action_requires_transition(
         if user_mode.key_capture.is_some()
             || user_mode.key_reset_confirmation
             || (user_mode.screen == UserModeScreen::DeviceJoin
-                && (user_mode.controller_setup_clear_confirmation
-                    || user_mode.controller_setup_phase == ControllerSetupPhase::Reorder))
+                && user_mode.controller_setup_clear_confirmation)
             || (user_mode.screen == UserModeScreen::CharacterSelect
                 && user_mode.character_select_player > 0)
         {
@@ -1652,7 +1566,6 @@ fn user_mode_action_requires_transition(
             UserModeScreen::PlayerCountSelect
                 | UserModeScreen::DeviceJoin
                 | UserModeScreen::ControlsHub
-                | UserModeScreen::ControllerTest
                 | UserModeScreen::KeySettings
                 | UserModeScreen::SoundSettings
                 | UserModeScreen::CharacterSelect
@@ -1677,7 +1590,6 @@ fn user_mode_action_requires_transition(
             true
         }
         (UserModeScreen::ControlsHub, UserModeUiAction::Confirm) => true,
-        (UserModeScreen::ControllerTest, UserModeUiAction::OpenControllerSetup) => true,
         (UserModeScreen::CharacterSelect, UserModeUiAction::Confirm) => {
             let current = user_mode
                 .character_select_player
@@ -1848,18 +1760,6 @@ pub(crate) struct UserModeSoundToggleText {
 pub(crate) struct UserModeSoundVolumeText {
     channel: SoundSettingsChannel,
 }
-
-#[derive(Component)]
-pub(crate) struct UserModeControllerTestPanel;
-
-#[derive(Component)]
-pub(crate) struct UserModeControllerTestText;
-
-#[derive(Component)]
-pub(crate) struct UserModeVibrationButtonText;
-
-#[derive(Component)]
-pub(crate) struct UserModeHapticStyleButtonText;
 
 #[derive(Component)]
 pub(crate) struct UserModeCharacterSelectPanel;
@@ -2717,13 +2617,6 @@ pub fn setup_user_mode_ui(
                             ..default()
                         },
                         children![
-                            user_mode_action_button(
-                                "CHANGE ORDER",
-                                UserModeUiAction::ControllerSetupChangeOrder,
-                                Val::Px(220.0),
-                                48.0,
-                                18.0,
-                            ),
                             (
                                 Button,
                                 UserModeUiAction::ControllerSetupClear,
@@ -3090,137 +2983,6 @@ pub fn setup_user_mode_ui(
                 ],
             ),
             (
-                UserModeControllerTestPanel,
-                Node {
-                    display: Display::None,
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(18.0),
-                    padding: UiRect::axes(Val::Px(48.0), Val::Px(28.0)),
-                    ..default()
-                },
-                Pickable::IGNORE,
-                children![
-                    (
-                        Text::new("CONTROLLER TEST"),
-                        TextFont {
-                            font_size: 42.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                        TextShadow::default(),
-                    ),
-                    (
-                        UserModeControllerTestText,
-                        Text::new("Connect a controller to inspect it."),
-                        TextFont {
-                            font_size: 19.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.9, 0.86, 0.76)),
-                        TextLayout::new_with_justify(Justify::Center),
-                    ),
-                    user_mode_action_button(
-                        "CONTROLLER SETUP",
-                        UserModeUiAction::OpenControllerSetup,
-                        Val::Px(230.0),
-                        48.0,
-                        18.0,
-                    ),
-                    (
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(12.0),
-                            ..default()
-                        },
-                        children![
-                            (
-                                Button,
-                                UserModeUiAction::ToggleVibration,
-                                Node {
-                                    width: Val::Px(230.0),
-                                    height: Val::Px(48.0),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    border: UiRect::all(Val::Px(2.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
-                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
-                                children![(
-                                    UserModeVibrationButtonText,
-                                    Text::new(""),
-                                    TextFont {
-                                        font_size: 18.0,
-                                        ..default()
-                                    },
-                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                                )],
-                            ),
-                            user_mode_action_button(
-                                "",
-                                UserModeUiAction::TestVibration,
-                                Val::Px(230.0),
-                                48.0,
-                                18.0,
-                            ),
-                        ],
-                    ),
-                    (
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(12.0),
-                            ..default()
-                        },
-                        children![
-                            (
-                                Button,
-                                UserModeUiAction::ToggleHapticStyle,
-                                Node {
-                                    width: Val::Px(230.0),
-                                    height: Val::Px(48.0),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    border: UiRect::all(Val::Px(2.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
-                                BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
-                                children![(
-                                    UserModeHapticStyleButtonText,
-                                    Text::new(""),
-                                    TextFont {
-                                        font_size: 18.0,
-                                        ..default()
-                                    },
-                                    TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                                )],
-                            ),
-                            user_mode_action_button(
-                                "",
-                                UserModeUiAction::TestCombatHaptics,
-                                Val::Px(230.0),
-                                48.0,
-                                18.0,
-                            ),
-                        ],
-                    ),
-                    (
-                        Text::new(
-                            "Left/Right choose device  |  Confirm inspect  |  Back return\nHardware test checks both motors; combat preview demonstrates release → block → heavy → ultimate",
-                        ),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
-                    ),
-                ],
-            ),
-            (
                 UserModeControlsPanel,
                 Node {
                     display: Display::None,
@@ -3533,142 +3295,6 @@ fn controller_setup_can_finish(
             .filter(|assignment| **assignment != LocalInputAssignment::Unassigned)
             .all(|assignment| controller_setup_assignment_connected(*assignment, gamepads)),
     }
-}
-
-fn connected_controller_entities(gamepads: &Query<(Entity, &Gamepad)>) -> Vec<Entity> {
-    let mut entities = gamepads
-        .iter()
-        .map(|(entity, _)| entity)
-        .collect::<Vec<_>>();
-    entities.sort_by_key(|entity| entity.to_bits());
-    entities
-}
-
-fn selected_controller_test_entity(
-    user_mode: &UserModeState,
-    gamepads: &Query<(Entity, &Gamepad)>,
-) -> Option<Entity> {
-    if let Some(active) = user_mode.controller_test_active
-        && gamepads.get(active).is_ok()
-    {
-        return Some(active);
-    }
-    let entities = connected_controller_entities(gamepads);
-    (!entities.is_empty()).then(|| entities[user_mode.controller_test_cursor % entities.len()])
-}
-
-fn move_controller_test_cursor(
-    user_mode: &mut UserModeState,
-    gamepads: &Query<(Entity, &Gamepad)>,
-    direction: isize,
-) {
-    let count = gamepads.iter().count();
-    if count == 0 {
-        user_mode.controller_test_cursor = 0;
-        return;
-    }
-    user_mode.controller_test_cursor =
-        (user_mode.controller_test_cursor as isize + direction).rem_euclid(count as isize) as usize;
-}
-
-fn controller_test_message(
-    user_mode: &UserModeState,
-    gamepads: &Query<(Entity, &Gamepad)>,
-    metadata: &Query<&ControllerDeviceInfo>,
-) -> String {
-    let entities = connected_controller_entities(gamepads);
-    let Some(entity) = selected_controller_test_entity(user_mode, gamepads) else {
-        return "NO CONTROLLERS DETECTED\n\nPair a controller in the operating system, then press its Confirm button.\nKeyboard and mouse remain available."
-            .to_string();
-    };
-    let Ok((_, gamepad)) = gamepads.get(entity) else {
-        return "The selected controller disconnected.\nChoose another connected controller."
-            .to_string();
-    };
-    let info = controller_info(entity, metadata);
-    let family = info.map(|info| info.family).unwrap_or_default();
-    let name = info
-        .map(|info| info.display_name.as_str())
-        .unwrap_or("Gamepad");
-    let assignment = user_mode
-        .input_assignments
-        .iter()
-        .position(|assignment| *assignment == LocalInputAssignment::Gamepad(entity))
-        .map(|seat| format!("Assigned to P{}", seat + 1))
-        .unwrap_or_else(|| "Unassigned".to_string());
-    let index = entities
-        .iter()
-        .position(|candidate| *candidate == entity)
-        .unwrap_or(0);
-    let haptic_connection_hint =
-        if cfg!(target_os = "macos") && family == crate::control_settings::ControllerFamily::Xbox {
-            "\nmacOS Xbox rumble: pair through Bluetooth; a USB cable may provide input only."
-        } else {
-            ""
-        };
-
-    if user_mode.controller_test_active.is_none() {
-        return format!(
-            "{} / {}  —  {} {}\n{}\n{}  |  HAPTICS {}{}\n\nPress {} to inspect every input.",
-            index + 1,
-            entities.len(),
-            family.display_name(),
-            name,
-            assignment,
-            if info.map(|info| info.connected).unwrap_or(true) {
-                "CONNECTED"
-            } else {
-                "DISCONNECTED"
-            },
-            info.map(|info| info.haptics.label())
-                .unwrap_or("SYSTEM DEPENDENT"),
-            haptic_connection_hint,
-            family.confirm_label(),
-        );
-    }
-
-    let pressed = GamepadButton::all()
-        .into_iter()
-        .filter(|button| gamepad.pressed(*button))
-        .map(|button| family.face_button_label(button))
-        .collect::<Vec<_>>();
-    let pressed = if pressed.is_empty() {
-        "None".to_string()
-    } else {
-        pressed.join("  ")
-    };
-    let left = gamepad.left_stick();
-    let right = gamepad.right_stick();
-    let left_trigger = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
-    let right_trigger = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
-    let movement_state = if left.length() >= 0.20 {
-        "ACTIVE"
-    } else {
-        "inside deadzone"
-    };
-    format!(
-        "{} — {}\n{}  |  HAPTICS {}{}\n\nPressed: {pressed}\nLeft stick  X {:+.2}  Y {:+.2}  — {movement_state}\nRight stick X {:+.2}  Y {:+.2}\n{} {:.2}   {} {:.2}\n\nGameplay face layout: {} Jump  |  {} Aim/Grab  |  {} Light  |  {} Heavy\nMovement deadzone: 0.20  |  D-Pad Left/Right: vibration  |  Up/Down: style\nStart: motor test  |  {}: combat preview  |  Hold {} for 0.75 seconds to finish.",
-        family.display_name(),
-        name,
-        assignment,
-        info.map(|info| info.haptics.label())
-            .unwrap_or("SYSTEM DEPENDENT"),
-        haptic_connection_hint,
-        left.x,
-        left.y,
-        right.x,
-        right.y,
-        family.face_button_label(GamepadButton::LeftTrigger2),
-        left_trigger,
-        family.face_button_label(GamepadButton::RightTrigger2),
-        right_trigger,
-        family.face_button_label(GamepadButton::South),
-        family.face_button_label(GamepadButton::East),
-        family.face_button_label(GamepadButton::West),
-        family.face_button_label(GamepadButton::North),
-        family.face_button_label(GamepadButton::West),
-        family.back_label(),
-    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4046,13 +3672,8 @@ pub fn handle_user_mode_input(
         match action {
             UserModeUiAction::ControllerSetupRemoveSeat(seat) => {
                 if user_mode.remove_assignment_at(seat).is_some() {
-                    user_mode.controller_setup_snapshot = user_mode.input_assignments;
                     announcements.show(format!("P{} assignment removed", seat + 1), 0.8);
                 }
-            }
-            UserModeUiAction::ControllerSetupChangeOrder => {
-                user_mode.begin_controller_reorder();
-                announcements.show("Confirm devices in the new P1-P4 order", 1.1);
             }
             UserModeUiAction::ControllerSetupClear => {
                 if user_mode.arm_or_confirm_clear_assignments() {
@@ -4066,9 +3687,6 @@ pub fn handle_user_mode_input(
                     announcements.show("Release Confirm, then choose Ready", 0.8);
                 } else if !controller_setup_can_finish(&user_mode, &gamepads) {
                     announcements.show("Reconnect or remove every required controller", 1.1);
-                } else if user_mode.controller_setup_phase == ControllerSetupPhase::Reorder {
-                    user_mode.finish_controller_reorder();
-                    announcements.show("Player order saved", 0.9);
                 } else {
                     if let LocalInputAssignment::Gamepad(entity) = user_mode.input_assignments[0] {
                         let _ = request_controller_rumble(
@@ -4125,282 +3743,6 @@ pub fn handle_user_mode_input(
             );
             return;
         }
-    }
-
-    if user_mode.screen == UserModeScreen::ControllerTest {
-        if user_mode
-            .controller_test_active
-            .is_some_and(|entity| gamepads.get(entity).is_err())
-        {
-            user_mode.controller_test_active = None;
-            user_mode.controller_test_back_hold = 0.0;
-            announcements.show("Test controller disconnected", 0.9);
-        }
-
-        let toggle_vibration = pointer_action == Some(UserModeUiAction::ToggleVibration);
-        let toggle_haptic_style = pointer_action == Some(UserModeUiAction::ToggleHapticStyle);
-        let pointer_test = pointer_action == Some(UserModeUiAction::TestVibration);
-        let pointer_combat_test = pointer_action == Some(UserModeUiAction::TestCombatHaptics);
-        if pointer_action == Some(UserModeUiAction::OpenControllerSetup) {
-            request_user_mode_transition(
-                &mut game_transition,
-                &mut pause_owners,
-                UserModeTransitionAction::Route(UserModeUiAction::OpenControllerSetup),
-                GameTransitionReveal::Immediate,
-            );
-            return;
-        }
-        if toggle_vibration {
-            control_preferences.vibration = control_preferences.vibration.next();
-            if !control_preferences.vibration.enabled() {
-                for (gamepad, _) in &gamepads {
-                    rumble_requests.write(ControllerHapticRequest::stop(gamepad));
-                }
-            }
-            match save_control_preferences(&key_bindings, &control_preferences) {
-                Ok(()) => announcements.show(
-                    format!(
-                        "Controller vibration: {}",
-                        control_preferences.vibration.label()
-                    ),
-                    0.9,
-                ),
-                Err(error) => {
-                    warn!("Could not save control preferences: {error}");
-                    announcements.show("Vibration changed for this session; save failed", 1.2);
-                }
-            }
-            return;
-        }
-        if toggle_haptic_style {
-            control_preferences.haptic_style = control_preferences.haptic_style.next();
-            for (gamepad, _) in &gamepads {
-                rumble_requests.write(ControllerHapticRequest::stop(gamepad));
-            }
-            match save_control_preferences(&key_bindings, &control_preferences) {
-                Ok(()) => announcements.show(
-                    format!("Haptic style: {}", control_preferences.haptic_style.label()),
-                    0.9,
-                ),
-                Err(error) => {
-                    warn!("Could not save control preferences: {error}");
-                    announcements.show("Haptic style changed for this session; save failed", 1.2);
-                }
-            }
-            return;
-        }
-
-        if let Some(active) = user_mode.controller_test_active {
-            if keys.just_pressed(KeyCode::Escape) || pointer_action == Some(UserModeUiAction::Back)
-            {
-                user_mode.controller_test_active = None;
-                user_mode.controller_test_back_hold = 0.0;
-                return;
-            }
-            let Ok((_, gamepad)) = gamepads.get(active) else {
-                return;
-            };
-            let family = controller_info(active, &controller_metadata)
-                .map(|info| info.family)
-                .unwrap_or_default();
-            let vibration_direction = if gamepad.just_pressed(GamepadButton::DPadLeft) {
-                -1
-            } else if gamepad.just_pressed(GamepadButton::DPadRight) {
-                1
-            } else {
-                0
-            };
-            if vibration_direction != 0 {
-                control_preferences.vibration = if vibration_direction < 0 {
-                    control_preferences.vibration.previous()
-                } else {
-                    control_preferences.vibration.next()
-                };
-                if !control_preferences.vibration.enabled() {
-                    rumble_requests.write(ControllerHapticRequest::stop(active));
-                }
-                match save_control_preferences(&key_bindings, &control_preferences) {
-                    Ok(()) => announcements.show(
-                        format!("Vibration: {}", control_preferences.vibration.label()),
-                        0.75,
-                    ),
-                    Err(error) => {
-                        warn!("Could not save control preferences: {error}");
-                        announcements.show("Vibration changed; save failed", 1.0);
-                    }
-                }
-                return;
-            }
-            let style_direction = if gamepad.just_pressed(GamepadButton::DPadUp) {
-                -1
-            } else if gamepad.just_pressed(GamepadButton::DPadDown) {
-                1
-            } else {
-                0
-            };
-            if style_direction != 0 {
-                control_preferences.haptic_style = if style_direction < 0 {
-                    control_preferences.haptic_style.previous()
-                } else {
-                    control_preferences.haptic_style.next()
-                };
-                rumble_requests.write(ControllerHapticRequest::stop(active));
-                match save_control_preferences(&key_bindings, &control_preferences) {
-                    Ok(()) => announcements.show(
-                        format!("Haptic style: {}", control_preferences.haptic_style.label()),
-                        0.75,
-                    ),
-                    Err(error) => {
-                        warn!("Could not save control preferences: {error}");
-                        announcements.show("Haptic style changed; save failed", 1.0);
-                    }
-                }
-                return;
-            }
-            if gamepad.pressed(family.back_button()) {
-                user_mode.controller_test_back_hold += real_time.delta_secs();
-                if user_mode.controller_test_back_hold >= 0.75 {
-                    user_mode.controller_test_active = None;
-                    user_mode.controller_test_back_hold = 0.0;
-                    announcements.show("Controller test complete", 0.7);
-                    return;
-                }
-            } else {
-                user_mode.controller_test_back_hold = 0.0;
-            }
-            if pointer_test || gamepad.just_pressed(GamepadButton::Start) {
-                if queue_haptic_pattern(
-                    &mut rumble_requests,
-                    control_preferences.vibration,
-                    active,
-                    controller_test_pattern(),
-                    HapticPurpose::Test,
-                ) {
-                    announcements.show("Checking controller haptics…", 0.8);
-                } else {
-                    announcements.show("Choose Low, Standard, or High to test", 0.9);
-                }
-            } else if pointer_combat_test || gamepad.just_pressed(GamepadButton::West) {
-                if queue_haptic_pattern(
-                    &mut rumble_requests,
-                    control_preferences.vibration,
-                    active,
-                    combat_preview_pattern(control_preferences.haptic_style),
-                    HapticPurpose::Preview,
-                ) {
-                    announcements.show(
-                        format!(
-                            "{} combat preview",
-                            control_preferences.haptic_style.label()
-                        ),
-                        1.1,
-                    );
-                } else {
-                    announcements.show("Choose Low, Standard, or High to preview", 0.9);
-                }
-            }
-            return;
-        }
-
-        if let Some(pressed_entity) = gamepads.iter().find_map(|(entity, gamepad)| {
-            let family = controller_info(entity, &controller_metadata)
-                .map(|info| info.family)
-                .unwrap_or_default();
-            gamepad
-                .just_pressed(family.confirm_button())
-                .then_some(entity)
-        }) {
-            user_mode.controller_test_active = Some(pressed_entity);
-            user_mode.controller_test_back_hold = 0.0;
-            return;
-        }
-
-        let open_navigation = user_mode.input_assignments[0] == LocalInputAssignment::Unassigned;
-        let device_action = if open_navigation {
-            unassigned_gamepad_user_mode_action(
-                UserModeScreen::ControllerTest,
-                &gamepads,
-                &controller_metadata,
-                real_time.delta_secs(),
-                &mut menu_navigation.unassigned,
-            )
-        } else {
-            assignment_user_mode_action(
-                user_mode.input_assignments[0],
-                UserModeScreen::ControllerTest,
-                &keys,
-                &key_bindings,
-                &gamepads,
-                &controller_metadata,
-                real_time.delta_secs(),
-                &mut menu_navigation.seats[0],
-            )
-        };
-        let keyboard_action = open_navigation
-            .then(|| keyboard_user_mode_action(&user_mode, &keys))
-            .flatten();
-        match pointer_action.or(device_action).or(keyboard_action) {
-            Some(UserModeUiAction::Previous) => {
-                move_controller_test_cursor(&mut user_mode, &gamepads, -1)
-            }
-            Some(UserModeUiAction::Next) => {
-                move_controller_test_cursor(&mut user_mode, &gamepads, 1)
-            }
-            Some(UserModeUiAction::Confirm) => {
-                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
-                    user_mode.controller_test_active = Some(entity);
-                    user_mode.controller_test_back_hold = 0.0;
-                } else {
-                    announcements.show("No controller detected", 0.8);
-                }
-            }
-            Some(UserModeUiAction::TestVibration) => {
-                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
-                    if queue_haptic_pattern(
-                        &mut rumble_requests,
-                        control_preferences.vibration,
-                        entity,
-                        controller_test_pattern(),
-                        HapticPurpose::Test,
-                    ) {
-                        announcements.show("Checking controller haptics…", 0.8);
-                    } else {
-                        announcements.show("Choose Low, Standard, or High to test", 0.9);
-                    }
-                }
-            }
-            Some(UserModeUiAction::TestCombatHaptics) => {
-                if let Some(entity) = selected_controller_test_entity(&user_mode, &gamepads) {
-                    if queue_haptic_pattern(
-                        &mut rumble_requests,
-                        control_preferences.vibration,
-                        entity,
-                        combat_preview_pattern(control_preferences.haptic_style),
-                        HapticPurpose::Preview,
-                    ) {
-                        announcements.show(
-                            format!(
-                                "{} combat preview",
-                                control_preferences.haptic_style.label()
-                            ),
-                            1.1,
-                        );
-                    } else {
-                        announcements.show("Choose Low, Standard, or High to preview", 0.9);
-                    }
-                }
-            }
-            Some(UserModeUiAction::Back) => {
-                request_user_mode_transition(
-                    &mut game_transition,
-                    &mut pause_owners,
-                    UserModeTransitionAction::Route(UserModeUiAction::Back),
-                    GameTransitionReveal::Immediate,
-                );
-            }
-            _ => {}
-        }
-        return;
     }
 
     if user_mode.key_capture.is_some() {
@@ -4564,10 +3906,7 @@ pub fn handle_user_mode_input(
         UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect
     ) || (matches!(
         user_mode.screen,
-        UserModeScreen::ControlsHub
-            | UserModeScreen::ControllerTest
-            | UserModeScreen::KeySettings
-            | UserModeScreen::SoundSettings
+        UserModeScreen::ControlsHub | UserModeScreen::KeySettings | UserModeScreen::SoundSettings
     ) && user_mode.input_assignments[0]
         == LocalInputAssignment::Unassigned);
     let device_action = if before_device_join {
@@ -4865,47 +4204,6 @@ fn commit_user_mode_route(
     }
 }
 
-pub fn announce_haptic_test_results(
-    mut events: MessageReader<HapticPlaybackEvent>,
-    mut announcements: ResMut<MatchAnnouncements>,
-) {
-    for event in events.read() {
-        if !matches!(event.purpose, HapticPurpose::Test | HapticPurpose::Preview) {
-            continue;
-        }
-        match &event.result {
-            HapticPlaybackResult::Started => {
-                let message = match event.purpose {
-                    HapticPurpose::Test => "Testing: left motor → right motor → both",
-                    HapticPurpose::Preview => "Preview: release → block → heavy → ultimate",
-                    _ => unreachable!(),
-                };
-                announcements.show(message, 1.0);
-            }
-            HapticPlaybackResult::Completed => {
-                let message = if event.purpose == HapticPurpose::Preview {
-                    "Combat haptic preview complete"
-                } else if cfg!(target_os = "macos") {
-                    "Haptic command completed; if silent, reconnect the Xbox controller via Bluetooth"
-                } else {
-                    "Vibration test complete"
-                };
-                announcements.show(message, 1.6);
-            }
-            HapticPlaybackResult::Preempted => {
-                announcements.show("Haptic preview replaced by a newer cue", 0.75);
-            }
-            HapticPlaybackResult::Unsupported => {
-                announcements.show("This controller or connection has no haptics", 1.25);
-            }
-            HapticPlaybackResult::Failed(error) => {
-                warn!("Controller haptic playback failed: {error}");
-                announcements.show("Controller haptics failed; reconnect and retry", 1.25);
-            }
-        }
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 pub fn sync_web_battle_status(
     time: Res<Time<Real>>,
@@ -5015,7 +4313,6 @@ fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
             | UserModeScreen::PlayerCountSelect
             | UserModeScreen::DeviceJoin
             | UserModeScreen::ControlsHub
-            | UserModeScreen::ControllerTest
             | UserModeScreen::KeySettings
             | UserModeScreen::SoundSettings
             | UserModeScreen::CharacterSelect
@@ -5474,7 +4771,6 @@ pub fn update_user_mode_ui(
             Option<&UserModePlayerCountPanel>,
             Option<&UserModeControlsHubPanel>,
             Option<&UserModeDeviceJoinPanel>,
-            Option<&UserModeControllerTestPanel>,
             Option<&UserModeCharacterSelectPanel>,
             Option<&UserModeArenaSelectPanel>,
             Option<&UserModeKeySettingsPanel>,
@@ -5491,7 +4787,6 @@ pub fn update_user_mode_ui(
                 With<UserModePlayerCountPanel>,
                 With<UserModeControlsHubPanel>,
                 With<UserModeDeviceJoinPanel>,
-                With<UserModeControllerTestPanel>,
                 With<UserModeCharacterSelectPanel>,
                 With<UserModeArenaSelectPanel>,
                 With<UserModeKeySettingsPanel>,
@@ -5594,7 +4889,6 @@ pub fn update_user_mode_ui(
         UserModeScreen::PlayerCountSelect
             | UserModeScreen::DeviceJoin
             | UserModeScreen::ControlsHub
-            | UserModeScreen::ControllerTest
             | UserModeScreen::SoundSettings
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
@@ -5616,7 +4910,6 @@ pub fn update_user_mode_ui(
         player_count,
         hub,
         join,
-        test,
         character,
         arena,
         keys,
@@ -5629,7 +4922,6 @@ pub fn update_user_mode_ui(
             || (player_count.is_some() && user_mode.screen() == UserModeScreen::PlayerCountSelect)
             || (hub.is_some() && user_mode.screen() == UserModeScreen::ControlsHub)
             || (join.is_some() && user_mode.screen() == UserModeScreen::DeviceJoin)
-            || (test.is_some() && user_mode.screen() == UserModeScreen::ControllerTest)
             || (character.is_some() && user_mode.screen() == UserModeScreen::CharacterSelect)
             || (arena.is_some() && user_mode.screen() == UserModeScreen::ArenaSelect)
             || (keys.is_some() && key_settings_visible)
@@ -5646,26 +4938,18 @@ pub fn update_user_mode_ui(
         **text = device_join_message(&user_mode, &bindings, &gamepads, &controller_metadata);
     }
     for mut text in &mut join_title_texts {
-        **text = match (
-            user_mode.controller_setup_context,
-            user_mode.controller_setup_phase,
-        ) {
-            (_, ControllerSetupPhase::Reorder) => "CHANGE PLAYER ORDER",
-            (ControllerSetupContext::Settings, _) => "CONTROLLER SETUP",
-            (ControllerSetupContext::Match, _) => "READY YOUR FIGHTERS",
-            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
+        **text = match user_mode.controller_setup_context {
+            ControllerSetupContext::Settings => "CONTROLLER SETUP",
+            ControllerSetupContext::Match => "READY YOUR FIGHTERS",
+            ControllerSetupContext::Tutorial => "READY TO TRAIN",
         }
         .to_string();
     }
     for mut text in &mut join_ready_texts {
-        **text = match (
-            user_mode.controller_setup_context,
-            user_mode.controller_setup_phase,
-        ) {
-            (_, ControllerSetupPhase::Reorder) => "SAVE ORDER",
-            (ControllerSetupContext::Settings, _) => "DONE",
-            (ControllerSetupContext::Match, _) => "READY",
-            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
+        **text = match user_mode.controller_setup_context {
+            ControllerSetupContext::Settings => "DONE",
+            ControllerSetupContext::Match => "READY",
+            ControllerSetupContext::Tutorial => "READY TO TRAIN",
         }
         .to_string();
     }
@@ -5739,9 +5023,7 @@ fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction
             user_mode.screen == UserModeScreen::SoundSettings
                 && user_mode.sound_settings_channel == channel
         }
-        UserModeUiAction::ControllerSetupChangeOrder
-        | UserModeUiAction::ControllerSetupClear
-        | UserModeUiAction::ControllerSetupReady => {
+        UserModeUiAction::ControllerSetupClear | UserModeUiAction::ControllerSetupReady => {
             user_mode.screen == UserModeScreen::DeviceJoin
                 && user_mode.selected_controller_setup_action() == action
         }
@@ -5821,46 +5103,10 @@ pub fn update_user_mode_controls_ui(
     }
 }
 
-pub fn update_control_settings_ui(
+pub fn update_key_settings_ui(
     user_mode: Res<UserModeState>,
-    _preferences: Res<ControlPreferences>,
-    gamepads: Query<(Entity, &Gamepad)>,
-    metadata: Query<&ControllerDeviceInfo>,
-    mut test_texts: Query<
-        &mut Text,
-        (
-            With<UserModeControllerTestText>,
-            Without<UserModeVibrationButtonText>,
-        ),
-    >,
-    mut vibration_texts: Query<
-        &mut Text,
-        (
-            With<UserModeVibrationButtonText>,
-            Without<UserModeControllerTestText>,
-        ),
-    >,
-    mut haptic_style_texts: Query<
-        &mut Text,
-        (
-            With<UserModeHapticStyleButtonText>,
-            Without<UserModeControllerTestText>,
-            Without<UserModeVibrationButtonText>,
-        ),
-    >,
     mut reset_panels: Query<&mut Node, With<UserModeKeyResetPanel>>,
 ) {
-    if user_mode.screen() == UserModeScreen::ControllerTest {
-        for mut text in &mut test_texts {
-            **text = controller_test_message(&user_mode, &gamepads, &metadata);
-        }
-    }
-    for mut text in &mut vibration_texts {
-        **text = String::new();
-    }
-    for mut text in &mut haptic_style_texts {
-        **text = String::new();
-    }
     for mut node in &mut reset_panels {
         node.display = if user_mode.screen() == UserModeScreen::KeySettings
             && user_mode.key_reset_confirmation
@@ -5915,7 +5161,6 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::PlayerCountSelect
         | UserModeScreen::DeviceJoin
         | UserModeScreen::ControlsHub
-        | UserModeScreen::ControllerTest
         | UserModeScreen::KeySettings
         | UserModeScreen::SoundSettings
         | UserModeScreen::CharacterSelect
@@ -6032,7 +5277,6 @@ fn direction_to_user_mode_action(
             }
         }
         UserModeScreen::DeviceJoin
-        | UserModeScreen::ControllerTest
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
         | UserModeScreen::BattleResult => {
@@ -6196,7 +5440,6 @@ fn keyboard_user_mode_action(
             }
         }
         UserModeScreen::DeviceJoin
-        | UserModeScreen::ControllerTest
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect => {
             if select_previous_pressed(keys) {
@@ -6431,17 +5674,8 @@ fn device_join_message(
         })
         .collect::<Vec<_>>()
         .join("  |  ");
-    let status = match (
-        user_mode.controller_setup_context,
-        user_mode.controller_setup_phase,
-    ) {
-        (_, ControllerSetupPhase::Reorder) => {
-            format!(
-                "Choose devices in order — {} selected",
-                user_mode.joined_player_count()
-            )
-        }
-        (ControllerSetupContext::Settings, _) => format!(
+    let status = match user_mode.controller_setup_context {
+        ControllerSetupContext::Settings => format!(
             "{} session assignment{}",
             user_mode.joined_player_count(),
             if user_mode.joined_player_count() == 1 {
@@ -6450,13 +5684,13 @@ fn device_join_message(
                 "s"
             }
         ),
-        (ControllerSetupContext::Match, _) => {
+        ControllerSetupContext::Match => {
             format!(
                 "{} / {target} required players ready",
                 user_mode.joined_player_count()
             )
         }
-        (ControllerSetupContext::Tutorial, _) => {
+        ControllerSetupContext::Tutorial => {
             format!(
                 "{} / 1 trainee ready  |  progress is saved separately",
                 user_mode.joined_player_count()
@@ -8738,7 +7972,6 @@ mod tests {
             UserModeScreen::PlayerCountSelect,
             UserModeScreen::DeviceJoin,
             UserModeScreen::ControlsHub,
-            UserModeScreen::ControllerTest,
             UserModeScreen::KeySettings,
             UserModeScreen::SoundSettings,
             UserModeScreen::CharacterSelect,
@@ -8812,10 +8045,10 @@ mod tests {
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
 
-        user_mode.controls_hub_choice = ControlsHubChoice::Controller;
-        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
-        assert_eq!(user_mode.screen(), UserModeScreen::ControllerTest);
-        route_user_mode_action(&mut user_mode, UserModeUiAction::OpenControllerSetup);
+        route_user_mode_action(
+            &mut user_mode,
+            UserModeUiAction::ControlsHub(ControlsHubChoice::Controller),
+        );
         assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
         assert_eq!(
             user_mode.controller_setup_context,
@@ -8893,38 +8126,23 @@ mod tests {
     }
 
     #[test]
-    fn controller_reorder_cancel_restores_snapshot_and_save_commits_order() {
-        let original = [
-            LocalInputAssignment::Keyboard(0),
-            LocalInputAssignment::Keyboard(1),
-            LocalInputAssignment::Unassigned,
-            LocalInputAssignment::Unassigned,
-        ];
+    fn controller_setup_navigation_only_selects_clear_and_ready() {
         let mut user_mode = UserModeState::default();
-        user_mode.input_assignments = original;
         user_mode.enter_settings_device_join();
 
-        user_mode.begin_controller_reorder();
         assert_eq!(
-            user_mode.input_assignments,
-            [LocalInputAssignment::Unassigned; FIGHTER_COUNT]
+            user_mode.selected_controller_setup_action(),
+            UserModeUiAction::ControllerSetupReady
         );
-        user_mode.join_assignment(LocalInputAssignment::Keyboard(3));
-        user_mode.cancel_controller_reorder();
-        assert_eq!(user_mode.input_assignments, original);
-
-        user_mode.begin_controller_reorder();
-        user_mode.join_assignment(LocalInputAssignment::Keyboard(1));
-        user_mode.join_assignment(LocalInputAssignment::Keyboard(0));
-        user_mode.finish_controller_reorder();
+        user_mode.move_controller_setup_action(-1);
         assert_eq!(
-            user_mode.input_assignments,
-            [
-                LocalInputAssignment::Keyboard(1),
-                LocalInputAssignment::Keyboard(0),
-                LocalInputAssignment::Unassigned,
-                LocalInputAssignment::Unassigned,
-            ]
+            user_mode.selected_controller_setup_action(),
+            UserModeUiAction::ControllerSetupClear
+        );
+        user_mode.move_controller_setup_action(-1);
+        assert_eq!(
+            user_mode.selected_controller_setup_action(),
+            UserModeUiAction::ControllerSetupReady
         );
     }
 
@@ -8974,44 +8192,6 @@ mod tests {
             ),
             Some(UserModeUiAction::Back)
         );
-    }
-
-    #[test]
-    fn controller_test_copy_uses_live_family_buttons_and_deadzone() {
-        use bevy::ecs::system::SystemState;
-
-        let mut world = World::new();
-        let mut gamepad = Gamepad::default();
-        gamepad.digital_mut().press(GamepadButton::South);
-        let entity = world
-            .spawn((
-                gamepad,
-                ControllerDeviceInfo {
-                    display_name: "Switch Pro Controller".to_string(),
-                    family: ControllerFamily::Nintendo,
-                    vendor_id: Some(0x057e),
-                    product_id: None,
-                    connected: true,
-                    haptics: crate::controller_haptics::HapticAvailability::Supported,
-                },
-            ))
-            .id();
-        let mut user_mode = UserModeState::default();
-        user_mode.input_assignments[0] = LocalInputAssignment::Gamepad(entity);
-        user_mode.enter_controller_test();
-        user_mode.controller_test_active = Some(entity);
-
-        let mut system_state: SystemState<(
-            Query<(Entity, &Gamepad)>,
-            Query<&ControllerDeviceInfo>,
-        )> = SystemState::new(&mut world);
-        let (gamepads, metadata) = system_state.get(&world);
-        let message = controller_test_message(&user_mode, &gamepads, &metadata);
-
-        assert!(message.contains("Nintendo"));
-        assert!(message.contains("Pressed: B"));
-        assert!(message.contains("B Jump"));
-        assert!(message.contains("Movement deadzone: 0.20"));
     }
 
     #[test]

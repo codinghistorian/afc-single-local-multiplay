@@ -227,7 +227,6 @@ pub fn build_app() -> App {
                     .chain(),
                 combat_sfx::handle_sfx_preview_requests,
                 audio_settings::sync_audio_playback_gains,
-                user_mode::announce_haptic_test_results,
                 (
                     game_state::handle_global_input,
                     tutorial::observe_tutorial_objective,
@@ -444,7 +443,7 @@ pub fn build_app() -> App {
             Update,
             (
                 user_mode::update_user_mode_controls_ui,
-                user_mode::update_control_settings_ui,
+                user_mode::update_key_settings_ui,
                 user_mode::update_sound_settings_ui,
             )
                 .in_set(GameSet::Presentation),

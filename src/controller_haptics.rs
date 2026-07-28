@@ -51,60 +51,7 @@ pub enum HapticStyle {
     Cinematic,
 }
 
-impl HapticStyle {
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Minimal => Self::Competitive,
-            Self::Competitive => Self::Cinematic,
-            Self::Cinematic => Self::Minimal,
-        }
-    }
-
-    pub const fn previous(self) -> Self {
-        match self {
-            Self::Minimal => Self::Cinematic,
-            Self::Competitive => Self::Minimal,
-            Self::Cinematic => Self::Competitive,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Minimal => "MINIMAL",
-            Self::Competitive => "COMPETITIVE",
-            Self::Cinematic => "CINEMATIC",
-        }
-    }
-}
-
 impl VibrationLevel {
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Standard,
-            Self::Standard => Self::High,
-            Self::High => Self::Off,
-        }
-    }
-
-    pub const fn previous(self) -> Self {
-        match self {
-            Self::Off => Self::High,
-            Self::Low => Self::Off,
-            Self::Standard => Self::Low,
-            Self::High => Self::Standard,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Off => "OFF",
-            Self::Low => "LOW",
-            Self::Standard => "STANDARD",
-            Self::High => "HIGH",
-        }
-    }
-
     pub const fn magnitude_scale(self) -> f32 {
         match self {
             Self::Off => 0.0,
@@ -201,13 +148,6 @@ impl HapticPattern {
         Self { segments, priority }
     }
 
-    pub const fn sequence(
-        segments: [Option<HapticSegment>; MAX_HAPTIC_SEGMENTS],
-        priority: u8,
-    ) -> Self {
-        Self { segments, priority }
-    }
-
     pub const fn simple(strength: f32, duration_secs: f32, priority: u8) -> Self {
         let duration_ms = (duration_secs * 1000.0) as u16;
         Self::new(
@@ -250,38 +190,6 @@ impl HapticPattern {
             .map(|segment| segment.start_ms.saturating_add(segment.duration_ms))
             .max()
             .unwrap_or(0)
-    }
-}
-
-pub const fn controller_test_pattern() -> HapticPattern {
-    HapticPattern::new(
-        HapticSegment::continuous(0, 180, 1.0, 0.08),
-        Some(HapticSegment::continuous(300, 180, 0.08, 1.0)),
-        Some(HapticSegment::continuous(600, 360, 0.85, 0.85)),
-        100,
-    )
-}
-
-pub fn combat_preview_pattern(style: HapticStyle) -> HapticPattern {
-    let attack_release =
-        (style != HapticStyle::Minimal).then_some(HapticSegment::transient(0, 20, 0.04, 0.22));
-    let pattern = HapticPattern::sequence(
-        [
-            attack_release,
-            Some(HapticSegment::transient(260, 24, 0.04, 0.26)),
-            Some(HapticSegment::transient(520, 36, 0.18, 0.65)),
-            Some(HapticSegment::continuous(568, 42, 0.22, 0.12)),
-            Some(HapticSegment::transient(900, 30, 0.16, 0.55)),
-            Some(HapticSegment::continuous(945, 50, 0.42, 0.32)),
-            Some(HapticSegment::continuous(1005, 95, 0.68, 0.12)),
-            None,
-        ],
-        100,
-    );
-    if style == HapticStyle::Cinematic {
-        pattern.scaled_duration(1.18)
-    } else {
-        pattern
     }
 }
 
@@ -464,8 +372,6 @@ pub enum HapticPurpose {
     #[default]
     Gameplay,
     Join,
-    Test,
-    Preview,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1550,39 +1456,14 @@ mod tests {
     use crate::components::{ParticipantKind, PlayerSlotId};
 
     #[test]
-    fn vibration_levels_cycle_and_scale_without_changing_timing() {
-        assert_eq!(VibrationLevel::Off.next(), VibrationLevel::Low);
-        assert_eq!(VibrationLevel::High.next(), VibrationLevel::Off);
-        let standard = controller_test_pattern();
+    fn vibration_levels_scale_without_changing_timing() {
+        let standard = HapticPattern::simple(0.8, 0.24, 50);
         let low = standard.scaled(VibrationLevel::Low);
         let high = standard.scaled(VibrationLevel::High);
         assert_eq!(low.duration_ms(), standard.duration_ms());
         assert_eq!(high.duration_ms(), standard.duration_ms());
-        assert!((low.segments().next().unwrap().weak - 0.048).abs() < 0.001);
+        assert!((low.segments().next().unwrap().strong - 0.48).abs() < 0.001);
         assert!(high.segments().all(|segment| segment.strong <= 1.0));
-    }
-
-    #[test]
-    fn controller_test_pattern_is_short_and_three_stage() {
-        let pattern = controller_test_pattern();
-        assert_eq!(pattern.segments().count(), 3);
-        assert_eq!(pattern.duration_ms(), 960);
-        let segments: Vec<_> = pattern.segments().collect();
-        assert!(segments[0].strong > segments[0].weak);
-        assert!(segments[1].weak > segments[1].strong);
-        assert_eq!(segments[2].strong, segments[2].weak);
-    }
-
-    #[test]
-    fn haptic_styles_cycle_and_change_preview_density() {
-        assert_eq!(HapticStyle::Minimal.next(), HapticStyle::Competitive);
-        assert_eq!(HapticStyle::Minimal.previous(), HapticStyle::Cinematic);
-        let minimal = combat_preview_pattern(HapticStyle::Minimal);
-        let competitive = combat_preview_pattern(HapticStyle::Competitive);
-        let cinematic = combat_preview_pattern(HapticStyle::Cinematic);
-        assert_eq!(minimal.segments().count(), 6);
-        assert_eq!(competitive.segments().count(), 7);
-        assert!(cinematic.duration_ms() > competitive.duration_ms());
     }
 
     #[test]
