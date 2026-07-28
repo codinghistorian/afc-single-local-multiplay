@@ -6477,7 +6477,7 @@ fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
             capture.action.label()
         );
     }
-    "".to_string()
+    String::new()
 }
 
 fn key_settings_row_message(action: ControlAction, key: KeyCode, selected: bool) -> String {
