@@ -2546,14 +2546,6 @@ pub fn setup_user_mode_ui(
                         58.0,
                         24.0,
                     ),
-                    (
-                        Text::new("Up/Down or W/S choose  |  Enter confirm"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
-                    ),
                 ],
             ),
             (
