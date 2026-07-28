@@ -2649,26 +2649,8 @@ pub fn setup_user_mode_ui(
                         TextColor(Color::srgb(0.95, 0.86, 0.68)),
                         TextShadow::default(),
                     ),
-                    (
-                        Text::new("Tune music and effects independently."),
-                        TextFont {
-                            font_size: 19.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.7, 0.64)),
-                    ),
                     sound_settings_card(SoundSettingsChannel::BackgroundMusic),
                     sound_settings_card(SoundSettingsChannel::SoundEffects),
-                    (
-                        Text::new(
-                            "Up/Down choose  |  Left/Right volume  |  Confirm On/Off  |  Back return",
-                        ),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
-                    ),
                 ],
             ),
             (
