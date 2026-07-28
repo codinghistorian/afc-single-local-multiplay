@@ -6465,8 +6465,7 @@ fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
             capture.action.label()
         );
     }
-    "Up/Down row  |  Left/Right player  |  Confirm change  |  Menu/R restore defaults  |  Back"
-        .to_string()
+    "".to_string()
 }
 
 fn key_settings_row_message(action: ControlAction, key: KeyCode, selected: bool) -> String {
