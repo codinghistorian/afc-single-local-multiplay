@@ -3152,7 +3152,7 @@ pub fn setup_user_mode_ui(
                                 BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
                                 children![(
                                     UserModeVibrationButtonText,
-                                    Text::new("VIBRATION: STANDARD"),
+                                    Text::new(""),
                                     TextFont {
                                         font_size: 18.0,
                                         ..default()
@@ -3161,7 +3161,7 @@ pub fn setup_user_mode_ui(
                                 )],
                             ),
                             user_mode_action_button(
-                                "TEST VIBRATION",
+                                "",
                                 UserModeUiAction::TestVibration,
                                 Val::Px(230.0),
                                 48.0,
@@ -3191,7 +3191,7 @@ pub fn setup_user_mode_ui(
                                 BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
                                 children![(
                                     UserModeHapticStyleButtonText,
-                                    Text::new("STYLE: COMPETITIVE"),
+                                    Text::new(""),
                                     TextFont {
                                         font_size: 18.0,
                                         ..default()
@@ -3200,7 +3200,7 @@ pub fn setup_user_mode_ui(
                                 )],
                             ),
                             user_mode_action_button(
-                                "TEST COMBAT FEEL",
+                                "",
                                 UserModeUiAction::TestCombatHaptics,
                                 Val::Px(230.0),
                                 48.0,
@@ -5823,7 +5823,7 @@ pub fn update_user_mode_controls_ui(
 
 pub fn update_control_settings_ui(
     user_mode: Res<UserModeState>,
-    preferences: Res<ControlPreferences>,
+    _preferences: Res<ControlPreferences>,
     gamepads: Query<(Entity, &Gamepad)>,
     metadata: Query<&ControllerDeviceInfo>,
     mut test_texts: Query<
@@ -5856,10 +5856,10 @@ pub fn update_control_settings_ui(
         }
     }
     for mut text in &mut vibration_texts {
-        **text = format!("VIBRATION: {}", preferences.vibration.label());
+        **text = String::new();
     }
     for mut text in &mut haptic_style_texts {
-        **text = format!("STYLE: {}", preferences.haptic_style.label());
+        **text = String::new();
     }
     for mut node in &mut reset_panels {
         node.display = if user_mode.screen() == UserModeScreen::KeySettings
