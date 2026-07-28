@@ -29,6 +29,9 @@ use crate::game_state::{
     GameplayPauseOwner, GameplayPauseOwners, Hitstop, LocalSetup, MatchAnnouncements, MatchPhase,
     MatchState, MatchTelemetry,
 };
+use crate::game_transition::{
+    GameTransition, GameTransitionAction, GameTransitionReveal, request_game_transition,
+};
 use crate::items::{ArenaItem, ItemAssets, ItemKind, ItemState, item_scale};
 use crate::penguin_skills::{ActivePenguinSkill, ActivePenguinSurface};
 use crate::specials::{ActiveSpecial, SpecialKind};
@@ -1373,13 +1376,15 @@ pub enum TutorialPhase {
     FinalResult,
 }
 
-const TUTORIAL_FADE_OUT_SECONDS: f32 = 0.18;
-const TUTORIAL_FADE_HOLD_SECONDS: f32 = 0.06;
-const TUTORIAL_FADE_IN_SECONDS: f32 = 0.26;
 const TUTORIAL_SETTLE_STABLE_SECONDS: f32 = 0.18;
 const TUTORIAL_SUCCESS_REVEAL_SECONDS: f32 = 0.14;
 const TUTORIAL_SUCCESS_MIN_SECONDS: f32 = 0.25;
 const TUTORIAL_SUCCESS_AUTO_SECONDS: f32 = 1.1;
+
+fn tutorial_fade_ease(amount: f32) -> f32 {
+    let amount = amount.clamp(0.0, 1.0);
+    amount * amount * (3.0 - 2.0 * amount)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TutorialCompletionState {
@@ -1387,15 +1392,6 @@ pub enum TutorialCompletionState {
     Observing,
     Settling,
     Succeeded,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum TutorialTransitionStage {
-    #[default]
-    Idle,
-    FadingOut,
-    Covered,
-    FadingIn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1414,122 +1410,22 @@ pub(crate) enum TutorialTransitionAction {
     FinalSkipToHub,
 }
 
-#[derive(Resource, Clone, Debug)]
-pub struct TutorialTransition {
-    stage: TutorialTransitionStage,
-    elapsed: f32,
-    pending_action: Option<TutorialTransitionAction>,
-    wait_for_lesson_ready: bool,
-}
-
-impl Default for TutorialTransition {
-    fn default() -> Self {
-        Self {
-            stage: TutorialTransitionStage::Idle,
-            elapsed: 0.0,
-            pending_action: None,
-            wait_for_lesson_ready: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct TutorialTransitionAdvance {
-    action: Option<TutorialTransitionAction>,
-    finished: bool,
-}
-
-impl TutorialTransition {
-    pub(crate) fn active(&self) -> bool {
-        self.stage != TutorialTransitionStage::Idle
-    }
-
-    fn request(&mut self, action: TutorialTransitionAction) -> bool {
-        if self.active() {
-            return false;
-        }
-        self.stage = TutorialTransitionStage::FadingOut;
-        self.elapsed = 0.0;
-        self.pending_action = Some(action);
-        self.wait_for_lesson_ready = matches!(action, TutorialTransitionAction::StartChapter(_));
-        true
-    }
-
-    fn advance(&mut self, delta_seconds: f32, reveal_ready: bool) -> TutorialTransitionAdvance {
-        let delta_seconds = delta_seconds.max(0.0);
-        match self.stage {
-            TutorialTransitionStage::Idle => TutorialTransitionAdvance::default(),
-            TutorialTransitionStage::FadingOut => {
-                self.elapsed = (self.elapsed + delta_seconds).min(TUTORIAL_FADE_OUT_SECONDS);
-                if self.elapsed < TUTORIAL_FADE_OUT_SECONDS {
-                    return TutorialTransitionAdvance::default();
-                }
-                self.stage = TutorialTransitionStage::Covered;
-                self.elapsed = 0.0;
-                TutorialTransitionAdvance {
-                    action: self.pending_action.take(),
-                    finished: false,
-                }
-            }
-            TutorialTransitionStage::Covered => {
-                if self.wait_for_lesson_ready && !reveal_ready {
-                    return TutorialTransitionAdvance::default();
-                }
-                self.elapsed = (self.elapsed + delta_seconds).min(TUTORIAL_FADE_HOLD_SECONDS);
-                if self.elapsed >= TUTORIAL_FADE_HOLD_SECONDS {
-                    self.stage = TutorialTransitionStage::FadingIn;
-                    self.elapsed = 0.0;
-                    self.wait_for_lesson_ready = false;
-                }
-                TutorialTransitionAdvance::default()
-            }
-            TutorialTransitionStage::FadingIn => {
-                self.elapsed = (self.elapsed + delta_seconds).min(TUTORIAL_FADE_IN_SECONDS);
-                if self.elapsed < TUTORIAL_FADE_IN_SECONDS {
-                    return TutorialTransitionAdvance::default();
-                }
-                *self = Self::default();
-                TutorialTransitionAdvance {
-                    action: None,
-                    finished: true,
-                }
-            }
-        }
-    }
-
-    fn alpha(&self) -> f32 {
-        match self.stage {
-            TutorialTransitionStage::Idle => 0.0,
-            TutorialTransitionStage::FadingOut => {
-                tutorial_fade_ease(self.elapsed / TUTORIAL_FADE_OUT_SECONDS)
-            }
-            TutorialTransitionStage::Covered => 1.0,
-            TutorialTransitionStage::FadingIn => {
-                1.0 - tutorial_fade_ease(self.elapsed / TUTORIAL_FADE_IN_SECONDS)
-            }
-        }
-    }
-}
-
-fn tutorial_fade_ease(amount: f32) -> f32 {
-    let amount = amount.clamp(0.0, 1.0);
-    amount * amount * (3.0 - 2.0 * amount)
-}
-
 pub(crate) fn request_tutorial_transition(
-    transition: &mut TutorialTransition,
+    transition: &mut GameTransition,
     pause_owners: &mut GameplayPauseOwners,
     action: TutorialTransitionAction,
 ) -> bool {
-    let started = transition.request(action);
-    if started {
-        pause_owners.set(GameplayPauseOwner::TutorialTransition, true);
-    }
-    started
-}
-
-pub fn tutorial_transition_active(transition: Res<TutorialTransition>) -> bool {
-    transition.active()
+    let reveal = if matches!(action, TutorialTransitionAction::StartChapter(_)) {
+        GameTransitionReveal::TutorialLessonReady
+    } else {
+        GameTransitionReveal::Immediate
+    };
+    request_game_transition(
+        transition,
+        pause_owners,
+        GameTransitionAction::Tutorial(action),
+        reveal,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2255,7 +2151,7 @@ pub fn observe_tutorial_objective(
     state: Res<MatchState>,
     telemetry: Res<MatchTelemetry>,
     mut pause_owners: ResMut<GameplayPauseOwners>,
-    mut transition: ResMut<TutorialTransition>,
+    mut transition: ResMut<GameTransition>,
     fighters: Query<(
         &Fighter,
         &FighterInput,
@@ -2575,9 +2471,6 @@ pub(crate) struct TutorialFinalPanel;
 
 #[derive(Component)]
 pub(crate) struct TutorialResetPanel;
-
-#[derive(Component)]
-pub(crate) struct TutorialFadeOverlay;
 
 #[derive(Component)]
 pub(crate) struct TutorialHubSummaryText;
@@ -3182,24 +3075,6 @@ pub fn setup_tutorial_ui(mut commands: Commands, ui_cameras: Query<Entity, With<
             ],
         ));
 
-        root.spawn((
-            TutorialFadeOverlay,
-            Node {
-                display: Display::None,
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            GlobalZIndex(1000),
-            BackgroundColor(Color::srgba(0.006, 0.006, 0.012, 0.0)),
-            Pickable {
-                should_block_lower: true,
-                is_hoverable: false,
-            },
-        ));
     });
 }
 
@@ -3220,18 +3095,11 @@ pub fn sync_tutorial_ui_camera(
 pub fn update_tutorial_ui(
     user_mode: Res<UserModeState>,
     session: Res<TutorialSession>,
-    transition: Res<TutorialTransition>,
+    transition: Res<GameTransition>,
     progress: Res<TutorialProgress>,
     bindings: Res<PlayerKeyBindings>,
     controller_metadata: Query<&ControllerDeviceInfo>,
-    mut roots: Query<
-        &mut Node,
-        (
-            With<TutorialUiRoot>,
-            Without<Button>,
-            Without<TutorialFadeOverlay>,
-        ),
-    >,
+    mut roots: Query<&mut Node, (With<TutorialUiRoot>, Without<Button>)>,
     mut panels: Query<
         (
             &mut Node,
@@ -3246,7 +3114,6 @@ pub fn update_tutorial_ui(
         (
             Without<TutorialUiRoot>,
             Without<Button>,
-            Without<TutorialFadeOverlay>,
             Without<TutorialSuccessPanel>,
             Or<(
                 With<TutorialHubPanel>,
@@ -3265,7 +3132,6 @@ pub fn update_tutorial_ui(
             With<TutorialSuccessPanel>,
             Without<TutorialUiRoot>,
             Without<Button>,
-            Without<TutorialFadeOverlay>,
         ),
     >,
     mut texts: Query<
@@ -3317,32 +3183,15 @@ pub fn update_tutorial_ui(
             Without<TutorialResetPanel>,
         ),
     >,
-    mut fade_overlays: Query<
-        (&mut Node, &mut BackgroundColor),
-        (
-            With<TutorialFadeOverlay>,
-            Without<TutorialUiRoot>,
-            Without<Button>,
-        ),
-    >,
 ) {
-    let tutorial_visible = user_mode.tutorial_screen_active() || transition.active();
+    let tutorial_visible = user_mode.tutorial_screen_active()
+        || (transition.active() && transition.targets_tutorial());
     for mut node in &mut roots {
         node.display = if tutorial_visible {
             Display::Flex
         } else {
             Display::None
         };
-    }
-
-    let fade_alpha = transition.alpha();
-    for (mut node, mut background) in &mut fade_overlays {
-        node.display = if transition.active() {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        *background = BackgroundColor(Color::srgba(0.006, 0.006, 0.012, fade_alpha));
     }
 
     for (mut node, hub, prompt, objective, pause, complete, final_result, reset) in &mut panels {
@@ -3894,7 +3743,7 @@ pub fn advance_tutorial_success(
     time: Res<Time<Real>>,
     mut session: ResMut<TutorialSession>,
     mut pause_owners: ResMut<GameplayPauseOwners>,
-    mut transition: ResMut<TutorialTransition>,
+    mut transition: ResMut<GameTransition>,
 ) {
     if session.phase != TutorialPhase::Success
         || transition.active()
@@ -3918,27 +3767,21 @@ fn tutorial_success_ready_for_confirm(session: &TutorialSession) -> bool {
         && session.success_elapsed >= TUTORIAL_SUCCESS_MIN_SECONDS
 }
 
-pub fn advance_tutorial_transition(
-    time: Res<Time<Real>>,
-    mut transition: ResMut<TutorialTransition>,
+pub fn commit_pending_tutorial_transition(
+    mut transition: ResMut<GameTransition>,
     mut context: TutorialInputContext,
 ) {
-    let reveal_ready = context.session.phase == TutorialPhase::Prompt;
-    let advance = transition.advance(time.delta_secs(), reveal_ready);
-    if let Some(action) = advance.action {
-        commit_tutorial_transition(action, &mut context);
-    }
-    if advance.finished {
-        context
-            .pause_owners
-            .set(GameplayPauseOwner::TutorialTransition, false);
-    }
+    let Some(GameTransitionAction::Tutorial(action)) = transition.pending_action().cloned() else {
+        return;
+    };
+    commit_tutorial_transition(action, &mut context);
+    transition.mark_committed();
 }
 
 pub fn handle_tutorial_input(
     devices: TutorialInputDevices,
     mut context: TutorialInputContext,
-    mut transition: ResMut<TutorialTransition>,
+    mut transition: ResMut<GameTransition>,
     mut navigation_latch: Local<TutorialNavigationLatch>,
 ) {
     if transition.active() {
@@ -4319,6 +4162,13 @@ mod tests {
             .advance_by(Duration::from_secs_f32(seconds));
     }
 
+    fn requested_tutorial_action(app: &App) -> Option<TutorialTransitionAction> {
+        match app.world().resource::<GameTransition>().action() {
+            Some(GameTransitionAction::Tutorial(action)) => Some(*action),
+            _ => None,
+        }
+    }
+
     fn item_objective_test_app(
         step_index: usize,
         kind: ItemKind,
@@ -4338,7 +4188,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let player = app
@@ -4607,7 +4457,7 @@ mod tests {
         owners.set(GameplayPauseOwner::TutorialPrompt, true);
         owners.set(GameplayPauseOwner::TutorialMenu, true);
         owners.set(GameplayPauseOwner::TutorialSuccess, true);
-        owners.set(GameplayPauseOwner::TutorialTransition, true);
+        owners.set(GameplayPauseOwner::GameTransition, true);
 
         owners.clear_tutorial_overlays();
 
@@ -4615,58 +4465,34 @@ mod tests {
         assert!(!owners.contains(GameplayPauseOwner::TutorialPrompt));
         assert!(!owners.contains(GameplayPauseOwner::TutorialMenu));
         assert!(!owners.contains(GameplayPauseOwner::TutorialSuccess));
-        assert!(owners.contains(GameplayPauseOwner::TutorialTransition));
-        owners.set(GameplayPauseOwner::TutorialTransition, false);
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+        owners.set(GameplayPauseOwner::GameTransition, false);
         assert!(owners.blocks_gameplay());
     }
 
     #[test]
-    fn tutorial_fade_changes_state_only_while_fully_covered() {
-        let mut transition = TutorialTransition::default();
-        assert!(transition.request(TutorialTransitionAction::BeginPlaying));
-        assert_eq!(transition.alpha(), 0.0);
+    fn tutorial_routes_use_the_global_transition_coordinator() {
+        let mut transition = GameTransition::default();
+        let mut owners = GameplayPauseOwners::default();
 
-        let halfway = transition.advance(TUTORIAL_FADE_OUT_SECONDS * 0.5, true);
-        assert_eq!(halfway.action, None);
-        assert!((transition.alpha() - 0.5).abs() < 0.001);
-
-        let covered = transition.advance(TUTORIAL_FADE_OUT_SECONDS * 0.5, true);
-        assert_eq!(covered.action, Some(TutorialTransitionAction::BeginPlaying));
-        assert_eq!(transition.stage, TutorialTransitionStage::Covered);
-        assert_eq!(transition.alpha(), 1.0);
-
-        transition.advance(TUTORIAL_FADE_HOLD_SECONDS, true);
-        assert_eq!(transition.stage, TutorialTransitionStage::FadingIn);
-        transition.advance(TUTORIAL_FADE_IN_SECONDS * 0.5, true);
-        assert!((transition.alpha() - 0.5).abs() < 0.001);
-
-        let finished = transition.advance(TUTORIAL_FADE_IN_SECONDS * 0.5, true);
-        assert!(finished.finished);
-        assert!(!transition.active());
-        assert_eq!(transition.alpha(), 0.0);
-    }
-
-    #[test]
-    fn tutorial_fade_ignores_repeat_requests_and_waits_for_lesson_setup() {
-        let mut transition = TutorialTransition::default();
-        assert!(transition.request(TutorialTransitionAction::StartChapter(
-            TutorialChapterId::Basics
-        )));
-        assert!(!transition.request(TutorialTransitionAction::LeaveTutorial));
-
-        let covered = transition.advance(TUTORIAL_FADE_OUT_SECONDS, false);
+        assert!(request_tutorial_transition(
+            &mut transition,
+            &mut owners,
+            TutorialTransitionAction::StartChapter(TutorialChapterId::Basics),
+        ));
         assert_eq!(
-            covered.action,
-            Some(TutorialTransitionAction::StartChapter(
-                TutorialChapterId::Basics
+            transition.action(),
+            Some(&GameTransitionAction::Tutorial(
+                TutorialTransitionAction::StartChapter(TutorialChapterId::Basics)
             ))
         );
-        transition.advance(TUTORIAL_FADE_HOLD_SECONDS * 2.0, false);
-        assert_eq!(transition.stage, TutorialTransitionStage::Covered);
-        assert_eq!(transition.alpha(), 1.0);
-
-        transition.advance(TUTORIAL_FADE_HOLD_SECONDS, true);
-        assert_eq!(transition.stage, TutorialTransitionStage::FadingIn);
+        assert!(transition.targets_tutorial());
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+        assert!(!request_tutorial_transition(
+            &mut transition,
+            &mut owners,
+            TutorialTransitionAction::LeaveTutorial,
+        ));
     }
 
     #[test]
@@ -4686,7 +4512,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(UserModeState::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
@@ -4718,10 +4544,7 @@ mod tests {
         assert_eq!(session.step_index, 1);
         assert_eq!(session.phase, TutorialPhase::Playing);
         assert_eq!(session.completion_state, TutorialCompletionState::Settling);
-        assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
-            None
-        );
+        assert_eq!(requested_tutorial_action(&app), None);
 
         app.world_mut()
             .entity_mut(player)
@@ -4756,7 +4579,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let player = app
@@ -4852,7 +4675,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let player = app
@@ -4946,7 +4769,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         let player = app
@@ -4978,10 +4801,7 @@ mod tests {
             app.world().resource::<TutorialSession>().completion_state,
             TutorialCompletionState::Settling
         );
-        assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
-            None
-        );
+        assert_eq!(requested_tutorial_action(&app), None);
 
         *app.world_mut()
             .entity_mut(player)
@@ -5133,7 +4953,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(telemetry)
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
         app.world_mut().spawn((
@@ -5208,16 +5028,13 @@ mod tests {
         owners.set(GameplayPauseOwner::TutorialSuccess, true);
         app.insert_resource(session)
             .insert_resource(owners)
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(Time::<Real>::default())
             .add_systems(Update, advance_tutorial_success);
 
         advance_real_time(&mut app, 0.9);
         app.update();
-        assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
-            None
-        );
+        assert_eq!(requested_tutorial_action(&app), None);
 
         app.world_mut()
             .resource_mut::<GameplayPauseOwners>()
@@ -5232,13 +5049,13 @@ mod tests {
         advance_real_time(&mut app, 0.21);
         app.update();
         assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
+            requested_tutorial_action(&app),
             Some(TutorialTransitionAction::AdvanceStep { skipped: false })
         );
         assert!(
             app.world()
                 .resource::<GameplayPauseOwners>()
-                .contains(GameplayPauseOwner::TutorialTransition)
+                .contains(GameplayPauseOwner::GameTransition)
         );
     }
 
@@ -5318,7 +5135,7 @@ mod tests {
             .insert_resource(state)
             .insert_resource(MatchTelemetry::default())
             .insert_resource(GameplayPauseOwners::default())
-            .insert_resource(TutorialTransition::default())
+            .insert_resource(GameTransition::default())
             .insert_resource(UserModeState::default())
             .insert_resource(Time::<()>::default())
             .add_systems(Update, observe_tutorial_objective);
@@ -5365,10 +5182,7 @@ mod tests {
             app.world().resource::<TutorialSession>().completion_state,
             TutorialCompletionState::Settling
         );
-        assert_eq!(
-            app.world().resource::<TutorialTransition>().pending_action,
-            None
-        );
+        assert_eq!(requested_tutorial_action(&app), None);
 
         {
             let mut entity = app.world_mut().entity_mut(player);

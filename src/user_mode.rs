@@ -33,7 +33,10 @@ use crate::game_state::{
     GameplayPauseOwner, GameplayPauseOwners, LocalSetup, MatchAnnouncements, MatchPhase,
     MatchState, reconcile_fighter_control_from_setup,
 };
-use crate::tutorial::{TutorialTransition, TutorialTransitionAction, request_tutorial_transition};
+use crate::game_transition::{
+    GameTransition, GameTransitionAction, GameTransitionReveal, request_game_transition,
+};
+use crate::tutorial::{TutorialTransitionAction, request_tutorial_transition};
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
 const USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS: f32 = 0.35;
@@ -336,6 +339,18 @@ enum UserModeRoute {
     ExitToDev,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UserModeTransitionAction {
+    EnterMainMenu {
+        reset_dev_state: bool,
+    },
+    Route(UserModeUiAction),
+    FinishControllerSetup,
+    ShowBattleResult,
+    #[cfg(target_arch = "wasm32")]
+    ApplyWebMatchConfig(WebMatchConfig),
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct UserModeState {
     screen: UserModeScreen,
@@ -364,6 +379,7 @@ pub struct UserModeState {
     battle_music_pending: bool,
     battle_bot_ai_pending: bool,
     battle_active: bool,
+    result_sequence_active: bool,
     result_elapsed: f32,
     result_menu_ready: bool,
     result_choice: UserModeResultChoice,
@@ -459,7 +475,8 @@ pub fn should_spawn_web_gameplay_scene() -> bool {
 pub fn mark_web_gameplay_scene_loaded() {}
 
 #[cfg(target_arch = "wasm32")]
-struct WebMatchConfig {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WebMatchConfig {
     play_mode: UserPlayMode,
     player_characters: [CharacterKind; FIGHTER_COUNT],
     arena_index: usize,
@@ -708,6 +725,7 @@ impl Default for UserModeState {
             battle_music_pending: false,
             battle_bot_ai_pending: false,
             battle_active: false,
+            result_sequence_active: false,
             result_elapsed: 0.0,
             result_menu_ready: false,
             result_choice: UserModeResultChoice::PlayAgain,
@@ -742,7 +760,10 @@ impl UserModeState {
     }
 
     pub fn blocks_dev_input(&self) -> bool {
-        self.active() || self.battle_music_pending || self.battle_active
+        self.active()
+            || self.battle_music_pending
+            || self.battle_active
+            || self.result_sequence_active
     }
 
     pub fn hides_dev_controls(&self) -> bool {
@@ -750,7 +771,7 @@ impl UserModeState {
     }
 
     pub fn shows_gameplay_hud(&self) -> bool {
-        !self.active()
+        (!self.active() && !self.result_sequence_active)
             || matches!(
                 self.screen,
                 UserModeScreen::TutorialLesson
@@ -763,6 +784,7 @@ impl UserModeState {
         !self.tutorial_screen_active()
             && (self.battle_active
                 || self.battle_music_pending
+                || self.result_sequence_active
                 || self.screen == UserModeScreen::ControlsBriefing
                 || self.screen == UserModeScreen::BattleResult)
     }
@@ -771,6 +793,7 @@ impl UserModeState {
         (self.play_mode == UserPlayMode::SinglePlayer
             && (self.battle_active
                 || self.battle_music_pending
+                || self.result_sequence_active
                 || self.screen == UserModeScreen::BattleResult))
             .then_some(USER_MODE_PLAYER_FIGHTER_ID)
     }
@@ -823,7 +846,9 @@ impl UserModeState {
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     pub fn blocks_practice_health_refill(&self) -> bool {
-        self.battle_active || self.screen == UserModeScreen::BattleResult
+        self.battle_active
+            || self.result_sequence_active
+            || self.screen == UserModeScreen::BattleResult
     }
 
     fn enter_fresh_mode_select(&mut self) {
@@ -975,8 +1000,8 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
-    fn enter_battle_result(&mut self, winner: Option<usize>) {
-        self.screen = UserModeScreen::BattleResult;
+    fn begin_battle_result_sequence(&mut self, winner: Option<usize>) {
+        self.result_sequence_active = true;
         self.result_elapsed = 0.0;
         self.result_menu_ready = false;
         self.result_choice = UserModeResultChoice::PlayAgain;
@@ -984,15 +1009,23 @@ impl UserModeState {
     }
 
     fn tick_battle_result(&mut self, dt: f32) -> bool {
-        if self.screen != UserModeScreen::BattleResult || self.result_menu_ready {
+        if !self.result_sequence_active || self.result_menu_ready {
             return false;
         }
         self.result_elapsed += dt;
-        if self.result_elapsed >= USER_MODE_RESULT_MENU_DELAY_SECS {
-            self.result_menu_ready = true;
-            return true;
-        }
-        false
+        self.result_elapsed >= USER_MODE_RESULT_MENU_DELAY_SECS
+    }
+
+    fn reveal_battle_result(&mut self) {
+        self.screen = UserModeScreen::BattleResult;
+        self.result_sequence_active = false;
+        self.result_menu_ready = true;
+    }
+
+    #[cfg(test)]
+    fn enter_battle_result(&mut self, winner: Option<usize>) {
+        self.begin_battle_result_sequence(winner);
+        self.screen = UserModeScreen::BattleResult;
     }
 
     fn toggle_result_choice(&mut self) {
@@ -1007,6 +1040,7 @@ impl UserModeState {
     }
 
     fn clear_result_state(&mut self) {
+        self.result_sequence_active = false;
         self.result_elapsed = 0.0;
         self.result_menu_ready = false;
         self.result_choice = UserModeResultChoice::PlayAgain;
@@ -1458,6 +1492,107 @@ fn route_user_mode_action(
         }
         _ => UserModeRoute::None,
     }
+}
+
+fn user_mode_action_requires_transition(
+    user_mode: &UserModeState,
+    action: UserModeUiAction,
+) -> bool {
+    if action == UserModeUiAction::Back {
+        if user_mode.key_capture.is_some()
+            || user_mode.key_reset_confirmation
+            || (user_mode.screen == UserModeScreen::DeviceJoin
+                && (user_mode.controller_setup_clear_confirmation
+                    || user_mode.controller_setup_phase == ControllerSetupPhase::Reorder))
+            || (user_mode.screen == UserModeScreen::CharacterSelect
+                && user_mode.character_select_player > 0)
+        {
+            return false;
+        }
+        if user_mode.screen == UserModeScreen::ModeSelect {
+            return cfg!(all(feature = "native", not(target_arch = "wasm32")));
+        }
+        return matches!(
+            user_mode.screen,
+            UserModeScreen::PlayerCountSelect
+                | UserModeScreen::DeviceJoin
+                | UserModeScreen::ControlsHub
+                | UserModeScreen::ControllerTest
+                | UserModeScreen::KeySettings
+                | UserModeScreen::CharacterSelect
+                | UserModeScreen::ArenaSelect
+                | UserModeScreen::ControlsBriefing
+        );
+    }
+
+    match (user_mode.screen, action) {
+        (UserModeScreen::ModeSelect, UserModeUiAction::MainMenu(_) | UserModeUiAction::Confirm)
+        | (
+            UserModeScreen::PlayerCountSelect,
+            UserModeUiAction::PlayerCount(_) | UserModeUiAction::Confirm,
+        )
+        | (
+            UserModeScreen::ControlsHub,
+            UserModeUiAction::ControlsHub(_) | UserModeUiAction::Confirm,
+        )
+        | (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
+        | (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm)
+        | (UserModeScreen::BattleResult, UserModeUiAction::Result(_) | UserModeUiAction::Confirm) => {
+            true
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::Confirm) => {
+            let current = user_mode
+                .character_select_player
+                .min(user_mode.play_mode.human_player_count() - 1);
+            user_mode
+                .character_ready
+                .iter()
+                .take(user_mode.play_mode.human_player_count())
+                .enumerate()
+                .all(|(player, ready)| *ready || player == current)
+        }
+        _ => false,
+    }
+}
+
+fn user_mode_route_reveal(
+    user_mode: &UserModeState,
+    action: UserModeUiAction,
+) -> GameTransitionReveal {
+    match (user_mode.screen, action) {
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
+            if user_mode.controls_briefing_seen =>
+        {
+            GameTransitionReveal::BattleReady
+        }
+        (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
+            GameTransitionReveal::BattleReady
+        }
+        (
+            UserModeScreen::BattleResult,
+            UserModeUiAction::Result(UserModeResultChoice::PlayAgain),
+        ) => GameTransitionReveal::BattleReady,
+        (UserModeScreen::BattleResult, UserModeUiAction::Confirm)
+            if user_mode.result_choice == UserModeResultChoice::PlayAgain =>
+        {
+            GameTransitionReveal::BattleReady
+        }
+        _ => GameTransitionReveal::Immediate,
+    }
+}
+
+fn request_user_mode_transition(
+    transition: &mut GameTransition,
+    pause_owners: &mut GameplayPauseOwners,
+    action: UserModeTransitionAction,
+    reveal: GameTransitionReveal,
+) -> bool {
+    request_game_transition(
+        transition,
+        pause_owners,
+        GameTransitionAction::UserMode(action),
+        reveal,
+    )
 }
 
 #[derive(Component)]
@@ -2084,8 +2219,9 @@ pub fn setup_user_mode_ui(
                         },
                         ImageNode::new(asset_server.load(USER_MODE_GAME_LOGO_PATH))
                             .with_rect(Rect {
-                                min: Vec2::new(288.0, 96.0),
-                                max: Vec2::new(1248.0, 816.0),
+                                // Center the visible artwork over the menu-button column.
+                                min: Vec2::new(230.0, 96.0),
+                                max: Vec2::new(1190.0, 816.0),
                             })
                             .with_mode(NodeImageMode::Stretch),
                         Pickable::IGNORE,
@@ -3249,6 +3385,12 @@ fn controller_test_message(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CharacterDeviceOutcome {
+    Immediate(UserModeRoute),
+    Transition(UserModeUiAction),
+}
+
 fn handle_character_device_actions(
     user_mode: &mut UserModeState,
     keys: &ButtonInput<KeyCode>,
@@ -3257,7 +3399,7 @@ fn handle_character_device_actions(
     metadata: &Query<&ControllerDeviceInfo>,
     dt: f32,
     trackers: &mut MenuNavigationTrackers,
-) -> Option<UserModeRoute> {
+) -> Option<CharacterDeviceOutcome> {
     let mut handled = false;
     for player in 0..user_mode.play_mode.human_player_count() {
         let assignment = user_mode.input_assignments[player];
@@ -3286,15 +3428,18 @@ fn handle_character_device_actions(
             continue;
         }
 
+        if user_mode_action_requires_transition(user_mode, action) {
+            return Some(CharacterDeviceOutcome::Transition(action));
+        }
         let route = route_user_mode_action(user_mode, action);
         if route == UserModeRoute::ArenaEntered || route == UserModeRoute::ControlsBack {
-            return Some(route);
+            return Some(CharacterDeviceOutcome::Immediate(route));
         }
         if user_mode.screen != UserModeScreen::CharacterSelect {
-            return Some(route);
+            return Some(CharacterDeviceOutcome::Immediate(route));
         }
     }
-    handled.then_some(UserModeRoute::None)
+    handled.then_some(CharacterDeviceOutcome::Immediate(UserModeRoute::None))
 }
 
 fn unassigned_gamepad_user_mode_action(
@@ -3324,29 +3469,22 @@ pub struct UserModeInputDevices<'w, 's> {
 }
 
 #[derive(SystemParam)]
-pub struct UserModeInputContext<'w, 's> {
-    asset_server: Res<'w, AssetServer>,
+pub struct UserModeInputContext<'w> {
     user_mode: ResMut<'w, UserModeState>,
     key_bindings: ResMut<'w, PlayerKeyBindings>,
     control_preferences: ResMut<'w, ControlPreferences>,
     rumble_requests: MessageWriter<'w, ControllerHapticRequest>,
-    setup: ResMut<'w, LocalSetup>,
-    state: ResMut<'w, MatchState>,
-    gameplay_scene: Res<'w, UserModeGameplayScene>,
     announcements: ResMut<'w, MatchAnnouncements>,
-    music: Query<'w, 's, Entity, With<UserModeMusic>>,
-    virtual_time: ResMut<'w, Time<Virtual>>,
-    screen_look: ResMut<'w, ScreenLook>,
-    screen_transition: ResMut<'w, ScreenLookTransition>,
     pause_owners: ResMut<'w, GameplayPauseOwners>,
-    tutorial_transition: ResMut<'w, TutorialTransition>,
+    game_transition: ResMut<'w, GameTransition>,
 }
 
 pub fn sync_main_menu_pointer_hover(
+    transition: Res<GameTransition>,
     mut user_mode: ResMut<UserModeState>,
     action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
 ) {
-    if user_mode.screen != UserModeScreen::ModeSelect {
+    if transition.active() || user_mode.screen != UserModeScreen::ModeSelect {
         return;
     }
 
@@ -3367,7 +3505,6 @@ pub fn handle_user_mode_input(
     devices: UserModeInputDevices,
     context: UserModeInputContext,
     mut menu_navigation: Local<MenuNavigationTrackers>,
-    mut commands: Commands,
 ) {
     let UserModeInputDevices {
         keys,
@@ -3378,24 +3515,16 @@ pub fn handle_user_mode_input(
         action_buttons,
     } = devices;
     let UserModeInputContext {
-        asset_server,
         mut user_mode,
         mut key_bindings,
         mut control_preferences,
         mut rumble_requests,
-        mut setup,
-        mut state,
-        gameplay_scene,
         mut announcements,
-        music,
-        mut virtual_time,
-        mut screen_look,
-        mut screen_transition,
         mut pause_owners,
-        mut tutorial_transition,
+        mut game_transition,
     } = context;
 
-    if tutorial_transition.active() {
+    if game_transition.active() {
         return;
     }
 
@@ -3411,8 +3540,14 @@ pub fn handle_user_mode_input(
                 gamepad.just_pressed(family.confirm_button())
             })
         {
-            user_mode.enter_fresh_mode_select();
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::EnterMainMenu {
+                    reset_dev_state: false,
+                },
+                GameTransitionReveal::Immediate,
+            );
         }
         return;
     }
@@ -3420,18 +3555,14 @@ pub fn handle_user_mode_input(
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     {
         if !user_mode.blocks_dev_input() && user_mode_pressed(&keys) {
-            stop_user_mode_music(&mut commands, &music);
-            reset_user_mode_presentation(
-                &mut virtual_time,
-                &mut screen_look,
-                &mut screen_transition,
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::EnterMainMenu {
+                    reset_dev_state: true,
+                },
+                GameTransitionReveal::Immediate,
             );
-            start_user_mode_menu_music(&mut commands, &asset_server);
-            user_mode.enter_fresh_mode_select();
-            if state.phase != MatchPhase::Setup {
-                state.return_to_setup();
-            }
-            announcements.show("", 0.0);
             return;
         }
     }
@@ -3468,9 +3599,16 @@ pub fn handle_user_mode_input(
         {
             if user_mode.controller_setup_context == ControllerSetupContext::Tutorial {
                 request_tutorial_transition(
-                    &mut tutorial_transition,
+                    &mut game_transition,
                     &mut pause_owners,
                     TutorialTransitionAction::LeaveTutorial,
+                );
+            } else if user_mode_action_requires_transition(&user_mode, UserModeUiAction::Back) {
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(UserModeUiAction::Back),
+                    GameTransitionReveal::Immediate,
                 );
             } else {
                 route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
@@ -3574,20 +3712,20 @@ pub fn handle_user_mode_input(
                         );
                     }
                     match user_mode.controller_setup_context {
-                        ControllerSetupContext::Settings => {
-                            user_mode.enter_controls_hub();
-                            announcements.show("Controller setup saved for this session", 1.0);
+                        ControllerSetupContext::Settings | ControllerSetupContext::Match => {
+                            request_user_mode_transition(
+                                &mut game_transition,
+                                &mut pause_owners,
+                                UserModeTransitionAction::FinishControllerSetup,
+                                GameTransitionReveal::Immediate,
+                            );
                         }
                         ControllerSetupContext::Tutorial => {
                             request_tutorial_transition(
-                                &mut tutorial_transition,
+                                &mut game_transition,
                                 &mut pause_owners,
                                 TutorialTransitionAction::EnterHub,
                             );
-                        }
-                        ControllerSetupContext::Match => {
-                            user_mode.enter_character_select();
-                            announcements.show("Choose your characters", 0.9);
                         }
                     }
                 }
@@ -3606,15 +3744,17 @@ pub fn handle_user_mode_input(
             | UserModeScreen::ArenaSelect
     ) {
         if let Some(config) = take_web_match_config() {
-            user_mode.play_mode = config.play_mode;
-            user_mode.player_characters = config.player_characters;
-            user_mode.arena_index = config.arena_index;
-            if let Some(bindings) = config.bindings {
-                *key_bindings = bindings;
-            }
-            stop_user_mode_music(&mut commands, &music);
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            let reveal = if user_mode.controls_briefing_seen {
+                GameTransitionReveal::BattleReady
+            } else {
+                GameTransitionReveal::Immediate
+            };
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::ApplyWebMatchConfig(config),
+                reveal,
+            );
             return;
         }
     }
@@ -3874,7 +4014,12 @@ pub fn handle_user_mode_input(
                 }
             }
             Some(UserModeUiAction::Back) => {
-                route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(UserModeUiAction::Back),
+                    GameTransitionReveal::Immediate,
+                );
             }
             _ => {}
         }
@@ -3993,7 +4138,7 @@ pub fn handle_user_mode_input(
     let web_start_requested = false;
 
     if pointer_action.is_none() && user_mode.screen == UserModeScreen::CharacterSelect {
-        if let Some(route) = handle_character_device_actions(
+        if let Some(outcome) = handle_character_device_actions(
             &mut user_mode,
             &keys,
             &key_bindings,
@@ -4002,6 +4147,19 @@ pub fn handle_user_mode_input(
             real_time.delta_secs(),
             &mut menu_navigation,
         ) {
+            if let CharacterDeviceOutcome::Transition(action) = outcome {
+                let reveal = user_mode_route_reveal(&user_mode, action);
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(action),
+                    reveal,
+                );
+                return;
+            }
+            let CharacterDeviceOutcome::Immediate(route) = outcome else {
+                unreachable!();
+            };
             if route == UserModeRoute::ArenaEntered {
                 set_active_arena_index(user_mode.arena_index);
                 announcements.show("Choose arena", 0.9);
@@ -4075,14 +4233,182 @@ pub fn handle_user_mode_input(
     if enters_tutorial {
         user_mode.main_menu_choice = UserModeMainMenuChoice::Tutorial;
         request_tutorial_transition(
-            &mut tutorial_transition,
+            &mut game_transition,
             &mut pause_owners,
             TutorialTransitionAction::EnterDeviceJoin,
         );
         return;
     }
 
+    if user_mode_action_requires_transition(&user_mode, action) {
+        let reveal = user_mode_route_reveal(&user_mode, action);
+        let started = request_user_mode_transition(
+            &mut game_transition,
+            &mut pause_owners,
+            UserModeTransitionAction::Route(action),
+            reveal,
+        );
+        #[cfg(target_arch = "wasm32")]
+        if started && web_start_requested {
+            clear_web_battle_start_signal();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = started;
+        return;
+    }
+
     let route = route_user_mode_action(&mut user_mode, action);
+    match route {
+        UserModeRoute::None => {}
+        UserModeRoute::CharacterPlayerAdvanced => announcements.show(
+            format!(
+                "P{} choose character",
+                user_mode.character_select_player + 1
+            ),
+            0.9,
+        ),
+        UserModeRoute::ArenaChanged => set_active_arena_index(user_mode.arena_index),
+        UserModeRoute::ArenaEntered
+        | UserModeRoute::PrepareMatch
+        | UserModeRoute::ConfirmBattle
+        | UserModeRoute::Replay
+        | UserModeRoute::ChooseCharacter
+        | UserModeRoute::ControlsBack
+        | UserModeRoute::ExitToDev => {
+            unreachable!("confirmed screen changes must be committed by GameTransition")
+        }
+    }
+}
+
+#[derive(SystemParam)]
+pub struct UserModeTransitionContext<'w, 's> {
+    asset_server: Res<'w, AssetServer>,
+    user_mode: ResMut<'w, UserModeState>,
+    #[cfg(target_arch = "wasm32")]
+    key_bindings: ResMut<'w, PlayerKeyBindings>,
+    setup: ResMut<'w, LocalSetup>,
+    state: ResMut<'w, MatchState>,
+    announcements: ResMut<'w, MatchAnnouncements>,
+    music: Query<'w, 's, Entity, With<UserModeMusic>>,
+    virtual_time: ResMut<'w, Time<Virtual>>,
+    screen_look: ResMut<'w, ScreenLook>,
+    screen_transition: ResMut<'w, ScreenLookTransition>,
+    feedback: ResMut<'w, HitEffects>,
+}
+
+pub fn commit_pending_user_mode_transition(
+    mut commands: Commands,
+    mut transition: ResMut<GameTransition>,
+    context: UserModeTransitionContext,
+) {
+    let Some(GameTransitionAction::UserMode(action)) = transition.pending_action().cloned() else {
+        return;
+    };
+    let UserModeTransitionContext {
+        asset_server,
+        mut user_mode,
+        #[cfg(target_arch = "wasm32")]
+        mut key_bindings,
+        mut setup,
+        mut state,
+        mut announcements,
+        music,
+        mut virtual_time,
+        mut screen_look,
+        mut screen_transition,
+        mut feedback,
+    } = context;
+
+    match action {
+        UserModeTransitionAction::EnterMainMenu { reset_dev_state } => {
+            stop_user_mode_music(&mut commands, &music);
+            if reset_dev_state {
+                reset_user_mode_presentation(
+                    &mut virtual_time,
+                    &mut screen_look,
+                    &mut screen_transition,
+                );
+                if state.phase != MatchPhase::Setup {
+                    state.return_to_setup();
+                }
+                announcements.show("", 0.0);
+            }
+            user_mode.enter_fresh_mode_select();
+            start_user_mode_menu_music(&mut commands, &asset_server);
+        }
+        UserModeTransitionAction::Route(action) => {
+            let route = route_user_mode_action(&mut user_mode, action);
+            commit_user_mode_route(
+                route,
+                &mut commands,
+                &asset_server,
+                &mut user_mode,
+                &mut setup,
+                &mut state,
+                &mut announcements,
+                &music,
+                &mut virtual_time,
+                &mut screen_look,
+                &mut screen_transition,
+            );
+        }
+        UserModeTransitionAction::FinishControllerSetup => {
+            match user_mode.controller_setup_context {
+                ControllerSetupContext::Settings => {
+                    user_mode.enter_controls_hub();
+                    announcements.show("Controller setup saved for this session", 1.0);
+                }
+                ControllerSetupContext::Match => {
+                    user_mode.enter_character_select();
+                    announcements.show("Choose your characters", 0.9);
+                }
+                ControllerSetupContext::Tutorial => {
+                    debug_assert!(false, "tutorial setup uses a tutorial transition action");
+                }
+            }
+        }
+        UserModeTransitionAction::ShowBattleResult => {
+            user_mode.reveal_battle_result();
+            virtual_time.set_relative_speed(1.0);
+            if let Some(kind) = result_sfx_kind(&user_mode) {
+                feedback.push_combat_sfx(CombatSfxCue::new(
+                    kind,
+                    Vec3::ZERO,
+                    USER_MODE_RESULT_SFX_PRIORITY,
+                ));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        UserModeTransitionAction::ApplyWebMatchConfig(config) => {
+            user_mode.play_mode = config.play_mode;
+            user_mode.player_characters = config.player_characters;
+            user_mode.arena_index = config.arena_index;
+            if let Some(bindings) = config.bindings {
+                *key_bindings = bindings;
+            }
+            stop_user_mode_music(&mut commands, &music);
+            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+        }
+    }
+
+    transition.mark_committed();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_user_mode_route(
+    route: UserModeRoute,
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    user_mode: &mut UserModeState,
+    setup: &mut LocalSetup,
+    state: &mut MatchState,
+    announcements: &mut MatchAnnouncements,
+    music: &Query<Entity, With<UserModeMusic>>,
+    virtual_time: &mut Time<Virtual>,
+    screen_look: &mut ScreenLook,
+    screen_transition: &mut ScreenLookTransition,
+) {
     match route {
         UserModeRoute::None => {}
         UserModeRoute::CharacterPlayerAdvanced => announcements.show(
@@ -4098,63 +4424,43 @@ pub fn handle_user_mode_input(
         }
         UserModeRoute::ArenaChanged => set_active_arena_index(user_mode.arena_index),
         UserModeRoute::PrepareMatch => {
-            stop_user_mode_music(&mut commands, &music);
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            stop_user_mode_music(commands, music);
+            let flow = prepare_user_mode_match(user_mode, setup, state);
+            announce_user_mode_match_flow(flow, setup, announcements);
         }
         UserModeRoute::ConfirmBattle => {
-            if gameplay_scene.ready_for_battle() {
-                #[cfg(target_arch = "wasm32")]
-                if web_start_requested {
-                    clear_web_battle_start_signal();
-                }
-                confirm_user_mode_match_start(&mut user_mode, &mut state);
-                announcements.show(
-                    format!(
-                        "Starting match as {}",
-                        character_label(setup.player_character())
-                    ),
-                    0.9,
-                );
-            } else {
-                announcements.show("Loading battle", 0.7);
-            }
+            confirm_user_mode_match_start(user_mode, state);
+            announcements.show(
+                format!(
+                    "Starting match as {}",
+                    character_label(setup.player_character())
+                ),
+                0.9,
+            );
         }
         UserModeRoute::Replay => {
-            reset_user_mode_presentation(
-                &mut virtual_time,
-                &mut screen_look,
-                &mut screen_transition,
-            );
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            reset_user_mode_presentation(virtual_time, screen_look, screen_transition);
+            let flow = prepare_user_mode_match(user_mode, setup, state);
+            announce_user_mode_match_flow(flow, setup, announcements);
         }
         UserModeRoute::ChooseCharacter => {
-            reset_user_mode_presentation(
-                &mut virtual_time,
-                &mut screen_look,
-                &mut screen_transition,
-            );
+            reset_user_mode_presentation(virtual_time, screen_look, screen_transition);
             state.return_to_setup();
-            stop_user_mode_music(&mut commands, &music);
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            stop_user_mode_music(commands, music);
+            start_user_mode_menu_music(commands, asset_server);
             announcements.show("", 0.0);
         }
         UserModeRoute::ControlsBack => {
             state.return_to_setup();
-            stop_user_mode_music(&mut commands, &music);
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            stop_user_mode_music(commands, music);
+            start_user_mode_menu_music(commands, asset_server);
             announcements.show("Choose arena", 0.8);
         }
         UserModeRoute::ExitToDev => {
             #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
             {
-                stop_user_mode_music(&mut commands, &music);
-                reset_user_mode_presentation(
-                    &mut virtual_time,
-                    &mut screen_look,
-                    &mut screen_transition,
-                );
+                stop_user_mode_music(commands, music);
+                reset_user_mode_presentation(virtual_time, screen_look, screen_transition);
                 user_mode.exit_to_dev();
                 announcements.show("Dev setup", 0.8);
             }
@@ -4205,7 +4511,7 @@ pub fn announce_haptic_test_results(
 
 #[cfg(target_arch = "wasm32")]
 pub fn sync_web_battle_status(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     user_mode: Res<UserModeState>,
     state: Res<MatchState>,
     mut scene: ResMut<UserModeGameplayScene>,
@@ -4245,17 +4551,19 @@ pub fn sync_user_mode_battle_result(
     time: Res<Time<Real>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut user_mode: ResMut<UserModeState>,
-    mut feedback: ResMut<HitEffects>,
     state: Res<MatchState>,
     mut screen_look: ResMut<ScreenLook>,
     mut screen_transition: ResMut<ScreenLookTransition>,
+    mut transition: ResMut<GameTransition>,
+    mut pause_owners: ResMut<GameplayPauseOwners>,
 ) {
     if user_mode.battle_active
         && state.phase == MatchPhase::Results
+        && !user_mode.result_sequence_active
         && user_mode.screen != UserModeScreen::BattleResult
         && !user_mode.tutorial_screen_active()
     {
-        user_mode.enter_battle_result(user_mode_result_winner(&state));
+        user_mode.begin_battle_result_sequence(user_mode_result_winner(&state));
         virtual_time.set_relative_speed(USER_MODE_DEATH_SLOW_MOTION_SCALE);
         begin_screen_look_transition(
             &mut screen_look,
@@ -4265,15 +4573,13 @@ pub fn sync_user_mode_battle_result(
         );
     }
 
-    if user_mode.tick_battle_result(time.delta_secs()) {
-        virtual_time.set_relative_speed(1.0);
-        if let Some(kind) = result_sfx_kind(&user_mode) {
-            feedback.push_combat_sfx(CombatSfxCue::new(
-                kind,
-                Vec3::ZERO,
-                USER_MODE_RESULT_SFX_PRIORITY,
-            ));
-        }
+    if user_mode.tick_battle_result(time.delta_secs()) && !transition.active() {
+        request_user_mode_transition(
+            &mut transition,
+            &mut pause_owners,
+            UserModeTransitionAction::ShowBattleResult,
+            GameTransitionReveal::Immediate,
+        );
     }
 }
 
@@ -6191,6 +6497,73 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_screen_change_waits_for_the_global_transition_commit() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        let mut transition = GameTransition::default();
+        let mut owners = GameplayPauseOwners::default();
+
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Next
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(
+            user_mode.main_menu_choice,
+            UserModeMainMenuChoice::Multiplayer
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        let action = UserModeTransitionAction::Route(UserModeUiAction::Confirm);
+        assert!(request_user_mode_transition(
+            &mut transition,
+            &mut owners,
+            action.clone(),
+            GameTransitionReveal::Immediate,
+        ));
+
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+        assert_eq!(
+            transition.action(),
+            Some(&GameTransitionAction::UserMode(action))
+        );
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+    }
+
+    #[test]
+    fn only_the_final_multiplayer_character_confirmation_fades() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_character_select();
+
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::CharacterPlayerAdvanced
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(user_mode.character_select_player, 1);
+
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Next
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+    }
+
+    #[test]
     fn main_menu_cycles_and_wraps_four_vertical_choices() {
         let choices = [
             UserModeMainMenuChoice::SinglePlayer,
@@ -6273,6 +6646,7 @@ mod tests {
         user_mode.enter_fresh_mode_select();
         let mut app = App::new();
         app.insert_resource(user_mode)
+            .insert_resource(GameTransition::default())
             .add_systems(Update, sync_main_menu_pointer_hover);
         app.world_mut().spawn((
             Interaction::Hovered,
@@ -7277,15 +7651,30 @@ mod tests {
     }
 
     #[test]
-    fn battle_result_menu_waits_for_death_cinematic() {
+    fn result_transition_starts_only_after_the_death_cinematic() {
         let mut user_mode = UserModeState::default();
-        user_mode.enter_battle_result(Some(USER_MODE_PLAYER_FIGHTER_ID));
+        let mut transition = GameTransition::default();
+        let mut owners = GameplayPauseOwners::default();
+        user_mode.begin_battle_result_sequence(Some(USER_MODE_PLAYER_FIGHTER_ID));
 
-        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
+        assert_eq!(user_mode.screen(), default_user_mode_screen());
         assert!(!user_mode.result_menu_ready);
         assert!(!user_mode.tick_battle_result(USER_MODE_RESULT_MENU_DELAY_SECS - 0.1));
-        assert!(!user_mode.result_menu_ready);
+        assert!(!transition.active());
         assert!(user_mode.tick_battle_result(0.1));
+
+        assert!(request_user_mode_transition(
+            &mut transition,
+            &mut owners,
+            UserModeTransitionAction::ShowBattleResult,
+            GameTransitionReveal::Immediate,
+        ));
+        assert_eq!(user_mode.screen(), default_user_mode_screen());
+        assert!(!user_mode.result_menu_ready);
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+
+        user_mode.reveal_battle_result();
+        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
         assert!(user_mode.result_menu_ready);
         assert_eq!(result_title_message(&user_mode), "YOU WIN");
     }
