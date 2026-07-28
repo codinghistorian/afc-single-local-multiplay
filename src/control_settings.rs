@@ -8,7 +8,8 @@ use crate::controller_haptics::{
     queue_simple_haptic,
 };
 
-const CONTROL_PREFERENCES_VERSION: u32 = 4;
+const CONTROL_PREFERENCES_VERSION: u32 = 5;
+pub(crate) const SOUND_VOLUME_STEP_PERCENT: u8 = 10;
 #[cfg(target_arch = "wasm32")]
 const CONTROL_PREFERENCES_STORAGE_KEY: &str = "animal-fighter-club.controls.v1";
 
@@ -223,10 +224,72 @@ pub fn controller_info<'a>(
     metadata.get(entity).ok()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioChannel {
+    Music,
+    SoundEffects,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AudioChannelPreference {
+    enabled: bool,
+    volume_percent: u8,
+}
+
+impl Default for AudioChannelPreference {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume_percent: 100,
+        }
+    }
+}
+
+impl AudioChannelPreference {
+    pub(crate) const fn new(enabled: bool, volume_percent: u8) -> Self {
+        Self {
+            enabled,
+            volume_percent,
+        }
+    }
+
+    pub(crate) const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) const fn volume_percent(self) -> u8 {
+        self.volume_percent
+    }
+
+    pub(crate) fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+    }
+
+    pub(crate) fn step(&mut self, direction: i8) {
+        let delta = i16::from(direction.signum()) * i16::from(SOUND_VOLUME_STEP_PERCENT);
+        self.volume_percent = (i16::from(self.volume_percent) + delta).clamp(0, 100) as u8;
+    }
+
+    pub(crate) fn gain(self) -> f32 {
+        let normalized = f32::from(self.volume_percent) / 100.0;
+        normalized * normalized
+    }
+
+    pub(crate) fn effective_gain(self) -> f32 {
+        if self.enabled { self.gain() } else { 0.0 }
+    }
+
+    const fn is_valid(self) -> bool {
+        self.volume_percent <= 100
+    }
+}
+
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct ControlPreferences {
     pub vibration: VibrationLevel,
     pub haptic_style: HapticStyle,
+    pub(crate) music: AudioChannelPreference,
+    pub(crate) sound_effects: AudioChannelPreference,
 }
 
 impl Default for ControlPreferences {
@@ -234,12 +297,42 @@ impl Default for ControlPreferences {
         Self {
             vibration: VibrationLevel::Standard,
             haptic_style: HapticStyle::Competitive,
+            music: AudioChannelPreference::default(),
+            sound_effects: AudioChannelPreference::default(),
+        }
+    }
+}
+
+impl ControlPreferences {
+    pub(crate) const fn audio(&self, channel: AudioChannel) -> AudioChannelPreference {
+        match channel {
+            AudioChannel::Music => self.music,
+            AudioChannel::SoundEffects => self.sound_effects,
+        }
+    }
+
+    pub(crate) fn audio_mut(&mut self, channel: AudioChannel) -> &mut AudioChannelPreference {
+        match channel {
+            AudioChannel::Music => &mut self.music,
+            AudioChannel::SoundEffects => &mut self.sound_effects,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredControlPreferences {
+    version: u32,
+    vibration: VibrationLevel,
+    haptic_style: HapticStyle,
+    music_enabled: bool,
+    music_volume_percent: u8,
+    sound_effects_enabled: bool,
+    sound_effects_volume_percent: u8,
+    key_bindings: PlayerKeyBindings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct VersionFourStoredControlPreferences {
     version: u32,
     vibration: VibrationLevel,
     haptic_style: HapticStyle,
@@ -357,6 +450,10 @@ fn encode_control_preferences(
         version: CONTROL_PREFERENCES_VERSION,
         vibration: preferences.vibration,
         haptic_style: preferences.haptic_style,
+        music_enabled: preferences.music.enabled(),
+        music_volume_percent: preferences.music.volume_percent(),
+        sound_effects_enabled: preferences.sound_effects.enabled(),
+        sound_effects_volume_percent: preferences.sound_effects.volume_percent(),
         key_bindings: bindings.clone(),
     };
     ron::ser::to_string_pretty(&stored, ron::ser::PrettyConfig::new())
@@ -368,7 +465,7 @@ fn decode_control_preferences(
 ) -> Result<(PlayerKeyBindings, ControlPreferences), String> {
     let header: StoredControlPreferencesHeader =
         ron::from_str(contents).map_err(|error| format!("could not parse controls: {error}"))?;
-    let (key_bindings, vibration, haptic_style) = match header.version {
+    let (key_bindings, vibration, haptic_style, music, sound_effects) = match header.version {
         1 => {
             let stored: LegacyStoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse legacy controls: {error}"))?;
@@ -380,6 +477,8 @@ fn decode_control_preferences(
                     VibrationLevel::Off
                 },
                 HapticStyle::Competitive,
+                AudioChannelPreference::default(),
+                AudioChannelPreference::default(),
             )
         }
         2 => {
@@ -389,6 +488,8 @@ fn decode_control_preferences(
                 stored.key_bindings.migrate(),
                 stored.vibration,
                 HapticStyle::Competitive,
+                AudioChannelPreference::default(),
+                AudioChannelPreference::default(),
             )
         }
         3 => {
@@ -398,15 +499,40 @@ fn decode_control_preferences(
                 stored.key_bindings.migrate(),
                 stored.vibration,
                 stored.haptic_style,
+                AudioChannelPreference::default(),
+                AudioChannelPreference::default(),
+            )
+        }
+        4 => {
+            let stored: VersionFourStoredControlPreferences = ron::from_str(contents)
+                .map_err(|error| format!("could not parse version 4 controls: {error}"))?;
+            (
+                stored.key_bindings,
+                stored.vibration,
+                stored.haptic_style,
+                AudioChannelPreference::default(),
+                AudioChannelPreference::default(),
             )
         }
         CONTROL_PREFERENCES_VERSION => {
             let stored: StoredControlPreferences = ron::from_str(contents)
                 .map_err(|error| format!("could not parse controls: {error}"))?;
-            (stored.key_bindings, stored.vibration, stored.haptic_style)
+            (
+                stored.key_bindings,
+                stored.vibration,
+                stored.haptic_style,
+                AudioChannelPreference::new(stored.music_enabled, stored.music_volume_percent),
+                AudioChannelPreference::new(
+                    stored.sound_effects_enabled,
+                    stored.sound_effects_volume_percent,
+                ),
+            )
         }
         version => return Err(format!("unsupported controls version {version}")),
     };
+    if !music.is_valid() || !sound_effects.is_valid() {
+        return Err("saved sound volume must be between 0 and 100 percent".to_string());
+    }
     if key_bindings.has_duplicate_keys() {
         return Err("saved controls contain duplicate keys".to_string());
     }
@@ -422,6 +548,8 @@ fn decode_control_preferences(
         ControlPreferences {
             vibration,
             haptic_style,
+            music,
+            sound_effects,
         },
     ))
 }
@@ -624,6 +752,8 @@ mod tests {
         let preferences = ControlPreferences {
             vibration: VibrationLevel::Off,
             haptic_style: HapticStyle::Cinematic,
+            music: AudioChannelPreference::new(false, 40),
+            sound_effects: AudioChannelPreference::new(true, 70),
         };
         let encoded = encode_control_preferences(&bindings, &preferences).unwrap();
         let decoded = decode_control_preferences(&encoded).unwrap();
@@ -637,7 +767,7 @@ mod tests {
             &ControlPreferences::default(),
         )
         .unwrap()
-        .replacen("version: 4", "version: 99", 1);
+        .replacen("version: 5", "version: 99", 1);
         assert!(decode_control_preferences(&encoded).is_err());
     }
 
@@ -661,8 +791,103 @@ mod tests {
         let preferences = ControlPreferences {
             vibration: VibrationLevel::Off,
             haptic_style: HapticStyle::Competitive,
+            ..default()
         };
         assert!(!preferences.vibration.enabled());
+    }
+
+    #[test]
+    fn sound_preferences_default_to_enabled_at_full_volume() {
+        let preferences = ControlPreferences::default();
+
+        for channel in [AudioChannel::Music, AudioChannel::SoundEffects] {
+            let preference = preferences.audio(channel);
+            assert!(preference.enabled());
+            assert_eq!(preference.volume_percent(), 100);
+            assert_eq!(preference.effective_gain(), 1.0);
+        }
+    }
+
+    #[test]
+    fn sound_volume_steps_by_ten_percent_and_clamps() {
+        let mut preference = AudioChannelPreference::new(true, 100);
+        preference.step(1);
+        assert_eq!(preference.volume_percent(), 100);
+        preference.step(-1);
+        assert_eq!(preference.volume_percent(), 90);
+
+        for _ in 0..12 {
+            preference.step(-1);
+        }
+        assert_eq!(preference.volume_percent(), 0);
+        preference.step(-1);
+        assert_eq!(preference.volume_percent(), 0);
+        preference.step(1);
+        assert_eq!(preference.volume_percent(), 10);
+    }
+
+    #[test]
+    fn sound_channel_toggles_remain_independent() {
+        let mut preferences = ControlPreferences::default();
+
+        preferences.audio_mut(AudioChannel::Music).toggle();
+
+        assert!(!preferences.audio(AudioChannel::Music).enabled());
+        assert!(preferences.audio(AudioChannel::SoundEffects).enabled());
+        assert_eq!(preferences.audio(AudioChannel::Music).volume_percent(), 100);
+    }
+
+    #[test]
+    fn sound_volume_uses_a_squared_perceptual_gain_curve() {
+        assert_eq!(AudioChannelPreference::new(true, 0).effective_gain(), 0.0);
+        assert_eq!(AudioChannelPreference::new(true, 50).effective_gain(), 0.25);
+        assert_eq!(AudioChannelPreference::new(true, 100).effective_gain(), 1.0);
+        assert_eq!(
+            AudioChannelPreference::new(false, 100).effective_gain(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn version_four_controls_migrate_to_default_sound_preferences() {
+        let encoded = ron::ser::to_string(&VersionFourStoredControlPreferences {
+            version: 4,
+            vibration: VibrationLevel::High,
+            haptic_style: HapticStyle::Cinematic,
+            key_bindings: PlayerKeyBindings::default(),
+        })
+        .unwrap();
+
+        let (_, preferences) = decode_control_preferences(&encoded).unwrap();
+
+        assert_eq!(preferences.vibration, VibrationLevel::High);
+        assert_eq!(preferences.haptic_style, HapticStyle::Cinematic);
+        assert_eq!(preferences.music, AudioChannelPreference::default());
+        assert_eq!(preferences.sound_effects, AudioChannelPreference::default());
+    }
+
+    #[test]
+    fn version_five_rejects_sound_percentages_over_one_hundred() {
+        let encoded = encode_control_preferences(
+            &PlayerKeyBindings::default(),
+            &ControlPreferences::default(),
+        )
+        .unwrap()
+        .replacen("music_volume_percent: 100", "music_volume_percent: 101", 1);
+
+        assert!(decode_control_preferences(&encoded).is_err());
+
+        let encoded = encode_control_preferences(
+            &PlayerKeyBindings::default(),
+            &ControlPreferences::default(),
+        )
+        .unwrap()
+        .replacen(
+            "sound_effects_volume_percent: 100",
+            "sound_effects_volume_percent: 255",
+            1,
+        );
+        assert!(decode_control_preferences(&encoded).is_err());
     }
 
     #[test]
@@ -731,13 +956,15 @@ mod tests {
         ];
 
         for encoded in &encoded_versions {
-            let (migrated, _) = decode_control_preferences(encoded).unwrap();
+            let (migrated, preferences) = decode_control_preferences(encoded).unwrap();
             assert_eq!(migrated.p1.left, KeyCode::KeyQ);
             assert_eq!(migrated.p2.jump, KeyCode::BracketLeft);
             assert_eq!(migrated.p1.special, KeyCode::KeyE);
             assert_eq!(migrated.p2.special, KeyCode::KeyP);
             assert_eq!(migrated.p3.special, KeyCode::Period);
             assert_eq!(migrated.p4.special, KeyCode::Minus);
+            assert_eq!(preferences.music, AudioChannelPreference::default());
+            assert_eq!(preferences.sound_effects, AudioChannelPreference::default());
         }
 
         let (_, preferences) = decode_control_preferences(&encoded_versions[2]).unwrap();

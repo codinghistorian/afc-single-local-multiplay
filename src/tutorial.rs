@@ -22,6 +22,7 @@ use crate::components::{
     PlayerKeyBindings,
 };
 use crate::constants::{ARENA_TOP_Y, FIGHTER_COUNT, MAX_HEALTH, STOCK_LIVES};
+use crate::control_settings::ControlPreferences;
 use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
 use crate::effects::{EffectKind, VisualEffect};
 use crate::equipment::FighterEquipment;
@@ -4047,6 +4048,7 @@ pub fn handle_tutorial_input(
 #[derive(SystemParam)]
 pub struct TutorialCleanupResources<'w> {
     asset_server: Res<'w, AssetServer>,
+    control_preferences: Res<'w, ControlPreferences>,
     session: ResMut<'w, TutorialSession>,
     user_mode: ResMut<'w, UserModeState>,
     setup: ResMut<'w, LocalSetup>,
@@ -4081,6 +4083,7 @@ pub fn cleanup_tutorial_session(
 ) {
     let TutorialCleanupResources {
         asset_server,
+        control_preferences,
         mut session,
         mut user_mode,
         mut setup,
@@ -4106,7 +4109,7 @@ pub fn cleanup_tutorial_session(
         commands.entity(entity).remove::<BotDifficulty>();
     }
     stop_user_mode_music(&mut commands, &music);
-    start_user_mode_menu_music(&mut commands, &asset_server);
+    start_user_mode_menu_music(&mut commands, &asset_server, &control_preferences);
 
     restore_tutorial_setup(
         &mut session,

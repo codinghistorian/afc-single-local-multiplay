@@ -2,6 +2,7 @@ mod arena;
 mod arena_barriers;
 mod arena_defs;
 mod arena_prop_colliders;
+mod audio_settings;
 mod bee_skills;
 mod body_collision;
 mod bot;
@@ -117,6 +118,7 @@ pub fn build_app() -> App {
 
     app.add_plugins(default_plugins);
     app.add_plugins(controller_haptics::ControllerHapticsPlugin);
+    app.add_message::<combat_sfx::SfxPreviewRequest>();
 
     #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
     app.add_plugins(macos_gamepad::MacOsGamepadPlugin);
@@ -216,13 +218,15 @@ pub fn build_app() -> App {
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 feel::reload_combat_feel_tuning,
                 (
-                    user_mode::sync_main_menu_pointer_hover,
+                    user_mode::sync_user_mode_pointer_hover,
                     tutorial::handle_tutorial_input,
                     user_mode::handle_user_mode_input,
                     user_mode::sync_user_mode_controllers,
                     user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
+                combat_sfx::handle_sfx_preview_requests,
+                audio_settings::sync_audio_playback_gains,
                 user_mode::announce_haptic_test_results,
                 (
                     game_state::handle_global_input,
@@ -441,6 +445,7 @@ pub fn build_app() -> App {
             (
                 user_mode::update_user_mode_controls_ui,
                 user_mode::update_control_settings_ui,
+                user_mode::update_sound_settings_ui,
             )
                 .in_set(GameSet::Presentation),
         )
@@ -454,9 +459,7 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
-            combat_sfx::play_combat_sfx
-                .run_if(user_mode::gameplay_scene_loaded)
-                .in_set(GameSet::Presentation),
+            combat_sfx::play_combat_sfx.in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,
