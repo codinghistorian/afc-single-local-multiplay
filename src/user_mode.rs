@@ -100,10 +100,7 @@ const USER_MODE_DEFAULT_CHARACTERS: [CharacterKind; FIGHTER_COUNT] = [
 const USER_MODE_KEY_ROW_FONT_SIZE: f32 = 18.0;
 const USER_MODE_KEY_ROW_HEIGHT: f32 = 34.0;
 const USER_MODE_KEY_ROW_GAP: f32 = 3.0;
-const USER_MODE_KEY_VISIBLE_ROWS: usize = 6;
-const USER_MODE_KEY_ROW_PITCH: f32 = USER_MODE_KEY_ROW_HEIGHT + USER_MODE_KEY_ROW_GAP;
-const USER_MODE_KEY_LIST_HEIGHT: f32 = USER_MODE_KEY_ROW_HEIGHT * USER_MODE_KEY_VISIBLE_ROWS as f32
-    + USER_MODE_KEY_ROW_GAP * (USER_MODE_KEY_VISIBLE_ROWS - 1) as f32;
+const USER_MODE_KEY_PANEL_WIDTH: f32 = 640.0;
 #[cfg(target_arch = "wasm32")]
 const WEB_BATTLE_WARMUP_SECS: f32 = 2.0;
 
@@ -400,6 +397,7 @@ pub(crate) enum UserModeUiAction {
     ResetKeys,
     ConfirmKeyReset,
     CancelKeyReset,
+    SelectKeySettingsPlayer(usize),
     KeyBinding(KeyBindingCapture),
     Result(UserModeResultChoice),
 }
@@ -1322,18 +1320,26 @@ impl UserModeState {
     }
 
     fn move_key_cursor(&mut self, direction: isize) {
-        let total = ControlAction::ACTIVE.len() * FIGHTER_COUNT;
-        self.key_settings_cursor =
-            (self.key_settings_cursor as isize + direction).rem_euclid(total as isize) as usize;
+        let action_count = ControlAction::ACTIVE.len();
+        let player = self.key_settings_cursor / action_count;
+        let action_index = self.key_settings_cursor % action_count;
+        let next_action =
+            (action_index as isize + direction).rem_euclid(action_count as isize) as usize;
+        self.key_settings_cursor = player * action_count + next_action;
     }
 
-    fn move_key_column(&mut self, direction: isize) {
+    fn select_key_settings_player(&mut self, player: usize) {
         let action_count = ControlAction::ACTIVE.len();
         let action_index = self.key_settings_cursor % action_count;
-        let player = self.key_settings_cursor / action_count;
+        let player = player.min(FIGHTER_COUNT - 1);
+        self.key_settings_cursor = player * action_count + action_index;
+    }
+
+    fn move_key_player(&mut self, direction: isize) {
+        let player = self.selected_key_target().player;
         let next_player =
             (player as isize + direction).clamp(0, FIGHTER_COUNT as isize - 1) as usize;
-        self.key_settings_cursor = next_player * action_count + action_index;
+        self.select_key_settings_player(next_player);
     }
 
     fn begin_key_capture(&mut self) {
@@ -1570,11 +1576,15 @@ fn route_user_mode_action(
             UserModeRoute::None
         }
         (UserModeScreen::KeySettings, UserModeUiAction::PreviousColumn) => {
-            user_mode.move_key_column(-1);
+            user_mode.move_key_player(-1);
             UserModeRoute::None
         }
         (UserModeScreen::KeySettings, UserModeUiAction::NextColumn) => {
-            user_mode.move_key_column(1);
+            user_mode.move_key_player(1);
+            UserModeRoute::None
+        }
+        (UserModeScreen::KeySettings, UserModeUiAction::SelectKeySettingsPlayer(player)) => {
+            user_mode.select_key_settings_player(player);
             UserModeRoute::None
         }
         (UserModeScreen::KeySettings, UserModeUiAction::Confirm) => {
@@ -1864,7 +1874,7 @@ pub(crate) struct UserModeKeySettingsPanel;
 pub(crate) struct UserModeKeySettingsPromptText;
 
 #[derive(Component)]
-pub(crate) struct UserModeKeySettingsScroll {
+pub(crate) struct UserModeKeySettingsPlayerPanel {
     player: usize,
 }
 
@@ -2190,14 +2200,30 @@ fn controller_setup_seat_card(seat: usize) -> impl Bundle {
     )
 }
 
-fn key_settings_column(player: usize) -> impl Bundle {
+fn key_settings_player_button(player: usize) -> impl Bundle {
+    user_mode_action_button(
+        format!("P{}", player + 1),
+        UserModeUiAction::SelectKeySettingsPlayer(player),
+        Val::Px(145.0),
+        44.0,
+        19.0,
+    )
+}
+
+fn key_settings_player_panel(player: usize) -> impl Bundle {
     (
+        UserModeKeySettingsPlayerPanel { player },
         Node {
-            flex_basis: Val::Percent(25.0),
-            max_width: Val::Px(250.0),
+            display: if player == 0 {
+                Display::Flex
+            } else {
+                Display::None
+            },
+            width: Val::Percent(96.0),
+            max_width: Val::Px(USER_MODE_KEY_PANEL_WIDTH),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Stretch,
-            row_gap: Val::Px(8.0),
+            row_gap: Val::Px(USER_MODE_KEY_ROW_GAP),
             border: UiRect::all(Val::Px(2.0)),
             padding: UiRect::all(Val::Px(8.0)),
             ..default()
@@ -2205,37 +2231,14 @@ fn key_settings_column(player: usize) -> impl Bundle {
         BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.88)),
         BorderColor::all(Color::srgb(0.63, 0.61, 0.56)),
         children![
-            (
-                Text::new(format!("P{}", player + 1)),
-                TextFont {
-                    font_size: 21.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                TextShadow::default(),
-            ),
-            (
-                UserModeKeySettingsScroll { player },
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(USER_MODE_KEY_LIST_HEIGHT),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(USER_MODE_KEY_ROW_GAP),
-                    overflow: Overflow::scroll_y(),
-                    ..default()
-                },
-                ScrollPosition::default(),
-                children![
-                    key_settings_row(player, ControlAction::Left),
-                    key_settings_row(player, ControlAction::Right),
-                    key_settings_row(player, ControlAction::Up),
-                    key_settings_row(player, ControlAction::Down),
-                    key_settings_row(player, ControlAction::AimGrab),
-                    key_settings_row(player, ControlAction::Heavy),
-                    key_settings_row(player, ControlAction::Light),
-                    key_settings_row(player, ControlAction::Jump),
-                ],
-            ),
+            key_settings_row(player, ControlAction::Left),
+            key_settings_row(player, ControlAction::Right),
+            key_settings_row(player, ControlAction::Up),
+            key_settings_row(player, ControlAction::Down),
+            key_settings_row(player, ControlAction::AimGrab),
+            key_settings_row(player, ControlAction::Heavy),
+            key_settings_row(player, ControlAction::Light),
+            key_settings_row(player, ControlAction::Jump),
         ],
     )
 }
@@ -2996,20 +2999,24 @@ pub fn setup_user_mode_ui(
                     (
                         Node {
                             width: Val::Percent(96.0),
-                            max_width: Val::Px(1120.0),
+                            max_width: Val::Px(USER_MODE_KEY_PANEL_WIDTH),
                             flex_direction: FlexDirection::Row,
                             justify_content: JustifyContent::Center,
-                            align_items: AlignItems::FlexStart,
+                            align_items: AlignItems::Center,
                             column_gap: Val::Px(10.0),
                             ..default()
                         },
                         children![
-                            key_settings_column(0),
-                            key_settings_column(1),
-                            key_settings_column(2),
-                            key_settings_column(3)
+                            key_settings_player_button(0),
+                            key_settings_player_button(1),
+                            key_settings_player_button(2),
+                            key_settings_player_button(3),
                         ],
                     ),
+                    key_settings_player_panel(0),
+                    key_settings_player_panel(1),
+                    key_settings_player_panel(2),
+                    key_settings_player_panel(3),
                     user_mode_action_button(
                         "RESTORE DEFAULTS",
                         UserModeUiAction::ResetKeys,
@@ -5471,6 +5478,7 @@ pub fn update_user_mode_ui(
             Option<&UserModeCharacterSelectPanel>,
             Option<&UserModeArenaSelectPanel>,
             Option<&UserModeKeySettingsPanel>,
+            Option<&UserModeKeySettingsPlayerPanel>,
             Option<&UserModeResultPanel>,
         ),
         (
@@ -5487,6 +5495,7 @@ pub fn update_user_mode_ui(
                 With<UserModeCharacterSelectPanel>,
                 With<UserModeArenaSelectPanel>,
                 With<UserModeKeySettingsPanel>,
+                With<UserModeKeySettingsPlayerPanel>,
                 With<UserModeResultPanel>,
             )>,
         ),
@@ -5566,7 +5575,6 @@ pub fn update_user_mode_ui(
             Without<UserModeDeviceJoinClearText>,
         ),
     >,
-    mut key_settings_scrolls: Query<(&UserModeKeySettingsScroll, &mut ScrollPosition)>,
 ) {
     for (mut node, mut background) in &mut roots {
         node.display = if user_mode.active() {
@@ -5600,8 +5608,21 @@ pub fn update_user_mode_ui(
             Display::None
         };
     }
-    for (mut node, start, main, player_count, hub, join, test, character, arena, keys, result) in
-        &mut panels
+    let selected_key_target = user_mode.selected_key_target();
+    for (
+        mut node,
+        start,
+        main,
+        player_count,
+        hub,
+        join,
+        test,
+        character,
+        arena,
+        keys,
+        key_player,
+        result,
+    ) in &mut panels
     {
         let visible = (start.is_some() && user_mode.screen() == UserModeScreen::Start)
             || (main.is_some() && user_mode.screen() == UserModeScreen::ModeSelect)
@@ -5612,6 +5633,8 @@ pub fn update_user_mode_ui(
             || (character.is_some() && user_mode.screen() == UserModeScreen::CharacterSelect)
             || (arena.is_some() && user_mode.screen() == UserModeScreen::ArenaSelect)
             || (keys.is_some() && key_settings_visible)
+            || (key_player.is_some_and(|panel| panel.player == selected_key_target.player)
+                && key_settings_visible)
             || (result.is_some() && result_visible);
         node.display = if visible {
             Display::Flex
@@ -5675,7 +5698,6 @@ pub fn update_user_mode_ui(
         );
     }
 
-    let selected_key_target = user_mode.selected_key_target();
     for (mut text, choice, character_title, prompt, row, result, color) in &mut texts {
         if choice.is_some() {
             **text = user_mode_choice_message(&user_mode);
@@ -5696,20 +5718,6 @@ pub fn update_user_mode_ui(
             }
         } else if result.is_some() {
             **text = result_title_message(&user_mode);
-        }
-    }
-    for (scroll, mut scroll_position) in &mut key_settings_scrolls {
-        if key_settings_visible {
-            scroll_position.x = 0.0;
-            scroll_position.y = if scroll.player == selected_key_target.player {
-                let action_index = key_settings_action_index(selected_key_target.action)
-                    .expect("selected key-setting action is active");
-                key_settings_scroll_offset(action_index)
-            } else {
-                0.0
-            };
-        } else {
-            scroll_position.0 = Vec2::ZERO;
         }
     }
 }
@@ -5736,6 +5744,10 @@ fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction
         | UserModeUiAction::ControllerSetupReady => {
             user_mode.screen == UserModeScreen::DeviceJoin
                 && user_mode.selected_controller_setup_action() == action
+        }
+        UserModeUiAction::SelectKeySettingsPlayer(player) => {
+            user_mode.screen == UserModeScreen::KeySettings
+                && user_mode.selected_key_target().player == player
         }
         UserModeUiAction::KeyBinding(capture) => {
             user_mode.screen == UserModeScreen::KeySettings
@@ -6485,10 +6497,6 @@ fn key_settings_action_index(action: ControlAction) -> Option<usize> {
     ControlAction::ACTIVE
         .iter()
         .position(|candidate| *candidate == action)
-}
-
-fn key_settings_scroll_offset(action_index: usize) -> f32 {
-    action_index.saturating_sub(USER_MODE_KEY_VISIBLE_ROWS - 1) as f32 * USER_MODE_KEY_ROW_PITCH
 }
 
 fn controls_briefing_message(
@@ -8350,6 +8358,10 @@ mod tests {
         user_mode.enter_key_settings();
         assert!(user_mode_action_selected(
             &user_mode,
+            UserModeUiAction::SelectKeySettingsPlayer(0)
+        ));
+        assert!(user_mode_action_selected(
+            &user_mode,
             UserModeUiAction::KeyBinding(KeyBindingCapture {
                 player: 0,
                 action: ControlAction::Left,
@@ -8437,15 +8449,27 @@ mod tests {
     }
 
     #[test]
-    fn key_settings_scroll_offsets_follow_selected_row() {
-        assert_eq!(key_settings_scroll_offset(0), 0.0);
+    fn key_settings_up_down_wraps_within_selected_player() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_key_settings();
+        user_mode.select_key_settings_player(2);
+
+        user_mode.move_key_cursor(-1);
         assert_eq!(
-            key_settings_scroll_offset(USER_MODE_KEY_VISIBLE_ROWS - 1),
-            0.0
+            user_mode.selected_key_target(),
+            KeyBindingCapture {
+                player: 2,
+                action: ControlAction::Jump,
+            }
         );
+
+        user_mode.move_key_cursor(1);
         assert_eq!(
-            key_settings_scroll_offset(USER_MODE_KEY_VISIBLE_ROWS),
-            USER_MODE_KEY_ROW_PITCH
+            user_mode.selected_key_target(),
+            KeyBindingCapture {
+                player: 2,
+                action: ControlAction::Left,
+            }
         );
     }
 
@@ -8462,24 +8486,36 @@ mod tests {
     }
 
     #[test]
-    fn key_settings_left_right_moves_between_player_columns() {
+    fn key_settings_left_right_switches_player_tabs_and_preserves_action() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_key_settings();
         user_mode.move_key_cursor(5);
         assert_eq!(user_mode.selected_key_target().player, 0);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
 
-        user_mode.move_key_column(1);
+        user_mode.move_key_player(1);
         assert_eq!(user_mode.selected_key_target().player, 1);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
 
-        user_mode.move_key_column(2);
+        user_mode.move_key_player(2);
         assert_eq!(user_mode.selected_key_target().player, 3);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
 
-        user_mode.move_key_column(-3);
+        user_mode.move_key_player(1);
+        assert_eq!(user_mode.selected_key_target().player, 3);
+
+        user_mode.move_key_player(-3);
         assert_eq!(user_mode.selected_key_target().player, 0);
         assert_eq!(user_mode.selected_key_target().action, ControlAction::Heavy);
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::SelectKeySettingsPlayer(2));
+        assert_eq!(
+            user_mode.selected_key_target(),
+            KeyBindingCapture {
+                player: 2,
+                action: ControlAction::Heavy,
+            }
+        );
     }
 
     #[test]
