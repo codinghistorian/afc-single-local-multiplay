@@ -219,10 +219,10 @@ pub fn build_app() -> App {
                 feel::reload_combat_feel_tuning,
                 (
                     user_mode::sync_user_mode_pointer_hover,
+                    user_mode::handle_local_controller_reconnect,
                     tutorial::handle_tutorial_input,
                     user_mode::handle_user_mode_input,
                     user_mode::sync_user_mode_controllers,
-                    user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
                 combat_sfx::handle_sfx_preview_requests,

@@ -98,6 +98,7 @@ const USER_MODE_KEY_ROW_FONT_SIZE: f32 = 18.0;
 const USER_MODE_KEY_ROW_HEIGHT: f32 = 34.0;
 const USER_MODE_KEY_ROW_GAP: f32 = 3.0;
 const USER_MODE_KEY_PANEL_WIDTH: f32 = 640.0;
+const CONTROLLER_TAKEOVER_TITLE: &str = "CONNECT CONTROLLER?";
 #[cfg(target_arch = "wasm32")]
 const WEB_BATTLE_WARMUP_SECS: f32 = 2.0;
 
@@ -464,6 +465,21 @@ pub struct LocalControllerReconnect {
     missing_seats: [bool; FIGHTER_COUNT],
     resume_delay_frames: u8,
     paused_by_reconnect: bool,
+    pending_takeover: Option<PendingControllerTakeover>,
+    resume_kind: Option<ControllerReconnectResumeKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingControllerTakeover {
+    entity: Entity,
+    family: ControllerFamily,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControllerReconnectResumeKind {
+    Reconnected,
+    TakeoverAccepted,
+    TakeoverCanceled,
 }
 
 impl Default for LocalControllerReconnect {
@@ -472,6 +488,8 @@ impl Default for LocalControllerReconnect {
             missing_seats: [false; FIGHTER_COUNT],
             resume_delay_frames: 0,
             paused_by_reconnect: false,
+            pending_takeover: None,
+            resume_kind: None,
         }
     }
 }
@@ -481,14 +499,28 @@ impl LocalControllerReconnect {
         self.paused_by_reconnect || self.resume_delay_frames > 0
     }
 
+    pub fn blocks_ui_input(&self) -> bool {
+        self.pending_takeover.is_some()
+            || self.any_missing()
+            || self.resume_delay_frames > 0
+            || self.resume_kind.is_some()
+    }
+
     fn any_missing(&self) -> bool {
         self.missing_seats.iter().any(|missing| *missing)
+    }
+
+    fn begin_resume_delay(&mut self, kind: ControllerReconnectResumeKind) {
+        self.resume_delay_frames = 1;
+        self.resume_kind = Some(kind);
     }
 
     fn clear(&mut self) {
         self.missing_seats = [false; FIGHTER_COUNT];
         self.resume_delay_frames = 0;
         self.paused_by_reconnect = false;
+        self.pending_takeover = None;
+        self.resume_kind = None;
     }
 }
 
@@ -959,6 +991,14 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
+    fn enter_single_player_character_select(&mut self) {
+        self.play_mode = UserPlayMode::SinglePlayer;
+        if self.input_assignments[0] == LocalInputAssignment::Unassigned {
+            self.input_assignments[0] = LocalInputAssignment::Keyboard(0);
+        }
+        self.enter_character_select();
+    }
+
     fn enter_device_join(&mut self) {
         self.screen = UserModeScreen::DeviceJoin;
         self.controller_setup_context = ControllerSetupContext::Match;
@@ -1152,14 +1192,6 @@ impl UserModeState {
         }
     }
 
-    fn joined_player_count(&self) -> usize {
-        self.input_assignments
-            .iter()
-            .take(self.controller_setup_target())
-            .filter(|assignment| **assignment != LocalInputAssignment::Unassigned)
-            .count()
-    }
-
     fn assignment_is_joined(&self, assignment: LocalInputAssignment) -> bool {
         self.input_assignments.contains(&assignment)
     }
@@ -1294,10 +1326,7 @@ impl UserModeState {
 fn activate_main_menu_choice(user_mode: &mut UserModeState, choice: UserModeMainMenuChoice) {
     user_mode.main_menu_choice = choice;
     match choice {
-        UserModeMainMenuChoice::SinglePlayer => {
-            user_mode.play_mode = UserPlayMode::SinglePlayer;
-            user_mode.enter_device_join();
-        }
+        UserModeMainMenuChoice::SinglePlayer => user_mode.enter_single_player_character_select(),
         UserModeMainMenuChoice::Multiplayer => user_mode.enter_player_count_select(),
         UserModeMainMenuChoice::Tutorial => user_mode.enter_tutorial_device_join(),
         UserModeMainMenuChoice::Settings => user_mode.enter_controls_hub(),
@@ -1364,7 +1393,11 @@ fn route_user_mode_action(
                 UserModeRoute::None
             }
             UserModeScreen::CharacterSelect => {
-                user_mode.enter_device_join();
+                if user_mode.play_mode.is_single_player() {
+                    user_mode.enter_mode_select();
+                } else {
+                    user_mode.enter_device_join();
+                }
                 UserModeRoute::None
             }
             UserModeScreen::ArenaSelect => {
@@ -1721,9 +1754,6 @@ pub(crate) struct UserModePlayerCountPanel;
 pub(crate) struct UserModeDeviceJoinPanel;
 
 #[derive(Component)]
-pub(crate) struct UserModeDeviceJoinText;
-
-#[derive(Component)]
 pub(crate) struct UserModeDeviceJoinTitleText;
 
 #[derive(Component)]
@@ -1810,6 +1840,9 @@ pub(crate) struct UserModeBackButton;
 
 #[derive(Component)]
 pub(crate) struct ControllerReconnectOverlay;
+
+#[derive(Component)]
+pub(crate) struct ControllerReconnectTitle;
 
 #[derive(Component)]
 pub(crate) struct ControllerReconnectText;
@@ -2081,7 +2114,7 @@ fn controller_setup_seat_card(seat: usize) -> impl Bundle {
             ),
             (
                 UserModeDeviceJoinSeatText { seat },
-                Text::new("WAITING\nPress confirm"),
+                Text::new("PRESS A OR JUMP\nTO JOIN"),
                 TextFont {
                     font_size: 17.0,
                     ..default()
@@ -2579,16 +2612,6 @@ pub fn setup_user_mode_ui(
                         },
                         TextColor(Color::srgb(0.95, 0.86, 0.68)),
                         TextShadow::default(),
-                    ),
-                    (
-                        UserModeDeviceJoinText,
-                        Text::new("Connect a controller or use one of the keyboard layouts."),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.92, 0.88, 0.78)),
-                        TextLayout::new_with_justify(Justify::Center),
                     ),
                     (
                         Node {
@@ -3114,6 +3137,7 @@ pub fn setup_user_mode_ui(
         Pickable::IGNORE,
         children![
             (
+                ControllerReconnectTitle,
                 Text::new("CONTROLLER DISCONNECTED"),
                 TextFont {
                     font_size: 48.0,
@@ -3383,6 +3407,7 @@ pub struct UserModeInputDevices<'w, 's> {
 #[derive(SystemParam)]
 pub struct UserModeInputContext<'w> {
     user_mode: ResMut<'w, UserModeState>,
+    controller_reconnect: Res<'w, LocalControllerReconnect>,
     key_bindings: ResMut<'w, PlayerKeyBindings>,
     control_preferences: ResMut<'w, ControlPreferences>,
     rumble_requests: MessageWriter<'w, ControllerHapticRequest>,
@@ -3509,6 +3534,7 @@ pub fn handle_user_mode_input(
     } = devices;
     let UserModeInputContext {
         mut user_mode,
+        controller_reconnect,
         mut key_bindings,
         mut control_preferences,
         mut rumble_requests,
@@ -3519,6 +3545,10 @@ pub fn handle_user_mode_input(
     } = context;
 
     if game_transition.active() {
+        return;
+    }
+
+    if controller_reconnect.blocks_ui_input() {
         return;
     }
 
@@ -4422,83 +4452,268 @@ fn disconnected_controller_seats(
     })
 }
 
+fn controller_reconnect_combat_active(user_mode: &UserModeState, state: &MatchState) -> bool {
+    user_mode.battle_active && state.phase == MatchPhase::Fighting
+}
+
+fn single_player_takeover_eligible(
+    user_mode: &UserModeState,
+    state: &MatchState,
+    transition: &GameTransition,
+) -> bool {
+    if transition.active()
+        || user_mode.play_mode != UserPlayMode::SinglePlayer
+        || user_mode.tutorial_screen_active()
+    {
+        return false;
+    }
+
+    matches!(
+        user_mode.screen,
+        UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::ControlsBriefing
+            | UserModeScreen::BattleResult
+    ) || (controller_reconnect_combat_active(user_mode, state) && !user_mode.battle_music_pending)
+}
+
+fn local_controller_reconnect_eligible(
+    user_mode: &UserModeState,
+    state: &MatchState,
+    transition: &GameTransition,
+) -> bool {
+    !transition.active()
+        && (controller_reconnect_combat_active(user_mode, state)
+            || (user_mode.play_mode == UserPlayMode::SinglePlayer
+                && !user_mode.tutorial_screen_active()
+                && matches!(
+                    user_mode.screen,
+                    UserModeScreen::CharacterSelect
+                        | UserModeScreen::ArenaSelect
+                        | UserModeScreen::ControlsBriefing
+                        | UserModeScreen::BattleResult
+                )))
+}
+
+fn neutralize_reconnecting_fighter_inputs(
+    fighters: &mut Query<(&Controller, &mut FighterInput)>,
+    affected_seats: [bool; FIGHTER_COUNT],
+) {
+    for (controller, mut input) in fighters {
+        if affected_seats[controller.slot.index()] {
+            *input = FighterInput::default();
+        }
+    }
+}
+
+fn set_controller_reconnect_pause(
+    reconnect: &mut LocalControllerReconnect,
+    pause_owners: &mut GameplayPauseOwners,
+    active: bool,
+) {
+    reconnect.paused_by_reconnect = active;
+    pause_owners.set(GameplayPauseOwner::ControllerReconnect, active);
+}
+
 pub fn handle_local_controller_reconnect(
     mut user_mode: ResMut<UserModeState>,
     mut setup: ResMut<LocalSetup>,
     state: Res<MatchState>,
-    gamepads: Query<(Entity, &Gamepad)>,
+    transition: Res<GameTransition>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut gamepads: Query<(Entity, &mut Gamepad)>,
     metadata: Query<&ControllerDeviceInfo>,
     mut reconnect: ResMut<LocalControllerReconnect>,
     mut pause_owners: ResMut<GameplayPauseOwners>,
     mut fighters: Query<(&Controller, &mut FighterInput)>,
 ) {
-    if !user_mode.battle_active || state.phase != MatchPhase::Fighting {
-        if !reconnect.blocks_gameplay() && !reconnect.any_missing() {
+    if !local_controller_reconnect_eligible(&user_mode, &state, &transition) {
+        if !reconnect.blocks_gameplay() && !reconnect.blocks_ui_input() {
             return;
         }
-        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
+        set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, false);
         reconnect.clear();
         return;
     }
 
-    let mut missing = disconnected_controller_seats(&user_mode, &gamepads);
+    let combat_active = controller_reconnect_combat_active(&user_mode, &state);
+    if let Some(pending) = reconnect.pending_takeover {
+        if combat_active {
+            set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, true);
+            neutralize_reconnecting_fighter_inputs(&mut fighters, [true, false, false, false]);
+        }
+
+        let candidate_connected = gamepads.get(pending.entity).is_ok();
+        if !candidate_connected
+            || user_mode.input_assignments[0] != LocalInputAssignment::Keyboard(0)
+        {
+            reconnect.pending_takeover = None;
+            reconnect.begin_resume_delay(ControllerReconnectResumeKind::TakeoverCanceled);
+            return;
+        }
+
+        let escape_pressed = keys.just_pressed(KeyCode::Escape);
+        let (back_pressed, confirm_pressed) = gamepads
+            .get(pending.entity)
+            .map(|(_, gamepad)| {
+                (
+                    gamepad.just_pressed(pending.family.back_button()),
+                    gamepad.just_pressed(pending.family.confirm_button()),
+                )
+            })
+            .unwrap_or_default();
+
+        if escape_pressed || back_pressed {
+            if escape_pressed {
+                keys.clear_just_pressed(KeyCode::Escape);
+            }
+            if back_pressed {
+                let Ok((_, mut gamepad)) = gamepads.get_mut(pending.entity) else {
+                    return;
+                };
+                gamepad
+                    .digital_mut()
+                    .clear_just_pressed(pending.family.back_button());
+            }
+            reconnect.pending_takeover = None;
+            reconnect.begin_resume_delay(ControllerReconnectResumeKind::TakeoverCanceled);
+            return;
+        }
+
+        if confirm_pressed {
+            let Ok((_, mut gamepad)) = gamepads.get_mut(pending.entity) else {
+                reconnect.pending_takeover = None;
+                reconnect.begin_resume_delay(ControllerReconnectResumeKind::TakeoverCanceled);
+                return;
+            };
+            gamepad
+                .digital_mut()
+                .clear_just_pressed(pending.family.confirm_button());
+            let assignment = LocalInputAssignment::Gamepad(pending.entity);
+            user_mode.input_assignments[0] = assignment;
+            setup.slots[0].input = assignment;
+            reconnect.pending_takeover = None;
+            reconnect.begin_resume_delay(ControllerReconnectResumeKind::TakeoverAccepted);
+        }
+        return;
+    }
+
+    let mut missing = {
+        let read_gamepads = gamepads.as_readonly();
+        disconnected_controller_seats(&user_mode, &read_gamepads)
+    };
     if missing.iter().any(|seat| *seat) {
-        if reconnect.missing_seats != missing {
-            reconnect.missing_seats = missing;
-        }
-        if reconnect.resume_delay_frames != 0 {
-            reconnect.resume_delay_frames = 0;
-        }
-        if !reconnect.paused_by_reconnect {
-            reconnect.paused_by_reconnect = true;
-            pause_owners.set(GameplayPauseOwner::ControllerReconnect, true);
+        reconnect.missing_seats = missing;
+        reconnect.resume_delay_frames = 0;
+        reconnect.resume_kind = None;
+        if combat_active {
+            set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, true);
         }
 
-        for (controller, mut input) in &mut fighters {
-            if missing[controller.slot.index()] {
-                *input = FighterInput::default();
-            }
+        if combat_active {
+            neutralize_reconnecting_fighter_inputs(&mut fighters, missing);
         }
 
-        for (entity, gamepad) in &gamepads {
+        let replacement_candidates = gamepads
+            .iter()
+            .filter_map(|(entity, gamepad)| {
+                let assignment = LocalInputAssignment::Gamepad(entity);
+                let family = controller_info(entity, &metadata)
+                    .map(|info| info.family)
+                    .unwrap_or_default();
+                (!user_mode.assignment_is_joined(assignment)
+                    && gamepad.just_pressed(family.confirm_button()))
+                .then_some((entity, family))
+            })
+            .collect::<Vec<_>>();
+        for (entity, family) in replacement_candidates {
             let assignment = LocalInputAssignment::Gamepad(entity);
-            let family = controller_info(entity, &metadata)
-                .map(|info| info.family)
-                .unwrap_or_default();
-            if user_mode.assignment_is_joined(assignment)
-                || !gamepad.just_pressed(family.confirm_button())
-            {
-                continue;
-            }
             let Some(seat) = missing.iter().position(|seat| *seat) else {
                 break;
             };
+            if let Ok((_, mut gamepad)) = gamepads.get_mut(entity) {
+                gamepad
+                    .digital_mut()
+                    .clear_just_pressed(family.confirm_button());
+            }
             user_mode.input_assignments[seat] = assignment;
             setup.slots[seat].input = assignment;
             missing[seat] = false;
         }
 
-        if reconnect.missing_seats != missing {
-            reconnect.missing_seats = missing;
-        }
+        reconnect.missing_seats = missing;
         if reconnect.any_missing() {
             return;
         }
-        reconnect.resume_delay_frames = 1;
+        reconnect.begin_resume_delay(ControllerReconnectResumeKind::Reconnected);
         return;
     }
 
-    if reconnect.missing_seats != [false; FIGHTER_COUNT] {
+    if reconnect.any_missing() {
         reconnect.missing_seats = [false; FIGHTER_COUNT];
+        reconnect.begin_resume_delay(ControllerReconnectResumeKind::Reconnected);
+        return;
     }
+
     if reconnect.resume_delay_frames > 0 {
+        if combat_active {
+            set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, true);
+            neutralize_reconnecting_fighter_inputs(
+                &mut fighters,
+                std::array::from_fn(|seat| seat < user_mode.play_mode.human_player_count()),
+            );
+        }
         reconnect.resume_delay_frames -= 1;
         return;
     }
+
     if reconnect.paused_by_reconnect {
-        reconnect.paused_by_reconnect = false;
-        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
+        set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, false);
+        reconnect.resume_kind = None;
+    } else if reconnect.resume_kind.is_some() {
+        reconnect.resume_kind = None;
     }
+
+    if !single_player_takeover_eligible(&user_mode, &state, &transition)
+        || user_mode.input_assignments[0] != LocalInputAssignment::Keyboard(0)
+    {
+        return;
+    }
+
+    let candidate = gamepads.iter().find_map(|(entity, gamepad)| {
+        let assignment = LocalInputAssignment::Gamepad(entity);
+        let family = controller_info(entity, &metadata)
+            .map(|info| info.family)
+            .unwrap_or_default();
+        (!user_mode.assignment_is_joined(assignment)
+            && gamepad.just_pressed(family.confirm_button()))
+        .then_some(PendingControllerTakeover { entity, family })
+    });
+    let Some(candidate) = candidate else {
+        return;
+    };
+
+    if let Ok((_, mut gamepad)) = gamepads.get_mut(candidate.entity) {
+        gamepad
+            .digital_mut()
+            .clear_just_pressed(candidate.family.confirm_button());
+    }
+    reconnect.pending_takeover = Some(candidate);
+    if combat_active {
+        set_controller_reconnect_pause(&mut reconnect, &mut pause_owners, true);
+        neutralize_reconnecting_fighter_inputs(&mut fighters, [true, false, false, false]);
+    }
+}
+
+fn controller_takeover_prompt(pending: PendingControllerTakeover) -> String {
+    format!(
+        "Press {} again to use this {} controller for P1.\nPress {} or Esc to keep Keyboard 1.",
+        pending.family.confirm_label(),
+        pending.family.display_name(),
+        pending
+            .family
+            .face_button_label(pending.family.back_button()),
+    )
 }
 
 pub fn update_controller_reconnect_overlay(
@@ -4507,9 +4722,22 @@ pub fn update_controller_reconnect_overlay(
     gamepads: Query<(Entity, &Gamepad)>,
     metadata: Query<&ControllerDeviceInfo>,
     mut overlays: Query<&mut Node, With<ControllerReconnectOverlay>>,
-    mut texts: Query<&mut Text, With<ControllerReconnectText>>,
+    mut titles: Query<
+        &mut Text,
+        (
+            With<ControllerReconnectTitle>,
+            Without<ControllerReconnectText>,
+        ),
+    >,
+    mut texts: Query<
+        &mut Text,
+        (
+            With<ControllerReconnectText>,
+            Without<ControllerReconnectTitle>,
+        ),
+    >,
 ) {
-    let visible = reconnect.blocks_gameplay();
+    let visible = reconnect.blocks_gameplay() || reconnect.blocks_ui_input();
     for mut node in &mut overlays {
         node.display = if visible {
             Display::Flex
@@ -4538,17 +4766,43 @@ pub fn update_controller_reconnect_overlay(
         .collect::<Vec<_>>();
     prompts.sort();
     prompts.dedup();
-    let prompt = if prompts.is_empty() {
+    let reconnect_prompt = if prompts.is_empty() {
         "Confirm on the original or another unassigned controller".to_string()
     } else {
         format!("Press {} to reclaim a seat", prompts.join(" or "))
     };
+    let (title, body) = if let Some(pending) = reconnect.pending_takeover {
+        (
+            CONTROLLER_TAKEOVER_TITLE.to_string(),
+            controller_takeover_prompt(pending),
+        )
+    } else if reconnect.any_missing() {
+        (
+            "CONTROLLER DISCONNECTED".to_string(),
+            format!("{missing} disconnected\n{reconnect_prompt}"),
+        )
+    } else {
+        match reconnect.resume_kind {
+            Some(ControllerReconnectResumeKind::Reconnected) => (
+                "CONTROLLER RECONNECTED".to_string(),
+                "Controllers restored — resuming...".to_string(),
+            ),
+            Some(ControllerReconnectResumeKind::TakeoverAccepted) => (
+                "CONTROLLER CONNECTED".to_string(),
+                "P1 controller ready — resuming...".to_string(),
+            ),
+            Some(ControllerReconnectResumeKind::TakeoverCanceled) => (
+                "KEYBOARD 1 ACTIVE".to_string(),
+                "Keyboard 1 retained — resuming...".to_string(),
+            ),
+            None => (String::new(), String::new()),
+        }
+    };
+    for mut text in &mut titles {
+        **text = title.clone();
+    }
     for mut text in &mut texts {
-        **text = if reconnect.any_missing() {
-            format!("{missing} disconnected\n{prompt}")
-        } else {
-            "Controllers restored — resuming...".to_string()
-        };
+        **text = body.clone();
     }
 }
 
@@ -4807,7 +5061,6 @@ pub fn update_user_mode_ui(
         ),
         (
             Without<UserModeControlsText>,
-            Without<UserModeDeviceJoinText>,
             Without<UserModeDeviceJoinTitleText>,
             Without<UserModeDeviceJoinReadyText>,
             Without<UserModeDeviceJoinClearText>,
@@ -4821,12 +5074,10 @@ pub fn update_user_mode_ui(
             )>,
         ),
     >,
-    mut join_texts: Query<&mut Text, With<UserModeDeviceJoinText>>,
     mut join_title_texts: Query<
         &mut Text,
         (
             With<UserModeDeviceJoinTitleText>,
-            Without<UserModeDeviceJoinText>,
             Without<UserModeDeviceJoinReadyText>,
             Without<UserModeDeviceJoinClearText>,
             Without<UserModeDeviceJoinSeatText>,
@@ -4837,7 +5088,6 @@ pub fn update_user_mode_ui(
         (
             With<UserModeDeviceJoinReadyText>,
             Without<UserModeDeviceJoinTitleText>,
-            Without<UserModeDeviceJoinText>,
             Without<UserModeDeviceJoinClearText>,
             Without<UserModeDeviceJoinSeatText>,
         ),
@@ -4847,7 +5097,6 @@ pub fn update_user_mode_ui(
         (
             With<UserModeDeviceJoinClearText>,
             Without<UserModeDeviceJoinReadyText>,
-            Without<UserModeDeviceJoinText>,
             Without<UserModeDeviceJoinTitleText>,
             Without<UserModeDeviceJoinSeatText>,
         ),
@@ -4864,7 +5113,6 @@ pub fn update_user_mode_ui(
     mut seat_texts: Query<
         (&UserModeDeviceJoinSeatText, &mut Text),
         (
-            Without<UserModeDeviceJoinText>,
             Without<UserModeDeviceJoinTitleText>,
             Without<UserModeDeviceJoinReadyText>,
             Without<UserModeDeviceJoinClearText>,
@@ -4933,9 +5181,6 @@ pub fn update_user_mode_ui(
         } else {
             Display::None
         };
-    }
-    for mut text in &mut join_texts {
-        **text = device_join_message(&user_mode, &bindings, &gamepads, &controller_metadata);
     }
     for mut text in &mut join_title_texts {
         **text = match user_mode.controller_setup_context {
@@ -5596,24 +5841,21 @@ fn controller_setup_seat_message(
 ) -> String {
     match assignment {
         LocalInputAssignment::Keyboard(player) => {
-            format!("KEYBOARD {}\nCONNECTED\nCustom layout", player + 1)
+            format!("KEYBOARD {}\nCONNECTED", player + 1)
         }
         LocalInputAssignment::Gamepad(entity) => {
             let info = controller_info(entity, metadata);
             let family = info
                 .map(|info| info.family.display_name())
                 .unwrap_or("Gamepad");
-            let name = info
-                .map(|info| info.display_name.as_str())
-                .unwrap_or("Controller");
             let connection = if gamepads.get(entity).is_ok() {
                 "CONNECTED"
             } else {
-                "MISSING — reconnect or replace"
+                "MISSING\nReconnect or replace"
             };
-            format!("{family}\n{name}\n{connection}")
+            format!("{family}\n{connection}")
         }
-        LocalInputAssignment::Unassigned => "WAITING\nPress Confirm to join".to_string(),
+        LocalInputAssignment::Unassigned => "PRESS A OR JUMP\nTO JOIN".to_string(),
     }
 }
 
@@ -5635,72 +5877,6 @@ fn controller_setup_seat_colors(
             Color::srgb(0.38, 0.9, 0.62),
         ),
     }
-}
-
-fn device_join_message(
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    gamepads: &Query<Entity, With<Gamepad>>,
-    metadata: &Query<&ControllerDeviceInfo>,
-) -> String {
-    let target = user_mode.controller_setup_target();
-    let mut controller_prompts = gamepads
-        .iter()
-        .map(|entity| {
-            let family = controller_info(entity, metadata)
-                .map(|info| info.family)
-                .unwrap_or_default();
-            format!(
-                "{}: {} join / {} leave",
-                family.display_name(),
-                family.confirm_label(),
-                family.back_label()
-            )
-        })
-        .collect::<Vec<_>>();
-    controller_prompts.sort();
-    controller_prompts.dedup();
-    if controller_prompts.is_empty() {
-        controller_prompts.push("Controller: Confirm join / Back leave".to_string());
-    }
-    let keyboard_shortcuts = (0..FIGHTER_COUNT)
-        .map(|player| {
-            format!(
-                "K{}: {} or {}",
-                player + 1,
-                control_key_label(bindings, player, ControlAction::Jump),
-                control_key_label(bindings, player, ControlAction::AimGrab)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("  |  ");
-    let status = match user_mode.controller_setup_context {
-        ControllerSetupContext::Settings => format!(
-            "{} session assignment{}",
-            user_mode.joined_player_count(),
-            if user_mode.joined_player_count() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ),
-        ControllerSetupContext::Match => {
-            format!(
-                "{} / {target} required players ready",
-                user_mode.joined_player_count()
-            )
-        }
-        ControllerSetupContext::Tutorial => {
-            format!(
-                "{} / 1 trainee ready  |  progress is saved separately",
-                user_mode.joined_player_count()
-            )
-        }
-    };
-    format!(
-        "{}\nKeyboard: press that layout's Jump or Aim/Grab\n{keyboard_shortcuts}\n{status}  |  P1: Left/Right actions, Menu/Esc back",
-        controller_prompts.join("  |  "),
-    )
 }
 
 fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
@@ -6179,6 +6355,8 @@ mod tests {
         app.insert_resource(user_mode)
             .insert_resource(LocalSetup::default())
             .insert_resource(state)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<GameTransition>()
             .init_resource::<LocalControllerReconnect>()
             .init_resource::<GameplayPauseOwners>()
             .init_resource::<Time<Virtual>>()
@@ -6187,6 +6365,7 @@ mod tests {
                 Update,
                 (
                     handle_local_controller_reconnect,
+                    sync_user_mode_controllers,
                     crate::game_state::sync_virtual_time_pause,
                     count_reconnect_gameplay_ticks
                         .run_if(crate::game_state::match_accepts_gameplay),
@@ -6194,6 +6373,49 @@ mod tests {
                     .chain(),
             );
         app
+    }
+
+    fn takeover_test_app(screen: UserModeScreen) -> App {
+        let mut user_mode = UserModeState::default();
+        user_mode.screen = screen;
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        user_mode.input_assignments[0] = LocalInputAssignment::Keyboard(0);
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .insert_resource(LocalSetup::default())
+            .insert_resource(MatchState::default())
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<GameTransition>()
+            .init_resource::<LocalControllerReconnect>()
+            .init_resource::<GameplayPauseOwners>()
+            .add_systems(Update, handle_local_controller_reconnect);
+        app
+    }
+
+    fn connected_controller_info(family: ControllerFamily) -> ControllerDeviceInfo {
+        let (name, vendor_id) = match family {
+            ControllerFamily::Xbox => ("Xbox Controller", Some(0x045e)),
+            ControllerFamily::PlayStation => ("DualSense Wireless Controller", Some(0x054c)),
+            ControllerFamily::Nintendo => ("Nintendo Switch Pro Controller", Some(0x057e)),
+            ControllerFamily::Generic => ("Generic Controller", None),
+        };
+        ControllerDeviceInfo::connected(name.to_string(), vendor_id, None)
+    }
+
+    fn set_gamepad_button(app: &mut App, entity: Entity, button: GamepadButton, pressed: bool) {
+        let mut gamepad = app.world_mut().get_mut::<Gamepad>(entity).unwrap();
+        if pressed {
+            gamepad.digital_mut().press(button);
+        } else {
+            gamepad.digital_mut().release(button);
+        }
+    }
+
+    fn release_and_clear_gamepad(app: &mut App, entity: Entity, button: GamepadButton) {
+        let mut gamepad = app.world_mut().get_mut::<Gamepad>(entity).unwrap();
+        gamepad.digital_mut().release(button);
+        gamepad.digital_mut().clear();
     }
 
     fn pressed_a_gamepad() -> Gamepad {
@@ -6518,8 +6740,12 @@ mod tests {
             &mut single,
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::SinglePlayer),
         );
-        assert_eq!(single.screen(), UserModeScreen::DeviceJoin);
+        assert_eq!(single.screen(), UserModeScreen::CharacterSelect);
         assert_eq!(single.play_mode, UserPlayMode::SinglePlayer);
+        assert_eq!(
+            single.input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
 
         let mut multiplayer = UserModeState::default();
         multiplayer.enter_mode_select();
@@ -6560,6 +6786,22 @@ mod tests {
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::Settings),
         );
         assert_eq!(settings.screen(), UserModeScreen::ControlsHub);
+    }
+
+    #[test]
+    fn single_player_preserves_an_explicit_p1_session_assignment() {
+        let controller = Entity::from_raw_u32(17).expect("valid entity");
+        let mut user_mode = UserModeState::default();
+        user_mode.input_assignments[0] = LocalInputAssignment::Gamepad(controller);
+        user_mode.enter_mode_select();
+
+        activate_main_menu_choice(&mut user_mode, UserModeMainMenuChoice::SinglePlayer);
+
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(
+            user_mode.input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
     }
 
     #[test]
@@ -6622,8 +6864,6 @@ mod tests {
 
         user_mode.play_mode = UserPlayMode::SinglePlayer;
         user_mode.enter_character_select();
-        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
-        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
 
@@ -6692,7 +6932,12 @@ mod tests {
             user_mode.join_assignment(LocalInputAssignment::Gamepad(first_gamepad)),
             None
         );
-        assert_eq!(user_mode.joined_player_count(), FIGHTER_COUNT);
+        assert!(
+            user_mode
+                .input_assignments
+                .iter()
+                .all(|assignment| *assignment != LocalInputAssignment::Unassigned)
+        );
         assert_eq!(
             user_mode.input_assignments,
             [
@@ -6989,6 +7234,512 @@ mod tests {
             app.world()
                 .resource::<LocalControllerReconnect>()
                 .blocks_gameplay()
+        );
+    }
+
+    #[test]
+    fn takeover_is_scoped_to_selected_single_player_screens() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        user_mode.input_assignments[0] = LocalInputAssignment::Keyboard(0);
+        let mut state = MatchState::default();
+        let transition = GameTransition::default();
+
+        for screen in [
+            UserModeScreen::CharacterSelect,
+            UserModeScreen::ArenaSelect,
+            UserModeScreen::ControlsBriefing,
+            UserModeScreen::BattleResult,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                single_player_takeover_eligible(&user_mode, &state, &transition),
+                "single-player takeover should be eligible on {screen:?}"
+            );
+        }
+
+        user_mode.screen = UserModeScreen::Dev;
+        user_mode.battle_active = true;
+        state.phase = MatchPhase::Fighting;
+        assert!(single_player_takeover_eligible(
+            &user_mode,
+            &state,
+            &transition
+        ));
+        user_mode.battle_music_pending = true;
+        assert!(
+            !single_player_takeover_eligible(&user_mode, &state, &transition),
+            "battle loading must not accept a takeover"
+        );
+
+        user_mode.battle_music_pending = false;
+        user_mode.battle_active = false;
+        state.phase = MatchPhase::Setup;
+        for screen in [
+            UserModeScreen::Start,
+            UserModeScreen::Dev,
+            UserModeScreen::ModeSelect,
+            UserModeScreen::PlayerCountSelect,
+            UserModeScreen::DeviceJoin,
+            UserModeScreen::ControlsHub,
+            UserModeScreen::KeySettings,
+            UserModeScreen::SoundSettings,
+        ] {
+            user_mode.screen = screen;
+            assert!(
+                !single_player_takeover_eligible(&user_mode, &state, &transition),
+                "single-player takeover should be excluded from {screen:?}"
+            );
+        }
+
+        user_mode.screen = UserModeScreen::CharacterSelect;
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        assert!(!single_player_takeover_eligible(
+            &user_mode,
+            &state,
+            &transition
+        ));
+
+        user_mode.enter_tutorial_lesson();
+        state.phase = MatchPhase::Fighting;
+        assert!(!single_player_takeover_eligible(
+            &user_mode,
+            &state,
+            &transition
+        ));
+
+        user_mode.screen = UserModeScreen::CharacterSelect;
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        let mut active_transition = GameTransition::default();
+        active_transition.request(
+            GameTransitionAction::UserMode(UserModeTransitionAction::Route(
+                UserModeUiAction::Confirm,
+            )),
+            GameTransitionReveal::Immediate,
+        );
+        assert!(!single_player_takeover_eligible(
+            &user_mode,
+            &state,
+            &active_transition
+        ));
+    }
+
+    #[test]
+    fn takeover_prompt_uses_family_specific_confirm_and_back_labels() {
+        let entity = Entity::from_raw_u32(81).expect("valid entity");
+
+        assert_eq!(CONTROLLER_TAKEOVER_TITLE, "CONNECT CONTROLLER?");
+        for (family, confirm, back, name) in [
+            (ControllerFamily::Xbox, "A", "B", "Xbox"),
+            (
+                ControllerFamily::PlayStation,
+                "Cross",
+                "Circle",
+                "PlayStation",
+            ),
+            (ControllerFamily::Nintendo, "A", "B", "Nintendo"),
+        ] {
+            assert_eq!(
+                controller_takeover_prompt(PendingControllerTakeover { entity, family }),
+                format!(
+                    "Press {confirm} again to use this {name} controller for P1.\nPress {back} or Esc to keep Keyboard 1."
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_requires_release_and_a_second_confirm_before_assigning() {
+        let mut app = takeover_test_app(UserModeScreen::CharacterSelect);
+        let controller = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+
+        app.update();
+
+        let reconnect = app.world().resource::<LocalControllerReconnect>();
+        assert_eq!(
+            reconnect.pending_takeover,
+            Some(PendingControllerTakeover {
+                entity: controller,
+                family: ControllerFamily::Xbox,
+            })
+        );
+        assert!(reconnect.blocks_ui_input());
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[0].input,
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert!(
+            !app.world()
+                .get::<Gamepad>(controller)
+                .unwrap()
+                .just_pressed(GamepadButton::South),
+            "the opening confirm should be consumed"
+        );
+
+        release_and_clear_gamepad(&mut app, controller, GamepadButton::South);
+        app.update();
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover
+                .is_some()
+        );
+
+        set_gamepad_button(&mut app, controller, GamepadButton::South, true);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[0].input,
+            LocalInputAssignment::Gamepad(controller)
+        );
+        let reconnect = app.world().resource::<LocalControllerReconnect>();
+        assert!(reconnect.pending_takeover.is_none());
+        assert_eq!(
+            reconnect.resume_kind,
+            Some(ControllerReconnectResumeKind::TakeoverAccepted)
+        );
+        assert!(reconnect.blocks_ui_input());
+        assert!(
+            !app.world()
+                .get::<Gamepad>(controller)
+                .unwrap()
+                .just_pressed(GamepadButton::South),
+            "the confirming input should be consumed"
+        );
+
+        app.update();
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_ui_input(),
+            "the frame after confirmation should remain gated"
+        );
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_ui_input()
+        );
+    }
+
+    #[test]
+    fn takeover_prompt_is_locked_to_the_controller_that_opened_it() {
+        let mut app = takeover_test_app(UserModeScreen::ArenaSelect);
+        let candidate = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        app.update();
+        release_and_clear_gamepad(&mut app, candidate, GamepadButton::South);
+
+        let other = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Generic),
+            ))
+            .id();
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover,
+            Some(PendingControllerTakeover {
+                entity: candidate,
+                family: ControllerFamily::Xbox,
+            })
+        );
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert_ne!(candidate, other);
+    }
+
+    #[test]
+    fn takeover_back_and_escape_cancel_and_retain_keyboard_one() {
+        let mut back_app = takeover_test_app(UserModeScreen::ControlsBriefing);
+        let mut nintendo = Gamepad::default();
+        nintendo.digital_mut().press(GamepadButton::East);
+        let controller = back_app
+            .world_mut()
+            .spawn((
+                nintendo,
+                connected_controller_info(ControllerFamily::Nintendo),
+            ))
+            .id();
+        back_app.update();
+        release_and_clear_gamepad(&mut back_app, controller, GamepadButton::East);
+        set_gamepad_button(&mut back_app, controller, GamepadButton::South, true);
+
+        back_app.update();
+
+        assert_eq!(
+            back_app
+                .world()
+                .resource::<UserModeState>()
+                .input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        let reconnect = back_app.world().resource::<LocalControllerReconnect>();
+        assert!(reconnect.pending_takeover.is_none());
+        assert_eq!(
+            reconnect.resume_kind,
+            Some(ControllerReconnectResumeKind::TakeoverCanceled)
+        );
+        assert!(
+            !back_app
+                .world()
+                .get::<Gamepad>(controller)
+                .unwrap()
+                .just_pressed(GamepadButton::South),
+            "the controller cancellation should be consumed"
+        );
+
+        let mut escape_app = takeover_test_app(UserModeScreen::BattleResult);
+        let controller = escape_app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        escape_app.update();
+        release_and_clear_gamepad(&mut escape_app, controller, GamepadButton::South);
+        escape_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+
+        escape_app.update();
+
+        assert_eq!(
+            escape_app
+                .world()
+                .resource::<UserModeState>()
+                .input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert!(
+            escape_app
+                .world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover
+                .is_none()
+        );
+        assert!(
+            !escape_app
+                .world()
+                .resource::<ButtonInput<KeyCode>>()
+                .just_pressed(KeyCode::Escape),
+            "Escape cancellation should be consumed"
+        );
+    }
+
+    #[test]
+    fn disconnected_takeover_candidate_cancels_without_changing_p1() {
+        let mut app = takeover_test_app(UserModeScreen::CharacterSelect);
+        let controller = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        app.update();
+
+        app.world_mut().entity_mut(controller).remove::<Gamepad>();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        let reconnect = app.world().resource::<LocalControllerReconnect>();
+        assert!(reconnect.pending_takeover.is_none());
+        assert_eq!(
+            reconnect.resume_kind,
+            Some(ControllerReconnectResumeKind::TakeoverCanceled)
+        );
+    }
+
+    #[test]
+    fn combat_takeover_pauses_neutralizes_syncs_and_resumes_after_the_input_gate() {
+        let mut app = reconnect_test_app(
+            UserPlayMode::SinglePlayer,
+            [
+                LocalInputAssignment::Keyboard(0),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ],
+        );
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "P1",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                Controller::new(
+                    PlayerSlotId::new(0).unwrap(),
+                    ParticipantKind::Human,
+                    LocalInputAssignment::Keyboard(0),
+                ),
+                FighterInput {
+                    jump: true,
+                    light: true,
+                    ..default()
+                },
+            ))
+            .id();
+        let controller = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<GameplayPauseOwners>()
+                .contains(GameplayPauseOwner::ControllerReconnect)
+        );
+        let input = app.world().get::<FighterInput>(fighter).unwrap();
+        assert!(!input.jump);
+        assert!(!input.light);
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 0);
+
+        release_and_clear_gamepad(&mut app, controller, GamepadButton::South);
+        app.update();
+        set_gamepad_button(&mut app, controller, GamepadButton::South, true);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[0].input,
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert_eq!(
+            app.world().get::<Controller>(fighter).unwrap().input,
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 0);
+
+        app.update();
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 0);
+
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_gameplay()
+        );
+        assert_eq!(app.world().resource::<ReconnectGameplayTicks>().0, 1);
+    }
+
+    #[test]
+    fn accepted_controller_is_retained_and_uses_reconnect_after_disconnect() {
+        let mut app = takeover_test_app(UserModeScreen::ArenaSelect);
+        let controller = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        app.update();
+        release_and_clear_gamepad(&mut app, controller, GamepadButton::South);
+        set_gamepad_button(&mut app, controller, GamepadButton::South, true);
+        app.update();
+        app.update();
+        app.update();
+
+        let other = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Generic),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover
+                .is_none()
+        );
+        release_and_clear_gamepad(&mut app, other, GamepadButton::South);
+
+        app.world_mut().entity_mut(controller).remove::<Gamepad>();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .any_missing()
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .blocks_ui_input()
+        );
+
+        let replacement = app.world_mut().spawn(pressed_a_gamepad()).id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Gamepad(replacement)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[0].input,
+            LocalInputAssignment::Gamepad(replacement)
+        );
+        assert!(
+            !app.world()
+                .get::<Gamepad>(replacement)
+                .unwrap()
+                .just_pressed(GamepadButton::South),
+            "the reconnect confirmation should be consumed"
         );
     }
 
@@ -8161,6 +8912,27 @@ mod tests {
         assert_eq!(
             user_mode.input_assignments,
             [LocalInputAssignment::Unassigned; FIGHTER_COUNT]
+        );
+    }
+
+    #[test]
+    fn controller_setup_cards_use_concise_local_join_copy() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let mut system_state: SystemState<(
+            Query<Entity, With<Gamepad>>,
+            Query<&ControllerDeviceInfo>,
+        )> = SystemState::new(&mut world);
+        let (gamepads, metadata) = system_state.get(&world);
+
+        assert_eq!(
+            controller_setup_seat_message(LocalInputAssignment::Unassigned, &gamepads, &metadata,),
+            "PRESS A OR JUMP\nTO JOIN"
+        );
+        assert_eq!(
+            controller_setup_seat_message(LocalInputAssignment::Keyboard(2), &gamepads, &metadata,),
+            "KEYBOARD 3\nCONNECTED"
         );
     }
 
