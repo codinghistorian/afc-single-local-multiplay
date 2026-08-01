@@ -85,6 +85,7 @@ const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
 ];
 const USER_MODE_CHARACTER_GRID_COLUMNS: usize = 3;
 const USER_MODE_CHARACTER_GRID_ROWS: usize = 2;
+const USER_MODE_CHARACTER_PLAYER_MARKER_TEXT_OFFSET_Y: f32 = 1.0;
 const USER_MODE_CHARACTER_PORTRAIT_PATHS: [(CharacterKind, &str); 5] = [
     (
         CharacterKind::Cat,
@@ -1939,6 +1940,12 @@ pub(crate) struct UserModeCharacterPlayerMarker {
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UserModeCharacterPlayerMarkerText {
+    character: CharacterKind,
+    player: usize,
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UserModeCharacterReadyMarker {
     character: CharacterKind,
 }
@@ -2226,17 +2233,25 @@ fn character_player_marker(character: CharacterKind, player: usize) -> impl Bund
             height: Val::Percent(66.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            padding: UiRect::axes(Val::Px(5.0), Val::Px(1.0)),
+            padding: UiRect::axes(Val::Px(5.0), Val::Px(0.0)),
             ..default()
         },
         BackgroundColor(Color::srgba(0.08, 0.08, 0.09, 0.92)),
-        Text::new(format!("P{}", player + 1)),
-        TextFont {
-            font_size: 12.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.98, 0.91, 0.68)),
-        TextLayout::new_with_justify(Justify::Center),
+        children![(
+            UserModeCharacterPlayerMarkerText { character, player },
+            Node {
+                position_type: PositionType::Relative,
+                top: Val::Px(USER_MODE_CHARACTER_PLAYER_MARKER_TEXT_OFFSET_Y),
+                ..default()
+            },
+            Text::new(format!("P{}", player + 1)),
+            TextFont {
+                font_size: 12.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.98, 0.91, 0.68)),
+            TextLayout::new_with_justify(Justify::Center),
+        ),],
     )
 }
 
@@ -2367,7 +2382,7 @@ fn character_portrait_card(asset_server: &AssetServer, character: CharacterKind)
                     position_type: PositionType::Absolute,
                     left: Val::Percent(5.0),
                     right: Val::Percent(5.0),
-                    bottom: Val::Percent(4.0),
+                    bottom: Val::Percent(1.0),
                     height: Val::Percent(20.0),
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
@@ -5339,9 +5354,15 @@ pub fn update_user_mode_character_select_cards(
         (
             &UserModeCharacterPlayerMarker,
             &mut Node,
-            &mut Text,
             &mut BackgroundColor,
         ),
+        (
+            Without<UserModeCharacterReadyMarker>,
+            Without<UserModeCharacterPortraitCard>,
+        ),
+    >,
+    mut player_marker_texts: Query<
+        (&UserModeCharacterPlayerMarkerText, &mut Text),
         (
             Without<UserModeCharacterReadyMarker>,
             Without<UserModeCharacterPortraitCard>,
@@ -5366,7 +5387,7 @@ pub fn update_user_mode_character_select_cards(
     >,
 ) {
     let human_players = user_mode.play_mode.human_player_count();
-    for (marker, mut node, mut text, mut background) in &mut player_markers {
+    for (marker, mut node, mut background) in &mut player_markers {
         let selected = marker.player < human_players
             && user_mode.player_characters[marker.player] == marker.character;
         node.display = if selected {
@@ -5375,11 +5396,6 @@ pub fn update_user_mode_character_select_cards(
             Display::None
         };
         if selected {
-            **text = if user_mode.character_ready[marker.player] {
-                format!("P{} READY", marker.player + 1)
-            } else {
-                format!("P{}", marker.player + 1)
-            };
             *background = BackgroundColor(if marker.player == user_mode.character_select_player {
                 Color::srgb(0.73, 0.49, 0.16)
             } else if user_mode.character_ready[marker.player] {
@@ -5387,6 +5403,18 @@ pub fn update_user_mode_character_select_cards(
             } else {
                 Color::srgba(0.08, 0.08, 0.09, 0.92)
             });
+        }
+    }
+
+    for (marker, mut text) in &mut player_marker_texts {
+        let selected = marker.player < human_players
+            && user_mode.player_characters[marker.player] == marker.character;
+        if selected {
+            **text = if user_mode.character_ready[marker.player] {
+                format!("P{} READY", marker.player + 1)
+            } else {
+                format!("P{}", marker.player + 1)
+            };
         }
     }
 
@@ -8670,8 +8698,17 @@ mod tests {
                     player: 0,
                 },
                 Node::default(),
-                Text::new(""),
                 BackgroundColor::default(),
+            ))
+            .id();
+        let marker_text = app
+            .world_mut()
+            .spawn((
+                UserModeCharacterPlayerMarkerText {
+                    character: CharacterKind::Cat,
+                    player: 0,
+                },
+                Text::new(""),
             ))
             .id();
         let ready = app
@@ -8699,8 +8736,25 @@ mod tests {
             Display::Flex
         );
         assert_eq!(
-            app.world().get::<Text>(marker).unwrap().0,
+            app.world().get::<Text>(marker_text).unwrap().0,
             "P1 READY".to_string()
+        );
+    }
+
+    #[test]
+    fn character_player_marker_offsets_only_its_text() {
+        let mut world = World::new();
+        let marker = world
+            .spawn(character_player_marker(CharacterKind::Cat, 0))
+            .id();
+        let children = world.get::<Children>(marker).unwrap();
+
+        assert_eq!(children.len(), 1);
+        let text_node = world.get::<Node>(children[0]).unwrap();
+        assert_eq!(text_node.position_type, PositionType::Relative);
+        assert_eq!(
+            text_node.top,
+            Val::Px(USER_MODE_CHARACTER_PLAYER_MARKER_TEXT_OFFSET_Y)
         );
     }
 
