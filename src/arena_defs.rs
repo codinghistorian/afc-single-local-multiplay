@@ -6,6 +6,9 @@ use crate::items::ItemKind;
 
 pub use crate::arena_barriers::ArenaBarrierDefinition as PlatformDefinition;
 
+pub const TRAINING_GROUND_ARENA_INDEX: usize = 10;
+pub const TRAINING_GROUND_BACKGROUND_PATH: &str = "backgrounds/menu/map_select/arena0.png";
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ArenaGroundShape {
     Circle {
@@ -52,6 +55,7 @@ pub enum ArenaVisualTheme {
     Garden,
     Snow,
     Powder,
+    Training,
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +98,7 @@ pub struct ArenaBackgroundDefinition {
     pub image_size: Vec2,
     pub world_height: f32,
     pub distance: f32,
+    pub gameplay_visible: bool,
 }
 
 pub struct ArenaDefinition {
@@ -123,6 +128,20 @@ const fn arena_background(asset_path: &'static str) -> ArenaBackgroundDefinition
         image_size: Vec2::new(1536.0, 1024.0),
         world_height: 52.0,
         distance: 52.0,
+        gameplay_visible: true,
+    }
+}
+
+const fn arena_background_with_size(
+    asset_path: &'static str,
+    image_size: Vec2,
+) -> ArenaBackgroundDefinition {
+    ArenaBackgroundDefinition {
+        asset_path,
+        image_size,
+        world_height: 52.0,
+        distance: 52.0,
+        gameplay_visible: false,
     }
 }
 
@@ -146,6 +165,8 @@ const SKY_STEPS_BACKGROUND: ArenaBackgroundDefinition =
     arena_background("backgrounds/sky_steps.png");
 const POWDER_KEG_COURT_BACKGROUND: ArenaBackgroundDefinition =
     arena_background("backgrounds/powder_keg_court.png");
+const TRAINING_GROUND_BACKGROUND: ArenaBackgroundDefinition =
+    arena_background_with_size(TRAINING_GROUND_BACKGROUND_PATH, Vec2::new(1254.0, 1254.0));
 
 const CROWN_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::circle(
     0.0,
@@ -245,6 +266,15 @@ const POWDER_KEG_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::rectangle(-7.0, 0.0, 1.45, 3.2, 0.0, ARENA_TOP_Y + 0.12),
     ArenaGroundShape::rectangle(7.0, 0.0, 1.45, 3.2, 0.0, ARENA_TOP_Y + 0.12),
 ];
+
+const TRAINING_GROUND_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::rectangle(
+    0.0,
+    0.0,
+    9.0,
+    9.0,
+    0.0,
+    ARENA_TOP_Y,
+)];
 
 const CROWN_PLATFORMS: &[PlatformDefinition] = &[
     PlatformDefinition::new(0.0, 9.65, 3.9, 1.65, ARENA_TOP_Y - 0.05),
@@ -740,6 +770,9 @@ const FEAST_MARKET_HAZARDS: &[ArenaHazardDefinition] = &[];
 const SNARE_GARDEN_HAZARDS: &[ArenaHazardDefinition] = &[];
 const SKY_STEPS_HAZARDS: &[ArenaHazardDefinition] = &[];
 const POWDER_KEG_HAZARDS: &[ArenaHazardDefinition] = &[];
+const TRAINING_GROUND_ITEMS: &[ItemAnchor] = &[];
+const TRAINING_GROUND_HAZARDS: &[ArenaHazardDefinition] = &[];
+const TRAINING_GROUND_PLATFORMS: &[PlatformDefinition] = &[];
 
 const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
@@ -932,6 +965,26 @@ const ARENAS: &[ArenaDefinition] = &[
         background: POWDER_KEG_COURT_BACKGROUND,
         visual_theme: ArenaVisualTheme::Powder,
     },
+    ArenaDefinition {
+        name: "Training Ground",
+        spawn_points: [
+            Vec3::new(-3.8, ARENA_TOP_Y, 2.6),
+            Vec3::new(3.8, ARENA_TOP_Y, 2.6),
+            Vec3::new(-3.8, ARENA_TOP_Y, -2.6),
+            Vec3::new(3.8, ARENA_TOP_Y, -2.6),
+        ],
+        item_anchors: TRAINING_GROUND_ITEMS,
+        ground_shapes: TRAINING_GROUND_GROUND,
+        platforms: TRAINING_GROUND_PLATFORMS,
+        pipe_pair: None,
+        ringout_radius: RINGOUT_RADIUS + 0.8,
+        ringout_y: RINGOUT_Y,
+        // Same pitch as CAMERA_BASE_OFFSET, scaled for the 18x18 court.
+        camera_offset: Vec3::new(0.0, 14.1, 16.0),
+        hazards: TRAINING_GROUND_HAZARDS,
+        background: TRAINING_GROUND_BACKGROUND,
+        visual_theme: ArenaVisualTheme::Training,
+    },
 ];
 
 static ACTIVE_ARENA_INDEX: AtomicUsize = AtomicUsize::new(0);
@@ -966,7 +1019,7 @@ mod tests {
     #[test]
     fn arena_definitions_cover_current_stage_variety() {
         let arenas = arena_definitions();
-        assert!(arenas.len() >= 10);
+        assert_eq!(arenas.len(), TRAINING_GROUND_ARENA_INDEX + 1);
         assert_eq!(arenas[0].spawn_points.len(), 4);
         assert!(!arenas[0].item_anchors.is_empty());
         assert!(!arenas[1].hazards.is_empty());
@@ -979,6 +1032,7 @@ mod tests {
         assert_eq!(arenas[7].name, "Snare Garden");
         assert_eq!(arenas[8].name, "Sky Steps");
         assert_eq!(arenas[9].name, "Powder Keg Court");
+        assert_eq!(arenas[TRAINING_GROUND_ARENA_INDEX].name, "Training Ground");
         assert!(arenas[2].ringout_y < RINGOUT_Y);
         assert!(arenas[3].hazards.len() >= 2);
         assert!(arenas[4].hazards.iter().any(|hazard| hazard.phase > 0.0));
@@ -986,6 +1040,9 @@ mod tests {
         assert!(arenas[7].hazards.is_empty());
         assert!(arenas[8].hazards.is_empty());
         assert!(arenas[9].hazards.is_empty());
+        assert!(arenas[TRAINING_GROUND_ARENA_INDEX].item_anchors.is_empty());
+        assert!(arenas[TRAINING_GROUND_ARENA_INDEX].hazards.is_empty());
+        assert!(arenas[TRAINING_GROUND_ARENA_INDEX].platforms.is_empty());
         assert!(
             arenas[8]
                 .platforms
@@ -1004,24 +1061,28 @@ mod tests {
 
     #[test]
     fn every_arena_has_its_own_matching_background_asset() {
-        let expected_paths = [
-            "backgrounds/crown_ring.png",
-            "backgrounds/split_causeway.png",
-            "backgrounds/sunstone_steps.png",
-            "backgrounds/crank_yard.png",
-            "backgrounds/vent_spiral.png",
-            "backgrounds/bumper_alley.png",
-            "backgrounds/feast_market.png",
-            "backgrounds/snare_garden.png",
-            "backgrounds/sky_steps.png",
-            "backgrounds/powder_keg_court.png",
+        let expected_assets = [
+            ("backgrounds/crown_ring.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/split_causeway.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/sunstone_steps.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/crank_yard.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/vent_spiral.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/bumper_alley.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/feast_market.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/snare_garden.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/sky_steps.png", Vec2::new(1536.0, 1024.0)),
+            (
+                "backgrounds/powder_keg_court.png",
+                Vec2::new(1536.0, 1024.0),
+            ),
+            (TRAINING_GROUND_BACKGROUND_PATH, Vec2::new(1254.0, 1254.0)),
         ];
 
         let arenas = arena_definitions();
-        assert_eq!(arenas.len(), expected_paths.len());
-        for (arena, expected_path) in arenas.iter().zip(expected_paths) {
+        assert_eq!(arenas.len(), expected_assets.len());
+        for (arena, (expected_path, expected_size)) in arenas.iter().zip(expected_assets) {
             assert_eq!(arena.background.asset_path, expected_path, "{}", arena.name);
-            assert_eq!(arena.background.image_size, Vec2::new(1536.0, 1024.0));
+            assert_eq!(arena.background.image_size, expected_size);
 
             let asset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets")
@@ -1041,10 +1102,52 @@ mod tests {
     }
 
     #[test]
+    fn supplied_training_ground_png_keeps_its_authored_dimensions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(TRAINING_GROUND_BACKGROUND_PATH);
+        let bytes = std::fs::read(&path).expect("training ground preview should be readable");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(bytes.len() >= 24, "PNG is missing its IHDR header");
+        assert_eq!(&bytes[12..16], b"IHDR");
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        assert_eq!((width, height), (1254, 1254));
+    }
+
+    #[test]
+    fn training_ground_is_a_single_flat_rectangle() {
+        let training = arena_definition(TRAINING_GROUND_ARENA_INDEX);
+        assert_eq!(training.ground_shapes.len(), 1);
+        assert!(matches!(
+            training.ground_shapes[0],
+            ArenaGroundShape::Rectangle {
+                half_extents,
+                top_y: ARENA_TOP_Y,
+                ..
+            } if half_extents == Vec2::new(9.0, 9.0)
+        ));
+        assert!(!training.background.gameplay_visible);
+        assert!(
+            training
+                .camera_offset
+                .normalize()
+                .distance(CAMERA_BASE_OFFSET.normalize())
+                < 0.002,
+            "training ground should use the standard gameplay camera pitch"
+        );
+        assert!(
+            arena_definitions()[..TRAINING_GROUND_ARENA_INDEX]
+                .iter()
+                .all(|arena| arena.background.gameplay_visible)
+        );
+    }
+
+    #[test]
     fn arena_definition_clamps_selection_index() {
         assert_eq!(arena_definition(0).name, "Crown Ring");
         assert_eq!(arena_definition(1).name, "Split Causeway");
-        assert_eq!(arena_definition(usize::MAX).name, "Powder Keg Court");
+        assert_eq!(arena_definition(usize::MAX).name, "Training Ground");
     }
 
     #[test]

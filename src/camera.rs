@@ -1,6 +1,8 @@
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::time::Real;
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,9 @@ use std::fs;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::path::{Path, PathBuf};
 
-use crate::arena_defs::active_arena_definition;
+use crate::arena_defs::{ArenaDefinition, active_arena_definition};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::arena_defs::{TRAINING_GROUND_ARENA_INDEX, set_active_arena_index};
 use crate::combat::HitEffects;
 use crate::components::{Fighter, FighterAction, FighterActionState};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -48,6 +52,10 @@ const GAMEPLAY_CAMERA_SHAKE_TRANSLATION_SCALE: f32 = 0.34;
 const SINGLE_PLAYER_CAMERA_PRESET_PATH: &str = "assets/camera/single_player_camera.ron";
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 const DEV_PLAYER_CAMERA_TARGET_ID: usize = 0;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+const DEV_SCREENSHOT_PATH: &str = "/tmp/afc-training-ground.png";
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+const TRAINING_GROUND_CAPTURE_ENV: &str = "AFC_TRAINING_GROUND_CAPTURE";
 
 #[derive(Component)]
 pub struct ArenaCamera;
@@ -294,11 +302,12 @@ pub fn setup_camera(mut commands: Commands) {
     let screen_look = ScreenLook::default();
     commands.insert_resource(screen_look);
     commands.insert_resource(ScreenLookTransition::default());
+    let arena = active_arena_definition();
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection::default()),
         ColorGrading::default(),
-        Transform::from_translation(active_arena_definition().camera_offset)
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        arena_camera_base_transform(arena),
         ArenaCamera,
     ));
     commands.spawn((
@@ -311,6 +320,17 @@ pub fn setup_camera(mut commands: Commands) {
         UiCamera,
         Name::new("Default UI camera"),
     ));
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn configure_training_ground_capture() {
+    if std::env::var_os(TRAINING_GROUND_CAPTURE_ENV).is_some() {
+        set_active_arena_index(TRAINING_GROUND_ARENA_INDEX);
+    }
+}
+
+fn arena_camera_base_transform(arena: &ArenaDefinition) -> Transform {
+    Transform::from_translation(arena.camera_offset).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -338,6 +358,61 @@ pub fn update_gameplay_camera_controls(
         time.delta_secs(),
         user_mode.blocks_dev_input(),
     );
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn capture_screenshot_hotkey(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
+    if !keys.just_pressed(KeyCode::F12) {
+        return;
+    }
+
+    let path =
+        std::env::var("AFC_SCREENSHOT_PATH").unwrap_or_else(|_| DEV_SCREENSHOT_PATH.to_string());
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub fn capture_training_ground_when_requested(
+    mut commands: Commands,
+    mut frames: Local<u32>,
+    mut captured: Local<bool>,
+    mut ui_cameras: Query<&mut Camera, With<UiCamera>>,
+    mut arena_cameras: Query<&mut Transform, With<ArenaCamera>>,
+    mut fighters: Query<&mut Visibility, With<Fighter>>,
+    mut ui_nodes: Query<&mut Visibility, (With<Node>, Without<Fighter>)>,
+) {
+    let Some(path) = std::env::var_os(TRAINING_GROUND_CAPTURE_ENV) else {
+        return;
+    };
+
+    for mut camera in &mut ui_cameras {
+        camera.is_active = false;
+    }
+    for mut transform in &mut arena_cameras {
+        *transform = arena_camera_base_transform(active_arena_definition());
+    }
+    for mut visibility in &mut fighters {
+        *visibility = Visibility::Hidden;
+    }
+    for mut visibility in &mut ui_nodes {
+        *visibility = Visibility::Hidden;
+    }
+
+    *frames += 1;
+    if *captured || *frames < 90 {
+        return;
+    }
+    *captured = true;
+    let path = if path.is_empty() {
+        DEV_SCREENSHOT_PATH.into()
+    } else {
+        path
+    };
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
 }
 
 fn load_single_player_camera_preset() -> SinglePlayerCameraPreset {
@@ -1100,6 +1175,7 @@ fn gameplay_camera_target(center: Vec3, farthest: f32, control: &GameplayCameraC
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena_defs::{TRAINING_GROUND_ARENA_INDEX, arena_definition};
 
     fn assert_vec2_close(actual: Vec2, expected: Vec2, tolerance: f32) {
         assert!(
@@ -1112,6 +1188,20 @@ mod tests {
         assert!(
             actual.distance(expected) <= tolerance,
             "expected {actual:?} to be within {tolerance} of {expected:?}"
+        );
+    }
+
+    #[test]
+    fn training_ground_uses_the_standard_gameplay_camera_pitch() {
+        let arena = arena_definition(TRAINING_GROUND_ARENA_INDEX);
+        let transform = arena_camera_base_transform(arena);
+        assert_vec3_close(transform.translation, arena.camera_offset, 0.001);
+        assert!(
+            arena
+                .camera_offset
+                .normalize()
+                .distance(crate::constants::CAMERA_BASE_OFFSET.normalize())
+                < 0.002
         );
     }
 

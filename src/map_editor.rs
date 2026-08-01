@@ -1189,6 +1189,7 @@ fn load_overlay(arena_index: usize) -> Result<MapOverlayDef, String> {
             7 => include_str!("../assets/maps/overlays/arena_7.ron"),
             8 => include_str!("../assets/maps/overlays/arena_8.ron"),
             9 => include_str!("../assets/maps/overlays/arena_9.ron"),
+            10 => include_str!("../assets/maps/overlays/arena_10.ron"),
             _ => return Ok(MapOverlayDef::empty(arena_index)),
         };
         let mut overlay: MapOverlayDef =

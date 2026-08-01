@@ -126,6 +126,12 @@ pub fn build_app() -> App {
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
 
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    app.add_systems(
+        Startup,
+        camera::configure_training_ground_capture.before(arena::setup_arena),
+    );
+
     app.insert_resource(ClearColor(Color::srgb(0.006, 0.006, 0.012)))
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.85, 0.78, 0.68),
@@ -375,6 +381,7 @@ pub fn build_app() -> App {
                     arena::sync_arena_visuals.run_if(user_mode::gameplay_scene_loaded),
                     arena::sync_arena_preview_render_layers
                         .run_if(user_mode::gameplay_scene_loaded),
+                    arena::sync_arena_lighting.run_if(user_mode::gameplay_scene_loaded),
                 )
                     .chain(),
                 map_editor::sync_map_overlay_visuals.run_if(user_mode::gameplay_scene_loaded),
@@ -392,6 +399,7 @@ pub fn build_app() -> App {
                     camera::load_single_player_camera_preset_hotkey,
                     camera::save_single_player_camera_preset_hotkey,
                     camera::toggle_camera_action_effects,
+                    camera::capture_screenshot_hotkey,
                 )
                     .chain(),
                 camera::follow_camera.run_if(user_mode::gameplay_scene_loaded),
@@ -469,6 +477,16 @@ pub fn build_app() -> App {
             Update,
             camera::update_screen_look_transition.in_set(GameSet::Presentation),
         );
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    app.add_systems(
+        Update,
+        camera::capture_training_ground_when_requested
+            .after(user_mode::sync_user_mode_ui_camera)
+            .after(tutorial::sync_tutorial_ui_camera)
+            .after(camera::follow_camera)
+            .in_set(GameSet::Presentation),
+    );
 
     app
 }

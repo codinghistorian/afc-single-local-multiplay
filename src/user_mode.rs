@@ -49,7 +49,7 @@ const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
 const USER_MODE_CONTROLLER_ICON_PATH: &str = "icons/controller.png";
 const USER_MODE_KEYBOARD_ICON_PATH: &str = "icons/keyboard.png";
 const USER_MODE_SOUND_ICON_PATH: &str = "icons/sound.png";
-const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
+const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 11] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
     "music/bgm/cc0_sunstone_desert_loop.mp3",
@@ -60,10 +60,12 @@ const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_snare_rhythm_garden.ogg",
     "music/bgm/cc0_sky_snow_stage.ogg",
     "music/bgm/cc0_powder_pirate_indenture_loop.wav",
+    "music/bgm/cc0_crown_hope.ogg",
 ];
 const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
 const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
+const USER_MODE_ARENA_PREVIEW_ASPECT_RATIO: f32 = 1.5;
 const USER_MODE_PLAYER_FIGHTER_ID: usize = 0;
 const USER_MODE_BOT_FIGHTER_ID: usize = 1;
 const USER_MODE_STOCK_RULE_INDEX: usize = 2;
@@ -5230,6 +5232,7 @@ pub fn update_user_mode_selection_previews(
         } else {
             Display::None
         };
+        node.aspect_ratio = Some(USER_MODE_ARENA_PREVIEW_ASPECT_RATIO);
     }
     for (mut camera, mut transform) in &mut arena_preview_cameras {
         if camera.is_active != arena_visible {
@@ -6918,6 +6921,7 @@ fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena_defs::TRAINING_GROUND_ARENA_INDEX;
     use crate::components::{LocalInputAssignment, ParticipantKind, PlayerSlotId};
 
     #[derive(Resource, Default)]
@@ -8883,9 +8887,21 @@ mod tests {
     fn arena_selector_copy_only_exposes_focused_choice_and_counter() {
         let message = arena_select_message(5);
 
-        assert_eq!(message, "BUMPER ALLEY\n6 / 10");
+        assert_eq!(message, "BUMPER ALLEY\n6 / 11");
         assert!(!message.contains("CROWN RING"));
         assert!(!message.contains("POWDER KEG COURT"));
+    }
+
+    #[test]
+    fn training_ground_selector_is_registered_as_the_eleventh_arena() {
+        assert_eq!(
+            user_mode_battle_music_path(TRAINING_GROUND_ARENA_INDEX),
+            USER_MODE_BATTLE_MUSIC_PATHS[0]
+        );
+        assert_eq!(
+            arena_select_message(TRAINING_GROUND_ARENA_INDEX),
+            "TRAINING GROUND\n11 / 11"
+        );
     }
 
     #[test]
@@ -8993,6 +9009,47 @@ mod tests {
             app.world().get::<Node>(preview).unwrap().display,
             Display::None
         );
+    }
+
+    #[test]
+    fn every_arena_including_training_ground_uses_the_live_preview_camera() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_arena_select();
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_selection_previews);
+        let panel = app
+            .world_mut()
+            .spawn((UserModeArenaPreviewPanel, Node::default()))
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera::default(),
+                Transform::default(),
+                UserModeArenaPreviewCamera,
+            ))
+            .id();
+
+        for arena_index in 0..arena_definitions().len() {
+            app.world_mut().resource_mut::<UserModeState>().arena_index = arena_index;
+            app.update();
+
+            assert_eq!(
+                app.world().get::<Node>(panel).unwrap().display,
+                Display::Flex
+            );
+            assert_eq!(
+                app.world().get::<Node>(panel).unwrap().aspect_ratio,
+                Some(USER_MODE_ARENA_PREVIEW_ASPECT_RATIO)
+            );
+            assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+            assert_eq!(
+                app.world().get::<Transform>(camera).unwrap().translation,
+                arena_preview_camera_transform(arena_index).translation
+            );
+        }
     }
 
     #[test]

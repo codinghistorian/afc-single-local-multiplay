@@ -1594,7 +1594,7 @@ mod tests {
 
     #[test]
     fn dev_arena_label_identifies_the_active_map() {
-        assert_eq!(dev_arena_label_text(4), "MAP 05/10  VENT SPIRAL");
+        assert_eq!(dev_arena_label_text(4), "MAP 05/11  VENT SPIRAL");
     }
 
     #[test]

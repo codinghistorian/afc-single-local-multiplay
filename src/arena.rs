@@ -1,6 +1,8 @@
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::EulerRot;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::scene::SceneInstanceReady;
 use serde::Deserialize;
@@ -10,10 +12,12 @@ use std::f32::consts::{PI, TAU};
 use std::fs;
 use std::sync::OnceLock;
 
+use crate::arena_barriers::ArenaBarrierDefinition;
 use crate::arena_defs::{
     ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
     ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, CRANK_PIPE_VISUAL_SCALE,
-    PlatformDefinition, active_arena_definition, active_arena_index, arena_definitions,
+    PlatformDefinition, TRAINING_GROUND_ARENA_INDEX, active_arena_definition, active_arena_index,
+    arena_definitions,
 };
 use crate::arena_prop_colliders::{
     LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
@@ -78,6 +82,7 @@ const POWDER_CANNON_INTERVAL_SECONDS: f32 = 2.6;
 const POWDER_CANNON_BOMB_DAMAGE: f32 = 9.0;
 const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
 const CHAMPIONS_COURT_RON_PATH: &str = "assets/maps/champions_court.ron";
+const TRAINING_GROUND_RON_PATH: &str = "assets/maps/training_ground.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
@@ -90,6 +95,12 @@ pub(crate) const ARENA_PREVIEW_RENDER_LAYER: usize = 21;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+#[derive(Component)]
+pub(crate) struct ArenaGlobalDirectionalLight;
+
+#[derive(Component)]
+pub(crate) struct ArenaGlobalPointLight;
 
 fn arena_geometry_render_layers() -> RenderLayers {
     RenderLayers::from_layers(&[0, ARENA_PREVIEW_RENDER_LAYER])
@@ -142,6 +153,12 @@ pub struct ArenaHazardMarker {
 
 #[derive(Component)]
 pub struct ArenaCampfireFlame {
+    base_scale: Vec3,
+    phase: f32,
+}
+
+#[derive(Component)]
+pub struct ArenaDecorativeFlame {
     base_scale: Vec3,
     phase: f32,
 }
@@ -307,7 +324,7 @@ impl ArenaPipeState {
 
 #[allow(dead_code)]
 #[derive(Clone)]
-struct ChampionsCourtFloorRenderAsset {
+struct AuthoredFloorRenderAsset {
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
 }
@@ -353,27 +370,48 @@ impl ArenaAssetProp {
 }
 
 #[derive(Debug, Deserialize)]
-struct ChampionsCourtRon {
-    map: ChampionsCourtMap,
+struct AuthoredArenaRon {
+    map: AuthoredArenaMap,
     assets: HashMap<String, String>,
-    floor_shapes: Vec<ChampionsCourtFloorShape>,
     #[serde(default)]
-    prefabs: HashMap<String, Vec<ChampionsCourtObject>>,
+    floor_shapes: Vec<AuthoredFloorShape>,
     #[serde(default)]
-    instances: Vec<ChampionsCourtObject>,
+    prefabs: HashMap<String, Vec<AuthoredObject>>,
     #[serde(default)]
-    prefab_instances: Vec<ChampionsCourtPrefabInstance>,
+    instances: Vec<AuthoredObject>,
     #[serde(default)]
-    lights: Vec<ChampionsCourtLight>,
+    prefab_instances: Vec<AuthoredPrefabInstance>,
+    #[serde(default)]
+    lights: Vec<AuthoredLight>,
+    #[serde(default)]
+    materials: HashMap<String, AuthoredMaterial>,
+    #[serde(default)]
+    primitives: Vec<AuthoredPrimitive>,
+    #[serde(default)]
+    primitive_prefabs: HashMap<String, Vec<AuthoredPrimitive>>,
+    #[serde(default)]
+    primitive_prefab_instances: Vec<AuthoredPrimitivePrefabInstance>,
+    #[serde(default)]
+    floor_rows: Vec<AuthoredFloorRow>,
+    #[serde(default)]
+    floor_pattern: Option<AuthoredFloorPattern>,
+    #[serde(default)]
+    floor_materials: Vec<String>,
+    #[serde(default)]
+    colliders: Vec<AuthoredCollider>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChampionsCourtMap {
+struct AuthoredArenaMap {
     tile_size: f32,
+    #[serde(default)]
+    floor_width: f32,
+    #[serde(default)]
+    floor_depth: f32,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChampionsCourtFloorShape {
+struct AuthoredFloorShape {
     id: String,
     kind: String,
     asset: String,
@@ -393,7 +431,7 @@ struct ChampionsCourtFloorShape {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct ChampionsCourtObject {
+struct AuthoredObject {
     #[serde(default)]
     id: String,
     asset: String,
@@ -405,7 +443,7 @@ struct ChampionsCourtObject {
 }
 
 #[derive(Debug, Deserialize)]
-struct ChampionsCourtPrefabInstance {
+struct AuthoredPrefabInstance {
     id: String,
     prefab: String,
     position: (f32, f32, f32),
@@ -416,7 +454,7 @@ struct ChampionsCourtPrefabInstance {
 }
 
 #[derive(Debug, Deserialize)]
-struct ChampionsCourtLight {
+struct AuthoredLight {
     id: String,
     kind: String,
     #[serde(default)]
@@ -433,6 +471,78 @@ struct ChampionsCourtLight {
     range: f32,
     #[serde(default)]
     shadows: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AuthoredMaterial {
+    color: (f32, f32, f32),
+    #[serde(default)]
+    emissive: (f32, f32, f32),
+    #[serde(default = "default_roughness")]
+    roughness: f32,
+    #[serde(default)]
+    metallic: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AuthoredPrimitive {
+    #[serde(default)]
+    id: String,
+    kind: String,
+    position: (f32, f32, f32),
+    #[serde(default)]
+    rotation_y: f32,
+    #[serde(default = "unit_tuple3")]
+    scale: (f32, f32, f32),
+    material: String,
+    #[serde(default)]
+    effect: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredPrimitivePrefabInstance {
+    id: String,
+    prefab: String,
+    position: (f32, f32, f32),
+    #[serde(default)]
+    rotation_y: f32,
+    #[serde(default = "unit_tuple3")]
+    scale: (f32, f32, f32),
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredFloorRow {
+    z: f32,
+    depth: f32,
+    #[serde(default)]
+    offset: f32,
+    widths: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredFloorPattern {
+    rows: usize,
+    columns: usize,
+    gap: f32,
+    bevel: f32,
+}
+
+#[derive(Default)]
+struct AuthoredFloorMeshBuffers {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredCollider {
+    id: String,
+    center: (f32, f32),
+    half_extents: (f32, f32),
+    #[serde(default)]
+    rotation_y: f32,
+    top_y: f32,
 }
 
 #[derive(Resource)]
@@ -567,14 +677,16 @@ fn spawn_arena_geometry(
     materials: &mut Assets<StandardMaterial>,
 ) {
     let arena = active_arena_definition();
-    spawn_arena_background(
-        commands,
-        asset_server,
-        meshes,
-        materials,
-        arena.background,
-        arena.camera_offset,
-    );
+    if arena.background.gameplay_visible {
+        spawn_arena_background(
+            commands,
+            asset_server,
+            meshes,
+            materials,
+            arena.background,
+            arena.camera_offset,
+        );
+    }
 
     let arena_index = active_arena_index();
     let palette = arena_theme_palette(arena.visual_theme);
@@ -586,8 +698,11 @@ fn spawn_arena_geometry(
         ..default()
     });
 
-    if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
-        match spawn_champions_court_map(commands, asset_server) {
+    if matches!(
+        arena_index,
+        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+    ) {
+        match spawn_authored_arena_map(commands, asset_server, meshes, materials, arena_index) {
             Ok(()) => {
                 spawn_arena_hazard_markers(
                     commands,
@@ -599,7 +714,7 @@ fn spawn_arena_geometry(
                 return;
             }
             Err(error) => {
-                warn!("Could not load {CHAMPIONS_COURT_RON_PATH}: {error}");
+                warn!("Could not load authored scene for {}: {error}", arena.name);
             }
         }
     }
@@ -728,6 +843,12 @@ fn arena_theme_palette(theme: ArenaVisualTheme) -> ArenaThemePalette {
             secondary: Color::srgb(0.24, 0.25, 0.25),
             trim: Color::srgb(0.9, 0.55, 0.12),
             hazard: Color::srgb(0.96, 0.2, 0.08),
+        },
+        ArenaVisualTheme::Training => ArenaThemePalette {
+            primary: Color::srgb(0.62, 0.43, 0.25),
+            secondary: Color::srgb(0.82, 0.62, 0.38),
+            trim: Color::srgb(0.95, 0.58, 0.2),
+            hazard: Color::srgb(1.0, 0.32, 0.06),
         },
     }
 }
@@ -926,6 +1047,7 @@ fn spawn_arena_theme_accents(
         ArenaVisualTheme::Snow => (&[(-2.9, -2.3), (2.9, 2.3)][..], Vec2::new(3.4, 0.14)),
         ArenaVisualTheme::Powder => (&[(-3.8, 0.0), (3.8, 0.0)][..], Vec2::new(0.18, 12.0)),
         ArenaVisualTheme::Crown => return,
+        ArenaVisualTheme::Training => return,
     };
 
     for (x, z) in positions {
@@ -1000,14 +1122,25 @@ pub fn sync_arena_background_to_camera(
     }
 }
 
-fn spawn_champions_court_map(
+fn spawn_authored_arena_map(
     commands: &mut Commands,
     asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    arena_index: usize,
 ) -> Result<(), String> {
-    let map = load_champions_court_map()?;
+    let map = load_authored_arena_map(arena_index)?;
+    let arena_name = arena_definitions()[arena_index].name;
     let mut scenes = HashMap::new();
 
-    spawn_champions_floor_shapes(commands, asset_server, &map, &mut scenes);
+    spawn_authored_floor_shapes(
+        commands,
+        asset_server,
+        &map,
+        &mut scenes,
+        arena_index,
+        arena_name,
+    );
 
     for object in &map.instances {
         spawn_champions_object(
@@ -1017,14 +1150,14 @@ fn spawn_champions_court_map(
             &mut scenes,
             &object.asset,
             champions_object_transform(object),
-            champions_object_name("Champions Court object", &object.id, &object.asset),
+            champions_object_name(arena_name, &object.id, &object.asset),
         );
     }
 
     for prefab_instance in &map.prefab_instances {
         let Some(prefab) = map.prefabs.get(&prefab_instance.prefab) else {
             warn!(
-                "Champion's Court prefab instance '{}' references missing prefab '{}'",
+                "{arena_name} prefab instance '{}' references missing prefab '{}'",
                 prefab_instance.id, prefab_instance.prefab
             );
             continue;
@@ -1038,54 +1171,62 @@ fn spawn_champions_court_map(
                 &mut scenes,
                 &object.asset,
                 champions_prefab_object_transform(prefab_instance, object),
-                champions_prefab_object_name(prefab_instance, object),
+                authored_prefab_object_name(arena_name, prefab_instance, object),
             );
         }
     }
 
-    if CHAMPIONS_COURT_MAP_LIGHTS_ENABLED {
-        spawn_champions_lights(commands, &map.lights);
+    spawn_authored_primitives(commands, meshes, materials, &map, arena_name);
+
+    if arena_index != CHAMPIONS_COURT_ARENA_INDEX || CHAMPIONS_COURT_MAP_LIGHTS_ENABLED {
+        spawn_authored_lights(commands, &map.lights, arena_name);
     }
 
     Ok(())
 }
 
-fn load_champions_court_map() -> Result<ChampionsCourtRon, String> {
+fn load_authored_arena_map(arena_index: usize) -> Result<AuthoredArenaRon, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let contents = include_str!("../assets/maps/champions_court.ron");
+        let contents = match arena_index {
+            CHAMPIONS_COURT_ARENA_INDEX => include_str!("../assets/maps/champions_court.ron"),
+            TRAINING_GROUND_ARENA_INDEX => include_str!("../assets/maps/training_ground.ron"),
+            _ => return Err(format!("arena {arena_index} has no authored scene")),
+        };
         return ron::from_str(contents).map_err(|error| format!("RON parse failed: {error}"));
     }
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     {
-        let contents = fs::read_to_string(CHAMPIONS_COURT_RON_PATH)
-            .map_err(|error| format!("read failed: {error}"))?;
+        let path = match arena_index {
+            CHAMPIONS_COURT_ARENA_INDEX => CHAMPIONS_COURT_RON_PATH,
+            TRAINING_GROUND_ARENA_INDEX => TRAINING_GROUND_RON_PATH,
+            _ => return Err(format!("arena {arena_index} has no authored scene")),
+        };
+        let contents = fs::read_to_string(path).map_err(|error| format!("read failed: {error}"))?;
         ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))
     }
 }
 
-fn spawn_champions_floor_shapes(
+fn spawn_authored_floor_shapes(
     commands: &mut Commands,
     asset_server: &AssetServer,
-    map: &ChampionsCourtRon,
+    map: &AuthoredArenaRon,
     scenes: &mut HashMap<String, Handle<Scene>>,
+    arena_index: usize,
+    arena_name: &str,
 ) {
     for shape in &map.floor_shapes {
         let Some(scene) = champions_scene_handle(asset_server, map, scenes, &shape.asset) else {
             warn!(
-                "Champion's Court floor shape '{}' references missing asset '{}'",
+                "{arena_name} floor shape '{}' references missing asset '{}'",
                 shape.id, shape.asset
             );
             continue;
         };
 
         let scale = Vec3::splat(champions_floor_asset_scale(&shape.asset, map.map.tile_size));
-        for tile in champions_floor_shape_render_positions(
-            shape,
-            map.map.tile_size,
-            CHAMPIONS_COURT_ARENA_INDEX,
-        ) {
+        for tile in champions_floor_shape_render_positions(shape, map.map.tile_size, arena_index) {
             let x = tile.x;
             let z = tile.y;
             commands.spawn((
@@ -1094,7 +1235,7 @@ fn spawn_champions_floor_shapes(
                     .with_rotation(champions_yaw(shape.rotation_y))
                     .with_scale(scale),
                 ArenaGeometry,
-                Name::new(format!("Champion's Court floor {}", shape.id)),
+                Name::new(format!("{arena_name} floor {}", shape.id)),
             ));
         }
     }
@@ -1103,16 +1244,16 @@ fn spawn_champions_floor_shapes(
 #[allow(dead_code)]
 fn champions_floor_render_asset(
     asset_server: &AssetServer,
-    map: &ChampionsCourtRon,
-    render_assets: &mut HashMap<String, ChampionsCourtFloorRenderAsset>,
+    map: &AuthoredArenaRon,
+    render_assets: &mut HashMap<String, AuthoredFloorRenderAsset>,
     asset_key: &str,
-) -> Option<ChampionsCourtFloorRenderAsset> {
+) -> Option<AuthoredFloorRenderAsset> {
     let path = champions_runtime_asset_path(&map.assets, asset_key)?;
     if let Some(asset) = render_assets.get(&path) {
         return Some(asset.clone());
     }
 
-    let asset = ChampionsCourtFloorRenderAsset {
+    let asset = AuthoredFloorRenderAsset {
         mesh: asset_server.load(
             GltfAssetLabel::Primitive {
                 mesh: 0,
@@ -1135,14 +1276,14 @@ fn champions_floor_render_asset(
 fn spawn_champions_object(
     commands: &mut Commands,
     asset_server: &AssetServer,
-    map: &ChampionsCourtRon,
+    map: &AuthoredArenaRon,
     scenes: &mut HashMap<String, Handle<Scene>>,
     asset_key: &str,
     transform: Transform,
     name: String,
 ) {
     let Some(scene) = champions_scene_handle(asset_server, map, scenes, asset_key) else {
-        warn!("Champion's Court object '{name}' references missing asset '{asset_key}'");
+        warn!("Authored arena object '{name}' references missing asset '{asset_key}'");
         return;
     };
 
@@ -1151,7 +1292,7 @@ fn spawn_champions_object(
 
 fn champions_scene_handle(
     asset_server: &AssetServer,
-    map: &ChampionsCourtRon,
+    map: &AuthoredArenaRon,
     scenes: &mut HashMap<String, Handle<Scene>>,
     asset_key: &str,
 ) -> Option<Handle<Scene>> {
@@ -1174,15 +1315,15 @@ fn champions_runtime_asset_path(
         .map(|file| format!("{MINI_ARENA_ASSET_ROOT}/{file}"))
 }
 
-fn champions_object_transform(object: &ChampionsCourtObject) -> Transform {
+fn champions_object_transform(object: &AuthoredObject) -> Transform {
     Transform::from_translation(champions_object_position(object.position))
         .with_rotation(champions_yaw(object.rotation_y))
         .with_scale(champions_scale(object.scale))
 }
 
 fn champions_prefab_object_transform(
-    prefab_instance: &ChampionsCourtPrefabInstance,
-    object: &ChampionsCourtObject,
+    prefab_instance: &AuthoredPrefabInstance,
+    object: &AuthoredObject,
 ) -> Transform {
     let parent_rotation = champions_yaw(prefab_instance.rotation_y);
     let child_rotation = champions_yaw(object.rotation_y);
@@ -1209,24 +1350,529 @@ fn champions_object_name(prefix: &str, id: &str, asset_key: &str) -> String {
     }
 }
 
-fn champions_prefab_object_name(
-    prefab_instance: &ChampionsCourtPrefabInstance,
-    object: &ChampionsCourtObject,
+fn authored_prefab_object_name(
+    arena_name: &str,
+    prefab_instance: &AuthoredPrefabInstance,
+    object: &AuthoredObject,
 ) -> String {
     if object.id.is_empty() {
         format!(
-            "Champions Court prefab {} {}",
+            "{arena_name} prefab {} {}",
             prefab_instance.id, object.asset
         )
     } else {
-        format!(
-            "Champions Court prefab {} {}",
-            prefab_instance.id, object.id
-        )
+        format!("{arena_name} prefab {} {}", prefab_instance.id, object.id)
     }
 }
 
-fn champions_floor_shape_tiles(shape: &ChampionsCourtFloorShape) -> Vec<Vec2> {
+fn spawn_authored_primitives(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &AuthoredArenaRon,
+    arena_name: &str,
+) {
+    let material_handles = map
+        .materials
+        .iter()
+        .map(|(name, material)| {
+            let emissive = material.emissive;
+            let handle = materials.add(StandardMaterial {
+                base_color: champions_color(material.color),
+                emissive: LinearRgba::rgb(emissive.0, emissive.1, emissive.2),
+                perceptual_roughness: material.roughness,
+                metallic: material.metallic,
+                ..default()
+            });
+            (name.clone(), handle)
+        })
+        .collect::<HashMap<_, _>>();
+    let mut mesh_handles = HashMap::new();
+    let mut ordinal = 0usize;
+
+    spawn_authored_floor_pattern(commands, meshes, map, &material_handles, arena_name);
+    spawn_authored_floor_rows(
+        commands,
+        meshes,
+        map,
+        &material_handles,
+        &mut mesh_handles,
+        arena_name,
+    );
+
+    for primitive in &map.primitives {
+        spawn_authored_primitive(
+            commands,
+            meshes,
+            primitive,
+            authored_primitive_transform(primitive),
+            &material_handles,
+            &mut mesh_handles,
+            format!("{arena_name} primitive {}", primitive.id),
+            ordinal,
+        );
+        ordinal += 1;
+    }
+
+    for instance in &map.primitive_prefab_instances {
+        let Some(prefab) = map.primitive_prefabs.get(&instance.prefab) else {
+            warn!(
+                "{arena_name} primitive prefab instance '{}' references missing prefab '{}'",
+                instance.id, instance.prefab
+            );
+            continue;
+        };
+
+        for primitive in prefab {
+            spawn_authored_primitive(
+                commands,
+                meshes,
+                primitive,
+                authored_primitive_prefab_transform(instance, primitive),
+                &material_handles,
+                &mut mesh_handles,
+                format!("{arena_name} prefab {} {}", instance.id, primitive.id),
+                ordinal,
+            );
+            ordinal += 1;
+        }
+    }
+}
+
+fn spawn_authored_floor_pattern(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    map: &AuthoredArenaRon,
+    material_handles: &HashMap<String, Handle<StandardMaterial>>,
+    arena_name: &str,
+) {
+    let Some(pattern) = &map.floor_pattern else {
+        return;
+    };
+    if pattern.rows == 0 || pattern.columns == 0 || map.floor_materials.is_empty() {
+        warn!("{arena_name} floor pattern needs rows, columns, and materials");
+        return;
+    }
+
+    let floor_width = if map.map.floor_width > 0.0 {
+        map.map.floor_width
+    } else {
+        16.0
+    };
+    let floor_depth = if map.map.floor_depth > 0.0 {
+        map.map.floor_depth
+    } else {
+        12.0
+    };
+    let unit_width = floor_width / pattern.columns as f32;
+    let unit_depth = floor_depth / pattern.rows as f32;
+    let gap = pattern.gap.clamp(0.0, unit_width.min(unit_depth) * 0.38);
+    let mut occupied = vec![false; pattern.rows * pattern.columns];
+    let mut buffers = (0..map.floor_materials.len())
+        .map(|_| AuthoredFloorMeshBuffers::default())
+        .collect::<Vec<_>>();
+
+    for row in 0..pattern.rows {
+        for column in 0..pattern.columns {
+            let index = row * pattern.columns + column;
+            if occupied[index] {
+                continue;
+            }
+
+            let roll = authored_floor_hash(row, column, 0) % 100;
+            let requested_span = match roll {
+                0 => (3, 3),
+                1..=2 => (3, 2),
+                3..=7 => (2, 2),
+                8..=18 => (2, 1),
+                19..=25 => (1, 2),
+                _ => (1, 1),
+            };
+            let span = authored_floor_available_span(
+                &occupied,
+                pattern.rows,
+                pattern.columns,
+                row,
+                column,
+                requested_span,
+            );
+            for occupied_row in row..row + span.1 {
+                for occupied_column in column..column + span.0 {
+                    occupied[occupied_row * pattern.columns + occupied_column] = true;
+                }
+            }
+
+            let width = unit_width * span.0 as f32 - gap;
+            let depth = unit_depth * span.1 as f32 - gap;
+            let x = -floor_width * 0.5 + (column as f32 + span.0 as f32 * 0.5) * unit_width;
+            let z = -floor_depth * 0.5 + (row as f32 + span.1 as f32 * 0.5) * unit_depth;
+            let variant = authored_floor_hash(row, column, 1) % buffers.len();
+            let height_step = (authored_floor_hash(row, column, 2) % 4) as f32;
+            let height = 0.09 + height_step * 0.004;
+            let top_y = height_step * 0.0012;
+            append_authored_floor_stone(
+                &mut buffers[variant],
+                Vec3::new(x, top_y, z),
+                Vec3::new(width, height, depth),
+                pattern.bevel,
+            );
+        }
+    }
+
+    for (material_index, buffers) in buffers.into_iter().enumerate() {
+        if buffers.indices.is_empty() {
+            continue;
+        }
+        let material_name = &map.floor_materials[material_index];
+        let Some(material) = material_handles.get(material_name) else {
+            warn!("{arena_name} floor pattern references missing material '{material_name}'");
+            continue;
+        };
+        let mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buffers.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buffers.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, buffers.uvs)
+        .with_inserted_indices(Indices::U32(buffers.indices));
+        commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(0.0, ARENA_TOP_Y, 0.0),
+            ArenaGeometry,
+            Name::new(format!("{arena_name} dense floor {material_index}")),
+        ));
+    }
+}
+
+fn authored_floor_hash(row: usize, column: usize, salt: usize) -> usize {
+    let mut value = (row as u32).wrapping_mul(0x9E37_79B9)
+        ^ (column as u32).wrapping_mul(0x85EB_CA6B)
+        ^ (salt as u32).wrapping_mul(0xC2B2_AE35);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    (value ^ (value >> 16)) as usize
+}
+
+fn authored_floor_available_span(
+    occupied: &[bool],
+    rows: usize,
+    columns: usize,
+    row: usize,
+    column: usize,
+    requested: (usize, usize),
+) -> (usize, usize) {
+    for depth in (1..=requested.1.min(rows - row)).rev() {
+        for width in (1..=requested.0.min(columns - column)).rev() {
+            if (row..row + depth).all(|candidate_row| {
+                (column..column + width)
+                    .all(|candidate_column| !occupied[candidate_row * columns + candidate_column])
+            }) {
+                return (width, depth);
+            }
+        }
+    }
+    (1, 1)
+}
+
+fn append_authored_floor_stone(
+    buffers: &mut AuthoredFloorMeshBuffers,
+    center: Vec3,
+    size: Vec3,
+    authored_bevel: f32,
+) {
+    let half_width = size.x * 0.5;
+    let half_depth = size.z * 0.5;
+    let bevel = authored_bevel
+        .max(0.0)
+        .min(half_width * 0.32)
+        .min(half_depth * 0.32)
+        .min(size.y * 0.42);
+    let top_y = center.y;
+    let shoulder_y = top_y - bevel;
+    let bottom_y = top_y - size.y;
+    let outer_cut = bevel * 0.52;
+    let inner_half_width = half_width - bevel;
+    let inner_half_depth = half_depth - bevel;
+    let inner_cut = (outer_cut * 0.72)
+        .min(inner_half_width * 0.45)
+        .min(inner_half_depth * 0.45);
+    let outer = authored_floor_octagon(half_width, half_depth, outer_cut);
+    let inner = authored_floor_octagon(inner_half_width, inner_half_depth, inner_cut);
+
+    let top_center_index = buffers.positions.len() as u32;
+    buffers.positions.push([center.x, top_y, center.z]);
+    buffers.normals.push([0.0, 1.0, 0.0]);
+    buffers.uvs.push([0.5, 0.5]);
+    for point in inner {
+        buffers
+            .positions
+            .push([center.x + point.x, top_y, center.z + point.y]);
+        buffers.normals.push([0.0, 1.0, 0.0]);
+        buffers.uvs.push([
+            0.5 + point.x / size.x.max(f32::EPSILON),
+            0.5 + point.y / size.z.max(f32::EPSILON),
+        ]);
+    }
+    for index in 0..8_u32 {
+        let current = top_center_index + 1 + index;
+        let next = top_center_index + 1 + (index + 1) % 8;
+        buffers
+            .indices
+            .extend_from_slice(&[top_center_index, next, current]);
+    }
+
+    for index in 0..8 {
+        let next = (index + 1) % 8;
+        let edge = outer[next] - outer[index];
+        let outward = Vec3::new(edge.y, 0.0, -edge.x).normalize_or_zero();
+        let bevel_normal = (outward + Vec3::Y * 0.9).normalize_or_zero();
+        append_authored_floor_quad(
+            buffers,
+            [
+                Vec3::new(center.x + inner[index].x, top_y, center.z + inner[index].y),
+                Vec3::new(center.x + inner[next].x, top_y, center.z + inner[next].y),
+                Vec3::new(
+                    center.x + outer[next].x,
+                    shoulder_y,
+                    center.z + outer[next].y,
+                ),
+                Vec3::new(
+                    center.x + outer[index].x,
+                    shoulder_y,
+                    center.z + outer[index].y,
+                ),
+            ],
+            bevel_normal,
+        );
+        append_authored_floor_quad(
+            buffers,
+            [
+                Vec3::new(
+                    center.x + outer[index].x,
+                    shoulder_y,
+                    center.z + outer[index].y,
+                ),
+                Vec3::new(
+                    center.x + outer[next].x,
+                    shoulder_y,
+                    center.z + outer[next].y,
+                ),
+                Vec3::new(center.x + outer[next].x, bottom_y, center.z + outer[next].y),
+                Vec3::new(
+                    center.x + outer[index].x,
+                    bottom_y,
+                    center.z + outer[index].y,
+                ),
+            ],
+            outward,
+        );
+    }
+}
+
+fn authored_floor_octagon(half_width: f32, half_depth: f32, cut: f32) -> [Vec2; 8] {
+    [
+        Vec2::new(-half_width + cut, -half_depth),
+        Vec2::new(half_width - cut, -half_depth),
+        Vec2::new(half_width, -half_depth + cut),
+        Vec2::new(half_width, half_depth - cut),
+        Vec2::new(half_width - cut, half_depth),
+        Vec2::new(-half_width + cut, half_depth),
+        Vec2::new(-half_width, half_depth - cut),
+        Vec2::new(-half_width, -half_depth + cut),
+    ]
+}
+
+fn append_authored_floor_quad(
+    buffers: &mut AuthoredFloorMeshBuffers,
+    mut points: [Vec3; 4],
+    normal: Vec3,
+) {
+    let face_normal = (points[1] - points[0])
+        .cross(points[2] - points[0])
+        .normalize_or_zero();
+    if face_normal.dot(normal) < 0.0 {
+        points.reverse();
+    }
+    let start = buffers.positions.len() as u32;
+    for (index, point) in points.into_iter().enumerate() {
+        buffers.positions.push(point.to_array());
+        buffers.normals.push(normal.to_array());
+        buffers.uvs.push(match index {
+            0 => [0.0, 0.0],
+            1 => [1.0, 0.0],
+            2 => [1.0, 1.0],
+            _ => [0.0, 1.0],
+        });
+    }
+    buffers
+        .indices
+        .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+}
+
+fn spawn_authored_floor_rows(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    map: &AuthoredArenaRon,
+    material_handles: &HashMap<String, Handle<StandardMaterial>>,
+    mesh_handles: &mut HashMap<String, Handle<Mesh>>,
+    arena_name: &str,
+) {
+    if map.floor_rows.is_empty() || map.floor_materials.is_empty() {
+        return;
+    }
+
+    let floor_width = if map.map.floor_width > 0.0 {
+        map.map.floor_width
+    } else {
+        16.0
+    };
+    let floor_depth = if map.map.floor_depth > 0.0 {
+        map.map.floor_depth
+    } else {
+        12.0
+    };
+    let gap = 0.055;
+
+    for (row_index, row) in map.floor_rows.iter().enumerate() {
+        if row.z.abs() + row.depth * 0.5 > floor_depth * 0.5 + 0.08 {
+            warn!("{arena_name} floor row {row_index} extends beyond its authored depth");
+        }
+        if row.widths.is_empty() {
+            continue;
+        }
+        let width_sum = row.widths.iter().sum::<f32>();
+        if width_sum <= f32::EPSILON {
+            continue;
+        }
+        let row_width = floor_width - row.offset.abs() * 2.0;
+        let usable_width = row_width - gap * (row.widths.len().saturating_sub(1) as f32);
+        let width_scale = usable_width / width_sum;
+        let mut cursor = -row_width * 0.5 + row.offset;
+
+        for (column_index, authored_width) in row.widths.iter().copied().enumerate() {
+            let width = authored_width * width_scale;
+            let x = cursor + width * 0.5;
+            cursor += width + gap;
+            let variant = (row_index * 3 + column_index * 2) % map.floor_materials.len();
+            let Some(material) = material_handles.get(&map.floor_materials[variant]) else {
+                warn!(
+                    "{arena_name} floor row references missing material '{}'",
+                    map.floor_materials[variant]
+                );
+                continue;
+            };
+            let height_variant = ((row_index * 5 + column_index * 7) % 3) as f32 * 0.004;
+            let height = 0.105 + height_variant;
+            let yaw_step = ((row_index * 7 + column_index * 11) % 5) as f32 - 2.0;
+            let depth_step = ((row_index * 13 + column_index * 7) % 5) as f32;
+            let depth = row.depth * (0.92 + depth_step * 0.035);
+            let z_jitter = (depth_step - 2.0) * 0.022;
+            let transform = Transform::from_xyz(
+                x,
+                ARENA_TOP_Y - height * 0.5 + height_variant * 0.25,
+                row.z + z_jitter,
+            )
+            .with_rotation(Quat::from_rotation_y(yaw_step * 0.006))
+            .with_scale(Vec3::new(width, height, depth));
+            let mesh = authored_primitive_mesh(meshes, mesh_handles, "cuboid");
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material.clone()),
+                transform,
+                ArenaGeometry,
+                Name::new(format!(
+                    "{arena_name} floor slab {row_index}-{column_index}"
+                )),
+            ));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_authored_primitive(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    primitive: &AuthoredPrimitive,
+    transform: Transform,
+    material_handles: &HashMap<String, Handle<StandardMaterial>>,
+    mesh_handles: &mut HashMap<String, Handle<Mesh>>,
+    name: String,
+    ordinal: usize,
+) {
+    let Some(material) = material_handles.get(&primitive.material) else {
+        warn!(
+            "{name} references missing material '{}'",
+            primitive.material
+        );
+        return;
+    };
+    let mesh = authored_primitive_mesh(meshes, mesh_handles, &primitive.kind);
+    let base_scale = transform.scale;
+    let mut entity = commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material.clone()),
+        transform,
+        ArenaGeometry,
+        Name::new(name),
+    ));
+    if primitive.effect == "flame" {
+        entity.insert(ArenaDecorativeFlame {
+            base_scale,
+            phase: ordinal as f32 * 0.47,
+        });
+    }
+}
+
+fn authored_primitive_mesh(
+    meshes: &mut Assets<Mesh>,
+    mesh_handles: &mut HashMap<String, Handle<Mesh>>,
+    kind: &str,
+) -> Handle<Mesh> {
+    if let Some(mesh) = mesh_handles.get(kind) {
+        return mesh.clone();
+    }
+    let mesh = match kind {
+        "cylinder" => meshes.add(Cylinder::new(0.5, 1.0)),
+        "cone" => meshes.add(Cone::new(0.5, 1.0)),
+        "sphere" => meshes.add(Sphere::new(0.5).mesh().uv(16, 8)),
+        _ => meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+    };
+    mesh_handles.insert(kind.to_string(), mesh.clone());
+    mesh
+}
+
+fn authored_primitive_transform(primitive: &AuthoredPrimitive) -> Transform {
+    Transform::from_translation(champions_stage_position(primitive.position))
+        .with_rotation(champions_yaw(primitive.rotation_y))
+        .with_scale(champions_scale(primitive.scale))
+}
+
+fn authored_primitive_prefab_transform(
+    instance: &AuthoredPrimitivePrefabInstance,
+    primitive: &AuthoredPrimitive,
+) -> Transform {
+    let parent_rotation = champions_yaw(instance.rotation_y);
+    let child_rotation = champions_yaw(primitive.rotation_y);
+    let parent_scale = champions_scale(instance.scale);
+    let child_scale = champions_scale(primitive.scale);
+    let parent_position = champions_raw_position(instance.position);
+    let child_position = champions_raw_position(primitive.position);
+    let translation = parent_position + parent_rotation * (child_position * parent_scale);
+
+    Transform::from_translation(Vec3::new(
+        translation.x,
+        champions_stage_y(translation.y),
+        translation.z,
+    ))
+    .with_rotation(parent_rotation * child_rotation)
+    .with_scale(parent_scale * child_scale)
+}
+
+fn champions_floor_shape_tiles(shape: &AuthoredFloorShape) -> Vec<Vec2> {
     match shape.kind.as_str() {
         "filled_octagon" => {
             if shape.radius_tiles <= 0 {
@@ -1255,7 +1901,7 @@ fn champions_floor_shape_tiles(shape: &ChampionsCourtFloorShape) -> Vec<Vec2> {
 }
 
 fn champions_floor_shape_render_positions(
-    shape: &ChampionsCourtFloorShape,
+    shape: &AuthoredFloorShape,
     tile_size: f32,
     arena_index: usize,
 ) -> Vec<Vec2> {
@@ -1311,7 +1957,7 @@ fn champions_rectangle_tiles(width: i32, depth: i32) -> Vec<Vec2> {
     tiles
 }
 
-fn spawn_champions_lights(commands: &mut Commands, lights: &[ChampionsCourtLight]) {
+fn spawn_authored_lights(commands: &mut Commands, lights: &[AuthoredLight], arena_name: &str) {
     for light in lights {
         match light.kind.as_str() {
             "directional" => {
@@ -1328,7 +1974,7 @@ fn spawn_champions_lights(commands: &mut Commands, lights: &[ChampionsCourtLight
                     },
                     champions_light_transform(light),
                     ArenaGeometry,
-                    Name::new(format!("Champion's Court light {}", light.id)),
+                    Name::new(format!("{arena_name} light {}", light.id)),
                 ));
             }
             "point" => {
@@ -1346,7 +1992,7 @@ fn spawn_champions_lights(commands: &mut Commands, lights: &[ChampionsCourtLight
                     },
                     Transform::from_translation(champions_stage_position(light.position)),
                     ArenaGeometry,
-                    Name::new(format!("Champion's Court light {}", light.id)),
+                    Name::new(format!("{arena_name} light {}", light.id)),
                 ));
             }
             _ => {}
@@ -1354,7 +2000,7 @@ fn spawn_champions_lights(commands: &mut Commands, lights: &[ChampionsCourtLight
     }
 }
 
-fn champions_light_transform(light: &ChampionsCourtLight) -> Transform {
+fn champions_light_transform(light: &AuthoredLight) -> Transform {
     let (x, y, z) = light.rotation_euler_degrees;
     Transform::from_rotation(Quat::from_euler(
         EulerRot::XYZ,
@@ -1408,6 +2054,10 @@ fn unit_tuple3() -> (f32, f32, f32) {
 
 fn white_tuple3() -> (f32, f32, f32) {
     (1.0, 1.0, 1.0)
+}
+
+fn default_roughness() -> f32 {
+    1.0
 }
 
 fn spawn_mini_arena_props(commands: &mut Commands, asset_server: &AssetServer, arena_index: usize) {
@@ -1471,6 +2121,7 @@ fn arena_asset_props(arena_index: usize) -> &'static [ArenaAssetProp] {
         7 => SNARE_GARDEN_ASSET_PROPS,
         8 => SKY_STEPS_ASSET_PROPS,
         9 => POWDER_KEG_ASSET_PROPS,
+        TRAINING_GROUND_ARENA_INDEX => &[],
         _ => CROWN_ASSET_PROPS,
     }
 }
@@ -1481,54 +2132,83 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
         .position(|candidate| candidate.name == arena.name)
         .unwrap_or_else(active_arena_index);
 
-    // Champions Court is rendered from its RON scene rather than this fallback prop list.
-    if arena_index == CHAMPIONS_COURT_ARENA_INDEX {
+    // Authored RON scenes are rendered instead of their fallback prop lists.
+    if matches!(
+        arena_index,
+        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+    ) {
         &[]
     } else {
         arena_asset_props(arena_index)
     }
 }
 
-fn champions_court_collision_barriers() -> &'static [WorldPropBarrier] {
-    static BARRIERS: OnceLock<Vec<WorldPropBarrier>> = OnceLock::new();
-    BARRIERS.get_or_init(|| {
-        let map: ChampionsCourtRon =
-            ron::from_str(include_str!("../assets/maps/champions_court.ron"))
-                .expect("embedded Champion's Court RON should parse");
-        let mut barriers = Vec::new();
+fn authored_arena_collision_barriers(arena_index: usize) -> &'static [WorldPropBarrier] {
+    static BARRIERS: OnceLock<Vec<Vec<WorldPropBarrier>>> = OnceLock::new();
+    &BARRIERS.get_or_init(|| {
+        arena_definitions()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| build_authored_arena_collision_barriers(index))
+            .collect()
+    })[arena_index]
+}
 
-        for object in &map.instances {
-            let transform = Transform::from_xyz(
-                object.position.0,
-                ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
-                object.position.2,
-            )
-            .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
-            .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
-            append_champions_object_barriers(&map.assets, object, transform, &mut barriers);
+fn build_authored_arena_collision_barriers(arena_index: usize) -> Vec<WorldPropBarrier> {
+    let contents = match arena_index {
+        CHAMPIONS_COURT_ARENA_INDEX => include_str!("../assets/maps/champions_court.ron"),
+        TRAINING_GROUND_ARENA_INDEX => include_str!("../assets/maps/training_ground.ron"),
+        _ => return Vec::new(),
+    };
+    let map: AuthoredArenaRon =
+        ron::from_str(contents).expect("embedded authored arena RON should parse");
+    let mut barriers = Vec::new();
+
+    for object in &map.instances {
+        let transform = Transform::from_xyz(
+            object.position.0,
+            ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
+            object.position.2,
+        )
+        .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
+        .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
+        append_champions_object_barriers(&map.assets, object, transform, &mut barriers);
+    }
+
+    for prefab_instance in &map.prefab_instances {
+        let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
+            continue;
+        };
+        for object in objects {
+            append_champions_object_barriers(
+                &map.assets,
+                object,
+                champions_prefab_object_transform(prefab_instance, object),
+                &mut barriers,
+            );
         }
+    }
 
-        for prefab_instance in &map.prefab_instances {
-            let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
-                continue;
-            };
-            for object in objects {
-                append_champions_object_barriers(
-                    &map.assets,
-                    object,
-                    champions_prefab_object_transform(prefab_instance, object),
-                    &mut barriers,
-                );
-            }
+    barriers.extend(map.colliders.iter().map(|collider| {
+        debug_assert!(!collider.id.is_empty());
+        WorldPropBarrier {
+            definition: ArenaBarrierDefinition::rectangle(
+                collider.center.0,
+                collider.center.1,
+                collider.half_extents.0,
+                collider.half_extents.1,
+                collider.rotation_y.to_radians(),
+                ARENA_TOP_Y + collider.top_y,
+            ),
+            behavior: PropBarrierBehavior::Solid,
         }
-
-        barriers
-    })
+    }));
+    barriers
 }
 
 fn append_champions_object_barriers(
     assets: &HashMap<String, String>,
-    object: &ChampionsCourtObject,
+    object: &AuthoredObject,
     transform: Transform,
     barriers: &mut Vec<WorldPropBarrier>,
 ) {
@@ -1579,8 +2259,15 @@ fn arena_collision_worlds() -> &'static [ArenaCollisionWorld] {
                     .copied()
                     .flat_map(ArenaAssetProp::collision_barriers)
                     .collect();
-                if arena.visual_theme == ArenaVisualTheme::Crown {
-                    prop_barriers.extend(champions_court_collision_barriers().iter().copied());
+                if matches!(
+                    arena_index,
+                    CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+                ) {
+                    prop_barriers.extend(
+                        authored_arena_collision_barriers(arena_index)
+                            .iter()
+                            .copied(),
+                    );
                 }
                 ArenaCollisionWorld {
                     arena_index,
@@ -2049,6 +2736,7 @@ fn spawn_arena_lights(commands: &mut Commands) {
             ..default()
         },
         Transform::from_xyz(-5.0, 12.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ArenaGlobalDirectionalLight,
     ));
 
     commands.spawn((
@@ -2059,7 +2747,63 @@ fn spawn_arena_lights(commands: &mut Commands) {
             ..default()
         },
         Transform::from_xyz(0.0, 9.0, 4.5),
+        ArenaGlobalPointLight,
     ));
+}
+
+pub fn sync_arena_lighting(
+    scene: Res<ArenaScene>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut directional_lights: Query<
+        &mut DirectionalLight,
+        (
+            With<ArenaGlobalDirectionalLight>,
+            Without<ArenaGlobalPointLight>,
+        ),
+    >,
+    mut point_lights: Query<
+        (&mut PointLight, &mut Transform),
+        (
+            With<ArenaGlobalPointLight>,
+            Without<ArenaGlobalDirectionalLight>,
+        ),
+    >,
+) {
+    if !scene.is_changed() {
+        return;
+    }
+
+    let training = scene.index == TRAINING_GROUND_ARENA_INDEX;
+    if training {
+        ambient.color = Color::srgb(0.48, 0.40, 0.33);
+        ambient.brightness = 150.0;
+    } else {
+        ambient.color = Color::srgb(0.85, 0.78, 0.68);
+        ambient.brightness = 430.0;
+    }
+
+    for mut light in &mut directional_lights {
+        light.illuminance = if training { 3_600.0 } else { 12_500.0 };
+        light.color = if training {
+            Color::srgb(1.0, 0.88, 0.72)
+        } else {
+            Color::WHITE
+        };
+    }
+    for (mut light, mut transform) in &mut point_lights {
+        light.intensity = if training { 5_800_000.0 } else { 1_100_000.0 };
+        light.range = if training { 18.0 } else { 36.0 };
+        light.color = if training {
+            Color::srgb(0.98, 0.77, 0.52)
+        } else {
+            Color::WHITE
+        };
+        transform.translation = if training {
+            Vec3::new(0.0, 5.0, 0.0)
+        } else {
+            Vec3::new(0.0, 9.0, 4.5)
+        };
+    }
 }
 
 fn spawn_campfire_props(
@@ -2582,6 +3326,10 @@ pub fn update_arena_hazard_visuals(
     state: Res<ArenaHazardState>,
     mut markers: Query<(&ArenaHazardMarker, &mut Transform), Without<ArenaCampfireFlame>>,
     mut flames: Query<(&ArenaCampfireFlame, &mut Transform), Without<ArenaHazardMarker>>,
+    mut decorative_flames: Query<
+        (&ArenaDecorativeFlame, &mut Transform),
+        (Without<ArenaHazardMarker>, Without<ArenaCampfireFlame>),
+    >,
 ) {
     for (marker, mut transform) in &mut markers {
         let wave = ((state.elapsed + marker.phase) / marker.pulse_seconds.max(0.1) * TAU).sin();
@@ -2596,15 +3344,23 @@ pub fn update_arena_hazard_visuals(
     }
 
     for (flame, mut transform) in &mut flames {
-        let flicker = (state.elapsed * 9.0 + flame.phase).sin();
-        let flutter = (state.elapsed * 13.0 + flame.phase * 0.7).sin();
-        transform.scale = flame.base_scale
-            * Vec3::new(
-                1.0 - flicker * 0.055,
-                1.0 + flicker * 0.1,
-                1.0 + flutter * 0.045,
-            );
+        animate_flame_transform(state.elapsed, flame.phase, flame.base_scale, &mut transform);
     }
+
+    for (flame, mut transform) in &mut decorative_flames {
+        animate_flame_transform(state.elapsed, flame.phase, flame.base_scale, &mut transform);
+    }
+}
+
+fn animate_flame_transform(elapsed: f32, phase: f32, base_scale: Vec3, transform: &mut Transform) {
+    let flicker = (elapsed * 9.0 + phase).sin();
+    let flutter = (elapsed * 13.0 + phase * 0.7).sin();
+    transform.scale = base_scale
+        * Vec3::new(
+            1.0 - flicker * 0.055,
+            1.0 + flicker * 0.1,
+            1.0 + flutter * 0.045,
+        );
 }
 
 pub fn update_arena_pipe_visuals(
@@ -4384,7 +5140,12 @@ mod tests {
     fn arena_background_wallpapers_use_authored_three_to_two_aspect() {
         for arena in arena_definitions() {
             let size = arena_background_wallpaper_size(arena.background);
-            assert!((size.x / size.y - 1.5).abs() < 0.001, "{}", arena.name);
+            let authored_aspect = arena.background.image_size.x / arena.background.image_size.y;
+            assert!(
+                (size.x / size.y - authored_aspect).abs() < 0.001,
+                "{}",
+                arena.name
+            );
             assert!(size.x > ARENA_RADIUS * 2.0, "{}", arena.name);
 
             let camera_transform =
@@ -4412,6 +5173,7 @@ mod tests {
                 1 | 2 => 4,
                 CRANK_YARD_ARENA_INDEX => 4,
                 VENT_SPIRAL_ARENA_INDEX => 1,
+                TRAINING_GROUND_ARENA_INDEX => 0,
                 7 => 3,
                 _ => 5,
             };
@@ -4425,6 +5187,98 @@ mod tests {
                     .join(arena_prop_asset_path(prop.file))
                     .is_file()
             }));
+        }
+    }
+
+    #[test]
+    fn training_ground_has_the_reference_perimeter_and_decor() {
+        let map = load_authored_arena_map(TRAINING_GROUND_ARENA_INDEX)
+            .expect("training ground RON should parse");
+        let instances = &map.primitive_prefab_instances;
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|instance| instance.prefab == "torch_tower")
+                .count(),
+            6
+        );
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|instance| instance.prefab == "pine")
+                .count(),
+            4
+        );
+        let gate = instances
+            .iter()
+            .find(|instance| instance.id == "gate")
+            .expect("training ground should have a main gate");
+        assert!(gate.position.2 < 0.0, "gate must be on the camera-far side");
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("training ground should use the dense paving pattern");
+        assert!(floor_pattern.rows >= 40);
+        assert!(floor_pattern.columns >= 40);
+        assert!(floor_pattern.gap > 0.0);
+        assert!(floor_pattern.bevel > 0.0);
+        assert!(map.floor_rows.is_empty());
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|instance| instance.prefab == "buttress")
+                .count(),
+            16
+        );
+        for corner in [
+            "torch_corner_far_west",
+            "torch_corner_far_east",
+            "torch_corner_near_west",
+            "torch_corner_near_east",
+        ] {
+            assert!(instances.iter().any(|instance| instance.id == corner));
+        }
+        for near_corner in ["torch_corner_near_west", "torch_corner_near_east"] {
+            let tower = instances
+                .iter()
+                .find(|instance| instance.id == near_corner)
+                .expect("near corner tower should exist");
+            assert!(tower.position.0.abs() < 9.0);
+            assert!(tower.position.2 < 9.0);
+        }
+        assert_eq!(map.colliders.len(), 4);
+        assert_eq!(
+            map.lights
+                .iter()
+                .filter(|light| light.kind == "point")
+                .count(),
+            6
+        );
+        assert!(map.floor_materials.len() >= 4);
+    }
+
+    #[test]
+    fn training_ground_perimeter_is_a_continuous_solid_boundary() {
+        let barriers = authored_arena_collision_barriers(TRAINING_GROUND_ARENA_INDEX);
+        assert_eq!(barriers.len(), 4);
+        assert!(
+            barriers
+                .iter()
+                .all(|barrier| barrier.behavior == PropBarrierBehavior::Solid
+                    && barrier.definition.top_y >= ARENA_TOP_Y + 4.0)
+        );
+
+        let training = &arena_definitions()[TRAINING_GROUND_ARENA_INDEX];
+        for position in [
+            Vec3::new(0.0, ARENA_TOP_Y, -9.18),
+            Vec3::new(0.0, ARENA_TOP_Y, 9.18),
+            Vec3::new(-9.18, ARENA_TOP_Y, 0.0),
+            Vec3::new(9.18, ARENA_TOP_Y, 0.0),
+        ] {
+            assert_ne!(
+                resolve_platform_side_collision_for_arena(training, position, FIGHTER_RADIUS,),
+                position
+            );
         }
     }
 
@@ -4531,7 +5385,7 @@ mod tests {
 
     #[test]
     fn champions_court_objects_generate_shared_prop_barriers() {
-        let barriers = champions_court_collision_barriers();
+        let barriers = authored_arena_collision_barriers(CHAMPIONS_COURT_ARENA_INDEX);
         assert!(!barriers.is_empty());
         assert!(barriers.iter().any(|barrier| {
             barrier.definition.center.distance(Vec2::ZERO) < 0.01
@@ -4595,7 +5449,8 @@ mod tests {
             return;
         }
 
-        let map = load_champions_court_map().expect("champions court RON should parse");
+        let map = load_authored_arena_map(CHAMPIONS_COURT_ARENA_INDEX)
+            .expect("champions court RON should parse");
         assert_eq!(map.map.tile_size, 2.0);
         assert!(map.assets.contains_key("floor"));
         assert!(!map.floor_shapes.is_empty());
@@ -4615,7 +5470,7 @@ mod tests {
 
     #[test]
     fn champions_floor_shapes_expand_octagons_and_even_rectangles() {
-        let octagon = ChampionsCourtFloorShape {
+        let octagon = AuthoredFloorShape {
             id: "test_octagon".to_string(),
             kind: "filled_octagon".to_string(),
             asset: "floor".to_string(),
@@ -4632,7 +5487,7 @@ mod tests {
         assert!(octagon_tiles.contains(&Vec2::new(2.0, 0.0)));
         assert!(!octagon_tiles.contains(&Vec2::new(2.0, 2.0)));
 
-        let rectangle = ChampionsCourtFloorShape {
+        let rectangle = AuthoredFloorShape {
             id: "test_rect".to_string(),
             kind: "rectangle".to_string(),
             asset: "floor_detail".to_string(),
@@ -4649,7 +5504,7 @@ mod tests {
         assert!(rectangle_tiles.contains(&Vec2::new(-1.5, -0.5)));
         assert!(rectangle_tiles.contains(&Vec2::new(1.5, 0.5)));
 
-        let far_rectangle = ChampionsCourtFloorShape {
+        let far_rectangle = AuthoredFloorShape {
             center: (64, 64),
             ..rectangle
         };
@@ -4658,14 +5513,14 @@ mod tests {
 
     #[test]
     fn champions_prefab_transform_combines_parent_and_child() {
-        let prefab_instance = ChampionsCourtPrefabInstance {
+        let prefab_instance = AuthoredPrefabInstance {
             id: "rotated_prefab".to_string(),
             prefab: "weapon_corner".to_string(),
             position: (10.0, 1.0, 0.0),
             rotation_y: 90.0,
             scale: (2.0, 1.0, 2.0),
         };
-        let object = ChampionsCourtObject {
+        let object = AuthoredObject {
             id: "child".to_string(),
             asset: "weapon_spear".to_string(),
             position: (1.0, 0.5, 0.0),
