@@ -169,6 +169,14 @@ pub fn handle_special_inputs(
         &Transform,
     )>,
 ) {
+    if !SHARED_SPECIALS_ENABLED {
+        for (_, _, mut input, _, _, _, _, _, _) in &mut fighters {
+            input.special = false;
+            input.special_kind = None;
+        }
+        return;
+    }
+
     if hitstop.active() {
         return;
     }
@@ -885,6 +893,76 @@ fn styled_special_cooldown(loadout: LoadoutContext) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directly_injected_special_request_is_rejected_by_authoritative_handler() {
+        let mut app = App::new();
+        app.insert_resource(Hitstop::default())
+            .insert_resource(HitEffects::default())
+            .insert_resource(EffectAssets::default())
+            .insert_resource(SpecialAssets {
+                projectile_mesh: Handle::default(),
+                trap_mesh: Handle::default(),
+                shockwave_mesh: Handle::default(),
+                hazard_mesh: Handle::default(),
+                projectile_material: Handle::default(),
+                trap_material: Handle::default(),
+                shockwave_material: Handle::default(),
+                hazard_material: Handle::default(),
+            })
+            .add_systems(Update, handle_special_inputs);
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "Injected",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    special: true,
+                    special_kind: Some(SpecialInputKind::Projectile),
+                    ..default()
+                },
+                FighterMotor::default(),
+                FighterActionState::default(),
+                FighterSpecialState::default(),
+                FighterStyle {
+                    kind: FighterStyleKind::Catalyst,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                Transform::default(),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query::<&ActiveSpecial>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let input = app.world().get::<FighterInput>(fighter).unwrap();
+        assert!(!input.special);
+        assert_eq!(input.special_kind, None);
+        assert_eq!(
+            app.world()
+                .get::<FighterActionState>(fighter)
+                .unwrap()
+                .action,
+            FighterAction::Idle
+        );
+        assert_eq!(
+            app.world()
+                .get::<FighterSpecialState>(fighter)
+                .unwrap()
+                .cooldown,
+            0.0
+        );
+    }
 
     #[test]
     fn shockwave_radius_expands_over_lifetime() {

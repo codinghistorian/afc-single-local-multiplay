@@ -706,7 +706,7 @@ fn keyboard_action_sample(
         reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings);
     let light_blocked =
         reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
-    let special_just = keys.just_pressed(bindings.special);
+    let special_just = SHARED_SPECIALS_ENABLED && keys.just_pressed(bindings.special);
     let special_kind = special_just.then(|| {
         if keys.pressed(bindings.light) {
             SpecialInputKind::Trap
@@ -763,7 +763,7 @@ fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
     } else {
         Vec2::new(stick.x, -stick.y)
     };
-    let special_just = gamepad.just_pressed(GamepadButton::RightTrigger);
+    let special_just = SHARED_SPECIALS_ENABLED && gamepad.just_pressed(GamepadButton::RightTrigger);
     let special_kind = special_just.then(|| {
         if gamepad.pressed(GamepadButton::LeftTrigger) {
             SpecialInputKind::Trap
@@ -847,8 +847,8 @@ fn collect_device_player_input(
     input.grab = chord.grab;
     input.guard = sample.guard_held || chord.guard;
     input.ultimate = sample.ultimate_just || chord.ultimate;
-    input.special = sample.special_just;
-    input.special_kind = sample.special_kind;
+    input.special = SHARED_SPECIALS_ENABLED && sample.special_just;
+    input.special_kind = input.special.then_some(sample.special_kind).flatten();
 }
 
 #[cfg(test)]
@@ -6620,62 +6620,71 @@ mod tests {
         assert!(sample.dash_just);
         assert!(sample.guard_held);
         assert!(sample.ultimate_just);
-        assert!(sample.special_just);
-        assert_eq!(sample.special_kind, Some(SpecialInputKind::Trap));
+        assert!(!sample.special_just);
+        assert_eq!(sample.special_kind, None);
     }
 
     #[test]
-    fn xbox_special_modifiers_use_documented_precedence() {
-        for (modifier, expected) in [
-            (None, SpecialInputKind::Projectile),
-            (Some(GamepadButton::East), SpecialInputKind::Shockwave),
-            (Some(GamepadButton::North), SpecialInputKind::Hazard),
-            (Some(GamepadButton::LeftTrigger), SpecialInputKind::Trap),
-        ] {
+    fn xbox_right_bumper_and_all_former_modifiers_produce_no_special_request() {
+        let modifiers = [
+            GamepadButton::East,
+            GamepadButton::North,
+            GamepadButton::LeftTrigger,
+        ];
+        for mask in 0..(1 << modifiers.len()) {
             let mut buttons = vec![GamepadButton::RightTrigger];
-            if let Some(modifier) = modifier {
-                buttons.push(modifier);
+            for (index, modifier) in modifiers.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    buttons.push(*modifier);
+                }
             }
-            assert_eq!(
-                gamepad_action_sample(&gamepad_with_buttons(&buttons)).special_kind,
-                Some(expected)
-            );
+            let sample = gamepad_action_sample(&gamepad_with_buttons(&buttons));
+            assert!(!sample.special_just);
+            assert_eq!(sample.special_kind, None);
         }
     }
 
     #[test]
-    fn keyboard_special_chords_select_all_four_shared_specials() {
+    fn default_e_and_all_former_keyboard_modifiers_produce_no_special_request() {
         let bindings = PlayerControlBindings::player_one_default();
-        for (modifier, expected) in [
-            (None, SpecialInputKind::Projectile),
-            (Some(bindings.heavy), SpecialInputKind::Hazard),
-            (Some(bindings.aim_grab), SpecialInputKind::Shockwave),
-            (Some(bindings.light), SpecialInputKind::Trap),
-        ] {
+        assert_eq!(bindings.special, KeyCode::KeyE);
+        let modifiers = [bindings.light, bindings.aim_grab, bindings.heavy];
+        for mask in 0..(1 << modifiers.len()) {
             let mut keys = ButtonInput::default();
-            if let Some(modifier) = modifier {
-                keys.press(modifier);
+            for (index, modifier) in modifiers.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    keys.press(*modifier);
+                }
             }
-            keys.press(bindings.special);
+            keys.press(KeyCode::KeyE);
             let sample = keyboard_action_sample(&keys, bindings, false);
-            assert!(sample.special_just);
-            assert_eq!(sample.special_kind, Some(expected));
+            assert!(!sample.special_just);
+            assert_eq!(sample.special_kind, None);
         }
     }
 
     #[test]
-    fn keyboard_special_modifier_precedence_is_light_then_aim_then_heavy() {
-        let bindings = PlayerControlBindings::player_one_default();
-        let mut keys = ButtonInput::default();
-        keys.press(bindings.light);
-        keys.press(bindings.aim_grab);
-        keys.press(bindings.heavy);
-        keys.press(bindings.special);
-
-        assert_eq!(
-            keyboard_action_sample(&keys, bindings, false).special_kind,
-            Some(SpecialInputKind::Trap)
+    fn normalized_device_input_rejects_injected_special_samples() {
+        let mut dash = DashTapTracker::default();
+        let mut guard = GuardChordTracker::default();
+        let mut flick = StickFlickTracker::default();
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            DeviceActionSample {
+                special_just: true,
+                special_kind: Some(SpecialInputKind::Hazard),
+                ..default()
+            },
+            1.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
         );
+
+        assert!(!input.special);
+        assert_eq!(input.special_kind, None);
     }
 
     #[test]

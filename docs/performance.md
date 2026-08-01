@@ -57,6 +57,48 @@ script.
 
 ## Hot-path validation record
 
+The shared-special runtime-gate change was checked with three paired
+`FourBotStress` runs on 2026-07-28. The before build was commit `782366d`; the
+after build was the shared-special working tree. All six official runs used the
+same Apple M2 Max with 12 logical CPUs, macOS 26.5.1, Metal, the profiling
+profile with `perf`, a 1280x720 window, the `FFC00001` seed, Crank Yard, six
+normal items, two arena hazards, and four Catalyst bots. Every run warmed up for
+30 seconds and sampled for 300 seconds. The reported rows are the middle runs
+when ordered by frame median, as required by the three-run protocol.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median: `782366d`, run 2 of 3 | 19,377 | 16.5813 / 17.6813 / 18.1715 ms | 0.0760 / 0.1211 / 0.1390 ms | 96.29% total; 8.02% normalized | 0.4369 / 0.4369 GiB | 765 / 761 | 127 / 127 | 127 / 117 / 46 / 44 |
+| After median: shared-special gate, run 2 of 3 | 27,310 | 13.3743 / 19.2382 / 20.8904 ms | 0.0713 / 0.1312 / 0.1676 ms | 119.98% total; 10.00% normalized | 0.4292 / 0.4128 GiB | 754 / 749 | 127 / 127 | 127 / 117 / 46 / 44 |
+| After investigation: extra fully paced run | 18,004 | 16.6604 / 17.8191 / 19.2778 ms | 0.0826 / 0.1507 / 0.1872 ms | 92.16% total; 7.68% normalized | 0.4067 / 0.4067 GiB | 754 / 749 | 127 / 127 | 127 / 117 / 46 / 44 |
+
+The official median's frame median changed by -19.34%, p95 by +8.81%, and p99
+by +14.96%. Those values mix different presentation regimes and must not be
+read as either a workload speedup or an accepted regression. `AutoNoVsync` was
+requested for every run, but rolling FPS diagnostics show that the before
+median was paced below 70 FPS for 144 of 150 sample snapshots, while the after
+median switched repeatedly between paced and unlocked presentation and was
+below 70 FPS for only 109 of 150 snapshots. The three before frame medians were
+4.1691, 16.5813, and 16.6717 ms; the three after medians were 8.4164, 13.3743,
+and 16.6863 ms.
+
+The fully paced after run 3 and one extra investigation run both stayed below
+70 FPS for all 150 diagnostic snapshots. The extra run was +0.48% at frame
+median and +0.78% at p95 relative to the before median, but its p99 was +6.09%
+(+1.1063 ms). The official after run 3 reproduced that tail at 19.2816 ms, so
+the p99 threshold observation is retained rather than dismissed. The harness
+cannot separate replacement-action workload from macOS presentation jitter,
+and Bevy's Metal backend did not expose GPU timestamps.
+
+The investigation found no non-special attack tuning change: the source diff
+does not touch combat, techniques, items, or any character-skill module, bots
+fall through to the established movement and attack selection paths, and the
+full 725-test suite remains green. Peak/end entities fell by 11/12 in the
+official median, asset and mesh-allocation counts stayed flat, and RSS did not
+grow through the sample. This is a functional workload change because bots no
+longer spawn shared specials; it is not an optimization claim, does not replace
+an accepted baseline row, and does not change any target.
+
 The guided-tutorial change was checked with one paired `FourBotStress` run on
 2026-07-27. Both builds used an Apple M2 Max with 12 logical CPUs, macOS 26.5.1,
 the profiling profile with `perf`, a 1280x720 window, the `FFC00001` seed, Crank

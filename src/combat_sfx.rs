@@ -1,9 +1,11 @@
 use bevy::audio::Volume;
 use bevy::prelude::*;
 
+use crate::audio_settings::CategorizedAudioPlayback;
 use crate::combat::{
     HitEffects, ImpactFeedbackIntensity, ImpactProfile, ImpactSource, impact_feedback_profile,
 };
+use crate::control_settings::ControlPreferences;
 use crate::reactions::ReactionFamilyId;
 use crate::techniques::{
     AttackPayloadId, payload_is_ultimate_bomb, payload_is_ultimate_catch,
@@ -27,6 +29,7 @@ const WALL_IMPACT_SFX: &str = "soundeffects/hit/punch_2.wav";
 const GROUND_IMPACT_SFX: &str = "soundeffects/hit/punch.wav";
 const MAX_COMBAT_SFX_PER_FRAME: usize = 8;
 const THROWN_ITEM_HIT_START_SECS: f32 = 0.22;
+const SFX_PREVIEW_PRIORITY: u8 = 70;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CombatSfxKind {
@@ -107,6 +110,15 @@ pub struct CombatSfxAssets {
     ground_impact: Handle<AudioSource>,
 }
 
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SfxPreviewRequest {
+    Play,
+    Stop,
+}
+
+#[derive(Component)]
+pub(crate) struct SfxPreview;
+
 impl CombatSfxAssets {
     fn handle_for(&self, kind: CombatSfxKind) -> Handle<AudioSource> {
         match kind {
@@ -152,19 +164,57 @@ pub fn setup_combat_sfx_assets(mut commands: Commands, asset_server: Res<AssetSe
 pub fn play_combat_sfx(
     mut commands: Commands,
     assets: Res<CombatSfxAssets>,
+    preferences: Res<ControlPreferences>,
     mut effects: ResMut<HitEffects>,
 ) {
     let cues = effects.drain_combat_sfx_cues();
-    if cues.is_empty() {
+    let channel_gain = preferences.sound_effects.effective_gain();
+    if cues.is_empty() || channel_gain == 0.0 {
         return;
     }
 
     for cue in coalesce_combat_sfx_cues(&cues) {
+        let authored_gain = volume_for_cue(cue);
         commands.spawn((
             AudioPlayer::new(assets.handle_for(cue.kind)),
-            playback_settings_for_cue(cue),
+            playback_settings_for_cue(cue, channel_gain),
+            CategorizedAudioPlayback::sound_effect(authored_gain),
         ));
     }
+}
+
+pub(crate) fn handle_sfx_preview_requests(
+    mut commands: Commands,
+    assets: Res<CombatSfxAssets>,
+    preferences: Res<ControlPreferences>,
+    mut requests: MessageReader<SfxPreviewRequest>,
+    active_previews: Query<Entity, With<SfxPreview>>,
+) {
+    let Some(request) = requests.read().copied().last() else {
+        return;
+    };
+
+    for entity in &active_previews {
+        commands.entity(entity).despawn();
+    }
+
+    if request == SfxPreviewRequest::Stop {
+        return;
+    }
+
+    let channel_gain = preferences.sound_effects.effective_gain();
+    if channel_gain == 0.0 {
+        return;
+    }
+
+    let cue = CombatSfxCue::new(CombatSfxKind::Guarded, Vec3::ZERO, SFX_PREVIEW_PRIORITY);
+    let authored_gain = volume_for_cue(cue);
+    commands.spawn((
+        SfxPreview,
+        AudioPlayer::new(assets.handle_for(cue.kind)),
+        playback_settings_for_cue(cue, channel_gain),
+        CategorizedAudioPlayback::sound_effect(authored_gain),
+    ));
 }
 
 pub fn combat_sfx_kind_for_impact(profile: &ImpactProfile) -> CombatSfxKind {
@@ -234,9 +284,9 @@ fn coalesce_combat_sfx_cues(cues: &[CombatSfxCue]) -> Vec<CombatSfxCue> {
     coalesced
 }
 
-fn playback_settings_for_cue(cue: CombatSfxCue) -> PlaybackSettings {
+fn playback_settings_for_cue(cue: CombatSfxCue, channel_gain: f32) -> PlaybackSettings {
     let settings = PlaybackSettings::DESPAWN
-        .with_volume(Volume::Linear(volume_for_cue(cue)))
+        .with_volume(Volume::Linear(volume_for_cue(cue) * channel_gain))
         .with_speed(speed_for_cue(cue));
     if let Some(start_position) = start_position_for_cue(cue.kind) {
         settings.with_start_position(start_position)
@@ -316,6 +366,26 @@ mod tests {
             intensity,
             ReactionFamilyId::ShortStandingStagger,
         )
+    }
+
+    fn test_assets() -> CombatSfxAssets {
+        CombatSfxAssets {
+            light_hit: default(),
+            heavy_hit: default(),
+            ultimate_hit: default(),
+            item_hit: default(),
+            guarded: default(),
+            pig_ultimate_munch: default(),
+            thrown_item_hit: default(),
+            pig_jump_x: default(),
+            item_drop: default(),
+            result_win: default(),
+            result_lose: default(),
+            steamer_explosion: default(),
+            mushroom_bigger: default(),
+            wall_impact: default(),
+            ground_impact: default(),
+        }
     }
 
     #[test]
@@ -422,7 +492,7 @@ mod tests {
         assert_eq!(start_position_for_cue(CombatSfxKind::PigJumpX), None);
         assert_eq!(start_position_for_cue(CombatSfxKind::Guarded), None);
         assert_eq!(
-            playback_settings_for_cue(item_hit).start_position,
+            playback_settings_for_cue(item_hit, 1.0).start_position,
             Some(core::time::Duration::from_secs_f32(
                 THROWN_ITEM_HIT_START_SECS
             ))
@@ -457,5 +527,42 @@ mod tests {
         assert!(coalesced.contains(&CombatSfxCue::new(CombatSfxKind::LightHit, Vec3::X, 90)));
         assert!(!coalesced.contains(&CombatSfxCue::new(CombatSfxKind::LightHit, Vec3::ZERO, 10)));
         assert_eq!(coalesced[0].kind, CombatSfxKind::ResultWin);
+    }
+
+    #[test]
+    fn a_new_sfx_preview_replaces_the_active_preview() {
+        let mut app = App::new();
+        app.add_message::<SfxPreviewRequest>()
+            .insert_resource(test_assets())
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, handle_sfx_preview_requests);
+
+        app.world_mut().write_message(SfxPreviewRequest::Play);
+        app.update();
+        let first = {
+            let world = app.world_mut();
+            let mut previews = world.query_filtered::<Entity, With<SfxPreview>>();
+            previews.single(world).unwrap()
+        };
+
+        app.world_mut().write_message(SfxPreviewRequest::Play);
+        app.update();
+        let second = {
+            let world = app.world_mut();
+            let mut previews = world.query_filtered::<Entity, With<SfxPreview>>();
+            previews.single(world).unwrap()
+        };
+
+        assert_ne!(first, second);
+        assert!(app.world().get_entity(first).is_err());
+
+        app.world_mut().write_message(SfxPreviewRequest::Stop);
+        app.update();
+        let preview_count = {
+            let world = app.world_mut();
+            let mut previews = world.query_filtered::<Entity, With<SfxPreview>>();
+            previews.iter(world).count()
+        };
+        assert_eq!(preview_count, 0);
     }
 }

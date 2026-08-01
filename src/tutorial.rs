@@ -22,6 +22,7 @@ use crate::components::{
     PlayerKeyBindings,
 };
 use crate::constants::{ARENA_TOP_Y, FIGHTER_COUNT, MAX_HEALTH, STOCK_LIVES};
+use crate::control_settings::ControlPreferences;
 use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
 use crate::effects::{EffectKind, VisualEffect};
 use crate::equipment::FighterEquipment;
@@ -34,7 +35,7 @@ use crate::game_transition::{
 };
 use crate::items::{ArenaItem, ItemAssets, ItemKind, ItemState, item_scale};
 use crate::penguin_skills::{ActivePenguinSkill, ActivePenguinSurface};
-use crate::specials::{ActiveSpecial, SpecialKind};
+use crate::specials::ActiveSpecial;
 use crate::techniques::TechniqueId;
 use crate::user_mode::{
     UserModeMusic, UserModeScreen, UserModeState, start_user_mode_menu_music, stop_user_mode_music,
@@ -66,12 +67,30 @@ pub enum TutorialChapterId {
 }
 
 impl TutorialChapterId {
+    #[allow(dead_code)]
+    /// Includes retired IDs so existing progress files continue to deserialize.
     pub const ALL: [Self; 12] = [
         Self::Basics,
         Self::Combat,
         Self::DefenseRecovery,
         Self::Items,
         Self::SharedSpecials,
+        Self::HudWinning,
+        Self::CatLab,
+        Self::PigLab,
+        Self::BeeLab,
+        Self::PenguinLab,
+        Self::ChickLab,
+        Self::FinalExam,
+    ];
+
+    #[allow(dead_code)]
+    /// Chapters currently exposed by the tutorial hub.
+    pub const ACTIVE: [Self; 11] = [
+        Self::Basics,
+        Self::Combat,
+        Self::DefenseRecovery,
+        Self::Items,
         Self::HudWinning,
         Self::CatLab,
         Self::PigLab,
@@ -351,7 +370,6 @@ pub enum TutorialObjective {
         uses: u8,
     },
     ItemThrow(ItemKind),
-    SpecialSpawn(SpecialKind),
     RingOutOpponent,
     LoseLife,
     MatchResult {
@@ -389,7 +407,6 @@ pub enum TutorialPromptAction {
     Light,
     Heavy,
     Jump,
-    Special,
     Dash,
     Guard,
     Ultimate,
@@ -598,7 +615,7 @@ const COMBAT_STEPS: &[TutorialStep] = &[
     ),
     lesson_step(
         "MP",
-        "Heavy techniques, shared specials, and ultimates consume MP. White Wine and Barrel restore it.",
+        "Heavy techniques and ultimates consume MP. White Wine and Barrel restore it.",
         TutorialObjective::Knowledge,
         &[],
         "Watch the blue MP meter beneath HP.",
@@ -790,45 +807,6 @@ const ITEM_STEPS: &[TutorialStep] = &[
     ),
 ];
 
-const SPECIAL_STEPS: &[TutorialStep] = &[
-    lesson_step(
-        "Pulse Dart",
-        "Spawn the fast straight Pulse Dart. Shared specials consume MP and enter cooldown.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Projectile),
-        &[TutorialPromptAction::Special],
-        "Use Special without a modifier.",
-        "Release Light, Aim, and Heavy before pressing Special.",
-        ScriptedDummyMode::Passive,
-    ),
-    lesson_step(
-        "Trip Plate",
-        "Place a Trip Plate trap in front of Cat.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Trap),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Light],
-        "Hold Light as Special is pressed.",
-        "The step refills MP and clears cooldown; press the displayed Special + Light chord together.",
-        ScriptedDummyMode::Passive,
-    ),
-    lesson_step(
-        "Snap Wave",
-        "Release the close expanding Snap Wave.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Shockwave),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Aim],
-        "Hold Aim as Special is pressed.",
-        "Press Special while the displayed Aim control is already held.",
-        ScriptedDummyMode::Passive,
-    ),
-    lesson_step(
-        "Drift Field",
-        "Create the lingering Drift Field hazard.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Hazard),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Heavy],
-        "Hold Heavy as Special is pressed.",
-        "Press Special while Heavy is held; each objective starts with full MP and no cooldown.",
-        ScriptedDummyMode::Passive,
-    ),
-];
-
 const HUD_STEPS: &[TutorialStep] = &[
     lesson_step(
         "HP and MP",
@@ -850,7 +828,7 @@ const HUD_STEPS: &[TutorialStep] = &[
     ),
     lesson_step(
         "Status and cooldowns",
-        "The HUD shows held items, SPEED/GIANT timers, and SP/EQ cooldowns.",
+        "The HUD shows held items, SPEED/GIANT timers, and EQ cooldowns.",
         TutorialObjective::Knowledge,
         &[],
         "Compact icons appear only while relevant.",
@@ -978,15 +956,6 @@ const CAT_LAB_STEPS: &[TutorialStep] = &[
         true,
         [TutorialPromptAction::Jump, TutorialPromptAction::Heavy]
     ),
-    lesson_step(
-        "Pulse Dart",
-        "Demonstrate Cat's shared neutral special.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Projectile),
-        &[TutorialPromptAction::Special],
-        "Press Special alone.",
-        "Release every modifier before pressing Special.",
-        ScriptedDummyMode::Passive,
-    ),
     lab_step!(
         "Royal Rush",
         "Catch Pig with Cat's ultimate rush.",
@@ -1032,15 +1001,6 @@ const PIG_LAB_STEPS: &[TutorialStep] = &[
         true,
         [TutorialPromptAction::Jump, TutorialPromptAction::Heavy]
     ),
-    lesson_step(
-        "Trip Plate",
-        "Demonstrate Pig's shared trap special.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Trap),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Light],
-        "Press Special + Light.",
-        "Hold Light before pressing Special.",
-        ScriptedDummyMode::Passive,
-    ),
     lab_step!(
         "Unblockable Ham Rush",
         "Catch the dummy with Pig's ultimate.",
@@ -1085,15 +1045,6 @@ const BEE_LAB_STEPS: &[TutorialStep] = &[
         TechniqueId::BeeJumpHeavy,
         true,
         [TutorialPromptAction::Jump, TutorialPromptAction::Heavy]
-    ),
-    lesson_step(
-        "Snap Wave",
-        "Demonstrate Bee's shared close special.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Shockwave),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Aim],
-        "Press Special + Aim.",
-        "Hold Aim before pressing Special.",
-        ScriptedDummyMode::Passive,
     ),
     lab_step!(
         "Royal Swarm",
@@ -1147,15 +1098,6 @@ const PENGUIN_LAB_STEPS: &[TutorialStep] = &[
         true,
         [TutorialPromptAction::Jump, TutorialPromptAction::Heavy]
     ),
-    lesson_step(
-        "Drift Field",
-        "Demonstrate Penguin's shared lingering special.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Hazard),
-        &[TutorialPromptAction::Special, TutorialPromptAction::Heavy],
-        "Press Special + Heavy.",
-        "Hold Heavy before pressing Special.",
-        ScriptedDummyMode::Passive,
-    ),
     lab_step!(
         "Grand Ice Field",
         "Start Penguin's ultimate slide route.",
@@ -1208,15 +1150,6 @@ const CHICK_LAB_STEPS: &[TutorialStep] = &[
         false,
         [TutorialPromptAction::Jump, TutorialPromptAction::Heavy]
     ),
-    lesson_step(
-        "Pulse Dart",
-        "Demonstrate Chick's shared neutral special.",
-        TutorialObjective::SpecialSpawn(SpecialKind::Projectile),
-        &[TutorialPromptAction::Special],
-        "Press Special alone.",
-        "Release every modifier before pressing Special.",
-        ScriptedDummyMode::Passive,
-    ),
     lab_step!(
         "Sixteen-Egg Burst",
         "Start Chick's ultimate egg burst.",
@@ -1234,14 +1167,13 @@ const FINAL_EXAM_STEPS: &[TutorialStep] = &[lesson_step(
         TutorialPromptAction::Move,
         TutorialPromptAction::Light,
         TutorialPromptAction::Heavy,
-        TutorialPromptAction::Special,
     ],
-    "Use movement, defense, items, shared specials, and Cat's full move set.",
+    "Use movement, defense, items, and Cat's full move set.",
     "Control center stage, preserve MP for recovery pressure, and launch Pig near the boundary.",
     ScriptedDummyMode::NormalBot,
 )];
 
-pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
+pub const TUTORIAL_CHAPTERS: [TutorialChapter; 11] = [
     TutorialChapter {
         id: TutorialChapterId::Basics,
         number: 1,
@@ -1279,17 +1211,8 @@ pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
         final_exam: false,
     },
     TutorialChapter {
-        id: TutorialChapterId::SharedSpecials,
-        number: 5,
-        title: "Shared Specials",
-        summary: "Pulse Dart, Trip Plate, Snap Wave, and Drift Field.",
-        player_character: CharacterKind::Cat,
-        steps: SPECIAL_STEPS,
-        final_exam: false,
-    },
-    TutorialChapter {
         id: TutorialChapterId::HudWinning,
-        number: 6,
+        number: 5,
         title: "HUD & Winning",
         summary: "Read HP, MP, stocks, status, EDGE danger, respawns, elimination, and victory.",
         player_character: CharacterKind::Cat,
@@ -1298,52 +1221,52 @@ pub const TUTORIAL_CHAPTERS: [TutorialChapter; 12] = [
     },
     TutorialChapter {
         id: TutorialChapterId::CatLab,
-        number: 7,
+        number: 6,
         title: "Cat Lab",
-        summary: "Verify Cat's grounded, dash, aerial, special, and ultimate routes.",
+        summary: "Verify Cat's grounded, dash, aerial, and ultimate routes.",
         player_character: CharacterKind::Cat,
         steps: CAT_LAB_STEPS,
         final_exam: false,
     },
     TutorialChapter {
         id: TutorialChapterId::PigLab,
-        number: 8,
+        number: 7,
         title: "Pig Lab",
-        summary: "Verify Pig's grounded, dash, aerial, special, and ultimate routes.",
+        summary: "Verify Pig's grounded, dash, aerial, and ultimate routes.",
         player_character: CharacterKind::Pig,
         steps: PIG_LAB_STEPS,
         final_exam: false,
     },
     TutorialChapter {
         id: TutorialChapterId::BeeLab,
-        number: 9,
+        number: 8,
         title: "Bee Lab",
-        summary: "Verify Bee's grounded, dash, aerial, special, and ultimate routes.",
+        summary: "Verify Bee's grounded, dash, aerial, and ultimate routes.",
         player_character: CharacterKind::Bee,
         steps: BEE_LAB_STEPS,
         final_exam: false,
     },
     TutorialChapter {
         id: TutorialChapterId::PenguinLab,
-        number: 10,
+        number: 9,
         title: "Penguin Lab",
-        summary: "Verify Penguin's grounded, dash, aerial, special, and ultimate routes.",
+        summary: "Verify Penguin's grounded, dash, aerial, and ultimate routes.",
         player_character: CharacterKind::Penguin,
         steps: PENGUIN_LAB_STEPS,
         final_exam: false,
     },
     TutorialChapter {
         id: TutorialChapterId::ChickLab,
-        number: 11,
+        number: 10,
         title: "Chick Lab",
-        summary: "Verify Chick's grounded, dash, aerial, special, and ultimate routes.",
+        summary: "Verify Chick's grounded, dash, aerial, and ultimate routes.",
         player_character: CharacterKind::Chick,
         steps: CHICK_LAB_STEPS,
         final_exam: false,
     },
     TutorialChapter {
         id: TutorialChapterId::FinalExam,
-        number: 12,
+        number: 11,
         title: "Final Exam",
         summary: "Cat versus a forgiving normal-rules Pig: three lives, Split Causeway items, last fighter standing.",
         player_character: CharacterKind::Cat,
@@ -1357,10 +1280,10 @@ pub fn tutorial_chapter(id: TutorialChapterId) -> &'static TutorialChapter {
 }
 
 pub fn chapter_index(id: TutorialChapterId) -> usize {
-    TutorialChapterId::ALL
+    TUTORIAL_CHAPTERS
         .iter()
-        .position(|candidate| *candidate == id)
-        .expect("every tutorial chapter ID belongs to the catalog")
+        .position(|chapter| chapter.id == id)
+        .expect("active tutorial chapter ID belongs to the catalog")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1638,7 +1561,7 @@ pub fn tutorial_grid_move(cursor: usize, direction: IVec2) -> usize {
     let next_row = if direction.y < 0 {
         row.saturating_sub(1)
     } else if direction.y > 0 {
-        (row + 1).min(5)
+        (row + 1).min((TUTORIAL_CHAPTERS.len() - 1) / 2)
     } else {
         row
     };
@@ -1688,9 +1611,6 @@ fn controller_tutorial_action_label(
         TutorialPromptAction::Light => family.face_button_label(GamepadButton::West).to_string(),
         TutorialPromptAction::Heavy => family.face_button_label(GamepadButton::North).to_string(),
         TutorialPromptAction::Jump => family.face_button_label(GamepadButton::South).to_string(),
-        TutorialPromptAction::Special => family
-            .face_button_label(GamepadButton::RightTrigger)
-            .to_string(),
         TutorialPromptAction::Dash => family
             .face_button_label(GamepadButton::RightTrigger2)
             .to_string(),
@@ -1730,7 +1650,6 @@ fn keyboard_tutorial_action_label(
         TutorialPromptAction::Light => key(ControlAction::Light),
         TutorialPromptAction::Heavy => key(ControlAction::Heavy),
         TutorialPromptAction::Jump => key(ControlAction::Jump),
-        TutorialPromptAction::Special => key(ControlAction::Special),
         TutorialPromptAction::Dash => "double-tap Move".to_string(),
         TutorialPromptAction::Guard => format!(
             "{} + {}",
@@ -1793,7 +1712,6 @@ fn tutorial_settlement_status(session: &TutorialSession) -> Option<&'static str>
         TutorialObjective::ItemThrow(ItemKind::Barrel) => "WAIT FOR THE SPRAY",
         TutorialObjective::ItemThrow(ItemKind::Crate) => "WAIT FOR THE REVEAL",
         TutorialObjective::ItemThrow(ItemKind::Steamer) => "MOVE CLEAR - WAIT FOR THE BLAST",
-        TutorialObjective::SpecialSpawn(_) => "LET THE SPECIAL ACTIVATE",
         TutorialObjective::RingOutOpponent | TutorialObjective::LoseLife => "WAIT FOR THE RESPAWN",
         _ => "LET THE ACTION FINISH",
     })
@@ -2163,7 +2081,6 @@ pub fn observe_tutorial_objective(
         &FighterInventory,
     )>,
     items: Query<(Entity, &ArenaItem)>,
-    specials: Query<&ActiveSpecial>,
     effects: Query<&VisualEffect>,
 ) {
     if session.phase != TutorialPhase::Playing || transition.active() {
@@ -2297,9 +2214,6 @@ pub fn observe_tutorial_objective(
                     ItemState::Thrown { .. } | ItemState::Armed { .. } | ItemState::Spraying { .. }
                 )
         }),
-        TutorialObjective::SpecialSpawn(kind) => specials
-            .iter()
-            .any(|special| special.owner_id == TUTORIAL_PLAYER_ID && special.kind == kind),
         TutorialObjective::RingOutOpponent => {
             telemetry.ring_outs > session.objective_baseline.ring_outs || dummy_lost_stock
         }
@@ -2349,16 +2263,6 @@ pub fn observe_tutorial_objective(
         TutorialObjective::ItemThrow(_) => {
             session.completion_world_effect_seen = true;
         }
-        TutorialObjective::SpecialSpawn(kind) => {
-            session.completion_world_effect_seen |= specials.iter().any(|special| {
-                tutorial_special_activation_matches(
-                    special.owner_id,
-                    special.kind,
-                    special.active_feedback_sent,
-                    kind,
-                )
-            });
-        }
         _ => {}
     }
 
@@ -2382,9 +2286,7 @@ pub fn observe_tutorial_objective(
         TutorialObjective::Guarding { .. } => {
             !input.guard && action.action != FighterAction::Guarding && player_recovered
         }
-        TutorialObjective::ItemThrow(_) | TutorialObjective::SpecialSpawn(_) => {
-            player_recovered && session.completion_world_effect_seen
-        }
+        TutorialObjective::ItemThrow(_) => player_recovered && session.completion_world_effect_seen,
         TutorialObjective::RingOutOpponent => dummy_state
             .is_some_and(|(action, motor, _)| tutorial_fighter_has_recovered(action, motor)),
         TutorialObjective::LoseLife => player_recovered,
@@ -2408,15 +2310,6 @@ fn tutorial_fighter_has_recovered(action: &FighterActionState, motor: &FighterMo
         && motor.velocity.y.abs() <= 0.05
         && motor.dash_slide_timer <= 0.0
         && matches!(action.action, FighterAction::Idle | FighterAction::Moving)
-}
-
-fn tutorial_special_activation_matches(
-    owner_id: usize,
-    actual_kind: SpecialKind,
-    active_feedback_sent: bool,
-    expected_kind: SpecialKind,
-) -> bool {
-    owner_id == TUTORIAL_PLAYER_ID && actual_kind == expected_kind && active_feedback_sent
 }
 
 fn tutorial_final_exam_won(state: &MatchState) -> bool {
@@ -2649,7 +2542,7 @@ pub fn setup_tutorial_ui(mut commands: Commands, ui_cameras: Query<Entity, With<
                 Pickable::IGNORE,
             ))
             .with_children(|grid| {
-                for row in 0..6 {
+                for row in 0..TUTORIAL_CHAPTERS.len().div_ceil(2) {
                     grid.spawn((
                         Node {
                             width: Val::Percent(100.0),
@@ -2662,8 +2555,9 @@ pub fn setup_tutorial_ui(mut commands: Commands, ui_cameras: Query<Entity, With<
                     ))
                     .with_children(|row_node| {
                         for column in 0..2 {
-                            let chapter =
-                                &TUTORIAL_CHAPTERS[(row * 2 + column).min(11)];
+                            let Some(chapter) = TUTORIAL_CHAPTERS.get(row * 2 + column) else {
+                                continue;
+                            };
                             row_node
                                 .spawn(tutorial_button(
                                     "",
@@ -3232,7 +3126,7 @@ pub fn update_tutorial_ui(
         transform.scale = Vec2::splat(0.94 + success_reveal * 0.06);
     }
 
-    let selected_chapter = TUTORIAL_CHAPTERS[session.hub_cursor.min(11)];
+    let selected_chapter = TUTORIAL_CHAPTERS[session.hub_cursor.min(TUTORIAL_CHAPTERS.len() - 1)];
     let step = session.current_step();
     let assignment = user_mode.tutorial_player_assignment();
     let controls = step
@@ -3258,8 +3152,9 @@ pub fn update_tutorial_ui(
     {
         if hub_summary.is_some() {
             **text = format!(
-                "{}\n\nAll 12 chapters are unlocked and replayable. Move in two columns; confirm to train. R resets tutorial marks only.",
-                selected_chapter.summary
+                "{}\n\nAll {} chapters are unlocked and replayable. Move in two columns; confirm to train. R resets tutorial marks only.",
+                selected_chapter.summary,
+                TUTORIAL_CHAPTERS.len(),
             );
         } else if let Some(chapter_button) = chapter_button {
             let chapter = tutorial_chapter(chapter_button.chapter);
@@ -3841,7 +3736,9 @@ pub fn handle_tutorial_input(
             let action = pointer_action.or_else(|| {
                 if menu.confirm {
                     Some(TutorialUiAction::Chapter(
-                        TutorialChapterId::ALL[context.session.hub_cursor.min(11)],
+                        TUTORIAL_CHAPTERS
+                            [context.session.hub_cursor.min(TUTORIAL_CHAPTERS.len() - 1)]
+                        .id,
                     ))
                 } else if menu.back {
                     Some(TutorialUiAction::Back)
@@ -4047,6 +3944,7 @@ pub fn handle_tutorial_input(
 #[derive(SystemParam)]
 pub struct TutorialCleanupResources<'w> {
     asset_server: Res<'w, AssetServer>,
+    control_preferences: Res<'w, ControlPreferences>,
     session: ResMut<'w, TutorialSession>,
     user_mode: ResMut<'w, UserModeState>,
     setup: ResMut<'w, LocalSetup>,
@@ -4081,6 +3979,7 @@ pub fn cleanup_tutorial_session(
 ) {
     let TutorialCleanupResources {
         asset_server,
+        control_preferences,
         mut session,
         mut user_mode,
         mut setup,
@@ -4106,7 +4005,7 @@ pub fn cleanup_tutorial_session(
         commands.entity(entity).remove::<BotDifficulty>();
     }
     stop_user_mode_music(&mut commands, &music);
-    start_user_mode_menu_music(&mut commands, &asset_server);
+    start_user_mode_menu_music(&mut commands, &asset_server, &control_preferences);
 
     restore_tutorial_setup(
         &mut session,
@@ -4221,18 +4120,27 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_twelve_unique_open_chapters() {
-        assert_eq!(TUTORIAL_CHAPTERS.len(), 12);
+    fn catalog_has_eleven_unique_open_chapters_and_retains_the_legacy_id() {
+        assert_eq!(TUTORIAL_CHAPTERS.len(), 11);
         let ids = TUTORIAL_CHAPTERS
             .iter()
             .map(|chapter| chapter.id)
             .collect::<BTreeSet<_>>();
-        assert_eq!(ids.len(), 12);
-        assert_eq!(ids, TutorialChapterId::ALL.into_iter().collect());
+        assert_eq!(ids.len(), 11);
+        assert_eq!(ids, TutorialChapterId::ACTIVE.into_iter().collect());
+        assert!(!ids.contains(&TutorialChapterId::SharedSpecials));
+        assert!(TutorialChapterId::ALL.contains(&TutorialChapterId::SharedSpecials));
         assert!(
             TUTORIAL_CHAPTERS
                 .iter()
                 .all(|chapter| !chapter.steps.is_empty())
+        );
+        assert_eq!(
+            TUTORIAL_CHAPTERS
+                .iter()
+                .map(|chapter| chapter.number)
+                .collect::<Vec<_>>(),
+            (1..=11).collect::<Vec<_>>()
         );
         let stable_ids = TutorialChapterId::ALL
             .into_iter()
@@ -4325,9 +4233,8 @@ mod tests {
     }
 
     #[test]
-    fn curriculum_covers_all_items_and_shared_specials() {
+    fn curriculum_covers_all_items_without_unreachable_special_objectives() {
         let mut items = BTreeSet::new();
-        let mut specials = BTreeSet::new();
         for chapter in TUTORIAL_CHAPTERS {
             for step in chapter.steps {
                 match step.objective {
@@ -4335,15 +4242,17 @@ mod tests {
                     | TutorialObjective::ItemThrow(kind) => {
                         items.insert(format!("{kind:?}"));
                     }
-                    TutorialObjective::SpecialSpawn(kind) => {
-                        specials.insert(format!("{kind:?}"));
-                    }
                     _ => {}
                 }
+                let copy = format!(
+                    "{} {} {} {}",
+                    step.title, step.instruction, step.hint, step.strong_hint
+                )
+                .to_ascii_lowercase();
+                assert!(!copy.contains("shared special"), "{}", step.title);
             }
         }
         assert_eq!(items.len(), 8);
-        assert_eq!(specials.len(), 4);
     }
 
     #[test]
@@ -4380,6 +4289,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_shared_special_progress_decodes_without_losing_other_chapters() {
+        let stored = StoredTutorialProgress {
+            version: TUTORIAL_PROGRESS_VERSION,
+            visited: [
+                TutorialChapterId::Basics,
+                TutorialChapterId::SharedSpecials,
+                TutorialChapterId::Combat,
+            ]
+            .into_iter()
+            .collect(),
+            completed: [TutorialChapterId::SharedSpecials, TutorialChapterId::Combat]
+                .into_iter()
+                .collect(),
+        };
+        let encoded = ron::ser::to_string(&stored).unwrap();
+
+        let decoded = decode_tutorial_progress(&encoded).unwrap();
+
+        assert!(decoded.is_visited(TutorialChapterId::Basics));
+        assert!(decoded.is_complete(TutorialChapterId::Combat));
+        assert!(decoded.is_complete(TutorialChapterId::SharedSpecials));
+    }
+
+    #[test]
     fn corrupt_and_unsupported_progress_is_ignored_by_decoder() {
         assert!(decode_tutorial_progress("not ron").is_err());
         let encoded = encode_tutorial_progress(&TutorialProgress::default())
@@ -4400,12 +4333,13 @@ mod tests {
     }
 
     #[test]
-    fn grid_navigation_is_two_columns_and_six_rows() {
+    fn grid_navigation_is_two_columns_with_a_single_final_row_entry() {
         assert_eq!(tutorial_grid_move(0, IVec2::X), 1);
         assert_eq!(tutorial_grid_move(1, IVec2::X), 1);
         assert_eq!(tutorial_grid_move(1, IVec2::Y), 3);
         assert_eq!(tutorial_grid_move(10, IVec2::Y), 10);
-        assert_eq!(tutorial_grid_move(11, IVec2::NEG_Y), 9);
+        assert_eq!(tutorial_grid_move(10, IVec2::X), 10);
+        assert_eq!(tutorial_grid_move(10, IVec2::NEG_Y), 8);
     }
 
     #[test]
@@ -5092,34 +5026,6 @@ mod tests {
     }
 
     #[test]
-    fn special_spawn_waits_for_the_expected_active_effect() {
-        assert!(!tutorial_special_activation_matches(
-            TUTORIAL_PLAYER_ID,
-            SpecialKind::Projectile,
-            false,
-            SpecialKind::Projectile,
-        ));
-        assert!(!tutorial_special_activation_matches(
-            TUTORIAL_DUMMY_ID,
-            SpecialKind::Projectile,
-            true,
-            SpecialKind::Projectile,
-        ));
-        assert!(!tutorial_special_activation_matches(
-            TUTORIAL_PLAYER_ID,
-            SpecialKind::Trap,
-            true,
-            SpecialKind::Projectile,
-        ));
-        assert!(tutorial_special_activation_matches(
-            TUTORIAL_PLAYER_ID,
-            SpecialKind::Projectile,
-            true,
-            SpecialKind::Projectile,
-        ));
-    }
-
-    #[test]
     fn guarding_objective_requires_a_confirmed_guard_impact() {
         let mut app = App::new();
         let mut session = TutorialSession::default();
@@ -5262,7 +5168,7 @@ mod tests {
         use bevy::ecs::system::SystemState;
 
         let bindings = PlayerKeyBindings::default();
-        let step = &SPECIAL_STEPS[1];
+        let step = &COMBAT_STEPS[3];
         let mut world = World::new();
         let controller = world
             .spawn(ControllerDeviceInfo {
@@ -5291,7 +5197,7 @@ mod tests {
             &metadata,
         );
 
-        assert_eq!(keyboard, "E + C");
-        assert_eq!(controller_prompt, "R1 + Square");
+        assert_eq!(keyboard, "double-tap Move + C");
+        assert_eq!(controller_prompt, "R2 + Square");
     }
 }

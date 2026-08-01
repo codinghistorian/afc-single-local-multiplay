@@ -24,8 +24,9 @@ use crate::constants::ARENA_RADIUS;
 use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::constants::{
     COMBO_QUEUE_END, COMBO_QUEUE_START, ITEM_BREEZE_BUOY_STAMINA, ITEM_PICKUP_RANGE,
-    ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER, SPECIAL_HAZARD_RADIUS,
-    SPECIAL_PROJECTILE_RADIUS, SPECIAL_SHOCKWAVE_RADIUS, SPECIAL_TRAP_RADIUS,
+    ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER, SHARED_SPECIALS_ENABLED,
+    SPECIAL_HAZARD_RADIUS, SPECIAL_PROJECTILE_RADIUS, SPECIAL_SHOCKWAVE_RADIUS,
+    SPECIAL_TRAP_RADIUS,
 };
 use crate::equipment::{EquipmentKind, FighterEquipment};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -881,7 +882,7 @@ fn bot_should_drive_autonomous_inputs(behavior: BotBehaviorMode) -> bool {
 }
 
 fn bot_ai_special_inputs_allowed(user_mode: &UserModeState) -> bool {
-    !user_mode.restricts_bot_special_inputs()
+    SHARED_SPECIALS_ENABLED && !user_mode.restricts_bot_special_inputs()
 }
 
 fn bot_recovery_decision(
@@ -1894,6 +1895,17 @@ mod tests {
     fn tutorial_difficulty_disables_normal_grabs_only() {
         assert!(BotDifficulty::Standard.normal_grab_allowed());
         assert!(!BotDifficulty::Tutorial.normal_grab_allowed());
+    }
+
+    #[test]
+    fn disabled_shared_special_gate_skips_the_bot_special_selection_branch() {
+        let mut normal = UserModeState::default();
+        assert!(!normal.restricts_bot_special_inputs());
+        assert!(!bot_ai_special_inputs_allowed(&normal));
+
+        normal.enter_tutorial_lesson();
+        assert!(!normal.restricts_bot_special_inputs());
+        assert!(!bot_ai_special_inputs_allowed(&normal));
     }
 
     #[test]
