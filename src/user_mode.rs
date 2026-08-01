@@ -4,7 +4,6 @@ use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
-use bevy::scene::SceneInstanceReady;
 use bevy::time::{Real, Virtual};
 use bevy::ui::UiTargetCamera;
 
@@ -13,9 +12,7 @@ use crate::arena_defs::{active_arena_index, arena_definitions, set_active_arena_
 use crate::audio_settings::CategorizedAudioPlayback;
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
-use crate::characters::{
-    CharacterKind, CharacterMoveCatalog, character_label, character_scene_model,
-};
+use crate::characters::{CharacterKind, character_label};
 use crate::combat::HitEffects;
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, SfxPreviewRequest};
 use crate::components::{
@@ -46,6 +43,8 @@ const USER_MODE_TUTORIAL_BACKGROUND_PATH: &str =
     "backgrounds/menu/animal_fighter_tutorial_background_1920x1080.png";
 const USER_MODE_SETTINGS_BACKGROUND_PATH: &str =
     "backgrounds/menu/animal_fighter_settings_background_1920x1080.png";
+const USER_MODE_CHARACTER_SELECT_BACKGROUND_PATH: &str =
+    "backgrounds/menu/character_select/character_select.png";
 const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
 const USER_MODE_CONTROLLER_ICON_PATH: &str = "icons/controller.png";
 const USER_MODE_KEYBOARD_ICON_PATH: &str = "icons/keyboard.png";
@@ -62,10 +61,6 @@ const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_sky_snow_stage.ogg",
     "music/bgm/cc0_powder_pirate_indenture_loop.wav",
 ];
-const USER_MODE_PREVIEW_TEXTURE_SIZE: u32 = 384;
-const USER_MODE_PREVIEW_LAYER: usize = 20;
-const USER_MODE_PREVIEW_ORIGIN: Vec3 = Vec3::new(92.0, 32.0, 92.0);
-const USER_MODE_PREVIEW_SCALE: f32 = 1.248;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
 const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
@@ -88,6 +83,30 @@ const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
     CharacterKind::Penguin,
     CharacterKind::Chick,
 ];
+const USER_MODE_CHARACTER_GRID_COLUMNS: usize = 3;
+const USER_MODE_CHARACTER_GRID_ROWS: usize = 2;
+const USER_MODE_CHARACTER_PORTRAIT_PATHS: [(CharacterKind, &str); 5] = [
+    (
+        CharacterKind::Cat,
+        "backgrounds/menu/character_select/cat.png",
+    ),
+    (
+        CharacterKind::Pig,
+        "backgrounds/menu/character_select/pig.png",
+    ),
+    (
+        CharacterKind::Bee,
+        "backgrounds/menu/character_select/bee.png",
+    ),
+    (
+        CharacterKind::Penguin,
+        "backgrounds/menu/character_select/penguin.png",
+    ),
+    (
+        CharacterKind::Chick,
+        "backgrounds/menu/character_select/chick.png",
+    ),
+];
 const USER_MODE_DEFAULT_CHARACTERS: [CharacterKind; FIGHTER_COUNT] = [
     CharacterKind::Cat,
     CharacterKind::Pig,
@@ -101,6 +120,48 @@ const USER_MODE_KEY_PANEL_WIDTH: f32 = 640.0;
 const CONTROLLER_TAKEOVER_TITLE: &str = "CONNECT CONTROLLER?";
 #[cfg(target_arch = "wasm32")]
 const WEB_BATTLE_WARMUP_SECS: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UserModeCharacterProfile {
+    name: &'static str,
+    tagline: &'static str,
+    description: &'static str,
+}
+
+fn user_mode_character_profile(character: CharacterKind) -> UserModeCharacterProfile {
+    match character {
+        CharacterKind::Cat => UserModeCharacterProfile {
+            name: "CAT",
+            tagline: "AGILE | BEGINNER FRIENDLY",
+            description: "Quick movement and reliable close-range attacks.",
+        },
+        CharacterKind::Pig => UserModeCharacterProfile {
+            name: "PIG",
+            tagline: "POWERFUL | HEAVY HITTER",
+            description: "A sturdy fighter that rewards deliberate, hard-hitting attacks.",
+        },
+        CharacterKind::Bee => UserModeCharacterProfile {
+            name: "BEE",
+            tagline: "FAST | AIRBORNE",
+            description: "A nimble fighter that keeps pressure high with quick movement.",
+        },
+        CharacterKind::Penguin => UserModeCharacterProfile {
+            name: "PENGUIN",
+            tagline: "CONTROL | TRICKY",
+            description: "A steady fighter that uses space and timing to set the pace.",
+        },
+        CharacterKind::Chick => UserModeCharacterProfile {
+            name: "CHICK",
+            tagline: "VERSATILE | QUICK",
+            description: "A flexible fighter with light movement and adaptable attacks.",
+        },
+        _ => UserModeCharacterProfile {
+            name: "FIGHTER",
+            tagline: "READY FOR THE ARENA",
+            description: "Choose a fighter to enter the arena.",
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserModeScreen {
@@ -248,6 +309,14 @@ impl UserPlayMode {
     }
 }
 
+fn user_mode_character_breadcrumb(play_mode: UserPlayMode) -> &'static str {
+    if play_mode.is_single_player() {
+        "SINGLE PLAYER"
+    } else {
+        "MULTIPLAYER"
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UserModeMainMenuChoice {
     SinglePlayer,
@@ -371,6 +440,9 @@ pub(crate) enum UserModeUiAction {
     AdjustSoundChannel(SoundSettingsChannel, SoundVolumeStep),
     Previous,
     Next,
+    CharacterUp,
+    CharacterDown,
+    SelectCharacter(CharacterKind),
     PreviousColumn,
     NextColumn,
     Confirm,
@@ -1137,16 +1209,42 @@ impl UserModeState {
     }
 
     fn select_previous(&mut self) {
-        self.set_selected_character(previous_user_mode_character(self.selected_character()));
+        self.move_character_cursor(IVec2::NEG_X);
     }
 
     fn select_next(&mut self) {
-        self.set_selected_character(next_user_mode_character(self.selected_character()));
+        self.move_character_cursor(IVec2::X);
+    }
+
+    fn select_character_up(&mut self) {
+        self.move_character_cursor(IVec2::Y);
+    }
+
+    fn select_character_down(&mut self) {
+        self.move_character_cursor(IVec2::NEG_Y);
+    }
+
+    fn move_character_cursor(&mut self, direction: IVec2) {
+        let player = self.character_select_player.min(FIGHTER_COUNT - 1);
+        if self.character_ready[player] {
+            return;
+        }
+        self.player_characters[player] =
+            move_character_in_grid(self.player_characters[player], direction);
     }
 
     fn set_selected_character(&mut self, character: CharacterKind) {
         let player = self.character_select_player.min(FIGHTER_COUNT - 1);
         self.player_characters[player] = character;
+    }
+
+    fn select_character(&mut self, character: CharacterKind) -> bool {
+        let player = self.character_select_player.min(FIGHTER_COUNT - 1);
+        if self.character_ready[player] || !USER_MODE_SELECTABLE_CHARACTERS.contains(&character) {
+            return false;
+        }
+        self.set_selected_character(character);
+        true
     }
 
     fn select_previous_arena(&mut self) {
@@ -1388,12 +1486,20 @@ fn route_user_mode_action(
                 }
                 UserModeRoute::None
             }
-            UserModeScreen::CharacterSelect if user_mode.character_select_player > 0 => {
+            UserModeScreen::CharacterSelect
+                if user_mode.character_select_player > 0
+                    && !user_mode.character_ready[user_mode.character_select_player] =>
+            {
                 user_mode.character_select_player -= 1;
                 UserModeRoute::None
             }
             UserModeScreen::CharacterSelect => {
-                if user_mode.play_mode.is_single_player() {
+                let player = user_mode
+                    .character_select_player
+                    .min(user_mode.play_mode.human_player_count() - 1);
+                if user_mode.character_ready[player] {
+                    user_mode.character_ready[player] = false;
+                } else if user_mode.play_mode.is_single_player() {
                     user_mode.enter_mode_select();
                 } else {
                     user_mode.enter_device_join();
@@ -1498,6 +1604,18 @@ fn route_user_mode_action(
             user_mode.select_next();
             UserModeRoute::None
         }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::CharacterUp) => {
+            user_mode.select_character_up();
+            UserModeRoute::None
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::CharacterDown) => {
+            user_mode.select_character_down();
+            UserModeRoute::None
+        }
+        (UserModeScreen::CharacterSelect, UserModeUiAction::SelectCharacter(character)) => {
+            user_mode.select_character(character);
+            UserModeRoute::None
+        }
         (UserModeScreen::CharacterSelect, UserModeUiAction::Confirm) => {
             if user_mode.confirm_character_selection() {
                 user_mode.enter_arena_select();
@@ -1587,12 +1705,21 @@ fn user_mode_action_requires_transition(
             || (user_mode.screen == UserModeScreen::DeviceJoin
                 && user_mode.controller_setup_clear_confirmation)
             || (user_mode.screen == UserModeScreen::CharacterSelect
-                && user_mode.character_select_player > 0)
+                && user_mode.character_select_player > 0
+                && !user_mode.character_ready[user_mode.character_select_player])
         {
             return false;
         }
         if user_mode.screen == UserModeScreen::ModeSelect {
             return cfg!(all(feature = "native", not(target_arch = "wasm32")));
+        }
+        if user_mode.screen == UserModeScreen::CharacterSelect {
+            let current = user_mode
+                .character_select_player
+                .min(user_mode.play_mode.human_player_count() - 1);
+            if user_mode.character_ready[current] {
+                return false;
+            }
         }
         return matches!(
             user_mode.screen,
@@ -1795,6 +1922,43 @@ pub(crate) struct UserModeSoundVolumeText {
 pub(crate) struct UserModeCharacterSelectPanel;
 
 #[derive(Component)]
+pub(crate) struct UserModeCharacterSelectBackground;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterSelectRail;
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UserModeCharacterPortraitCard {
+    character: CharacterKind,
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UserModeCharacterPlayerMarker {
+    character: CharacterKind,
+    player: usize,
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UserModeCharacterReadyMarker {
+    character: CharacterKind,
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterBreadcrumbText;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterProfileName;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterProfileTagline;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterProfileDescription;
+
+#[derive(Component)]
+pub(crate) struct UserModeCharacterConfirmButton;
+
+#[derive(Component)]
 pub(crate) struct UserModeArenaSelectPanel;
 
 #[derive(Component)]
@@ -1848,24 +2012,10 @@ pub(crate) struct ControllerReconnectTitle;
 pub(crate) struct ControllerReconnectText;
 
 #[derive(Component)]
-pub(crate) struct UserModeCharacterPreview;
-
-#[derive(Component)]
 pub(crate) struct UserModeArenaPreviewPanel;
 
 #[derive(Component)]
 pub(crate) struct UserModeArenaPreviewCamera;
-
-#[derive(Component)]
-pub(crate) struct UserModePreviewRoot;
-
-#[derive(Component)]
-pub(crate) struct UserModePreviewCamera;
-
-#[derive(Component)]
-pub(crate) struct UserModePreviewScene {
-    character: CharacterKind,
-}
 
 #[derive(Component)]
 pub(crate) struct UserModeMusic;
@@ -1873,22 +2023,6 @@ pub(crate) struct UserModeMusic;
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ArenaMusic {
     arena_index: usize,
-}
-
-fn user_mode_preview_render_layers() -> RenderLayers {
-    RenderLayers::layer(USER_MODE_PREVIEW_LAYER)
-}
-
-fn apply_user_mode_preview_render_layers(
-    scene_ready: On<SceneInstanceReady>,
-    children: Query<&Children>,
-    mut commands: Commands,
-) {
-    for descendant in children.iter_descendants(scene_ready.entity) {
-        commands
-            .entity(descendant)
-            .insert(user_mode_preview_render_layers());
-    }
 }
 
 fn user_mode_action_button(
@@ -2062,24 +2196,312 @@ fn user_mode_back_button() -> impl Bundle {
         Node {
             display: Display::None,
             position_type: PositionType::Absolute,
-            left: Val::Px(28.0),
-            top: Val::Px(24.0),
-            width: Val::Px(112.0),
-            height: Val::Px(44.0),
+            left: Val::Percent(2.2),
+            top: Val::Percent(2.8),
+            width: Val::Percent(9.0),
+            height: Val::Percent(5.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor::all(Color::NONE),
+        children![(
+            Text::new("BACK"),
+            TextFont {
+                font_size: 17.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.95, 0.86, 0.68)),
+        )],
+    )
+}
+
+fn character_player_marker(character: CharacterKind, player: usize) -> impl Bundle {
+    (
+        UserModeCharacterPlayerMarker { character, player },
+        Node {
+            display: Display::None,
+            min_width: Val::Px(38.0),
+            height: Val::Percent(66.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(Val::Px(5.0), Val::Px(1.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.08, 0.08, 0.09, 0.92)),
+        Text::new(format!("P{}", player + 1)),
+        TextFont {
+            font_size: 12.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.98, 0.91, 0.68)),
+        TextLayout::new_with_justify(Justify::Center),
+    )
+}
+
+fn character_portrait_aspect_ratio(_character: CharacterKind) -> f32 {
+    1.0
+}
+
+fn character_portrait_source_rect(character: CharacterKind) -> Rect {
+    match character {
+        CharacterKind::Cat => Rect {
+            min: Vec2::new(352.0, 122.0),
+            max: Vec2::new(1182.0, 952.0),
+        },
+        CharacterKind::Pig => Rect {
+            min: Vec2::new(28.0, 38.0),
+            max: Vec2::new(988.0, 998.0),
+        },
+        CharacterKind::Bee => Rect {
+            min: Vec2::new(27.0, 25.0),
+            max: Vec2::new(987.0, 985.0),
+        },
+        CharacterKind::Penguin => Rect {
+            min: Vec2::new(391.0, 172.0),
+            max: Vec2::new(1075.0, 856.0),
+        },
+        CharacterKind::Chick => Rect {
+            min: Vec2::new(358.0, 122.0),
+            max: Vec2::new(1108.0, 872.0),
+        },
+        _ => Rect {
+            min: Vec2::ZERO,
+            max: Vec2::splat(1024.0),
+        },
+    }
+}
+
+fn character_portrait_image(asset_server: &AssetServer, character: CharacterKind) -> impl Bundle {
+    (
+        Node {
+            width: Val::Percent(100.0),
+            max_width: Val::Percent(100.0),
+            max_height: Val::Percent(100.0),
+            aspect_ratio: Some(character_portrait_aspect_ratio(character)),
+            align_self: AlignSelf::Center,
+            ..default()
+        },
+        ImageNode::new(asset_server.load(character_portrait_path(character)))
+            .with_rect(character_portrait_source_rect(character)),
+        Pickable::IGNORE,
+    )
+}
+
+fn character_portrait_card(asset_server: &AssetServer, character: CharacterKind) -> impl Bundle {
+    (
+        Button,
+        UserModeUiAction::SelectCharacter(character),
+        UserModeCharacterPortraitCard { character },
+        Node {
+            width: Val::Percent(31.0),
+            height: Val::Percent(47.0),
+            position_type: PositionType::Relative,
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Percent(1.5),
+            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::axes(Val::Percent(3.0), Val::Percent(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.025, 0.025, 0.032, 0.91)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        BoxShadow::new(
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            Val::Px(0.0),
+            Val::Px(0.0),
+            Val::Px(0.0),
+            Val::Px(0.0),
+        ),
+        children![
+            (
+                Node {
+                    width: Val::Percent(76.0),
+                    max_height: Val::Percent(63.0),
+                    aspect_ratio: Some(1.0),
+                    flex_shrink: 1.0,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![character_portrait_image(asset_server, character)],
+            ),
+            (
+                Text::new(character_label(character).to_ascii_uppercase()),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.96, 0.92, 0.82)),
+                TextLayout::new_with_justify(Justify::Center),
+                Pickable::IGNORE,
+            ),
+            (
+                UserModeCharacterReadyMarker { character },
+                Node {
+                    display: Display::None,
+                    position_type: PositionType::Absolute,
+                    top: Val::Percent(4.0),
+                    right: Val::Percent(4.0),
+                    min_height: Val::Px(18.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.18, 0.38, 0.24, 0.96)),
+                Text::new("READY"),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 1.0, 0.78)),
+                TextLayout::new_with_justify(Justify::Center),
+                Pickable::IGNORE,
+            ),
+            (
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(5.0),
+                    right: Val::Percent(5.0),
+                    bottom: Val::Percent(4.0),
+                    height: Val::Percent(20.0),
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::FlexStart,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Percent(2.0),
+                    row_gap: Val::Percent(2.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    character_player_marker(character, 0),
+                    character_player_marker(character, 1),
+                    character_player_marker(character, 2),
+                    character_player_marker(character, 3),
+                ],
+            ),
+        ],
+    )
+}
+
+fn character_empty_portrait_card() -> impl Bundle {
+    (
+        Node {
+            width: Val::Percent(31.0),
+            height: Val::Percent(47.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
-        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        BackgroundColor(Color::srgba(0.03, 0.03, 0.035, 0.46)),
+        BorderColor::all(Color::srgba(0.42, 0.4, 0.35, 0.5)),
+        Pickable::IGNORE,
+    )
+}
+
+fn character_profile_panel() -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(5.0),
+            top: Val::Percent(70.5),
+            width: Val::Percent(35.0),
+            height: Val::Percent(13.0),
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::axes(Val::Percent(3.0), Val::Percent(2.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.02, 0.02, 0.025, 0.9)),
+        BorderColor::all(Color::srgb(0.38, 0.35, 0.3)),
+        BoxShadow::new(
+            Color::srgba(0.0, 0.0, 0.0, 0.28),
+            Val::Px(0.0),
+            Val::Px(3.0),
+            Val::Px(0.0),
+            Val::Px(8.0),
+        ),
+        Pickable::IGNORE,
         children![(
-            Text::new("BACK"),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::FlexStart,
+                row_gap: Val::Percent(3.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+            children![
+                (
+                    UserModeCharacterProfileName,
+                    Text::new("CAT"),
+                    TextFont {
+                        font_size: 27.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.98, 0.9, 0.7)),
+                    TextShadow::default(),
+                    Pickable::IGNORE,
+                ),
+                (
+                    UserModeCharacterProfileTagline,
+                    Text::new("AGILE | BEGINNER FRIENDLY"),
+                    TextFont {
+                        font_size: 14.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.94, 0.7, 0.3)),
+                    Pickable::IGNORE,
+                ),
+                (
+                    UserModeCharacterProfileDescription,
+                    Text::new("Quick movement and reliable close-range attacks."),
+                    TextFont {
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.86, 0.82, 0.72)),
+                    Pickable::IGNORE,
+                ),
+            ],
+        ),],
+    )
+}
+
+fn character_confirm_button() -> impl Bundle {
+    (
+        Button,
+        UserModeUiAction::Confirm,
+        UserModeCharacterConfirmButton,
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(5.0),
+            top: Val::Percent(84.0),
+            width: Val::Percent(35.0),
+            height: Val::Percent(6.5),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.83, 0.57, 0.18)),
+        BorderColor::all(Color::srgb(1.0, 0.82, 0.4)),
+        children![(
+            Text::new("CONFIRM FIGHTER"),
             TextFont {
                 font_size: 19.0,
                 ..default()
             },
-            TextColor(Color::srgb(0.95, 0.86, 0.68)),
+            TextColor(Color::srgb(0.12, 0.075, 0.025)),
+            Pickable::IGNORE,
         )],
     )
 }
@@ -2206,7 +2628,6 @@ fn key_settings_row(player: usize, action: ControlAction) -> impl Bundle {
 pub fn setup_user_mode_ui(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    character_catalog: Res<CharacterMoveCatalog>,
     mut images: ResMut<Assets<Image>>,
     ui_cameras: Query<Entity, With<UiCamera>>,
 ) {
@@ -2217,13 +2638,6 @@ pub fn setup_user_mode_ui(
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     let preview_view_format = Some(TextureFormat::Rgba8UnormSrgb);
 
-    let preview_image = Image::new_target_texture(
-        USER_MODE_PREVIEW_TEXTURE_SIZE,
-        USER_MODE_PREVIEW_TEXTURE_SIZE,
-        TextureFormat::Rgba8Unorm,
-        preview_view_format.clone(),
-    );
-    let preview_image = images.add(preview_image);
     let arena_preview_image = Image::new_target_texture(
         USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH,
         USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT,
@@ -2231,56 +2645,6 @@ pub fn setup_user_mode_ui(
         preview_view_format,
     );
     let arena_preview_image = images.add(arena_preview_image);
-    let preview_origin = USER_MODE_PREVIEW_ORIGIN;
-    let preview_scene =
-        character_scene_model(&asset_server, &character_catalog, CharacterKind::Cat);
-
-    commands
-        .spawn((
-            UserModePreviewRoot,
-            Transform::from_translation(preview_origin),
-            Visibility::Visible,
-            user_mode_preview_render_layers(),
-        ))
-        .with_children(|parent| {
-            if let Some(scene) = preview_scene {
-                parent
-                    .spawn((
-                        UserModePreviewScene {
-                            character: CharacterKind::Cat,
-                        },
-                        SceneRoot(scene),
-                        Transform::from_xyz(0.0, 0.18, 0.0)
-                            .with_scale(Vec3::splat(USER_MODE_PREVIEW_SCALE)),
-                        user_mode_preview_render_layers(),
-                    ))
-                    .observe(apply_user_mode_preview_render_layers);
-            }
-        });
-
-    commands.spawn((
-        PointLight {
-            intensity: 2800.0,
-            range: 8.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_translation(preview_origin + Vec3::new(-1.6, 2.4, 3.0)),
-        user_mode_preview_render_layers(),
-    ));
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: -4,
-            clear_color: Color::srgba(0.0, 0.0, 0.0, 0.0).into(),
-            ..default()
-        },
-        RenderTarget::Image(preview_image.clone().into()),
-        Transform::from_translation(preview_origin + Vec3::new(0.0, 1.0, 4.35))
-            .looking_at(preview_origin + Vec3::new(0.0, 0.86, 0.0), Vec3::Y),
-        UserModePreviewCamera,
-        user_mode_preview_render_layers(),
-    ));
     commands.spawn((
         DirectionalLight {
             illuminance: 18_000.0,
@@ -2369,6 +2733,21 @@ pub fn setup_user_mode_ui(
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
         Pickable::IGNORE,
         children![
+            (
+                UserModeCharacterSelectBackground,
+                Node {
+                    display: Display::None,
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                ImageNode::new(asset_server.load(USER_MODE_CHARACTER_SELECT_BACKGROUND_PATH))
+                    .with_mode(NodeImageMode::Stretch),
+                Pickable::IGNORE,
+            ),
             (
                 UserModeStartPanel,
                 Node {
@@ -2694,89 +3073,104 @@ pub fn setup_user_mode_ui(
                 UserModeCharacterSelectPanel,
                 Node {
                     display: Display::None,
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(14.0),
                     ..default()
                 },
                 Pickable::IGNORE,
                 children![
                     (
-                        UserModeCharacterTitleText,
-                        Text::new("P1 SELECT A CHARACTER"),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(0.0),
+                            top: Val::Percent(0.0),
+                            width: Val::Percent(45.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        UserModeCharacterSelectRail,
+                        BackgroundColor(Color::srgba(0.006, 0.005, 0.004, 0.28)),
+                        Pickable::IGNORE,
+                    ),
+                    (
+                        UserModeCharacterBreadcrumbText,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(5.0),
+                            top: Val::Percent(9.6),
+                            width: Val::Percent(35.0),
+                            ..default()
+                        },
+                        Text::new("SINGLE PLAYER"),
                         TextFont {
-                            font_size: 42.0,
+                            font_size: 17.0,
                             ..default()
                         },
-                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextColor(Color::srgb(0.88, 0.64, 0.3)),
+                        TextLayout::new_with_justify(Justify::Left),
+                        Pickable::IGNORE,
+                    ),
+                    (
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(5.0),
+                            top: Val::Percent(13.3),
+                            width: Val::Percent(35.0),
+                            ..default()
+                        },
+                        Text::new("CHOOSE YOUR FIGHTER"),
+                        TextFont {
+                            font_size: 32.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.88, 0.72)),
                         TextShadow::default(),
+                        Pickable::IGNORE,
                     ),
                     (
-                        UserModeCharacterPreview,
-                        ImageNode::new(preview_image),
                         Node {
-                            width: Val::Px(290.0),
-                            height: Val::Px(290.0),
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(5.0),
+                            top: Val::Percent(20.3),
+                            width: Val::Percent(35.0),
                             ..default()
                         },
+                        Text::new("Select a fighter to enter the arena."),
+                        TextFont {
+                            font_size: 16.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.72, 0.68, 0.6)),
+                        Pickable::IGNORE,
                     ),
                     (
                         Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(5.0),
+                            top: Val::Percent(26.0),
+                            width: Val::Percent(35.0),
+                            height: Val::Percent(42.0),
                             flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            column_gap: Val::Px(18.0),
+                            flex_wrap: FlexWrap::Wrap,
+                            align_content: AlignContent::SpaceBetween,
+                            justify_content: JustifyContent::SpaceBetween,
                             ..default()
                         },
+                        Pickable::IGNORE,
                         children![
-                            user_mode_action_button(
-                                "<",
-                                UserModeUiAction::Previous,
-                                Val::Px(64.0),
-                                54.0,
-                                34.0
-                            ),
-                            (
-                                UserModeChoiceText,
-                                Text::new(character_select_message(CharacterKind::Cat)),
-                                TextFont {
-                                    font_size: USER_MODE_CHOICE_FONT_SIZE,
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.96, 0.92, 0.82)),
-                                TextShadow::default(),
-                                TextLayout::new_with_justify(Justify::Center),
-                                Node {
-                                    min_width: Val::Px(240.0),
-                                    ..default()
-                                },
-                            ),
-                            user_mode_action_button(
-                                ">",
-                                UserModeUiAction::Next,
-                                Val::Px(64.0),
-                                54.0,
-                                34.0
-                            ),
+                            character_portrait_card(&asset_server, CharacterKind::Cat),
+                            character_portrait_card(&asset_server, CharacterKind::Pig),
+                            character_portrait_card(&asset_server, CharacterKind::Bee),
+                            character_portrait_card(&asset_server, CharacterKind::Penguin),
+                            character_portrait_card(&asset_server, CharacterKind::Chick),
+                            character_empty_portrait_card(),
                         ],
                     ),
-                    user_mode_action_button(
-                        "SELECT",
-                        UserModeUiAction::Confirm,
-                        Val::Px(240.0),
-                        54.0,
-                        22.0
-                    ),
-                    (
-                        Text::new("Left/Right or Q/E choose  |  Enter confirm  |  Esc back"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
-                    ),
+                    character_profile_panel(),
+                    character_confirm_button(),
                 ],
             ),
             (
@@ -4806,99 +5200,15 @@ pub fn update_controller_reconnect_overlay(
     }
 }
 
-pub fn sync_user_mode_preview_scene(
-    mut commands: Commands,
-    user_mode: Res<UserModeState>,
-    asset_server: Res<AssetServer>,
-    character_catalog: Res<CharacterMoveCatalog>,
-    roots: Query<Entity, With<UserModePreviewRoot>>,
-    previews: Query<(Entity, &UserModePreviewScene)>,
-) {
-    if user_mode.screen() != UserModeScreen::CharacterSelect {
-        return;
-    }
-    let selected = user_mode.selected_character();
-    if previews
-        .iter()
-        .any(|(_, preview)| preview.character == selected)
-    {
-        return;
-    }
-    let Some(scene) = character_scene_model(&asset_server, &character_catalog, selected) else {
-        return;
-    };
-    for (entity, _) in &previews {
-        commands.entity(entity).despawn();
-    }
-    for root in &roots {
-        commands.entity(root).with_children(|parent| {
-            parent
-                .spawn((
-                    UserModePreviewScene {
-                        character: selected,
-                    },
-                    SceneRoot(scene.clone()),
-                    Transform::from_xyz(0.0, 0.18, 0.0)
-                        .with_scale(Vec3::splat(USER_MODE_PREVIEW_SCALE)),
-                    user_mode_preview_render_layers(),
-                ))
-                .observe(apply_user_mode_preview_render_layers);
-        });
-    }
-}
-
-pub fn rotate_user_mode_preview(
-    time: Res<Time>,
-    user_mode: Res<UserModeState>,
-    mut previews: Query<&mut Transform, With<UserModePreviewRoot>>,
-    mut cameras: Query<&mut Camera, With<UserModePreviewCamera>>,
-) {
-    let preview_active = user_mode.screen() == UserModeScreen::CharacterSelect;
-    for mut camera in &mut cameras {
-        if camera.is_active != preview_active {
-            camera.is_active = preview_active;
-        }
-    }
-    if !preview_active {
-        return;
-    }
-    let yaw = time.elapsed_secs() * 0.9;
-    for mut transform in &mut previews {
-        transform.rotation = Quat::from_rotation_y(yaw);
-    }
-}
-
 pub fn update_user_mode_selection_previews(
     user_mode: Res<UserModeState>,
-    mut character_previews: Query<
-        &mut Node,
-        (
-            With<UserModeCharacterPreview>,
-            Without<UserModeArenaPreviewPanel>,
-        ),
-    >,
-    mut arena_preview_panels: Query<
-        &mut Node,
-        (
-            With<UserModeArenaPreviewPanel>,
-            Without<UserModeCharacterPreview>,
-        ),
-    >,
+    mut arena_preview_panels: Query<&mut Node, With<UserModeArenaPreviewPanel>>,
     mut arena_preview_cameras: Query<
         (&mut Camera, &mut Transform),
         With<UserModeArenaPreviewCamera>,
     >,
 ) {
-    let character_visible = user_mode.screen() == UserModeScreen::CharacterSelect;
     let arena_visible = user_mode.screen() == UserModeScreen::ArenaSelect;
-
-    for mut node in &mut character_previews {
-        node.display = if character_visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
     for mut node in &mut arena_preview_panels {
         node.display = if arena_visible {
             Display::Flex
@@ -4906,7 +5216,6 @@ pub fn update_user_mode_selection_previews(
             Display::None
         };
     }
-
     for (mut camera, mut transform) in &mut arena_preview_cameras {
         if camera.is_active != arena_visible {
             camera.is_active = arena_visible;
@@ -4938,6 +5247,20 @@ fn main_menu_background_path(choice: UserModeMainMenuChoice) -> Option<&'static 
 
 fn desired_main_menu_background(user_mode: &UserModeState) -> Option<UserModeMainMenuChoice> {
     (user_mode.screen() == UserModeScreen::ModeSelect).then_some(user_mode.main_menu_choice)
+}
+
+pub fn update_user_mode_character_select_background(
+    user_mode: Res<UserModeState>,
+    mut backgrounds: Query<&mut Node, With<UserModeCharacterSelectBackground>>,
+) {
+    let visible = user_mode.screen() == UserModeScreen::CharacterSelect;
+    for mut node in &mut backgrounds {
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
 }
 
 pub fn update_user_mode_main_menu_backgrounds(
@@ -5007,6 +5330,139 @@ pub fn update_user_mode_main_menu_backgrounds(
         } else {
             Display::None
         };
+    }
+}
+
+pub fn update_user_mode_character_select_cards(
+    user_mode: Res<UserModeState>,
+    mut player_markers: Query<
+        (
+            &UserModeCharacterPlayerMarker,
+            &mut Node,
+            &mut Text,
+            &mut BackgroundColor,
+        ),
+        (
+            Without<UserModeCharacterReadyMarker>,
+            Without<UserModeCharacterPortraitCard>,
+        ),
+    >,
+    mut ready_markers: Query<
+        (&UserModeCharacterReadyMarker, &mut Node),
+        Without<UserModeCharacterPlayerMarker>,
+    >,
+    mut cards: Query<
+        (
+            &UserModeCharacterPortraitCard,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &mut BoxShadow,
+        ),
+        (
+            Without<UserModeCharacterReadyMarker>,
+            Without<UserModeCharacterPlayerMarker>,
+        ),
+    >,
+) {
+    let human_players = user_mode.play_mode.human_player_count();
+    for (marker, mut node, mut text, mut background) in &mut player_markers {
+        let selected = marker.player < human_players
+            && user_mode.player_characters[marker.player] == marker.character;
+        node.display = if selected {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if selected {
+            **text = if user_mode.character_ready[marker.player] {
+                format!("P{} READY", marker.player + 1)
+            } else {
+                format!("P{}", marker.player + 1)
+            };
+            *background = BackgroundColor(if marker.player == user_mode.character_select_player {
+                Color::srgb(0.73, 0.49, 0.16)
+            } else if user_mode.character_ready[marker.player] {
+                Color::srgb(0.16, 0.34, 0.22)
+            } else {
+                Color::srgba(0.08, 0.08, 0.09, 0.92)
+            });
+        }
+    }
+
+    for (marker, mut node) in &mut ready_markers {
+        let ready = (0..human_players).any(|player| {
+            user_mode.player_characters[player] == marker.character
+                && user_mode.character_ready[player]
+        });
+        node.display = if ready { Display::Flex } else { Display::None };
+    }
+
+    for (card, interaction, mut background, mut border, mut shadow) in &mut cards {
+        let selected = user_mode.screen() == UserModeScreen::CharacterSelect
+            && user_mode.selected_character() == card.character;
+        let (background_color, border_color, shadow_color, blur_radius) = match interaction {
+            Interaction::Pressed => (
+                Color::srgb(0.43, 0.28, 0.09),
+                Color::srgb(1.0, 0.86, 0.48),
+                Color::srgba(1.0, 0.72, 0.22, 0.68),
+                14.0,
+            ),
+            Interaction::Hovered if !selected => (
+                Color::srgba(0.09, 0.075, 0.055, 0.94),
+                Color::srgb(0.8, 0.63, 0.34),
+                Color::srgba(0.92, 0.6, 0.2, 0.25),
+                8.0,
+            ),
+            _ if selected => (
+                Color::srgba(0.12, 0.085, 0.04, 0.96),
+                Color::srgb(1.0, 0.78, 0.34),
+                Color::srgba(1.0, 0.66, 0.18, 0.72),
+                13.0,
+            ),
+            _ => (
+                Color::srgba(0.025, 0.025, 0.032, 0.91),
+                Color::srgb(0.42, 0.4, 0.35),
+                Color::srgba(0.0, 0.0, 0.0, 0.0),
+                0.0,
+            ),
+        };
+        *background = BackgroundColor(background_color);
+        *border = BorderColor::all(border_color);
+        *shadow = BoxShadow::new(
+            shadow_color,
+            Val::Px(0.0),
+            Val::Px(0.0),
+            Val::Px(0.0),
+            Val::Px(blur_radius),
+        );
+    }
+}
+
+pub fn update_user_mode_character_profile(
+    user_mode: Res<UserModeState>,
+    mut profile_texts: ParamSet<(
+        Query<&mut Text, With<UserModeCharacterBreadcrumbText>>,
+        Query<&mut Text, With<UserModeCharacterProfileName>>,
+        Query<&mut Text, With<UserModeCharacterProfileTagline>>,
+        Query<&mut Text, With<UserModeCharacterProfileDescription>>,
+    )>,
+) {
+    let selected = user_mode.selected_character();
+    let profile = user_mode_character_profile(selected);
+    let breadcrumb = user_mode_character_breadcrumb(user_mode.play_mode);
+
+    for mut text in &mut profile_texts.p0() {
+        **text = breadcrumb.to_string();
+    }
+    for mut text in &mut profile_texts.p1() {
+        **text = profile.name.to_string();
+    }
+    for mut text in &mut profile_texts.p2() {
+        **text = profile.tagline.to_string();
+    }
+    for mut text in &mut profile_texts.p3() {
+        **text = profile.description.to_string();
     }
 }
 
@@ -5280,6 +5736,10 @@ fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction
             user_mode.screen == UserModeScreen::KeySettings
                 && user_mode.selected_key_target() == capture
         }
+        UserModeUiAction::SelectCharacter(character) => {
+            user_mode.screen == UserModeScreen::CharacterSelect
+                && user_mode.selected_character() == character
+        }
         UserModeUiAction::Result(choice) => {
             user_mode.screen == UserModeScreen::BattleResult && user_mode.result_choice == choice
         }
@@ -5293,25 +5753,50 @@ pub fn update_user_mode_button_styles(
         (
             &Interaction,
             &UserModeUiAction,
+            Option<&UserModeCharacterConfirmButton>,
+            Option<&UserModeBackButton>,
             &mut BackgroundColor,
             &mut BorderColor,
         ),
         (With<Button>, Without<UserModeRoot>),
     >,
 ) {
-    for (interaction, action, mut background, mut border) in &mut buttons {
+    for (interaction, action, confirm_button, back_button, mut background, mut border) in
+        &mut buttons
+    {
+        if back_button.is_some() {
+            *background = BackgroundColor(Color::NONE);
+            *border = BorderColor::all(Color::NONE);
+            continue;
+        }
         let selected = user_mode_action_selected(&user_mode, *action);
-        let (background_color, border_color) = match interaction {
-            Interaction::Pressed => (Color::srgb(0.42, 0.31, 0.13), Color::srgb(1.0, 0.86, 0.48)),
-            Interaction::Hovered => (Color::srgb(0.19, 0.16, 0.1), Color::srgb(0.94, 0.78, 0.42)),
-            Interaction::None if selected => (
-                Color::srgb(0.13, 0.105, 0.06),
-                Color::srgb(0.86, 0.69, 0.35),
-            ),
-            Interaction::None => (
-                Color::srgba(0.055, 0.055, 0.065, 0.94),
-                Color::srgb(0.42, 0.4, 0.35),
-            ),
+        let (background_color, border_color) = if confirm_button.is_some() {
+            match interaction {
+                Interaction::Pressed => {
+                    (Color::srgb(0.62, 0.38, 0.08), Color::srgb(1.0, 0.92, 0.58))
+                }
+                Interaction::Hovered => {
+                    (Color::srgb(0.94, 0.68, 0.22), Color::srgb(1.0, 0.9, 0.56))
+                }
+                _ => (Color::srgb(0.83, 0.57, 0.18), Color::srgb(1.0, 0.82, 0.4)),
+            }
+        } else {
+            match interaction {
+                Interaction::Pressed => {
+                    (Color::srgb(0.42, 0.31, 0.13), Color::srgb(1.0, 0.86, 0.48))
+                }
+                Interaction::Hovered => {
+                    (Color::srgb(0.19, 0.16, 0.1), Color::srgb(0.94, 0.78, 0.42))
+                }
+                Interaction::None if selected => (
+                    Color::srgb(0.13, 0.105, 0.06),
+                    Color::srgb(0.86, 0.69, 0.35),
+                ),
+                Interaction::None => (
+                    Color::srgba(0.055, 0.055, 0.065, 0.94),
+                    Color::srgb(0.42, 0.4, 0.35),
+                ),
+            }
         };
         *background = BackgroundColor(background_color);
         *border = BorderColor::all(border_color);
@@ -5408,10 +5893,10 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::ControlsHub
         | UserModeScreen::KeySettings
         | UserModeScreen::SoundSettings
-        | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
         | UserModeScreen::ControlsBriefing
         | UserModeScreen::TutorialHub => 1.0,
+        UserModeScreen::CharacterSelect => 0.0,
         UserModeScreen::BattleResult if user_mode.result_menu_ready => 0.58,
         UserModeScreen::BattleResult => 0.0,
         UserModeScreen::TutorialPause | UserModeScreen::TutorialFinalResult => 0.42,
@@ -5521,10 +6006,20 @@ fn direction_to_user_mode_action(
                 None
             }
         }
-        UserModeScreen::DeviceJoin
-        | UserModeScreen::CharacterSelect
-        | UserModeScreen::ArenaSelect
-        | UserModeScreen::BattleResult => {
+        UserModeScreen::CharacterSelect => {
+            if direction.x < 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.x > 0 {
+                Some(UserModeUiAction::Next)
+            } else if direction.y > 0 {
+                Some(UserModeUiAction::CharacterUp)
+            } else if direction.y < 0 {
+                Some(UserModeUiAction::CharacterDown)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::DeviceJoin | UserModeScreen::ArenaSelect | UserModeScreen::BattleResult => {
             if direction.x < 0 {
                 Some(UserModeUiAction::Previous)
             } else if direction.x > 0 {
@@ -5684,13 +6179,26 @@ fn keyboard_user_mode_action(
                 None
             }
         }
-        UserModeScreen::DeviceJoin
-        | UserModeScreen::CharacterSelect
-        | UserModeScreen::ArenaSelect => {
+        UserModeScreen::DeviceJoin | UserModeScreen::ArenaSelect => {
             if select_previous_pressed(keys) {
                 Some(UserModeUiAction::Previous)
             } else if select_next_pressed(keys) {
                 Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::CharacterSelect => {
+            if character_select_previous_pressed(keys) {
+                Some(UserModeUiAction::Previous)
+            } else if character_select_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if vertical_previous_pressed(keys) {
+                Some(UserModeUiAction::CharacterUp)
+            } else if vertical_next_pressed(keys) {
+                Some(UserModeUiAction::CharacterDown)
             } else if keys.just_pressed(KeyCode::Enter) {
                 Some(UserModeUiAction::Confirm)
             } else {
@@ -5751,6 +6259,14 @@ fn select_next_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyE)
 }
 
+fn character_select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    select_previous_pressed(keys) || keys.just_pressed(KeyCode::KeyA)
+}
+
+fn character_select_next_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    select_next_pressed(keys) || keys.just_pressed(KeyCode::KeyD)
+}
+
 fn user_mode_character_index(character: CharacterKind) -> usize {
     USER_MODE_SELECTABLE_CHARACTERS
         .iter()
@@ -5758,17 +6274,57 @@ fn user_mode_character_index(character: CharacterKind) -> usize {
         .unwrap_or(0)
 }
 
-fn next_user_mode_character(character: CharacterKind) -> CharacterKind {
-    let index = user_mode_character_index(character);
-    USER_MODE_SELECTABLE_CHARACTERS[(index + 1) % USER_MODE_SELECTABLE_CHARACTERS.len()]
+fn character_portrait_path(character: CharacterKind) -> &'static str {
+    USER_MODE_CHARACTER_PORTRAIT_PATHS
+        .iter()
+        .find_map(|(candidate, path)| (*candidate == character).then_some(*path))
+        .unwrap_or(USER_MODE_CHARACTER_PORTRAIT_PATHS[0].1)
 }
 
-fn previous_user_mode_character(character: CharacterKind) -> CharacterKind {
-    let index = user_mode_character_index(character);
-    USER_MODE_SELECTABLE_CHARACTERS[(index + USER_MODE_SELECTABLE_CHARACTERS.len() - 1)
-        % USER_MODE_SELECTABLE_CHARACTERS.len()]
+fn character_at_grid_cell(row: usize, column: usize) -> Option<CharacterKind> {
+    USER_MODE_SELECTABLE_CHARACTERS
+        .iter()
+        .copied()
+        .find(|character| {
+            let index = user_mode_character_index(*character);
+            index / USER_MODE_CHARACTER_GRID_COLUMNS == row
+                && index % USER_MODE_CHARACTER_GRID_COLUMNS == column
+        })
 }
 
+fn move_character_in_grid(character: CharacterKind, direction: IVec2) -> CharacterKind {
+    let index = user_mode_character_index(character);
+    let row = index / USER_MODE_CHARACTER_GRID_COLUMNS;
+    let column = index % USER_MODE_CHARACTER_GRID_COLUMNS;
+
+    if direction.x != 0 {
+        let step = direction.x.signum() as isize;
+        for offset in 1..=USER_MODE_CHARACTER_GRID_COLUMNS {
+            let next_column = (column as isize + step * offset as isize)
+                .rem_euclid(USER_MODE_CHARACTER_GRID_COLUMNS as isize)
+                as usize;
+            if let Some(character) = character_at_grid_cell(row, next_column) {
+                return character;
+            }
+        }
+    } else if direction.y != 0 {
+        let step = direction.y.signum() as isize;
+        let next_row =
+            (row as isize - step).rem_euclid(USER_MODE_CHARACTER_GRID_ROWS as isize) as usize;
+        return (0..USER_MODE_CHARACTER_GRID_COLUMNS)
+            .filter_map(|candidate_column| {
+                character_at_grid_cell(next_row, candidate_column)
+                    .map(|character| (candidate_column.abs_diff(column), character))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, character)| character)
+            .unwrap_or(character);
+    }
+
+    character
+}
+
+#[cfg(test)]
 fn character_select_message(selected: CharacterKind) -> String {
     let index = user_mode_character_index(selected);
     format!(
@@ -5810,14 +6366,14 @@ fn user_mode_choice_message(user_mode: &UserModeState) -> String {
                     if user_mode.character_ready[player] {
                         " [READY]"
                     } else if player == user_mode.character_select_player {
-                        " <"
+                        " [SELECTING]"
                     } else {
                         ""
                     }
                 )
             })
             .collect::<Vec<_>>()
-            .join("   "),
+            .join("\n"),
         UserModeScreen::ArenaSelect => arena_select_message(user_mode.arena_index),
         _ => String::new(),
     }
@@ -5825,7 +6381,10 @@ fn user_mode_choice_message(user_mode: &UserModeState) -> String {
 
 fn character_select_title_message(user_mode: &UserModeState) -> String {
     if user_mode.play_mode.is_single_player() {
-        "SELECT A CHARACTER".to_string()
+        format!(
+            "P{} SELECT A CHARACTER",
+            user_mode.character_select_player + 1
+        )
     } else {
         format!(
             "P{} SELECTING — EVERY PLAYER CONFIRMS",
@@ -6905,6 +7464,68 @@ mod tests {
     }
 
     #[test]
+    fn character_select_keyboard_and_controller_directions_map_to_grid_actions() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_character_select();
+        for (key, expected) in [
+            (KeyCode::ArrowLeft, UserModeUiAction::Previous),
+            (KeyCode::KeyA, UserModeUiAction::Previous),
+            (KeyCode::ArrowRight, UserModeUiAction::Next),
+            (KeyCode::KeyD, UserModeUiAction::Next),
+            (KeyCode::ArrowUp, UserModeUiAction::CharacterUp),
+            (KeyCode::KeyW, UserModeUiAction::CharacterUp),
+            (KeyCode::ArrowDown, UserModeUiAction::CharacterDown),
+            (KeyCode::KeyS, UserModeUiAction::CharacterDown),
+        ] {
+            let mut keys = ButtonInput::default();
+            keys.press(key);
+            assert_eq!(keyboard_user_mode_action(&user_mode, &keys), Some(expected));
+        }
+
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::CharacterSelect, IVec2::NEG_X),
+            Some(UserModeUiAction::Previous)
+        );
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::CharacterSelect, IVec2::X),
+            Some(UserModeUiAction::Next)
+        );
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::CharacterSelect, IVec2::Y),
+            Some(UserModeUiAction::CharacterUp)
+        );
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::CharacterSelect, IVec2::NEG_Y),
+            Some(UserModeUiAction::CharacterDown)
+        );
+
+        let mut up = Gamepad::default();
+        up.analog_mut().set(GamepadButton::DPadUp, 1.0);
+        assert_eq!(
+            gamepad_user_mode_action(
+                UserModeScreen::CharacterSelect,
+                &up,
+                ControllerFamily::Xbox,
+                0.0,
+                &mut MenuDirectionRepeat::default(),
+            ),
+            Some(UserModeUiAction::CharacterUp)
+        );
+        let mut left = Gamepad::default();
+        left.analog_mut().set(GamepadButton::DPadLeft, 1.0);
+        assert_eq!(
+            gamepad_user_mode_action(
+                UserModeScreen::CharacterSelect,
+                &left,
+                ControllerFamily::Xbox,
+                0.0,
+                &mut MenuDirectionRepeat::default(),
+            ),
+            Some(UserModeUiAction::Previous)
+        );
+    }
+
+    #[test]
     fn mixed_devices_join_in_order_without_duplicate_ownership() {
         let mut user_mode = UserModeState::default();
         user_mode.play_mode = UserPlayMode::FourPlayers;
@@ -7752,36 +8373,415 @@ mod tests {
         for player in 0..FIGHTER_COUNT - 1 {
             assert_eq!(user_mode.character_select_player, player);
             assert!(!user_mode.confirm_character_selection());
+            assert!(user_mode.character_ready[player]);
         }
         assert_eq!(user_mode.character_select_player, FIGHTER_COUNT - 1);
         assert!(user_mode.confirm_character_selection());
+        assert!(user_mode.character_ready.iter().all(|ready| *ready));
     }
 
     #[test]
-    fn selection_cycles_cat_pig_bee_penguin_and_chick() {
+    fn horizontal_character_navigation_wraps_within_each_row() {
         let mut user_mode = UserModeState::default();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
+
+        user_mode.select_previous();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Bee);
+
+        user_mode.select_next();
         assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
 
         user_mode.select_next();
         assert_eq!(user_mode.selected_character(), CharacterKind::Pig);
-
         user_mode.select_next();
         assert_eq!(user_mode.selected_character(), CharacterKind::Bee);
-
-        user_mode.select_next();
-        assert_eq!(user_mode.selected_character(), CharacterKind::Penguin);
-
-        user_mode.select_next();
-        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
-
         user_mode.select_next();
         assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
+    }
 
-        user_mode.select_previous();
-        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
+    #[test]
+    fn vertical_character_navigation_wraps_rows_and_chooses_nearest_valid_card() {
+        let mut user_mode = UserModeState::default();
 
-        user_mode.select_previous();
+        user_mode.select_character(CharacterKind::Cat);
+        user_mode.select_character_down();
         assert_eq!(user_mode.selected_character(), CharacterKind::Penguin);
+        user_mode.select_character_up();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Cat);
+
+        user_mode.select_character(CharacterKind::Pig);
+        user_mode.select_character_down();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
+        user_mode.select_character_down();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Pig);
+
+        user_mode.select_character(CharacterKind::Bee);
+        user_mode.select_character_down();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Chick);
+        user_mode.select_character_up();
+        assert_eq!(user_mode.selected_character(), CharacterKind::Pig);
+    }
+
+    #[test]
+    fn character_grid_never_selects_the_empty_sixth_slot() {
+        assert_eq!(
+            character_at_grid_cell(1, USER_MODE_CHARACTER_GRID_COLUMNS - 1),
+            None
+        );
+        assert_eq!(
+            move_character_in_grid(CharacterKind::Chick, IVec2::X),
+            CharacterKind::Penguin
+        );
+        assert_eq!(
+            move_character_in_grid(CharacterKind::Penguin, IVec2::NEG_X),
+            CharacterKind::Chick
+        );
+    }
+
+    #[test]
+    fn direct_portrait_selection_updates_only_the_active_player() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_character_select();
+
+        assert_eq!(
+            route_user_mode_action(
+                &mut user_mode,
+                UserModeUiAction::SelectCharacter(CharacterKind::Bee),
+            ),
+            UserModeRoute::None
+        );
+        assert_eq!(user_mode.player_characters[0], CharacterKind::Bee);
+        assert_eq!(user_mode.player_characters[1], CharacterKind::Pig);
+    }
+
+    #[test]
+    fn ready_player_cannot_change_character_from_a_portrait() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_character_select();
+        assert!(!user_mode.confirm_character_selection());
+        assert!(user_mode.character_ready[0]);
+
+        user_mode.character_select_player = 0;
+        route_user_mode_action(
+            &mut user_mode,
+            UserModeUiAction::SelectCharacter(CharacterKind::Bee),
+        );
+        assert_eq!(user_mode.player_characters[0], CharacterKind::Cat);
+
+        user_mode.character_select_player = 1;
+        route_user_mode_action(
+            &mut user_mode,
+            UserModeUiAction::SelectCharacter(CharacterKind::Bee),
+        );
+        assert_eq!(user_mode.player_characters[1], CharacterKind::Bee);
+
+        user_mode.character_select_player = 0;
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Back
+        ));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Back),
+            UserModeRoute::None
+        );
+        assert!(!user_mode.character_ready[0]);
+    }
+
+    #[test]
+    fn character_selection_stays_in_the_five_character_roster() {
+        assert_eq!(USER_MODE_SELECTABLE_CHARACTERS.len(), 5);
+        for character in USER_MODE_SELECTABLE_CHARACTERS {
+            assert!(
+                character_at_grid_cell(
+                    user_mode_character_index(character) / USER_MODE_CHARACTER_GRID_COLUMNS,
+                    user_mode_character_index(character) % USER_MODE_CHARACTER_GRID_COLUMNS,
+                ) == Some(character)
+            );
+        }
+    }
+
+    #[test]
+    fn character_select_assets_use_supplied_artwork_with_valid_png_headers() {
+        let asset_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        assert!(
+            asset_root
+                .join(USER_MODE_CHARACTER_SELECT_BACKGROUND_PATH)
+                .is_file(),
+            "missing character-select background: {USER_MODE_CHARACTER_SELECT_BACKGROUND_PATH}"
+        );
+        let background_bytes =
+            std::fs::read(asset_root.join(USER_MODE_CHARACTER_SELECT_BACKGROUND_PATH))
+                .expect("cannot read character-select background");
+        assert!(
+            background_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "character-select background is not PNG"
+        );
+        assert!(
+            background_bytes.len() >= 24,
+            "character-select background PNG header is truncated"
+        );
+        let expected_paths = [
+            (
+                CharacterKind::Cat,
+                "backgrounds/menu/character_select/cat.png",
+            ),
+            (
+                CharacterKind::Pig,
+                "backgrounds/menu/character_select/pig.png",
+            ),
+            (
+                CharacterKind::Bee,
+                "backgrounds/menu/character_select/bee.png",
+            ),
+            (
+                CharacterKind::Penguin,
+                "backgrounds/menu/character_select/penguin.png",
+            ),
+            (
+                CharacterKind::Chick,
+                "backgrounds/menu/character_select/chick.png",
+            ),
+        ];
+
+        for (character, expected_path) in expected_paths {
+            let path = character_portrait_path(character);
+            assert_eq!(path, expected_path);
+            let portrait_path = asset_root.join(path);
+            assert!(portrait_path.is_file(), "missing portrait: {path}");
+
+            let bytes = std::fs::read(&portrait_path)
+                .unwrap_or_else(|error| panic!("cannot read portrait {path}: {error}"));
+            assert!(
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "portrait is not PNG: {path}"
+            );
+            assert!(
+                bytes.len() >= 24,
+                "portrait PNG header is truncated: {path}"
+            );
+            let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+            let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+            assert!(width >= 1024, "portrait is too narrow: {path}");
+            assert!(height >= 1024, "portrait is too short: {path}");
+        }
+    }
+
+    #[test]
+    fn character_profiles_match_the_selector_copy_for_all_five_fighters() {
+        let expected = [
+            (
+                CharacterKind::Cat,
+                "CAT",
+                "AGILE | BEGINNER FRIENDLY",
+                "Quick movement and reliable close-range attacks.",
+            ),
+            (
+                CharacterKind::Pig,
+                "PIG",
+                "POWERFUL | HEAVY HITTER",
+                "A sturdy fighter that rewards deliberate, hard-hitting attacks.",
+            ),
+            (
+                CharacterKind::Bee,
+                "BEE",
+                "FAST | AIRBORNE",
+                "A nimble fighter that keeps pressure high with quick movement.",
+            ),
+            (
+                CharacterKind::Penguin,
+                "PENGUIN",
+                "CONTROL | TRICKY",
+                "A steady fighter that uses space and timing to set the pace.",
+            ),
+            (
+                CharacterKind::Chick,
+                "CHICK",
+                "VERSATILE | QUICK",
+                "A flexible fighter with light movement and adaptable attacks.",
+            ),
+        ];
+
+        for (character, name, tagline, description) in expected {
+            let profile = user_mode_character_profile(character);
+            assert_eq!(
+                (profile.name, profile.tagline, profile.description),
+                (name, tagline, description)
+            );
+        }
+    }
+
+    #[test]
+    fn character_explanation_uses_the_full_panel_without_a_portrait_box() {
+        let mut world = World::new();
+        let panel = world.spawn(character_profile_panel()).id();
+        let children = world.get::<Children>(panel).unwrap();
+
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            world.get::<Node>(children[0]).unwrap().width,
+            Val::Percent(100.0)
+        );
+        assert_eq!(world.query::<&ImageNode>().iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn character_card_system_marks_focus_and_keeps_ready_badges_visible() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_character_select();
+        user_mode.character_ready[0] = true;
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_character_select_cards);
+
+        let cat = app
+            .world_mut()
+            .spawn((
+                UserModeCharacterPortraitCard {
+                    character: CharacterKind::Cat,
+                },
+                Interaction::None,
+                Node::default(),
+                BackgroundColor::default(),
+                BorderColor::default(),
+                BoxShadow::default(),
+            ))
+            .id();
+        let bee = app
+            .world_mut()
+            .spawn((
+                UserModeCharacterPortraitCard {
+                    character: CharacterKind::Bee,
+                },
+                Interaction::None,
+                Node::default(),
+                BackgroundColor::default(),
+                BorderColor::default(),
+                BoxShadow::default(),
+            ))
+            .id();
+        let marker = app
+            .world_mut()
+            .spawn((
+                UserModeCharacterPlayerMarker {
+                    character: CharacterKind::Cat,
+                    player: 0,
+                },
+                Node::default(),
+                Text::new(""),
+                BackgroundColor::default(),
+            ))
+            .id();
+        let ready = app
+            .world_mut()
+            .spawn((
+                UserModeCharacterReadyMarker {
+                    character: CharacterKind::Cat,
+                },
+                Node::default(),
+            ))
+            .id();
+
+        app.update();
+
+        let cat_border = app.world().get::<BorderColor>(cat).unwrap();
+        assert_eq!(cat_border.top, Color::srgb(1.0, 0.78, 0.34));
+        let bee_border = app.world().get::<BorderColor>(bee).unwrap();
+        assert_eq!(bee_border.top, Color::srgb(0.42, 0.4, 0.35));
+        assert_eq!(
+            app.world().get::<Node>(marker).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Node>(ready).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Text>(marker).unwrap().0,
+            "P1 READY".to_string()
+        );
+    }
+
+    #[test]
+    fn hovering_a_portrait_changes_only_visual_state() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_character_select();
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .insert_resource(GameTransition::default())
+            .add_systems(Update, sync_user_mode_pointer_hover);
+        app.world_mut().spawn((
+            Interaction::Hovered,
+            UserModeUiAction::SelectCharacter(CharacterKind::Bee),
+        ));
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<UserModeState>().selected_character(),
+            CharacterKind::Cat
+        );
+    }
+
+    #[test]
+    fn character_select_cleanup_keeps_back_text_only_and_breadcrumb_plain() {
+        let mut world = World::new();
+        let back = world.spawn(user_mode_back_button()).id();
+
+        assert!(world.get::<Button>(back).is_some());
+        assert_eq!(
+            world.get::<UserModeUiAction>(back),
+            Some(&UserModeUiAction::Back)
+        );
+        assert_eq!(world.get::<BackgroundColor>(back).unwrap().0, Color::NONE);
+        assert_eq!(world.get::<BorderColor>(back).unwrap().top, Color::NONE);
+        let back_children = world.get::<Children>(back).unwrap();
+        assert_eq!(back_children.len(), 1);
+        assert_eq!(
+            world.get::<Text>(back_children[0]).unwrap().0,
+            "BACK".to_string()
+        );
+
+        for (play_mode, expected) in [
+            (UserPlayMode::SinglePlayer, "SINGLE PLAYER"),
+            (UserPlayMode::TwoPlayers, "MULTIPLAYER"),
+        ] {
+            let breadcrumb = user_mode_character_breadcrumb(play_mode);
+            assert_eq!(breadcrumb, expected);
+            assert!(!breadcrumb.contains('›'));
+        }
+    }
+
+    #[test]
+    fn character_select_cleanup_keeps_sixth_card_empty_and_confirm_unshadowed() {
+        let mut world = World::new();
+        let empty = world.spawn(character_empty_portrait_card()).id();
+
+        assert!(world.get::<Button>(empty).is_none());
+        assert!(world.get::<UserModeUiAction>(empty).is_none());
+        assert!(world.get::<Text>(empty).is_none());
+        assert!(world.get::<Children>(empty).is_none());
+        assert_eq!(world.get::<Node>(empty).unwrap().border.left, Val::Px(2.0));
+
+        let confirm = world.spawn(character_confirm_button()).id();
+        assert!(world.get::<BoxShadow>(confirm).is_none());
+        assert_eq!(
+            world.get::<BackgroundColor>(confirm).unwrap().0,
+            Color::srgb(0.83, 0.57, 0.18)
+        );
+        assert_eq!(
+            world.get::<BorderColor>(confirm).unwrap().top,
+            Color::srgb(1.0, 0.82, 0.4)
+        );
+        let confirm_children = world.get::<Children>(confirm).unwrap();
+        assert_eq!(confirm_children.len(), 1);
+        assert_eq!(
+            world.get::<Text>(confirm_children[0]).unwrap().0,
+            "CONFIRM FIGHTER".to_string()
+        );
+        assert!(world.get::<TextShadow>(confirm_children[0]).is_none());
     }
 
     #[test]
@@ -7793,6 +8793,21 @@ mod tests {
         assert!(!message.contains("PIG"));
         assert!(!message.contains("PENGUIN"));
         assert!(!message.contains("CHICK"));
+    }
+
+    #[test]
+    fn ready_character_markers_remain_visible_when_multiple_players_share_a_card() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_character_select();
+        user_mode.character_ready[0] = true;
+        user_mode.player_characters[1] = CharacterKind::Cat;
+
+        assert!((0..user_mode.play_mode.human_player_count()).any(|player| {
+            user_mode.player_characters[player] == CharacterKind::Cat
+                && user_mode.character_ready[player]
+        }));
+        assert_eq!(user_mode.player_characters[1], CharacterKind::Cat);
     }
 
     #[test]
@@ -7834,15 +8849,96 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_preview_uses_dedicated_non_world_render_layer() {
-        let layers = user_mode_preview_render_layers();
+    fn character_portrait_frames_are_uniform_without_stretching_supplied_artwork() {
+        assert_eq!(character_portrait_aspect_ratio(CharacterKind::Cat), 1.0);
+        assert_eq!(character_portrait_aspect_ratio(CharacterKind::Penguin), 1.0);
+        assert_eq!(character_portrait_aspect_ratio(CharacterKind::Chick), 1.0);
+        assert_eq!(character_portrait_aspect_ratio(CharacterKind::Pig), 1.0);
+        assert_eq!(character_portrait_aspect_ratio(CharacterKind::Bee), 1.0);
 
+        for (character, crop_size) in [
+            (CharacterKind::Cat, 830.0),
+            (CharacterKind::Pig, 960.0),
+            (CharacterKind::Bee, 960.0),
+            (CharacterKind::Penguin, 684.0),
+            (CharacterKind::Chick, 750.0),
+        ] {
+            let rect = character_portrait_source_rect(character);
+            assert_eq!(rect.max - rect.min, Vec2::splat(crop_size));
+        }
+    }
+
+    #[test]
+    fn character_card_portrait_source_tracks_the_selected_character() {
+        let expected = [
+            (
+                CharacterKind::Cat,
+                "backgrounds/menu/character_select/cat.png",
+            ),
+            (
+                CharacterKind::Pig,
+                "backgrounds/menu/character_select/pig.png",
+            ),
+            (
+                CharacterKind::Bee,
+                "backgrounds/menu/character_select/bee.png",
+            ),
+            (
+                CharacterKind::Penguin,
+                "backgrounds/menu/character_select/penguin.png",
+            ),
+            (
+                CharacterKind::Chick,
+                "backgrounds/menu/character_select/chick.png",
+            ),
+        ];
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_character_select();
+
+        for (character, path) in expected {
+            assert!(user_mode.select_character(character));
+            assert_eq!(
+                character_portrait_path(user_mode.selected_character()),
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn arena_preview_is_visible_only_on_arena_select() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_character_select();
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_selection_previews);
+        let preview = app
+            .world_mut()
+            .spawn((UserModeArenaPreviewPanel, Node::default()))
+            .id();
+
+        app.update();
         assert_eq!(
-            layers.iter().collect::<Vec<_>>(),
-            vec![USER_MODE_PREVIEW_LAYER]
+            app.world().get::<Node>(preview).unwrap().display,
+            Display::None
         );
-        assert_ne!(USER_MODE_PREVIEW_LAYER, 0);
-        assert!(!layers.intersects(&RenderLayers::default()));
+
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .enter_arena_select();
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(preview).unwrap().display,
+            Display::Flex
+        );
+
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .enter_mode_select();
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(preview).unwrap().display,
+            Display::None
+        );
     }
 
     #[test]
