@@ -8,7 +8,9 @@ use bevy::time::{Real, Virtual};
 use bevy::ui::UiTargetCamera;
 
 use crate::arena::ARENA_PREVIEW_RENDER_LAYER;
-use crate::arena_defs::{active_arena_index, arena_definitions, set_active_arena_index};
+use crate::arena_defs::{
+    active_arena_index, arena_definitions, arena_lighting_profile, set_active_arena_index,
+};
 use crate::audio_settings::CategorizedAudioPlayback;
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
@@ -66,6 +68,7 @@ const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
 const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
 const USER_MODE_ARENA_PREVIEW_ASPECT_RATIO: f32 = 1.5;
+const USER_MODE_CROWN_RING_ARENA_INDEX: usize = 0;
 const USER_MODE_PLAYER_FIGHTER_ID: usize = 0;
 const USER_MODE_BOT_FIGHTER_ID: usize = 1;
 const USER_MODE_STOCK_RULE_INDEX: usize = 2;
@@ -2027,6 +2030,12 @@ pub(crate) struct UserModeArenaPreviewPanel;
 pub(crate) struct UserModeArenaPreviewCamera;
 
 #[derive(Component)]
+pub(crate) struct UserModeArenaPreviewDirectionalLight;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaPreviewPointLight;
+
+#[derive(Component)]
 pub(crate) struct UserModeMusic;
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -2662,23 +2671,29 @@ pub fn setup_user_mode_ui(
         preview_view_format,
     );
     let arena_preview_image = images.add(arena_preview_image);
+    let preview_lighting = arena_lighting_profile(0);
     commands.spawn((
         DirectionalLight {
-            illuminance: 18_000.0,
+            illuminance: preview_lighting.directional_illuminance,
+            color: preview_lighting.directional_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(-8.0, 16.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(preview_lighting.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y),
+        UserModeArenaPreviewDirectionalLight,
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
     commands.spawn((
         PointLight {
-            intensity: 900_000.0,
-            range: 40.0,
+            intensity: preview_lighting.point_intensity,
+            range: preview_lighting.point_range,
+            color: preview_lighting.point_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(0.0, 12.0, 7.0),
+        Transform::from_translation(preview_lighting.point_position),
+        UserModeArenaPreviewPointLight,
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
     commands.spawn((
@@ -5224,6 +5239,22 @@ pub fn update_user_mode_selection_previews(
         (&mut Camera, &mut Transform),
         With<UserModeArenaPreviewCamera>,
     >,
+    mut directional_lights: Query<
+        (&mut DirectionalLight, &mut Transform),
+        (
+            With<UserModeArenaPreviewDirectionalLight>,
+            Without<UserModeArenaPreviewPointLight>,
+            Without<UserModeArenaPreviewCamera>,
+        ),
+    >,
+    mut point_lights: Query<
+        (&mut PointLight, &mut Transform),
+        (
+            With<UserModeArenaPreviewPointLight>,
+            Without<UserModeArenaPreviewDirectionalLight>,
+            Without<UserModeArenaPreviewCamera>,
+        ),
+    >,
 ) {
     let arena_visible = user_mode.screen() == UserModeScreen::ArenaSelect;
     for mut node in &mut arena_preview_panels {
@@ -5241,6 +5272,19 @@ pub fn update_user_mode_selection_previews(
         if arena_visible {
             *transform = arena_preview_camera_transform(user_mode.arena_index);
         }
+    }
+    let profile = arena_lighting_profile(user_mode.arena_index);
+    for (mut light, mut transform) in &mut directional_lights {
+        light.illuminance = profile.directional_illuminance;
+        light.color = profile.directional_color;
+        *transform = Transform::from_translation(profile.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y);
+    }
+    for (mut light, mut transform) in &mut point_lights {
+        light.intensity = profile.point_intensity;
+        light.range = profile.point_range;
+        light.color = profile.point_color;
+        transform.translation = profile.point_position;
     }
 }
 
@@ -6389,10 +6433,13 @@ fn arena_select_message(selected_index: usize) -> String {
 fn arena_preview_camera_transform(selected_index: usize) -> Transform {
     let arenas = arena_definitions();
     let selected_index = selected_index.min(arenas.len().saturating_sub(1));
-    Transform::from_translation(
-        arenas[selected_index].camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE,
-    )
-    .looking_at(Vec3::Y * 0.6, Vec3::Y)
+    let distance_scale = if selected_index == USER_MODE_CROWN_RING_ARENA_INDEX {
+        1.0
+    } else {
+        USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+    };
+    Transform::from_translation(arenas[selected_index].camera_offset * distance_scale)
+        .looking_at(Vec3::Y * 0.6, Vec3::Y)
 }
 
 fn user_mode_choice_message(user_mode: &UserModeState) -> String {
@@ -8934,14 +8981,27 @@ mod tests {
     #[test]
     fn arena_preview_camera_frames_each_selected_arena() {
         for (index, arena) in arena_definitions().iter().enumerate() {
+            let distance_scale = if index == USER_MODE_CROWN_RING_ARENA_INDEX {
+                1.0
+            } else {
+                USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+            };
             assert_eq!(
                 arena_preview_camera_transform(index).translation,
-                arena.camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+                arena.camera_offset * distance_scale
             );
         }
         assert_eq!(
             arena_preview_camera_transform(arena_definitions().len()).translation,
             arena_preview_camera_transform(arena_definitions().len() - 1).translation
+        );
+    }
+
+    #[test]
+    fn crown_ring_preview_uses_the_dev_mode_camera_transform() {
+        assert_eq!(
+            arena_preview_camera_transform(USER_MODE_CROWN_RING_ARENA_INDEX).translation,
+            arena_definitions()[USER_MODE_CROWN_RING_ARENA_INDEX].camera_offset
         );
     }
 
@@ -9076,6 +9136,66 @@ mod tests {
                 app.world().get::<Transform>(camera).unwrap().translation,
                 arena_preview_camera_transform(arena_index).translation
             );
+        }
+    }
+
+    #[test]
+    fn live_arena_preview_lights_follow_the_selected_arena_profile() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_arena_select();
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_selection_previews);
+        let directional = app
+            .world_mut()
+            .spawn((
+                DirectionalLight::default(),
+                Transform::default(),
+                UserModeArenaPreviewDirectionalLight,
+            ))
+            .id();
+        let point = app
+            .world_mut()
+            .spawn((
+                PointLight::default(),
+                Transform::default(),
+                UserModeArenaPreviewPointLight,
+            ))
+            .id();
+
+        for arena_index in [0, TRAINING_GROUND_ARENA_INDEX] {
+            app.world_mut().resource_mut::<UserModeState>().arena_index = arena_index;
+            app.update();
+
+            let profile = arena_lighting_profile(arena_index);
+            let directional_light = app.world().get::<DirectionalLight>(directional).unwrap();
+            let directional_transform = app.world().get::<Transform>(directional).unwrap();
+            let expected_directional = Transform::from_translation(profile.directional_position)
+                .looking_at(Vec3::ZERO, Vec3::Y);
+            assert_eq!(
+                directional_light.illuminance,
+                profile.directional_illuminance
+            );
+            assert_eq!(directional_light.color, profile.directional_color);
+            assert_eq!(
+                directional_transform.translation,
+                expected_directional.translation
+            );
+            assert!(
+                directional_transform
+                    .rotation
+                    .dot(expected_directional.rotation)
+                    .abs()
+                    > 0.9999
+            );
+
+            let point_light = app.world().get::<PointLight>(point).unwrap();
+            let point_transform = app.world().get::<Transform>(point).unwrap();
+            assert_eq!(point_light.intensity, profile.point_intensity);
+            assert_eq!(point_light.range, profile.point_range);
+            assert_eq!(point_light.color, profile.point_color);
+            assert_eq!(point_transform.translation, profile.point_position);
         }
     }
 

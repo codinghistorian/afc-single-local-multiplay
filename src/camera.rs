@@ -56,6 +56,10 @@ const DEV_PLAYER_CAMERA_TARGET_ID: usize = 0;
 const DEV_SCREENSHOT_PATH: &str = "/tmp/afc-training-ground.png";
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 const TRAINING_GROUND_CAPTURE_ENV: &str = "AFC_TRAINING_GROUND_CAPTURE";
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+const ARENA_CAPTURE_INDEX_ENV: &str = "AFC_ARENA_CAPTURE_INDEX";
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+const ARENA_CAPTURE_PATH_ENV: &str = "AFC_ARENA_CAPTURE_PATH";
 
 #[derive(Component)]
 pub struct ArenaCamera;
@@ -324,7 +328,12 @@ pub fn setup_camera(mut commands: Commands) {
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub fn configure_training_ground_capture() {
-    if std::env::var_os(TRAINING_GROUND_CAPTURE_ENV).is_some() {
+    if let Some(index) = std::env::var(ARENA_CAPTURE_INDEX_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        set_active_arena_index(index);
+    } else if std::env::var_os(TRAINING_GROUND_CAPTURE_ENV).is_some() {
         set_active_arena_index(TRAINING_GROUND_ARENA_INDEX);
     }
 }
@@ -383,7 +392,12 @@ pub fn capture_training_ground_when_requested(
     mut fighters: Query<&mut Visibility, With<Fighter>>,
     mut ui_nodes: Query<&mut Visibility, (With<Node>, Without<Fighter>)>,
 ) {
-    let Some(path) = std::env::var_os(TRAINING_GROUND_CAPTURE_ENV) else {
+    let path = if std::env::var_os(ARENA_CAPTURE_INDEX_ENV).is_some() {
+        std::env::var_os(ARENA_CAPTURE_PATH_ENV)
+            .unwrap_or_else(|| "/tmp/afc-arena-capture.png".into())
+    } else if let Some(path) = std::env::var_os(TRAINING_GROUND_CAPTURE_ENV) {
+        path
+    } else {
         return;
     };
 

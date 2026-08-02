@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::constants::{ARENA_TOP_Y, CAMERA_BASE_OFFSET, RINGOUT_RADIUS, RINGOUT_Y};
+#[cfg(test)]
+use crate::constants::CAMERA_BASE_OFFSET;
+use crate::constants::{ARENA_TOP_Y, RINGOUT_RADIUS, RINGOUT_Y};
 use crate::items::ItemKind;
 
 pub use crate::arena_barriers::ArenaBarrierDefinition as PlatformDefinition;
@@ -101,6 +103,19 @@ pub struct ArenaBackgroundDefinition {
     pub gameplay_visible: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ArenaLightingProfile {
+    pub ambient_color: Color,
+    pub ambient_brightness: f32,
+    pub directional_color: Color,
+    pub directional_illuminance: f32,
+    pub directional_position: Vec3,
+    pub point_color: Color,
+    pub point_intensity: f32,
+    pub point_range: f32,
+    pub point_position: Vec3,
+}
+
 pub struct ArenaDefinition {
     pub name: &'static str,
     pub spawn_points: [Vec3; 4],
@@ -145,8 +160,15 @@ const fn arena_background_with_size(
     }
 }
 
-const CROWN_RING_BACKGROUND: ArenaBackgroundDefinition =
-    arena_background("backgrounds/crown_ring.png");
+const CROWN_RING_BACKGROUND: ArenaBackgroundDefinition = ArenaBackgroundDefinition {
+    asset_path: "backgrounds/crown_ring.png",
+    image_size: Vec2::new(1448.0, 1086.0),
+    // Crown Ring is substantially wider than the original arenas. Overscan its
+    // 4:3 wallpaper so 16:9 gameplay windows never expose the plane's edges.
+    world_height: 84.0,
+    distance: 52.0,
+    gameplay_visible: true,
+};
 const SPLIT_CAUSEWAY_BACKGROUND: ArenaBackgroundDefinition =
     arena_background("backgrounds/split_causeway.png");
 const SUNSTONE_STEPS_BACKGROUND: ArenaBackgroundDefinition =
@@ -168,12 +190,21 @@ const POWDER_KEG_COURT_BACKGROUND: ArenaBackgroundDefinition =
 const TRAINING_GROUND_BACKGROUND: ArenaBackgroundDefinition =
     arena_background_with_size(TRAINING_GROUND_BACKGROUND_PATH, Vec2::new(1254.0, 1254.0));
 
-const CROWN_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::circle(
-    0.0,
-    0.0,
-    crate::constants::ARENA_RADIUS,
-    ARENA_TOP_Y,
-)];
+// Reference-court coordinates use +Z for the camera-near side. The main court,
+// front apron, and mirrored U-shaped wings are all floor-level support. The two
+// rectangular holes inside the wings are intentionally absent.
+const CROWN_GROUND: &[ArenaGroundShape] = &[
+    ArenaGroundShape::rectangle(0.0, 0.25, 7.5, 6.75, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, 9.1, 5.2, 2.1, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(-8.25, 1.4, 0.75, 4.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(8.25, 1.4, 0.75, 4.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(-11.65, 1.4, 0.75, 4.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(11.65, 1.4, 0.75, 4.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(-9.95, -2.6, 0.95, 0.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(9.95, -2.6, 0.95, 0.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(-9.95, 5.4, 0.95, 0.9, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(9.95, 5.4, 0.95, 0.9, 0.0, ARENA_TOP_Y),
+];
 
 const SPLIT_GROUND: &[ArenaGroundShape] = &[
     ArenaGroundShape::rectangle(-4.7, 0.0, 3.0, 6.5, 0.0, ARENA_TOP_Y),
@@ -277,10 +308,11 @@ const TRAINING_GROUND_GROUND: &[ArenaGroundShape] = &[ArenaGroundShape::rectangl
 )];
 
 const CROWN_PLATFORMS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(0.0, 9.65, 3.9, 1.65, ARENA_TOP_Y - 0.05),
-    PlatformDefinition::new(0.0, -9.65, 4.4, 1.65, ARENA_TOP_Y - 0.05),
-    PlatformDefinition::new(-9.55, 0.0, 1.55, 4.2, ARENA_TOP_Y - 0.05),
-    PlatformDefinition::new(9.55, 0.0, 1.55, 4.2, ARENA_TOP_Y - 0.05),
+    PlatformDefinition::new(0.0, -6.6, 5.2, 0.1, ARENA_TOP_Y + 0.07),
+    PlatformDefinition::new(0.0, -6.8, 5.2, 0.1, ARENA_TOP_Y + 0.14),
+    PlatformDefinition::new(0.0, -7.0, 5.2, 0.1, ARENA_TOP_Y + 0.21),
+    PlatformDefinition::new(0.0, -7.2, 5.2, 0.1, ARENA_TOP_Y + 0.28),
+    PlatformDefinition::new(0.0, -8.85, 5.2, 1.55, ARENA_TOP_Y + 0.28),
 ];
 
 const CROWN_ITEMS: &[ItemAnchor] = &[
@@ -787,9 +819,10 @@ const ARENAS: &[ArenaDefinition] = &[
         ground_shapes: CROWN_GROUND,
         platforms: CROWN_PLATFORMS,
         pipe_pair: None,
-        ringout_radius: RINGOUT_RADIUS,
+        ringout_radius: 16.5,
         ringout_y: RINGOUT_Y,
-        camera_offset: CAMERA_BASE_OFFSET,
+        // Same pitch as the standard camera, moved back to frame the 24.8-wide court.
+        camera_offset: Vec3::new(0.0, 18.5, 21.016),
         hazards: CROWN_HAZARDS,
         background: CROWN_RING_BACKGROUND,
         visual_theme: ArenaVisualTheme::Crown,
@@ -987,6 +1020,45 @@ const ARENAS: &[ArenaDefinition] = &[
     },
 ];
 
+pub(crate) fn arena_lighting_profile(index: usize) -> ArenaLightingProfile {
+    let arena = arena_definition(index);
+    match arena.visual_theme {
+        ArenaVisualTheme::Crown => ArenaLightingProfile {
+            ambient_color: Color::srgb(0.86, 0.76, 0.65),
+            ambient_brightness: 410.0,
+            directional_color: Color::srgb(1.0, 0.90, 0.76),
+            directional_illuminance: 14_500.0,
+            directional_position: Vec3::new(-8.0, 16.0, 10.0),
+            point_color: Color::srgb(1.0, 0.82, 0.66),
+            point_intensity: 1_200_000.0,
+            point_range: 36.0,
+            point_position: Vec3::new(0.0, 11.0, 5.0),
+        },
+        ArenaVisualTheme::Training => ArenaLightingProfile {
+            ambient_color: Color::srgb(0.68, 0.64, 0.58),
+            ambient_brightness: 220.0,
+            directional_color: Color::srgb(1.0, 0.96, 0.90),
+            directional_illuminance: 8_000.0,
+            directional_position: Vec3::new(-5.0, 12.0, 7.0),
+            point_color: Color::srgb(1.0, 0.86, 0.70),
+            point_intensity: 1_600_000.0,
+            point_range: 20.0,
+            point_position: Vec3::new(0.0, 8.0, 4.0),
+        },
+        _ => ArenaLightingProfile {
+            ambient_color: Color::srgb(0.85, 0.78, 0.68),
+            ambient_brightness: 430.0,
+            directional_color: Color::WHITE,
+            directional_illuminance: 12_500.0,
+            directional_position: Vec3::new(-5.0, 12.0, 7.0),
+            point_color: Color::WHITE,
+            point_intensity: 1_100_000.0,
+            point_range: 36.0,
+            point_position: Vec3::new(0.0, 9.0, 4.5),
+        },
+    }
+}
+
 static ACTIVE_ARENA_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 pub fn arena_definitions() -> &'static [ArenaDefinition] {
@@ -1062,7 +1134,7 @@ mod tests {
     #[test]
     fn every_arena_has_its_own_matching_background_asset() {
         let expected_assets = [
-            ("backgrounds/crown_ring.png", Vec2::new(1536.0, 1024.0)),
+            ("backgrounds/crown_ring.png", Vec2::new(1448.0, 1086.0)),
             ("backgrounds/split_causeway.png", Vec2::new(1536.0, 1024.0)),
             ("backgrounds/sunstone_steps.png", Vec2::new(1536.0, 1024.0)),
             ("backgrounds/crank_yard.png", Vec2::new(1536.0, 1024.0)),
@@ -1113,6 +1185,26 @@ mod tests {
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
         assert_eq!((width, height), (1254, 1254));
+    }
+
+    #[test]
+    fn crown_ring_uses_the_supplied_castle_backdrop_without_stretching() {
+        let crown = arena_definition(0);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(crown.background.asset_path);
+        let bytes = std::fs::read(&path).expect("Crown Ring backdrop should be readable");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(bytes.len() >= 24, "PNG is missing its IHDR header");
+        assert_eq!(&bytes[12..16], b"IHDR");
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+
+        assert_eq!(crown.background.asset_path, "backgrounds/crown_ring.png");
+        assert_eq!((width, height), (1448, 1086));
+        assert_eq!(crown.background.image_size, Vec2::new(1448.0, 1086.0));
+        assert_eq!(crown.background.world_height, 84.0);
+        assert!(crown.background.gameplay_visible);
     }
 
     #[test]
@@ -1314,16 +1406,65 @@ mod tests {
     }
 
     #[test]
-    fn crown_extension_platforms_touch_main_arena() {
-        let arena_radius = crate::constants::ARENA_RADIUS;
-        let north = CROWN_PLATFORMS[0];
-        let south = CROWN_PLATFORMS[1];
-        let west = CROWN_PLATFORMS[2];
-        let east = CROWN_PLATFORMS[3];
+    fn crown_ring_matches_the_reference_footprint_and_rear_terrace() {
+        let crown = arena_definition(0);
+        assert_eq!(crown.ground_shapes.len(), 10);
+        assert_eq!(crown.platforms.len(), 5);
 
-        assert!(north.center.y - north.half_extents.y <= arena_radius);
-        assert!(south.center.y + south.half_extents.y >= -arena_radius);
-        assert!(west.center.x + west.half_extents.x >= -arena_radius);
-        assert!(east.center.x - east.half_extents.x <= arena_radius);
+        for (x, z) in [
+            (4.0, 2.0),
+            (0.0, 9.4),
+            (-8.25, 1.4),
+            (8.25, 1.4),
+            (-11.65, 1.4),
+            (11.65, 1.4),
+            (-9.95, -2.6),
+            (9.95, 5.4),
+        ] {
+            assert!(
+                crate::arena::ground_support_for_arena_with_radius(crown, x, z, 0.0)
+                    .height()
+                    .is_some(),
+                "reference floor point ({x}, {z}) should be supported"
+            );
+        }
+
+        for x in [-9.95, 9.95] {
+            assert_eq!(
+                crate::arena::ground_support_for_arena_with_radius(crown, x, 1.4, 0.0).height(),
+                None,
+                "the side-wing void at x={x} must remain a real opening"
+            );
+        }
+
+        let expected_heights = [0.07, 0.14, 0.21, 0.28, 0.28];
+        for (platform, elevation) in crown.platforms.iter().zip(expected_heights) {
+            assert!((platform.top_y - (ARENA_TOP_Y + elevation)).abs() < 0.001);
+        }
+        assert_eq!(crown.platforms[4].center, Vec2::new(0.0, -8.85));
+        assert_eq!(crown.platforms[4].half_extents, Vec2::new(5.2, 1.55));
+
+        assert!(
+            crown
+                .camera_offset
+                .normalize()
+                .distance(CAMERA_BASE_OFFSET.normalize())
+                < 0.002,
+            "Crown Ring should retain the standard gameplay camera pitch"
+        );
+        let farthest_floor_corner = Vec2::new(12.4, 6.3).length();
+        assert!(crown.ringout_radius > farthest_floor_corner);
+    }
+
+    #[test]
+    fn crown_ring_uses_its_warm_reference_lighting_profile() {
+        let crown = arena_lighting_profile(0);
+        let default = arena_lighting_profile(1);
+
+        assert!(crown.directional_illuminance > default.directional_illuminance);
+        assert!(crown.point_intensity > default.point_intensity);
+        assert_ne!(crown.directional_color, default.directional_color);
+        assert_ne!(crown.point_color, default.point_color);
+        assert_eq!(crown.directional_position, Vec3::new(-8.0, 16.0, 10.0));
     }
 }

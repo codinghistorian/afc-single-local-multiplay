@@ -17,7 +17,7 @@ use crate::arena_defs::{
     ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape, ArenaHazardDefinition,
     ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme, CRANK_PIPE_VISUAL_SCALE,
     PlatformDefinition, TRAINING_GROUND_ARENA_INDEX, active_arena_definition, active_arena_index,
-    arena_definitions,
+    arena_definitions, arena_lighting_profile,
 };
 use crate::arena_prop_colliders::{
     LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
@@ -84,7 +84,6 @@ const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
 const CHAMPIONS_COURT_RON_PATH: &str = "assets/maps/champions_court.ron";
 const TRAINING_GROUND_RON_PATH: &str = "assets/maps/training_ground.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
-const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
 const ARENA_GROUND_DEPTH_BIAS_BASE: f32 = -2_048.0;
 const ARENA_GROUND_DEPTH_BIAS_STEP: f32 = 128.0;
@@ -491,6 +490,8 @@ struct AuthoredPrimitive {
     kind: String,
     position: (f32, f32, f32),
     #[serde(default)]
+    rotation_x: f32,
+    #[serde(default)]
     rotation_y: f32,
     #[serde(default = "unit_tuple3")]
     scale: (f32, f32, f32),
@@ -525,6 +526,8 @@ struct AuthoredFloorPattern {
     columns: usize,
     gap: f32,
     bevel: f32,
+    #[serde(default)]
+    masked_to_gameplay: bool,
 }
 
 #[derive(Default)]
@@ -538,11 +541,18 @@ struct AuthoredFloorMeshBuffers {
 #[derive(Debug, Deserialize)]
 struct AuthoredCollider {
     id: String,
+    #[serde(default)]
+    kind: String,
     center: (f32, f32),
+    #[serde(default)]
     half_extents: (f32, f32),
+    #[serde(default)]
+    radius: f32,
     #[serde(default)]
     rotation_y: f32,
     top_y: f32,
+    #[serde(default)]
+    behavior: String,
 }
 
 #[derive(Resource)]
@@ -1176,11 +1186,8 @@ fn spawn_authored_arena_map(
         }
     }
 
-    spawn_authored_primitives(commands, meshes, materials, &map, arena_name);
-
-    if arena_index != CHAMPIONS_COURT_ARENA_INDEX || CHAMPIONS_COURT_MAP_LIGHTS_ENABLED {
-        spawn_authored_lights(commands, &map.lights, arena_name);
-    }
+    spawn_authored_primitives(commands, meshes, materials, &map, arena_index, arena_name);
+    spawn_authored_lights(commands, &map.lights, arena_name);
 
     Ok(())
 }
@@ -1370,6 +1377,7 @@ fn spawn_authored_primitives(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &AuthoredArenaRon,
+    arena_index: usize,
     arena_name: &str,
 ) {
     let material_handles = map
@@ -1390,7 +1398,14 @@ fn spawn_authored_primitives(
     let mut mesh_handles = HashMap::new();
     let mut ordinal = 0usize;
 
-    spawn_authored_floor_pattern(commands, meshes, map, &material_handles, arena_name);
+    spawn_authored_floor_pattern(
+        commands,
+        meshes,
+        map,
+        arena_index,
+        &material_handles,
+        arena_name,
+    );
     spawn_authored_floor_rows(
         commands,
         meshes,
@@ -1443,6 +1458,7 @@ fn spawn_authored_floor_pattern(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     map: &AuthoredArenaRon,
+    arena_index: usize,
     material_handles: &HashMap<String, Handle<StandardMaterial>>,
     arena_name: &str,
 ) {
@@ -1467,6 +1483,22 @@ fn spawn_authored_floor_pattern(
     let unit_width = floor_width / pattern.columns as f32;
     let unit_depth = floor_depth / pattern.rows as f32;
     let gap = pattern.gap.clamp(0.0, unit_width.min(unit_depth) * 0.38);
+    let support_heights = (0..pattern.rows)
+        .flat_map(|row| {
+            (0..pattern.columns).map(move |column| {
+                if !pattern.masked_to_gameplay {
+                    return Some(ARENA_TOP_Y);
+                }
+                let x = -floor_width * 0.5 + (column as f32 + 0.5) * unit_width;
+                let z = -floor_depth * 0.5 + (row as f32 + 0.5) * unit_depth;
+                authored_floor_cell_support_height(
+                    arena_index,
+                    Vec2::new(x, z),
+                    Vec2::new(unit_width, unit_depth) * 0.5,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     let mut occupied = vec![false; pattern.rows * pattern.columns];
     let mut buffers = (0..map.floor_materials.len())
         .map(|_| AuthoredFloorMeshBuffers::default())
@@ -1478,6 +1510,10 @@ fn spawn_authored_floor_pattern(
             if occupied[index] {
                 continue;
             }
+            let Some(support_height) = support_heights[index] else {
+                occupied[index] = true;
+                continue;
+            };
 
             let roll = authored_floor_hash(row, column, 0) % 100;
             let requested_span = match roll {
@@ -1495,6 +1531,8 @@ fn spawn_authored_floor_pattern(
                 row,
                 column,
                 requested_span,
+                &support_heights,
+                support_height,
             );
             for occupied_row in row..row + span.1 {
                 for occupied_column in column..column + span.0 {
@@ -1509,7 +1547,7 @@ fn spawn_authored_floor_pattern(
             let variant = authored_floor_hash(row, column, 1) % buffers.len();
             let height_step = (authored_floor_hash(row, column, 2) % 4) as f32;
             let height = 0.09 + height_step * 0.004;
-            let top_y = height_step * 0.0012;
+            let top_y = support_height - ARENA_TOP_Y + height_step * 0.0012;
             append_authored_floor_stone(
                 &mut buffers[variant],
                 Vec3::new(x, top_y, z),
@@ -1564,18 +1602,70 @@ fn authored_floor_available_span(
     row: usize,
     column: usize,
     requested: (usize, usize),
+    support_heights: &[Option<f32>],
+    target_height: f32,
 ) -> (usize, usize) {
     for depth in (1..=requested.1.min(rows - row)).rev() {
         for width in (1..=requested.0.min(columns - column)).rev() {
             if (row..row + depth).all(|candidate_row| {
-                (column..column + width)
-                    .all(|candidate_column| !occupied[candidate_row * columns + candidate_column])
+                (column..column + width).all(|candidate_column| {
+                    let index = candidate_row * columns + candidate_column;
+                    !occupied[index]
+                        && support_heights[index]
+                            .is_some_and(|height| (height - target_height).abs() < 0.001)
+                })
             }) {
                 return (width, depth);
             }
         }
     }
     (1, 1)
+}
+
+fn authored_floor_cell_support_height(
+    arena_index: usize,
+    center: Vec2,
+    half_extents: Vec2,
+) -> Option<f32> {
+    let inset = half_extents * 0.82;
+    let samples = [
+        center,
+        center + Vec2::new(-inset.x, -inset.y),
+        center + Vec2::new(inset.x, -inset.y),
+        center + Vec2::new(-inset.x, inset.y),
+        center + Vec2::new(inset.x, inset.y),
+    ];
+    let mut support_height: Option<f32> = None;
+    for sample in samples {
+        let height = authored_walkable_height_at(arena_index, sample.x, sample.y)?;
+        if let Some(expected) = support_height
+            && (height - expected).abs() >= 0.001
+        {
+            return None;
+        }
+        support_height = Some(height);
+    }
+    support_height
+}
+
+fn authored_walkable_height_at(arena_index: usize, x: f32, z: f32) -> Option<f32> {
+    let arena = arena_definitions().get(arena_index)?;
+    let mut best = None;
+    for shape in arena.ground_shapes {
+        if let Some(height) = ground_shape_support(shape, x, z, 0.0).and_then(GroundSupport::height)
+        {
+            best = Some(best.map_or(height, |current: f32| current.max(height)));
+        }
+    }
+    for platform in arena.gameplay_platforms() {
+        if platform
+            .support_at(Vec2::new(x, z), 0.0)
+            .is_some_and(|support| support == crate::arena_barriers::BarrierSupport::Firm)
+        {
+            best = Some(best.map_or(platform.top_y, |current: f32| current.max(platform.top_y)));
+        }
+    }
+    best
 }
 
 fn append_authored_floor_stone(
@@ -1839,15 +1929,90 @@ fn authored_primitive_mesh(
         "cylinder" => meshes.add(Cylinder::new(0.5, 1.0)),
         "cone" => meshes.add(Cone::new(0.5, 1.0)),
         "sphere" => meshes.add(Sphere::new(0.5).mesh().uv(16, 8)),
+        "torus" => meshes.add(Torus::new(0.42, 0.08)),
+        "crown" => meshes.add(authored_crown_mesh()),
         _ => meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
     };
     mesh_handles.insert(kind.to_string(), mesh.clone());
     mesh
 }
 
+fn authored_crown_mesh() -> Mesh {
+    let outline = [
+        Vec2::new(-0.50, -0.42),
+        Vec2::new(0.50, -0.42),
+        Vec2::new(0.44, 0.14),
+        Vec2::new(0.24, -0.01),
+        Vec2::new(0.16, 0.46),
+        Vec2::new(0.0, 0.13),
+        Vec2::new(-0.16, 0.46),
+        Vec2::new(-0.24, -0.01),
+        Vec2::new(-0.44, 0.14),
+    ];
+    let half_depth = 0.11;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    for (z, normal, reverse) in [
+        (half_depth, Vec3::Z, false),
+        (-half_depth, Vec3::NEG_Z, true),
+    ] {
+        let center = positions.len() as u32;
+        positions.push([0.0, 0.0, z]);
+        normals.push(normal.to_array());
+        uvs.push([0.5, 0.5]);
+        for point in outline {
+            positions.push([point.x, point.y, z]);
+            normals.push(normal.to_array());
+            uvs.push([point.x + 0.5, point.y + 0.5]);
+        }
+        for index in 0..outline.len() as u32 {
+            let current = center + 1 + index;
+            let next = center + 1 + (index + 1) % outline.len() as u32;
+            if reverse {
+                indices.extend_from_slice(&[center, next, current]);
+            } else {
+                indices.extend_from_slice(&[center, current, next]);
+            }
+        }
+    }
+
+    for index in 0..outline.len() {
+        let next = (index + 1) % outline.len();
+        let edge = outline[next] - outline[index];
+        let normal = Vec3::new(edge.y, -edge.x, 0.0).normalize_or_zero();
+        let start = positions.len() as u32;
+        for point in [
+            Vec3::new(outline[index].x, outline[index].y, half_depth),
+            Vec3::new(outline[index].x, outline[index].y, -half_depth),
+            Vec3::new(outline[next].x, outline[next].y, -half_depth),
+            Vec3::new(outline[next].x, outline[next].y, half_depth),
+        ] {
+            positions.push(point.to_array());
+            normals.push(normal.to_array());
+        }
+        uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
 fn authored_primitive_transform(primitive: &AuthoredPrimitive) -> Transform {
     Transform::from_translation(champions_stage_position(primitive.position))
-        .with_rotation(champions_yaw(primitive.rotation_y))
+        .with_rotation(
+            champions_yaw(primitive.rotation_y)
+                * Quat::from_rotation_x(primitive.rotation_x.to_radians()),
+        )
         .with_scale(champions_scale(primitive.scale))
 }
 
@@ -1856,7 +2021,8 @@ fn authored_primitive_prefab_transform(
     primitive: &AuthoredPrimitive,
 ) -> Transform {
     let parent_rotation = champions_yaw(instance.rotation_y);
-    let child_rotation = champions_yaw(primitive.rotation_y);
+    let child_rotation = champions_yaw(primitive.rotation_y)
+        * Quat::from_rotation_x(primitive.rotation_x.to_radians());
     let parent_scale = champions_scale(instance.scale);
     let child_scale = champions_scale(primitive.scale);
     let parent_position = champions_raw_position(instance.position);
@@ -2189,21 +2355,38 @@ fn build_authored_arena_collision_barriers(arena_index: usize) -> Vec<WorldPropB
         }
     }
 
-    barriers.extend(map.colliders.iter().map(|collider| {
-        debug_assert!(!collider.id.is_empty());
-        WorldPropBarrier {
-            definition: ArenaBarrierDefinition::rectangle(
-                collider.center.0,
-                collider.center.1,
-                collider.half_extents.0,
-                collider.half_extents.1,
-                collider.rotation_y.to_radians(),
-                ARENA_TOP_Y + collider.top_y,
-            ),
-            behavior: PropBarrierBehavior::Solid,
-        }
-    }));
+    barriers.extend(map.colliders.iter().map(authored_collider_barrier));
     barriers
+}
+
+fn authored_collider_barrier(collider: &AuthoredCollider) -> WorldPropBarrier {
+    debug_assert!(!collider.id.is_empty());
+    let top_y = ARENA_TOP_Y + collider.top_y;
+    let definition = if collider.kind == "circle" {
+        ArenaBarrierDefinition::circle(
+            collider.center.0,
+            collider.center.1,
+            collider.radius.max(0.01),
+            top_y,
+        )
+    } else {
+        ArenaBarrierDefinition::rectangle(
+            collider.center.0,
+            collider.center.1,
+            collider.half_extents.0,
+            collider.half_extents.1,
+            collider.rotation_y.to_radians(),
+            top_y,
+        )
+    };
+    WorldPropBarrier {
+        definition,
+        behavior: if collider.behavior == "one_way_top" {
+            PropBarrierBehavior::OneWayTop
+        } else {
+            PropBarrierBehavior::Solid
+        },
+    }
 }
 
 fn append_champions_object_barriers(
@@ -2729,24 +2912,27 @@ const POWDER_KEG_ASSET_PROPS: &[ArenaAssetProp] = &[
 ];
 
 fn spawn_arena_lights(commands: &mut Commands) {
+    let profile = arena_lighting_profile(active_arena_index());
     commands.spawn((
         DirectionalLight {
-            illuminance: 12_500.0,
+            illuminance: profile.directional_illuminance,
+            color: profile.directional_color,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(-5.0, 12.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(profile.directional_position).looking_at(Vec3::ZERO, Vec3::Y),
         ArenaGlobalDirectionalLight,
     ));
 
     commands.spawn((
         PointLight {
-            intensity: 1_100_000.0,
-            range: 36.0,
+            intensity: profile.point_intensity,
+            range: profile.point_range,
+            color: profile.point_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(0.0, 9.0, 4.5),
+        Transform::from_translation(profile.point_position),
         ArenaGlobalPointLight,
     ));
 }
@@ -2755,7 +2941,7 @@ pub fn sync_arena_lighting(
     scene: Res<ArenaScene>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut directional_lights: Query<
-        &mut DirectionalLight,
+        (&mut DirectionalLight, &mut Transform),
         (
             With<ArenaGlobalDirectionalLight>,
             Without<ArenaGlobalPointLight>,
@@ -2773,36 +2959,21 @@ pub fn sync_arena_lighting(
         return;
     }
 
-    let training = scene.index == TRAINING_GROUND_ARENA_INDEX;
-    if training {
-        ambient.color = Color::srgb(0.68, 0.64, 0.58);
-        ambient.brightness = 220.0;
-    } else {
-        ambient.color = Color::srgb(0.85, 0.78, 0.68);
-        ambient.brightness = 430.0;
-    }
+    let profile = arena_lighting_profile(scene.index);
+    ambient.color = profile.ambient_color;
+    ambient.brightness = profile.ambient_brightness;
 
-    for mut light in &mut directional_lights {
-        light.illuminance = if training { 8_000.0 } else { 12_500.0 };
-        light.color = if training {
-            Color::srgb(1.0, 0.96, 0.90)
-        } else {
-            Color::WHITE
-        };
+    for (mut light, mut transform) in &mut directional_lights {
+        light.illuminance = profile.directional_illuminance;
+        light.color = profile.directional_color;
+        *transform = Transform::from_translation(profile.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y);
     }
     for (mut light, mut transform) in &mut point_lights {
-        light.intensity = if training { 1_600_000.0 } else { 1_100_000.0 };
-        light.range = if training { 20.0 } else { 36.0 };
-        light.color = if training {
-            Color::srgb(1.0, 0.86, 0.70)
-        } else {
-            Color::WHITE
-        };
-        transform.translation = if training {
-            Vec3::new(0.0, 8.0, 4.0)
-        } else {
-            Vec3::new(0.0, 9.0, 4.5)
-        };
+        light.intensity = profile.point_intensity;
+        light.range = profile.point_range;
+        light.color = profile.point_color;
+        transform.translation = profile.point_position;
     }
 }
 
@@ -4652,24 +4823,45 @@ mod tests {
 
     #[test]
     fn radius_support_extends_platform_ground_query_slightly() {
-        let platform = active_arena_definition().platforms[0];
+        const TEST_PLATFORMS: &[PlatformDefinition] = &[PlatformDefinition::new(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            ARENA_TOP_Y + 0.4,
+        )];
+        let arena = ArenaDefinition {
+            name: "Training Ground",
+            spawn_points: [Vec3::ZERO; 4],
+            item_anchors: &[],
+            ground_shapes: &[],
+            platforms: TEST_PLATFORMS,
+            pipe_pair: None,
+            ringout_radius: 10.0,
+            ringout_y: -5.0,
+            camera_offset: Vec3::new(0.0, 10.0, 10.0),
+            hazards: &[],
+            background: arena_definitions()[TRAINING_GROUND_ARENA_INDEX].background,
+            visual_theme: ArenaVisualTheme::Training,
+        };
+        let platform = TEST_PLATFORMS[0];
         let x = platform.center.x + platform.half_extents.x + 0.08;
-        assert_eq!(ground_height_at(x, platform.center.y), None);
         assert_eq!(
-            ground_height_at_with_radius(x, platform.center.y, 0.4),
-            Some(platform.top_y)
+            ground_support_for_arena_with_radius(&arena, x, platform.center.y, 0.0),
+            GroundSupport::Airborne
         );
         assert_eq!(
-            ground_support_at_with_radius(x, platform.center.y, 0.4),
+            ground_support_for_arena_with_radius(&arena, x, platform.center.y, 0.4),
             GroundSupport::Grace(platform.top_y)
         );
         assert_eq!(
-            ground_height_at_with_radius(
+            ground_support_for_arena_with_radius(
+                &arena,
                 platform.center.x + platform.half_extents.x + 0.2,
                 platform.center.y,
                 0.4,
             ),
-            None
+            GroundSupport::Airborne
         );
     }
 
@@ -4802,6 +4994,7 @@ mod tests {
     #[test]
     fn raised_walkable_platforms_open_at_landing_height_across_arenas() {
         let platform_cases = [
+            (0, 4, "Crown Ring"),
             (1, 2, "Split Causeway"),
             (2, 0, "Sunstone Steps"),
             (3, 0, "Crank Yard"),
@@ -4838,7 +5031,7 @@ mod tests {
 
     #[test]
     fn floor_level_platforms_remain_free_of_side_barriers() {
-        for arena_index in [0, 5, 6, 7, 9] {
+        for arena_index in [5, 6, 7, 9] {
             let arena = &arena_definitions()[arena_index];
             let platform = &arena.platforms[0];
             let position = Vec3::new(
@@ -5453,11 +5646,152 @@ mod tests {
 
         let map = load_authored_arena_map(CHAMPIONS_COURT_ARENA_INDEX)
             .expect("champions court RON should parse");
-        assert_eq!(map.map.tile_size, 2.0);
-        assert!(map.assets.contains_key("floor"));
-        assert!(!map.floor_shapes.is_empty());
+        assert_eq!(map.map.tile_size, 1.0);
+        assert_eq!(map.map.floor_width, 24.8);
+        assert_eq!(map.map.floor_depth, 22.4);
+        assert!(map.assets.contains_key("column"));
+        assert!(map.floor_shapes.is_empty());
         assert!(!map.instances.is_empty());
-        assert!(!map.prefab_instances.is_empty());
+        assert!(map.prefab_instances.is_empty());
+        assert!(map.materials.contains_key("gold"));
+
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("Crown Ring should use authored paving");
+        assert_eq!((floor_pattern.rows, floor_pattern.columns), (24, 26));
+        assert_eq!(floor_pattern.gap, 0.020);
+        assert_eq!(floor_pattern.bevel, 0.025);
+        assert!(floor_pattern.masked_to_gameplay);
+
+        assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "banner_tower")
+                .count(),
+            8
+        );
+        assert!(
+            map.primitives
+                .iter()
+                .any(|primitive| primitive.id == "center_crown"
+                    && primitive.kind == "crown"
+                    && (primitive.rotation_x + 90.0).abs() < 0.001)
+        );
+        assert!(map.lights.is_empty());
+        assert!(map.colliders.iter().any(|collider| {
+            collider.kind == "circle"
+                && collider.behavior == "one_way_top"
+                && collider.id == "center_medallion"
+        }));
+    }
+
+    #[test]
+    fn crown_floor_pattern_masks_voids_and_separates_terrace_heights() {
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(3.0, 2.0),
+                Vec2::splat(0.2),
+            ),
+            Some(ARENA_TOP_Y)
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(-9.95, 1.4),
+                Vec2::splat(0.2),
+            ),
+            None
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(0.0, -8.85),
+                Vec2::splat(0.2),
+            ),
+            Some(ARENA_TOP_Y + 0.28)
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(0.0, -6.5),
+                Vec2::splat(0.2),
+            ),
+            None,
+            "a single paving stone must not bridge the main court and first stair"
+        );
+    }
+
+    #[test]
+    fn authored_floor_foundations_are_recessed_below_every_paver_tier() {
+        let crown = load_authored_arena_map(CHAMPIONS_COURT_ARENA_INDEX)
+            .expect("Crown Ring RON should parse");
+        let mut crown_foundations = 0;
+        for primitive in &crown.primitives {
+            let support_y = match primitive.id.as_str() {
+                "foundation_step_1" => ARENA_TOP_Y + 0.07,
+                "foundation_step_2" => ARENA_TOP_Y + 0.14,
+                "foundation_step_3" => ARENA_TOP_Y + 0.21,
+                "foundation_step_4" | "foundation_dais" => ARENA_TOP_Y + 0.28,
+                id if id.starts_with("foundation_") => ARENA_TOP_Y,
+                _ => continue,
+            };
+            crown_foundations += 1;
+            let foundation_top = champions_stage_y(primitive.position.1) + primitive.scale.1 * 0.5;
+            assert!(
+                support_y - foundation_top >= 0.019,
+                "{} top {foundation_top} must stay below paver support {support_y}",
+                primitive.id
+            );
+        }
+        assert_eq!(crown_foundations, 15);
+
+        let training = load_authored_arena_map(TRAINING_GROUND_ARENA_INDEX)
+            .expect("Training Ground RON should parse");
+        let foundation = training
+            .primitives
+            .iter()
+            .find(|primitive| primitive.id == "floor_foundation")
+            .expect("Training Ground should have a floor foundation");
+        let foundation_top = champions_stage_y(foundation.position.1) + foundation.scale.1 * 0.5;
+        assert!(ARENA_TOP_Y - foundation_top >= 0.019);
+    }
+
+    #[test]
+    fn authored_circle_colliders_preserve_shape_and_one_way_behavior() {
+        let collider = AuthoredCollider {
+            id: "medallion".to_string(),
+            kind: "circle".to_string(),
+            center: (1.5, -2.5),
+            half_extents: (0.0, 0.0),
+            radius: 1.75,
+            rotation_y: 0.0,
+            top_y: 0.1,
+            behavior: "one_way_top".to_string(),
+        };
+
+        let barrier = authored_collider_barrier(&collider);
+        assert_eq!(barrier.behavior, PropBarrierBehavior::OneWayTop);
+        assert_eq!(barrier.definition.center, Vec2::new(1.5, -2.5));
+        assert_eq!(barrier.definition.top_y, ARENA_TOP_Y + 0.1);
+        assert!(matches!(
+            barrier.definition.footprint,
+            crate::arena_barriers::BarrierFootprint::Circle { radius }
+                if (radius - 1.75).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn authored_crown_mesh_is_closed_and_has_side_depth() {
+        let crown = authored_crown_mesh();
+        let positions = crown
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("crown should have positions");
+        let indices = crown.indices().expect("crown should be indexed");
+
+        assert_eq!(positions.len(), 56);
+        assert_eq!(indices.len(), 108);
     }
 
     #[test]
