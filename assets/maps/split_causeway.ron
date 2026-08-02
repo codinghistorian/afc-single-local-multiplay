@@ -1,0 +1,185 @@
+// Split Causeway rebuilt from assets/arena/split_castaway_example.png.
+// X is left/right, +Z is camera-near, and -Z is the rear fire platform.
+(
+    map: (
+        tile_size: 1.0,
+        floor_width: 19.0,
+        floor_depth: 14.8,
+    ),
+    assets: {},
+    floor_shapes: [],
+    prefabs: {},
+    instances: [],
+    prefab_instances: [],
+
+    materials: {
+        "mint_0": (color: (0.42, 0.70, 0.58), roughness: 0.98),
+        "mint_1": (color: (0.48, 0.76, 0.63), roughness: 0.97),
+        "mint_2": (color: (0.36, 0.63, 0.52), roughness: 0.99),
+        "peach_0": (color: (0.78, 0.54, 0.36), roughness: 0.98),
+        "peach_1": (color: (0.84, 0.61, 0.42), roughness: 0.97),
+        "peach_2": (color: (0.70, 0.45, 0.30), roughness: 0.99),
+        "bridge_0": (color: (0.74, 0.67, 0.55), roughness: 0.98),
+        "bridge_1": (color: (0.81, 0.73, 0.60), roughness: 0.97),
+        "bridge_2": (color: (0.67, 0.59, 0.48), roughness: 0.99),
+        "mint_side": (color: (0.24, 0.43, 0.36), roughness: 1.0),
+        "peach_side": (color: (0.48, 0.30, 0.21), roughness: 1.0),
+        "bridge_side": (color: (0.42, 0.38, 0.34), roughness: 1.0),
+        "under_shadow": (color: (0.20, 0.22, 0.27), roughness: 1.0),
+        "under_mid": (color: (0.29, 0.31, 0.36), roughness: 1.0),
+        "under_light": (color: (0.38, 0.39, 0.43), roughness: 0.99),
+        "wood_dark": (color: (0.20, 0.085, 0.035), roughness: 0.98),
+        "wood_mid": (color: (0.35, 0.16, 0.065), roughness: 0.96),
+        "wood_light": (color: (0.52, 0.28, 0.11), roughness: 0.94),
+        "rope": (color: (0.78, 0.55, 0.27), roughness: 0.96),
+        "lane_gold": (color: (0.96, 0.76, 0.26), roughness: 0.74, metallic: 0.08),
+        "foliage_dark": (color: (0.07, 0.25, 0.17), roughness: 1.0),
+        "foliage_mid": (color: (0.12, 0.39, 0.25), roughness: 1.0),
+        "foliage_light": (color: (0.20, 0.53, 0.33), roughness: 0.99),
+        "rock_dark": (color: (0.34, 0.24, 0.24), roughness: 1.0),
+        "rock_mid": (color: (0.56, 0.34, 0.29), roughness: 0.99),
+        "rock_light": (color: (0.72, 0.46, 0.35), roughness: 0.98),
+        "coral": (color: (0.73, 0.31, 0.48), roughness: 0.96),
+    },
+
+    // The fallback family covers any supported cell outside the explicit zones.
+    floor_materials: ["bridge_0", "bridge_1", "bridge_2"],
+    // First match wins: central pads and bridges override the broad color halves.
+    floor_material_regions: [
+        (min: (-2.30, -7.45), max: (2.30, -4.95), materials: ["peach_0", "peach_1", "peach_2"]),
+        (min: (-1.20, -5.05), max: (1.20, -1.65), materials: ["bridge_0", "bridge_1", "bridge_2"]),
+        (min: (-2.30, -1.75), max: (2.30, 1.75), materials: ["mint_0", "mint_1", "mint_2"]),
+        (min: (-1.20, 1.65), max: (1.20, 4.65), materials: ["bridge_0", "bridge_1", "bridge_2"]),
+        (min: (-2.60, 4.55), max: (2.60, 7.25), materials: ["peach_0", "peach_1", "peach_2"]),
+        (min: (-9.55, -7.45), max: (-2.15, 7.45), materials: ["mint_0", "mint_1", "mint_2"]),
+        (min: (2.15, -7.45), max: (9.55, 7.45), materials: ["peach_0", "peach_1", "peach_2"]),
+    ],
+    floor_rows: [],
+    floor_pattern: Some((
+        rows: 16,
+        columns: 22,
+        gap: 0.025,
+        bevel: 0.035,
+        masked_to_gameplay: true,
+    )),
+
+    primitive_prefabs: {
+        "lookout_cage": [
+            (id: "post_rear_left", kind: "cuboid", position: (-0.78, 1.08, -0.72), scale: (0.34, 2.16, 0.34), material: "wood_dark"),
+            (id: "post_rear_right", kind: "cuboid", position: (0.78, 1.08, -0.72), scale: (0.34, 2.16, 0.34), material: "wood_mid"),
+            (id: "post_front_left", kind: "cuboid", position: (-0.78, 1.08, 0.72), scale: (0.34, 2.16, 0.34), material: "wood_mid"),
+            (id: "post_front_right", kind: "cuboid", position: (0.78, 1.08, 0.72), scale: (0.34, 2.16, 0.34), material: "wood_dark"),
+            (id: "rail_rear_low", kind: "cuboid", position: (0.0, 0.78, -0.72), scale: (1.90, 0.24, 0.24), material: "wood_mid"),
+            (id: "rail_rear_high", kind: "cuboid", position: (0.0, 1.78, -0.72), scale: (1.90, 0.24, 0.24), material: "wood_light"),
+            (id: "rail_front_low", kind: "cuboid", position: (0.0, 0.78, 0.72), scale: (1.90, 0.24, 0.24), material: "wood_mid"),
+            (id: "rail_front_high", kind: "cuboid", position: (0.0, 1.78, 0.72), scale: (1.90, 0.24, 0.24), material: "wood_light"),
+            (id: "rail_left_low", kind: "cuboid", position: (-0.78, 0.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_mid"),
+            (id: "rail_left_high", kind: "cuboid", position: (-0.78, 1.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_light"),
+            (id: "rail_right_low", kind: "cuboid", position: (0.78, 0.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_mid"),
+            (id: "rail_right_high", kind: "cuboid", position: (0.78, 1.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_light"),
+            (id: "cap_rear_left", kind: "cylinder", position: (-0.78, 2.24, -0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
+            (id: "cap_rear_right", kind: "cylinder", position: (0.78, 2.24, -0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
+            (id: "cap_front_left", kind: "cylinder", position: (-0.78, 2.24, 0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
+            (id: "cap_front_right", kind: "cylinder", position: (0.78, 2.24, 0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
+        ],
+        "rope_fence": [
+            (id: "post_left", kind: "cylinder", position: (-0.72, 0.58, 0.0), scale: (0.18, 1.16, 0.18), material: "wood_mid"),
+            (id: "post_right", kind: "cylinder", position: (0.72, 0.58, 0.0), scale: (0.18, 1.16, 0.18), material: "wood_mid"),
+            (id: "cap_left", kind: "sphere", position: (-0.72, 1.18, 0.0), scale: (0.24, 0.24, 0.24), material: "rope"),
+            (id: "cap_right", kind: "sphere", position: (0.72, 1.18, 0.0), scale: (0.24, 0.24, 0.24), material: "rope"),
+            (id: "rope_left", kind: "cuboid", position: (-0.36, 0.83, 0.0), rotation_y: -3.0, scale: (0.76, 0.075, 0.075), material: "rope"),
+            (id: "rope_right", kind: "cuboid", position: (0.36, 0.83, 0.0), rotation_y: 3.0, scale: (0.76, 0.075, 0.075), material: "rope"),
+        ],
+        "pine": [
+            (id: "trunk", kind: "cylinder", position: (0.0, 0.54, 0.0), scale: (0.28, 1.08, 0.28), material: "wood_dark"),
+            (id: "lower", kind: "cone", position: (0.0, 1.04, 0.0), scale: (1.18, 1.26, 1.18), material: "foliage_dark"),
+            (id: "middle", kind: "cone", position: (0.0, 1.50, 0.0), scale: (0.90, 1.12, 0.90), material: "foliage_mid"),
+            (id: "upper", kind: "cone", position: (0.0, 1.88, 0.0), scale: (0.62, 0.90, 0.62), material: "foliage_light"),
+        ],
+        "rock_cluster": [
+            (id: "rock_large", kind: "cuboid", position: (-0.20, 0.36, 0.0), rotation_y: 22.0, scale: (0.82, 0.72, 0.68), material: "rock_dark"),
+            (id: "rock_mid", kind: "cuboid", position: (0.36, 0.25, 0.12), rotation_y: -18.0, scale: (0.58, 0.50, 0.54), material: "rock_mid"),
+            (id: "rock_tip", kind: "cone", position: (0.02, 0.82, -0.02), scale: (0.32, 0.76, 0.32), material: "rock_light"),
+        ],
+        "hanging_coral": [
+            (id: "stem", kind: "cuboid", position: (0.0, -0.38, 0.0), rotation_y: 18.0, scale: (0.18, 0.90, 0.18), material: "coral"),
+            (id: "branch_left", kind: "cuboid", position: (-0.18, -0.20, 0.0), rotation_x: 28.0, scale: (0.14, 0.55, 0.14), material: "coral"),
+            (id: "branch_right", kind: "cuboid", position: (0.18, -0.12, 0.0), rotation_x: -25.0, scale: (0.14, 0.48, 0.14), material: "coral"),
+        ],
+    },
+
+    primitive_prefab_instances: [
+        (id: "lookout_left", prefab: "lookout_cage", position: (-7.15, 0.0, -1.45), rotation_y: 2.0, scale: (1.12, 1.12, 1.12)),
+        (id: "lookout_right", prefab: "lookout_cage", position: (7.15, 0.0, -1.45), rotation_y: -2.0, scale: (1.12, 1.12, 1.12)),
+
+        (id: "rear_fence_left", prefab: "rope_fence", position: (-1.35, 0.24, -7.22)),
+        (id: "rear_fence_right", prefab: "rope_fence", position: (1.35, 0.24, -7.22)),
+        (id: "front_bridge_fence_left", prefab: "rope_fence", position: (-1.05, 0.0, 3.18), rotation_y: 90.0, scale: (1.22, 1.0, 1.0)),
+        (id: "front_bridge_fence_right", prefab: "rope_fence", position: (1.05, 0.0, 3.18), rotation_y: 90.0, scale: (1.22, 1.0, 1.0)),
+        (id: "right_spur_fence", prefab: "rope_fence", position: (9.0, 0.08, 5.52)),
+
+        (id: "pine_left_rear", prefab: "pine", position: (-8.05, 0.0, -4.75), rotation_y: 13.0, scale: (0.86, 0.86, 0.86)),
+        (id: "pine_left_rear_small", prefab: "pine", position: (-7.42, 0.0, -5.08), rotation_y: -18.0, scale: (0.58, 0.58, 0.58)),
+        (id: "pine_left_front", prefab: "pine", position: (-8.88, 0.0, 4.85), rotation_y: -11.0, scale: (0.72, 0.72, 0.72)),
+
+        (id: "rocks_right_rear", prefab: "rock_cluster", position: (8.0, 0.0, -4.75), rotation_y: 17.0, scale: (0.88, 0.88, 0.88)),
+        (id: "rocks_right_front", prefab: "rock_cluster", position: (8.62, 0.08, 5.12), rotation_y: -21.0, scale: (0.72, 0.72, 0.72)),
+
+        (id: "coral_left", prefab: "hanging_coral", position: (-4.55, -1.25, 5.72), rotation_y: 8.0, scale: (0.92, 0.92, 0.92)),
+        (id: "coral_center", prefab: "hanging_coral", position: (0.35, -1.55, 7.10), rotation_y: -12.0, scale: (1.05, 1.05, 1.05)),
+        (id: "coral_right", prefab: "hanging_coral", position: (5.60, -1.30, 5.68), rotation_y: 18.0, scale: (0.82, 0.82, 0.82)),
+    ],
+
+    primitives: [
+        // Recessed support foundations; top faces remain 0.02 below paver support.
+        (id: "foundation_left_deck", kind: "cuboid", position: (-5.35, -0.62, 0.0), scale: (6.30, 1.20, 11.40), material: "mint_side"),
+        (id: "foundation_right_deck", kind: "cuboid", position: (5.35, -0.62, 0.0), scale: (6.30, 1.20, 11.40), material: "peach_side"),
+        (id: "foundation_rear_pad", kind: "cuboid", position: (0.0, -0.43, -6.20), scale: (4.40, 1.30, 2.40), material: "peach_side"),
+        (id: "foundation_rear_bridge", kind: "cuboid", position: (0.0, -0.595, -3.35), scale: (2.30, 1.15, 3.30), material: "bridge_side"),
+        (id: "foundation_center_pad", kind: "cuboid", position: (0.0, -0.485, 0.0), scale: (4.40, 1.25, 3.40), material: "mint_side"),
+        (id: "foundation_front_bridge", kind: "cuboid", position: (0.0, -0.595, 3.15), scale: (2.30, 1.15, 2.90), material: "bridge_side"),
+        (id: "foundation_front_pad", kind: "cuboid", position: (0.0, -0.525, 5.90), scale: (5.00, 1.25, 2.60), material: "peach_side"),
+        (id: "foundation_left_spur", kind: "cuboid", position: (-9.0, -0.62, 4.25), scale: (1.00, 1.20, 2.90), material: "mint_side"),
+        (id: "foundation_right_spur", kind: "cuboid", position: (9.0, -0.54, 4.25), scale: (1.00, 1.20, 2.90), material: "peach_side"),
+
+        // Chunky descending layers establish the floating-island silhouette.
+        (id: "underlayer_left_0", kind: "cuboid", position: (-5.15, -1.28, 0.20), scale: (5.65, 1.10, 9.90), material: "under_light"),
+        (id: "underlayer_left_1", kind: "cuboid", position: (-4.95, -2.00, 0.35), scale: (4.70, 0.90, 8.10), material: "under_mid"),
+        (id: "underlayer_left_2", kind: "cuboid", position: (-4.65, -2.62, 0.45), scale: (3.45, 0.70, 5.85), material: "under_shadow"),
+        (id: "underlayer_right_0", kind: "cuboid", position: (5.15, -1.28, 0.20), scale: (5.65, 1.10, 9.90), material: "under_light"),
+        (id: "underlayer_right_1", kind: "cuboid", position: (4.95, -2.00, 0.35), scale: (4.70, 0.90, 8.10), material: "under_mid"),
+        (id: "underlayer_right_2", kind: "cuboid", position: (4.65, -2.62, 0.45), scale: (3.45, 0.70, 5.85), material: "under_shadow"),
+        (id: "underlayer_center_front_0", kind: "cuboid", position: (0.0, -1.35, 5.85), scale: (4.15, 1.12, 2.10), material: "under_light"),
+        (id: "underlayer_center_front_1", kind: "cuboid", position: (0.0, -2.12, 5.95), scale: (3.10, 0.95, 1.62), material: "under_mid"),
+        (id: "underlayer_center_front_2", kind: "cuboid", position: (0.0, -2.85, 6.05), scale: (1.90, 0.72, 1.05), material: "under_shadow"),
+        (id: "underlayer_center_rear", kind: "cuboid", position: (0.0, -1.30, -6.15), scale: (3.50, 1.00, 1.75), material: "under_mid"),
+
+        // Gold lane marks divide the readable combat lanes without adding walls.
+        (id: "lane_left", kind: "cuboid", position: (-5.15, 0.035, 0.0), scale: (0.11, 0.035, 8.30), material: "lane_gold"),
+        (id: "lane_right", kind: "cuboid", position: (5.15, 0.035, 0.0), scale: (0.11, 0.035, 8.30), material: "lane_gold"),
+
+        // Small broken edge blocks keep the silhouette handcrafted and irregular.
+        (id: "edge_block_left_rear", kind: "cuboid", position: (-8.58, 0.10, -4.10), rotation_y: 11.0, scale: (0.62, 0.20, 0.76), material: "mint_2"),
+        (id: "edge_block_left_front", kind: "cuboid", position: (-8.62, 0.08, 3.20), rotation_y: -8.0, scale: (0.72, 0.16, 0.58), material: "mint_1"),
+        (id: "edge_block_right_rear", kind: "cuboid", position: (8.58, 0.09, -3.80), rotation_y: -13.0, scale: (0.66, 0.18, 0.72), material: "peach_2"),
+        (id: "edge_block_right_front", kind: "cuboid", position: (8.62, 0.08, 3.15), rotation_y: 9.0, scale: (0.70, 0.16, 0.60), material: "peach_1"),
+    ],
+
+    lights: [],
+
+    colliders: [
+        // Only the lookout posts and substantial decor block fighters.
+        (id: "lookout_left_rear_left", kind: "circle", center: (-8.02, -2.26), radius: 0.24, top_y: 2.42),
+        (id: "lookout_left_rear_right", kind: "circle", center: (-6.28, -2.26), radius: 0.24, top_y: 2.42),
+        (id: "lookout_left_front_left", kind: "circle", center: (-8.02, -0.64), radius: 0.24, top_y: 2.42),
+        (id: "lookout_left_front_right", kind: "circle", center: (-6.28, -0.64), radius: 0.24, top_y: 2.42),
+        (id: "lookout_right_rear_left", kind: "circle", center: (6.28, -2.26), radius: 0.24, top_y: 2.42),
+        (id: "lookout_right_rear_right", kind: "circle", center: (8.02, -2.26), radius: 0.24, top_y: 2.42),
+        (id: "lookout_right_front_left", kind: "circle", center: (6.28, -0.64), radius: 0.24, top_y: 2.42),
+        (id: "lookout_right_front_right", kind: "circle", center: (8.02, -0.64), radius: 0.24, top_y: 2.42),
+        (id: "pine_left_rear", kind: "circle", center: (-8.05, -4.75), radius: 0.38, top_y: 2.30),
+        (id: "pine_left_front", kind: "circle", center: (-8.88, 4.85), radius: 0.34, top_y: 1.95),
+        (id: "rocks_right_rear", kind: "circle", center: (8.0, -4.75), radius: 0.46, top_y: 1.15),
+        (id: "rocks_right_front", kind: "circle", center: (8.62, 5.12), radius: 0.38, top_y: 0.96),
+    ],
+)

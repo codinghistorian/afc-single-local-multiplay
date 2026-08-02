@@ -485,6 +485,7 @@ pub fn build_app() -> App {
             .after(user_mode::sync_user_mode_ui_camera)
             .after(tutorial::sync_tutorial_ui_camera)
             .after(camera::follow_camera)
+            .before(arena::sync_arena_background_to_camera)
             .in_set(GameSet::Presentation),
     );
 

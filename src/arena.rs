@@ -72,6 +72,7 @@ const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
 const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
+const SPLIT_CAUSEWAY_ARENA_INDEX: usize = 1;
 const CRANK_YARD_ARENA_INDEX: usize = 3;
 const VENT_SPIRAL_ARENA_INDEX: usize = 4;
 const POWDER_KEG_ARENA_INDEX: usize = 9;
@@ -82,6 +83,7 @@ const POWDER_CANNON_INTERVAL_SECONDS: f32 = 2.6;
 const POWDER_CANNON_BOMB_DAMAGE: f32 = 9.0;
 const POWDER_CANNON_BOMB_RADIUS: f32 = 1.05;
 const CHAMPIONS_COURT_RON_PATH: &str = "assets/maps/champions_court.ron";
+const SPLIT_CAUSEWAY_RON_PATH: &str = "assets/maps/split_causeway.ron";
 const TRAINING_GROUND_RON_PATH: &str = "assets/maps/training_ground.ron";
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
@@ -397,6 +399,8 @@ struct AuthoredArenaRon {
     #[serde(default)]
     floor_materials: Vec<String>,
     #[serde(default)]
+    floor_material_regions: Vec<AuthoredFloorMaterialRegion>,
+    #[serde(default)]
     colliders: Vec<AuthoredCollider>,
 }
 
@@ -528,6 +532,13 @@ struct AuthoredFloorPattern {
     bevel: f32,
     #[serde(default)]
     masked_to_gameplay: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredFloorMaterialRegion {
+    min: (f32, f32),
+    max: (f32, f32),
+    materials: Vec<String>,
 }
 
 #[derive(Default)]
@@ -710,7 +721,7 @@ fn spawn_arena_geometry(
 
     if matches!(
         arena_index,
-        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+        CHAMPIONS_COURT_ARENA_INDEX | SPLIT_CAUSEWAY_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
     ) {
         match spawn_authored_arena_map(commands, asset_server, meshes, materials, arena_index) {
             Ok(()) => {
@@ -721,6 +732,7 @@ fn spawn_arena_geometry(
                     arena_index,
                     arena.hazards,
                 );
+                spawn_campfire_props(commands, meshes, materials, arena.hazards);
                 return;
             }
             Err(error) => {
@@ -1197,6 +1209,7 @@ fn load_authored_arena_map(arena_index: usize) -> Result<AuthoredArenaRon, Strin
     {
         let contents = match arena_index {
             CHAMPIONS_COURT_ARENA_INDEX => include_str!("../assets/maps/champions_court.ron"),
+            SPLIT_CAUSEWAY_ARENA_INDEX => include_str!("../assets/maps/split_causeway.ron"),
             TRAINING_GROUND_ARENA_INDEX => include_str!("../assets/maps/training_ground.ron"),
             _ => return Err(format!("arena {arena_index} has no authored scene")),
         };
@@ -1207,6 +1220,7 @@ fn load_authored_arena_map(arena_index: usize) -> Result<AuthoredArenaRon, Strin
     {
         let path = match arena_index {
             CHAMPIONS_COURT_ARENA_INDEX => CHAMPIONS_COURT_RON_PATH,
+            SPLIT_CAUSEWAY_ARENA_INDEX => SPLIT_CAUSEWAY_RON_PATH,
             TRAINING_GROUND_ARENA_INDEX => TRAINING_GROUND_RON_PATH,
             _ => return Err(format!("arena {arena_index} has no authored scene")),
         };
@@ -1465,7 +1479,8 @@ fn spawn_authored_floor_pattern(
     let Some(pattern) = &map.floor_pattern else {
         return;
     };
-    if pattern.rows == 0 || pattern.columns == 0 || map.floor_materials.is_empty() {
+    let floor_material_names = authored_floor_material_names(map);
+    if pattern.rows == 0 || pattern.columns == 0 || floor_material_names.is_empty() {
         warn!("{arena_name} floor pattern needs rows, columns, and materials");
         return;
     }
@@ -1499,8 +1514,23 @@ fn spawn_authored_floor_pattern(
             })
         })
         .collect::<Vec<_>>();
+    let material_region_indices = (0..pattern.rows)
+        .flat_map(|row| {
+            (0..pattern.columns).map(move |column| {
+                let x = -floor_width * 0.5 + (column as f32 + 0.5) * unit_width;
+                let z = -floor_depth * 0.5 + (row as f32 + 0.5) * unit_depth;
+                authored_floor_material_region_index(map, x, z)
+                    .unwrap_or(map.floor_material_regions.len())
+            })
+        })
+        .collect::<Vec<_>>();
     let mut occupied = vec![false; pattern.rows * pattern.columns];
-    let mut buffers = (0..map.floor_materials.len())
+    let material_indices = floor_material_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut buffers = (0..floor_material_names.len())
         .map(|_| AuthoredFloorMeshBuffers::default())
         .collect::<Vec<_>>();
 
@@ -1533,6 +1563,8 @@ fn spawn_authored_floor_pattern(
                 requested_span,
                 &support_heights,
                 support_height,
+                &material_region_indices,
+                material_region_indices[index],
             );
             for occupied_row in row..row + span.1 {
                 for occupied_column in column..column + span.0 {
@@ -1544,7 +1576,21 @@ fn spawn_authored_floor_pattern(
             let depth = unit_depth * span.1 as f32 - gap;
             let x = -floor_width * 0.5 + (column as f32 + span.0 as f32 * 0.5) * unit_width;
             let z = -floor_depth * 0.5 + (row as f32 + span.1 as f32 * 0.5) * unit_depth;
-            let variant = authored_floor_hash(row, column, 1) % buffers.len();
+            let region_index = material_region_indices[index];
+            let material_choices = map
+                .floor_material_regions
+                .get(region_index)
+                .map(|region| region.materials.as_slice())
+                .filter(|materials| !materials.is_empty())
+                .unwrap_or(&map.floor_materials);
+            let material_name =
+                &material_choices[authored_floor_hash(row, column, 1) % material_choices.len()];
+            let Some(&variant) = material_indices.get(material_name.as_str()) else {
+                warn!(
+                    "{arena_name} floor region references unregistered material '{material_name}'"
+                );
+                continue;
+            };
             let height_step = (authored_floor_hash(row, column, 2) % 4) as f32;
             let height = 0.09 + height_step * 0.004;
             let top_y = support_height - ARENA_TOP_Y + height_step * 0.0012;
@@ -1561,7 +1607,7 @@ fn spawn_authored_floor_pattern(
         if buffers.indices.is_empty() {
             continue;
         }
-        let material_name = &map.floor_materials[material_index];
+        let material_name = &floor_material_names[material_index];
         let Some(material) = material_handles.get(material_name) else {
             warn!("{arena_name} floor pattern references missing material '{material_name}'");
             continue;
@@ -1584,6 +1630,30 @@ fn spawn_authored_floor_pattern(
     }
 }
 
+fn authored_floor_material_names(map: &AuthoredArenaRon) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in map.floor_materials.iter().chain(
+        map.floor_material_regions
+            .iter()
+            .flat_map(|region| region.materials.iter()),
+    ) {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+fn authored_floor_material_region_index(map: &AuthoredArenaRon, x: f32, z: f32) -> Option<usize> {
+    map.floor_material_regions.iter().position(|region| {
+        !region.materials.is_empty()
+            && x >= region.min.0
+            && x <= region.max.0
+            && z >= region.min.1
+            && z <= region.max.1
+    })
+}
+
 fn authored_floor_hash(row: usize, column: usize, salt: usize) -> usize {
     let mut value = (row as u32).wrapping_mul(0x9E37_79B9)
         ^ (column as u32).wrapping_mul(0x85EB_CA6B)
@@ -1604,6 +1674,8 @@ fn authored_floor_available_span(
     requested: (usize, usize),
     support_heights: &[Option<f32>],
     target_height: f32,
+    material_region_indices: &[usize],
+    target_material_region: usize,
 ) -> (usize, usize) {
     for depth in (1..=requested.1.min(rows - row)).rev() {
         for width in (1..=requested.0.min(columns - column)).rev() {
@@ -1611,6 +1683,7 @@ fn authored_floor_available_span(
                 (column..column + width).all(|candidate_column| {
                     let index = candidate_row * columns + candidate_column;
                     !occupied[index]
+                        && material_region_indices[index] == target_material_region
                         && support_heights[index]
                             .is_some_and(|height| (height - target_height).abs() < 0.001)
                 })
@@ -2301,7 +2374,7 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     // Authored RON scenes are rendered instead of their fallback prop lists.
     if matches!(
         arena_index,
-        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+        CHAMPIONS_COURT_ARENA_INDEX | SPLIT_CAUSEWAY_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
     ) {
         &[]
     } else {
@@ -2323,6 +2396,7 @@ fn authored_arena_collision_barriers(arena_index: usize) -> &'static [WorldPropB
 fn build_authored_arena_collision_barriers(arena_index: usize) -> Vec<WorldPropBarrier> {
     let contents = match arena_index {
         CHAMPIONS_COURT_ARENA_INDEX => include_str!("../assets/maps/champions_court.ron"),
+        SPLIT_CAUSEWAY_ARENA_INDEX => include_str!("../assets/maps/split_causeway.ron"),
         TRAINING_GROUND_ARENA_INDEX => include_str!("../assets/maps/training_ground.ron"),
         _ => return Vec::new(),
     };
@@ -2444,7 +2518,9 @@ fn arena_collision_worlds() -> &'static [ArenaCollisionWorld] {
                     .collect();
                 if matches!(
                     arena_index,
-                    CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+                    CHAMPIONS_COURT_ARENA_INDEX
+                        | SPLIT_CAUSEWAY_ARENA_INDEX
+                        | TRAINING_GROUND_ARENA_INDEX
                 ) {
                     prop_barriers.extend(
                         authored_arena_collision_barriers(arena_index)
@@ -5356,6 +5432,12 @@ mod tests {
             );
             assert!(normal.dot(to_camera) > 0.999, "{}", arena.name);
         }
+
+        let split_wallpaper = arena_background_wallpaper_size(
+            arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].background,
+        );
+        assert!(split_wallpaper.x >= 126.0);
+        assert!(split_wallpaper.y >= 84.0);
     }
 
     #[test]
@@ -5687,6 +5769,105 @@ mod tests {
     }
 
     #[test]
+    fn split_causeway_ron_parses_with_reference_scene_content() {
+        let map = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+        assert_eq!(map.map.tile_size, 1.0);
+        assert_eq!(map.map.floor_width, 19.0);
+        assert_eq!(map.map.floor_depth, 14.8);
+        assert!(map.assets.is_empty());
+        assert!(map.instances.is_empty());
+        assert!(map.floor_shapes.is_empty());
+        assert!(map.materials.contains_key("mint_0"));
+        assert!(map.materials.contains_key("peach_0"));
+        assert!(map.materials.contains_key("bridge_0"));
+        assert_eq!(map.floor_material_regions.len(), 7);
+
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("Split Causeway should use authored low-poly paving");
+        assert_eq!((floor_pattern.rows, floor_pattern.columns), (16, 22));
+        assert_eq!(floor_pattern.gap, 0.025);
+        assert_eq!(floor_pattern.bevel, 0.035);
+        assert!(floor_pattern.masked_to_gameplay);
+
+        assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "lookout_cage")
+                .count(),
+            2
+        );
+        assert_eq!(
+            map.primitives
+                .iter()
+                .filter(|primitive| primitive.id.starts_with("foundation_"))
+                .count(),
+            9
+        );
+        assert!(map.lights.is_empty());
+        assert_eq!(map.colliders.len(), 12);
+    }
+
+    #[test]
+    fn split_causeway_floor_regions_preserve_mint_peach_and_neutral_zones() {
+        let map = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+
+        for (point, family) in [
+            (Vec2::new(-5.35, 0.0), "mint_"),
+            (Vec2::new(5.35, 0.0), "peach_"),
+            (Vec2::new(0.0, -6.2), "peach_"),
+            (Vec2::new(0.0, -3.35), "bridge_"),
+            (Vec2::new(0.0, 0.0), "mint_"),
+            (Vec2::new(0.0, 3.15), "bridge_"),
+            (Vec2::new(0.0, 5.9), "peach_"),
+        ] {
+            let region_index = authored_floor_material_region_index(&map, point.x, point.y)
+                .expect("reference zone should have an explicit material region");
+            assert!(
+                map.floor_material_regions[region_index]
+                    .materials
+                    .iter()
+                    .all(|material| material.starts_with(family)),
+                "floor at {point:?} should use the {family} family"
+            );
+        }
+
+        let material_names = authored_floor_material_names(&map);
+        assert_eq!(material_names.len(), 9);
+        assert!(material_names.iter().any(|name| name == "mint_2"));
+        assert!(material_names.iter().any(|name| name == "peach_2"));
+        assert!(material_names.iter().any(|name| name == "bridge_2"));
+    }
+
+    #[test]
+    fn split_causeway_authored_barriers_cover_both_lookout_cages() {
+        let barriers = authored_arena_collision_barriers(SPLIT_CAUSEWAY_ARENA_INDEX);
+        assert_eq!(barriers.len(), 12);
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.definition.center.x < -6.0)
+                .count(),
+            6
+        );
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.definition.center.x > 6.0)
+                .count(),
+            6
+        );
+        assert!(
+            barriers
+                .iter()
+                .all(|barrier| barrier.behavior == PropBarrierBehavior::Solid)
+        );
+    }
+
+    #[test]
     fn crown_floor_pattern_masks_voids_and_separates_terrace_heights() {
         assert_eq!(
             authored_floor_cell_support_height(
@@ -5756,6 +5937,29 @@ mod tests {
             .expect("Training Ground should have a floor foundation");
         let foundation_top = champions_stage_y(foundation.position.1) + foundation.scale.1 * 0.5;
         assert!(ARENA_TOP_Y - foundation_top >= 0.019);
+
+        let split = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+        let mut split_foundations = 0;
+        for primitive in &split.primitives {
+            if !primitive.id.starts_with("foundation_") {
+                continue;
+            }
+            split_foundations += 1;
+            let support_y = authored_walkable_height_at(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                primitive.position.0,
+                primitive.position.2,
+            )
+            .expect("every Split Causeway foundation should have gameplay support");
+            let foundation_top = champions_stage_y(primitive.position.1) + primitive.scale.1 * 0.5;
+            assert!(
+                support_y - foundation_top >= 0.019,
+                "{} top {foundation_top} must stay below paver support {support_y}",
+                primitive.id
+            );
+        }
+        assert_eq!(split_foundations, 9);
     }
 
     #[test]

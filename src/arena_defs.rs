@@ -169,8 +169,15 @@ const CROWN_RING_BACKGROUND: ArenaBackgroundDefinition = ArenaBackgroundDefiniti
     distance: 52.0,
     gameplay_visible: true,
 };
-const SPLIT_CAUSEWAY_BACKGROUND: ArenaBackgroundDefinition =
-    arena_background("backgrounds/split_causeway.png");
+const SPLIT_CAUSEWAY_BACKGROUND: ArenaBackgroundDefinition = ArenaBackgroundDefinition {
+    asset_path: "backgrounds/split_causeway.png",
+    image_size: Vec2::new(1536.0, 1024.0),
+    // Preserve the authored 3:2 image while overscanning enough to cover
+    // gameplay and arena-preview cameras without exposing the wallpaper edges.
+    world_height: 84.0,
+    distance: 52.0,
+    gameplay_visible: true,
+};
 const SUNSTONE_STEPS_BACKGROUND: ArenaBackgroundDefinition =
     arena_background("backgrounds/sunstone_steps.png");
 const CRANK_YARD_BACKGROUND: ArenaBackgroundDefinition =
@@ -207,11 +214,19 @@ const CROWN_GROUND: &[ArenaGroundShape] = &[
 ];
 
 const SPLIT_GROUND: &[ArenaGroundShape] = &[
-    ArenaGroundShape::rectangle(-4.7, 0.0, 3.0, 6.5, 0.0, ARENA_TOP_Y),
-    ArenaGroundShape::rectangle(4.7, 0.0, 3.0, 6.5, 0.0, ARENA_TOP_Y),
-    ArenaGroundShape::rectangle(0.0, 0.0, 1.75, 6.5, 0.0, ARENA_TOP_Y - 0.12),
-    ArenaGroundShape::rectangle(0.0, 4.7, 2.0, 1.15, 0.0, ARENA_TOP_Y + 0.04),
-    ArenaGroundShape::rectangle(0.0, -4.7, 2.0, 1.15, 0.0, ARENA_TOP_Y + 0.04),
+    // Broad mint and sandstone decks.
+    ArenaGroundShape::rectangle(-5.35, 0.0, 3.15, 5.7, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(5.35, 0.0, 3.15, 5.7, 0.0, ARENA_TOP_Y),
+    // Rear pad, narrow bridge, center pad, narrow bridge, and front pad.
+    // The one-unit channels beside both bridges are intentional ring-out gaps.
+    ArenaGroundShape::rectangle(0.0, -6.2, 2.2, 1.2, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, -3.35, 1.15, 1.65, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, 0.0, 2.2, 1.7, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, 3.15, 1.15, 1.45, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(0.0, 5.9, 2.5, 1.3, 0.0, ARENA_TOP_Y),
+    // Camera-near lookout ledges complete the asymmetric reference silhouette.
+    ArenaGroundShape::rectangle(-9.0, 4.25, 0.5, 1.45, 0.0, ARENA_TOP_Y),
+    ArenaGroundShape::rectangle(9.0, 4.25, 0.5, 1.45, 0.0, ARENA_TOP_Y),
 ];
 
 const SUNSTONE_GROUND: &[ArenaGroundShape] = &[
@@ -359,31 +374,31 @@ const CROWN_ITEMS: &[ItemAnchor] = &[
 ];
 
 const SPLIT_PLATFORMS: &[PlatformDefinition] = &[
-    PlatformDefinition::new(-4.8, 0.0, 2.1, 5.8, ARENA_TOP_Y - 0.04),
-    PlatformDefinition::new(4.8, 0.0, 2.1, 5.8, ARENA_TOP_Y - 0.04),
-    PlatformDefinition::new(0.0, 6.8, 2.8, 1.2, ARENA_TOP_Y + 0.24),
-    PlatformDefinition::new(0.0, -6.8, 2.8, 1.2, ARENA_TOP_Y + 0.24),
+    PlatformDefinition::new(0.0, -6.2, 2.2, 1.2, ARENA_TOP_Y + 0.24),
+    PlatformDefinition::new(0.0, 0.0, 2.2, 1.7, ARENA_TOP_Y + 0.16),
+    PlatformDefinition::new(0.0, 5.9, 2.5, 1.3, ARENA_TOP_Y + 0.12),
+    PlatformDefinition::new(9.0, 4.25, 0.5, 1.45, ARENA_TOP_Y + 0.08),
 ];
 
 const SPLIT_ITEMS: &[ItemAnchor] = &[
     ItemAnchor {
         kind: ItemKind::Barrel,
-        position: Vec3::new(-4.8, ARENA_TOP_Y + 0.44, 0.0),
+        position: Vec3::new(-6.5, ARENA_TOP_Y + 0.44, -1.0),
         phase: 0.4,
     },
     ItemAnchor {
         kind: ItemKind::Mushroom,
-        position: Vec3::new(4.8, ARENA_TOP_Y + 0.5, 0.0),
+        position: Vec3::new(6.5, ARENA_TOP_Y + 0.5, -1.0),
         phase: 2.0,
     },
     ItemAnchor {
         kind: ItemKind::Steamer,
-        position: Vec3::new(0.0, ARENA_TOP_Y + 0.46, 6.8),
+        position: Vec3::new(-5.0, ARENA_TOP_Y + 0.46, 4.0),
         phase: 3.6,
     },
     ItemAnchor {
         kind: ItemKind::CupCoffee,
-        position: Vec3::new(0.0, ARENA_TOP_Y + 0.5, -6.8),
+        position: Vec3::new(5.0, ARENA_TOP_Y + 0.5, 4.0),
         phase: 5.2,
     },
 ];
@@ -710,17 +725,31 @@ const CROWN_HAZARDS: &[ArenaHazardDefinition] = &[];
 const SPLIT_HAZARDS: &[ArenaHazardDefinition] = &[
     ArenaHazardDefinition {
         kind: ArenaHazardKind::Campfire,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.07, 4.7),
-        radius: 1.05,
+        center: Vec3::new(0.0, ARENA_TOP_Y + 0.31, -6.2),
+        radius: 0.85,
         pulse_seconds: 1.4,
         phase: 0.0,
     },
     ArenaHazardDefinition {
         kind: ArenaHazardKind::Campfire,
-        center: Vec3::new(0.0, ARENA_TOP_Y + 0.07, -4.7),
-        radius: 1.05,
+        center: Vec3::new(0.0, ARENA_TOP_Y + 0.23, 0.0),
+        radius: 0.85,
+        pulse_seconds: 1.4,
+        phase: 0.35,
+    },
+    ArenaHazardDefinition {
+        kind: ArenaHazardKind::Campfire,
+        center: Vec3::new(0.0, ARENA_TOP_Y + 0.19, 5.9),
+        radius: 0.85,
         pulse_seconds: 1.4,
         phase: 0.7,
+    },
+    ArenaHazardDefinition {
+        kind: ArenaHazardKind::Campfire,
+        center: Vec3::new(9.0, ARENA_TOP_Y + 0.15, 4.25),
+        radius: 0.85,
+        pulse_seconds: 1.4,
+        phase: 1.05,
     },
 ];
 
@@ -830,10 +859,10 @@ const ARENAS: &[ArenaDefinition] = &[
     ArenaDefinition {
         name: "Split Causeway",
         spawn_points: [
-            Vec3::new(-5.1, ARENA_TOP_Y, 2.8),
-            Vec3::new(5.1, ARENA_TOP_Y, 2.8),
-            Vec3::new(-5.1, ARENA_TOP_Y, -2.8),
-            Vec3::new(5.1, ARENA_TOP_Y, -2.8),
+            Vec3::new(-5.4, ARENA_TOP_Y, 2.3),
+            Vec3::new(5.4, ARENA_TOP_Y, 2.3),
+            Vec3::new(-5.4, ARENA_TOP_Y, -2.3),
+            Vec3::new(5.4, ARENA_TOP_Y, -2.3),
         ],
         item_anchors: SPLIT_ITEMS,
         ground_shapes: SPLIT_GROUND,
@@ -841,7 +870,8 @@ const ARENAS: &[ArenaDefinition] = &[
         pipe_pair: None,
         ringout_radius: RINGOUT_RADIUS + 1.0,
         ringout_y: RINGOUT_Y,
-        camera_offset: Vec3::new(0.0, 13.0, 15.2),
+        // Standard gameplay pitch, moved back to frame the wider authored island.
+        camera_offset: Vec3::new(0.0, 15.7, 17.8),
         hazards: SPLIT_HAZARDS,
         background: SPLIT_CAUSEWAY_BACKGROUND,
         visual_theme: ArenaVisualTheme::Causeway,
@@ -1033,6 +1063,17 @@ pub(crate) fn arena_lighting_profile(index: usize) -> ArenaLightingProfile {
             point_intensity: 1_200_000.0,
             point_range: 36.0,
             point_position: Vec3::new(0.0, 11.0, 5.0),
+        },
+        ArenaVisualTheme::Causeway => ArenaLightingProfile {
+            ambient_color: Color::srgb(0.78, 0.74, 0.68),
+            ambient_brightness: 330.0,
+            directional_color: Color::srgb(1.0, 0.87, 0.72),
+            directional_illuminance: 13_500.0,
+            directional_position: Vec3::new(-7.0, 15.0, 9.0),
+            point_color: Color::srgb(1.0, 0.58, 0.28),
+            point_intensity: 650_000.0,
+            point_range: 30.0,
+            point_position: Vec3::new(0.0, 10.0, 3.0),
         },
         ArenaVisualTheme::Training => ArenaLightingProfile {
             ambient_color: Color::srgb(0.68, 0.64, 0.58),
@@ -1243,18 +1284,76 @@ mod tests {
     }
 
     #[test]
-    fn split_causeway_uses_two_symmetric_campfires() {
+    fn split_causeway_places_four_campfires_on_raised_reference_pads() {
         let split = arena_definition(1);
-        assert_eq!(split.hazards.len(), 2);
+        assert_eq!(split.hazards.len(), 4);
         assert!(
             split
                 .hazards
                 .iter()
-                .all(|hazard| hazard.kind == ArenaHazardKind::Campfire)
+                .all(|hazard| hazard.kind == ArenaHazardKind::Campfire
+                    && (hazard.radius - 0.85).abs() < 0.001
+                    && (hazard.pulse_seconds - 1.4).abs() < 0.001)
         );
-        assert_eq!(split.hazards[0].center.x, 0.0);
-        assert_eq!(split.hazards[1].center.x, 0.0);
-        assert_eq!(split.hazards[0].center.z, -split.hazards[1].center.z);
+        assert_eq!(
+            split
+                .hazards
+                .iter()
+                .map(|hazard| (hazard.center.x, hazard.center.z, hazard.phase))
+                .collect::<Vec<_>>(),
+            vec![
+                (0.0, -6.2, 0.0),
+                (0.0, 0.0, 0.35),
+                (0.0, 5.9, 0.7),
+                (9.0, 4.25, 1.05),
+            ]
+        );
+
+        for hazard in split.hazards {
+            let support = crate::arena::ground_support_for_arena_with_radius(
+                split,
+                hazard.center.x,
+                hazard.center.z,
+                0.0,
+            )
+            .height()
+            .expect("every campfire should sit on a raised pad");
+            assert!((hazard.center.y - support - 0.07).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn split_causeway_matches_reference_decks_bridges_and_ringout_gaps() {
+        let split = arena_definition(1);
+        assert_eq!(split.ground_shapes.len(), 9);
+        assert_eq!(split.platforms.len(), 4);
+
+        for (x, z) in [
+            (-5.35, 0.0),
+            (5.35, 0.0),
+            (0.0, -6.2),
+            (0.0, -3.35),
+            (0.0, 0.0),
+            (0.0, 3.15),
+            (0.0, 5.9),
+            (-9.0, 4.25),
+            (9.0, 4.25),
+        ] {
+            assert!(
+                crate::arena::ground_support_for_arena_with_radius(split, x, z, 0.0)
+                    .height()
+                    .is_some(),
+                "reference deck point ({x}, {z}) should be walkable"
+            );
+        }
+
+        for (x, z) in [(-1.65, -3.35), (1.65, -3.35), (-1.65, 3.15), (1.65, 3.15)] {
+            assert_eq!(
+                crate::arena::ground_support_for_arena_with_radius(split, x, z, 0.0).height(),
+                None,
+                "reference opening ({x}, {z}) should remain a real ring-out gap"
+            );
+        }
     }
 
     #[test]
