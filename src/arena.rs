@@ -2775,31 +2775,31 @@ pub fn sync_arena_lighting(
 
     let training = scene.index == TRAINING_GROUND_ARENA_INDEX;
     if training {
-        ambient.color = Color::srgb(0.48, 0.40, 0.33);
-        ambient.brightness = 150.0;
+        ambient.color = Color::srgb(0.68, 0.64, 0.58);
+        ambient.brightness = 220.0;
     } else {
         ambient.color = Color::srgb(0.85, 0.78, 0.68);
         ambient.brightness = 430.0;
     }
 
     for mut light in &mut directional_lights {
-        light.illuminance = if training { 3_600.0 } else { 12_500.0 };
+        light.illuminance = if training { 8_000.0 } else { 12_500.0 };
         light.color = if training {
-            Color::srgb(1.0, 0.88, 0.72)
+            Color::srgb(1.0, 0.96, 0.90)
         } else {
             Color::WHITE
         };
     }
     for (mut light, mut transform) in &mut point_lights {
-        light.intensity = if training { 5_800_000.0 } else { 1_100_000.0 };
-        light.range = if training { 18.0 } else { 36.0 };
+        light.intensity = if training { 1_600_000.0 } else { 1_100_000.0 };
+        light.range = if training { 20.0 } else { 36.0 };
         light.color = if training {
-            Color::srgb(0.98, 0.77, 0.52)
+            Color::srgb(1.0, 0.86, 0.70)
         } else {
             Color::WHITE
         };
         transform.translation = if training {
-            Vec3::new(0.0, 5.0, 0.0)
+            Vec3::new(0.0, 8.0, 4.0)
         } else {
             Vec3::new(0.0, 9.0, 4.5)
         };
@@ -5191,7 +5191,7 @@ mod tests {
     }
 
     #[test]
-    fn training_ground_has_the_reference_perimeter_and_decor() {
+    fn training_ground_has_the_low_poly_reference_perimeter_and_decor() {
         let map = load_authored_arena_map(TRAINING_GROUND_ARENA_INDEX)
             .expect("training ground RON should parse");
         let instances = &map.primitive_prefab_instances;
@@ -5209,20 +5209,6 @@ mod tests {
                 .count(),
             4
         );
-        let gate = instances
-            .iter()
-            .find(|instance| instance.id == "gate")
-            .expect("training ground should have a main gate");
-        assert!(gate.position.2 < 0.0, "gate must be on the camera-far side");
-        let floor_pattern = map
-            .floor_pattern
-            .as_ref()
-            .expect("training ground should use the dense paving pattern");
-        assert!(floor_pattern.rows >= 40);
-        assert!(floor_pattern.columns >= 40);
-        assert!(floor_pattern.gap > 0.0);
-        assert!(floor_pattern.bevel > 0.0);
-        assert!(map.floor_rows.is_empty());
         assert_eq!(
             instances
                 .iter()
@@ -5230,6 +5216,31 @@ mod tests {
                 .count(),
             16
         );
+        let gate = instances
+            .iter()
+            .find(|instance| instance.id == "gate")
+            .expect("training ground should have a main gate");
+        assert!(gate.position.2 < 0.0, "gate must be on the camera-far side");
+
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("training ground should use low-poly paving");
+        assert_eq!((floor_pattern.rows, floor_pattern.columns), (30, 30));
+        assert_eq!(floor_pattern.gap, 0.025);
+        assert_eq!(floor_pattern.bevel, 0.045);
+        assert_eq!(map.floor_materials.len(), 3);
+        assert!(map.floor_rows.is_empty());
+
+        assert_eq!(map.colliders.len(), 4);
+        assert_eq!(
+            map.lights
+                .iter()
+                .filter(|light| light.kind == "point")
+                .count(),
+            6
+        );
+        assert!(map.lights.iter().all(|light| light.intensity <= 100.0));
         for corner in [
             "torch_corner_far_west",
             "torch_corner_far_east",
@@ -5246,15 +5257,6 @@ mod tests {
             assert!(tower.position.0.abs() < 9.0);
             assert!(tower.position.2 < 9.0);
         }
-        assert_eq!(map.colliders.len(), 4);
-        assert_eq!(
-            map.lights
-                .iter()
-                .filter(|light| light.kind == "point")
-                .count(),
-            6
-        );
-        assert!(map.floor_materials.len() >= 4);
     }
 
     #[test]

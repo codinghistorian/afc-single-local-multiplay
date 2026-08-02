@@ -1,4 +1,4 @@
-// Training Ground authored from the square arena0 reference.
+// Low-poly, character-led Training Ground authored from the square arena0 reference.
 // X is left/right, +Z is camera-near, and -Z is the far gate side.
 (
     schema_version: 1,
@@ -14,16 +14,14 @@
     prefab_instances: [],
 
     materials: {
-        "floor_0": (color: (0.58, 0.43, 0.27), roughness: 0.99),
-        "floor_1": (color: (0.62, 0.47, 0.29), roughness: 0.98),
-        "floor_2": (color: (0.66, 0.50, 0.31), roughness: 0.97),
-        "floor_3": (color: (0.54, 0.40, 0.25), roughness: 0.99),
-        "floor_4": (color: (0.70, 0.54, 0.34), roughness: 0.96),
-        "grout": (color: (0.40, 0.29, 0.18), roughness: 1.0),
-        "stone_dark": (color: (0.20, 0.18, 0.16), roughness: 0.99),
-        "stone_mid": (color: (0.29, 0.26, 0.22), roughness: 0.98),
-        "stone_warm": (color: (0.37, 0.31, 0.24), roughness: 0.97),
-        "stone_light": (color: (0.45, 0.39, 0.31), roughness: 0.96),
+        "floor_0": (color: (0.48, 0.40, 0.32), roughness: 0.99),
+        "floor_1": (color: (0.52, 0.44, 0.35), roughness: 0.98),
+        "floor_2": (color: (0.56, 0.47, 0.37), roughness: 0.97),
+        "grout": (color: (0.37, 0.32, 0.27), roughness: 1.0),
+        "stone_dark": (color: (0.18, 0.17, 0.16), roughness: 0.99),
+        "stone_mid": (color: (0.30, 0.28, 0.25), roughness: 0.98),
+        "stone_warm": (color: (0.37, 0.33, 0.28), roughness: 0.97),
+        "stone_light": (color: (0.46, 0.42, 0.36), roughness: 0.96),
         "wood": (color: (0.16, 0.075, 0.028), roughness: 0.96),
         "pottery": (color: (0.23, 0.095, 0.035), roughness: 0.94),
         "foliage_dark": (color: (0.075, 0.12, 0.042), roughness: 1.0),
@@ -41,28 +39,27 @@
             roughness: 0.24,
         ),
     },
-    floor_materials: ["floor_0", "floor_1", "floor_2", "floor_3", "floor_4"],
+    floor_materials: ["floor_0", "floor_1", "floor_2"],
     floor_rows: [],
-    // The new painting is built from a dense grid of small rounded pavers, with
-    // deterministic 2x1, 2x2, 3x2, and rare 3x3 stones mixed into the field.
+    // Broader pavers and subdued grout match the fighters' large, readable forms.
     floor_pattern: Some((
-        rows: 48,
-        columns: 48,
-        gap: 0.036,
-        bevel: 0.028,
+        rows: 30,
+        columns: 30,
+        gap: 0.025,
+        bevel: 0.045,
     )),
 
     primitive_prefabs: {
         "wall_segment": [
-            (kind: "cuboid", position: (0.0, 0.18, 0.0), scale: (1.50, 0.36, 0.54), material: "stone_dark"),
-            (kind: "cuboid", position: (-0.38, 0.47, 0.0), scale: (0.72, 0.28, 0.48), material: "stone_mid"),
-            (kind: "cuboid", position: (0.38, 0.48, 0.0), scale: (0.72, 0.30, 0.48), material: "stone_warm"),
+            (kind: "cuboid", position: (0.0, 0.225, 0.0), scale: (1.50, 0.45, 0.54), material: "stone_dark"),
+            (kind: "cuboid", position: (-0.38, 0.5875, 0.0), scale: (0.72, 0.35, 0.48), material: "stone_mid"),
+            (kind: "cuboid", position: (0.38, 0.60, 0.0), scale: (0.72, 0.375, 0.48), material: "stone_warm"),
         ],
         "buttress": [
-            (kind: "cuboid", position: (0.0, 0.16, 0.0), scale: (0.82, 0.32, 0.88), material: "stone_dark"),
-            (kind: "cuboid", position: (0.0, 0.49, 0.0), scale: (0.58, 0.52, 0.62), material: "stone_mid"),
-            (kind: "cuboid", position: (0.0, 0.78, 0.0), scale: (0.72, 0.16, 0.72), material: "stone_light"),
-            (kind: "cuboid", position: (0.0, 0.96, 0.0), scale: (0.48, 0.22, 0.50), material: "stone_warm"),
+            (kind: "cuboid", position: (0.0, 0.20, 0.0), scale: (0.82, 0.40, 0.88), material: "stone_dark"),
+            (kind: "cuboid", position: (0.0, 0.6125, 0.0), scale: (0.58, 0.65, 0.62), material: "stone_mid"),
+            (kind: "cuboid", position: (0.0, 0.975, 0.0), scale: (0.72, 0.20, 0.72), material: "stone_light"),
+            (kind: "cuboid", position: (0.0, 1.20, 0.0), scale: (0.48, 0.275, 0.50), material: "stone_warm"),
         ],
         "torch_tower": [
             (kind: "cuboid", position: (0.0, 0.18, 0.0), scale: (1.02, 0.36, 1.02), material: "stone_dark"),
@@ -86,13 +83,13 @@
             (kind: "cuboid", position: (-0.18, 0.41, 0.0), scale: (0.35, 0.06, 0.35), material: "stone_dark"),
         ],
         "gate_arch": [
-            (kind: "cuboid", position: (-0.76, 0.62, 0.0), scale: (0.56, 1.24, 0.64), material: "stone_mid"),
-            (kind: "cuboid", position: (0.76, 0.62, 0.0), scale: (0.56, 1.24, 0.64), material: "stone_mid"),
-            (kind: "cuboid", position: (0.0, 1.34, 0.0), scale: (2.08, 0.34, 0.68), material: "stone_warm"),
-            (kind: "cuboid", position: (-0.57, 1.58, 0.0), scale: (0.58, 0.24, 0.62), material: "stone_light"),
-            (kind: "cuboid", position: (0.0, 1.60, 0.0), scale: (0.54, 0.28, 0.64), material: "stone_mid"),
-            (kind: "cuboid", position: (0.57, 1.58, 0.0), scale: (0.58, 0.24, 0.62), material: "stone_light"),
-            (kind: "cuboid", position: (0.0, 0.57, -0.34), scale: (0.90, 1.04, 0.06), material: "void"),
+            (kind: "cuboid", position: (-0.76, 0.775, 0.0), scale: (0.56, 1.55, 0.64), material: "stone_mid"),
+            (kind: "cuboid", position: (0.76, 0.775, 0.0), scale: (0.56, 1.55, 0.64), material: "stone_mid"),
+            (kind: "cuboid", position: (0.0, 1.675, 0.0), scale: (2.08, 0.425, 0.68), material: "stone_warm"),
+            (kind: "cuboid", position: (-0.57, 1.975, 0.0), scale: (0.58, 0.30, 0.62), material: "stone_light"),
+            (kind: "cuboid", position: (0.0, 2.00, 0.0), scale: (0.54, 0.35, 0.64), material: "stone_mid"),
+            (kind: "cuboid", position: (0.57, 1.975, 0.0), scale: (0.58, 0.30, 0.62), material: "stone_light"),
+            (kind: "cuboid", position: (0.0, 0.7125, -0.34), scale: (0.90, 1.30, 0.06), material: "void"),
         ],
     },
 
@@ -191,12 +188,12 @@
     ],
 
     lights: [
-        (id: "torch_corner_far_west", kind: "point", position: (-9.30, 1.62, -9.30), color: (1.0, 0.34, 0.055), intensity: 165.0, range: 4.6, shadows: false),
-        (id: "torch_corner_far_east", kind: "point", position: (9.30, 1.62, -9.30), color: (1.0, 0.34, 0.055), intensity: 165.0, range: 4.6, shadows: false),
-        (id: "torch_corner_near_west", kind: "point", position: (-8.45, 1.62, 8.62), color: (1.0, 0.34, 0.055), intensity: 165.0, range: 4.6, shadows: false),
-        (id: "torch_corner_near_east", kind: "point", position: (8.45, 1.62, 8.62), color: (1.0, 0.34, 0.055), intensity: 165.0, range: 4.6, shadows: false),
-        (id: "torch_gate_west", kind: "point", position: (-1.55, 1.44, -9.38), color: (1.0, 0.38, 0.065), intensity: 150.0, range: 4.4, shadows: false),
-        (id: "torch_gate_east", kind: "point", position: (1.55, 1.44, -9.38), color: (1.0, 0.38, 0.065), intensity: 150.0, range: 4.4, shadows: false),
+        (id: "torch_corner_far_west", kind: "point", position: (-9.30, 1.62, -9.30), color: (1.0, 0.34, 0.055), intensity: 100.0, range: 4.6, shadows: false),
+        (id: "torch_corner_far_east", kind: "point", position: (9.30, 1.62, -9.30), color: (1.0, 0.34, 0.055), intensity: 100.0, range: 4.6, shadows: false),
+        (id: "torch_corner_near_west", kind: "point", position: (-8.45, 1.62, 8.62), color: (1.0, 0.34, 0.055), intensity: 100.0, range: 4.6, shadows: false),
+        (id: "torch_corner_near_east", kind: "point", position: (8.45, 1.62, 8.62), color: (1.0, 0.34, 0.055), intensity: 100.0, range: 4.6, shadows: false),
+        (id: "torch_gate_west", kind: "point", position: (-1.55, 1.44, -9.38), color: (1.0, 0.38, 0.065), intensity: 90.0, range: 4.4, shadows: false),
+        (id: "torch_gate_east", kind: "point", position: (1.55, 1.44, -9.38), color: (1.0, 0.38, 0.065), intensity: 90.0, range: 4.4, shadows: false),
     ],
 
     // The low decorative wall is a continuous gameplay boundary.

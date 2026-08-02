@@ -4373,7 +4373,7 @@ pub fn handle_user_mode_input(
     let keyboard_action = before_device_join
         .then(|| keyboard_user_mode_action(&user_mode, &keys))
         .flatten()
-        .or_else(|| single_player_enter_action(&user_mode, &keys));
+        .or_else(|| keyboard_menu_confirm_action(&user_mode, &keys));
     let action = pointer_action
         .or(device_action)
         .or(keyboard_action)
@@ -6267,19 +6267,28 @@ fn keyboard_user_mode_action(
     }
 }
 
-fn single_player_enter_action(
+fn keyboard_menu_confirm_action(
     user_mode: &UserModeState,
     keys: &ButtonInput<KeyCode>,
 ) -> Option<UserModeUiAction> {
-    (user_mode.play_mode == UserPlayMode::SinglePlayer
-        && matches!(
-            user_mode.screen,
-            UserModeScreen::CharacterSelect
-                | UserModeScreen::ArenaSelect
-                | UserModeScreen::ControlsBriefing
-        )
-        && keys.just_pressed(KeyCode::Enter))
-    .then_some(UserModeUiAction::Confirm)
+    if !keys.just_pressed(KeyCode::Enter) {
+        return None;
+    }
+
+    let confirmable = matches!(
+        user_mode.screen,
+        UserModeScreen::ModeSelect
+            | UserModeScreen::PlayerCountSelect
+            | UserModeScreen::ControlsHub
+            | UserModeScreen::SoundSettings
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::KeySettings
+            | UserModeScreen::ControlsBriefing
+    ) || (user_mode.screen == UserModeScreen::BattleResult
+        && user_mode.result_menu_ready);
+
+    confirmable.then_some(UserModeUiAction::Confirm)
 }
 
 fn select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -7716,42 +7725,60 @@ mod tests {
     }
 
     #[test]
-    fn enter_confirms_single_player_character_arena_and_fight() {
+    fn enter_confirms_user_mode_menu_actions() {
         let mut user_mode = UserModeState::default();
-        user_mode.play_mode = UserPlayMode::SinglePlayer;
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::Enter);
 
-        user_mode.enter_character_select();
-        let character_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(character_action, Some(UserModeUiAction::Confirm));
-        assert_eq!(
-            route_user_mode_action(&mut user_mode, character_action.unwrap()),
-            UserModeRoute::ArenaEntered
-        );
-        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+        for screen in [
+            UserModeScreen::ModeSelect,
+            UserModeScreen::PlayerCountSelect,
+            UserModeScreen::ControlsHub,
+            UserModeScreen::SoundSettings,
+            UserModeScreen::CharacterSelect,
+            UserModeScreen::ArenaSelect,
+            UserModeScreen::KeySettings,
+            UserModeScreen::ControlsBriefing,
+        ] {
+            user_mode.screen = screen;
+            assert_eq!(
+                keyboard_menu_confirm_action(&user_mode, &keys),
+                Some(UserModeUiAction::Confirm),
+                "Enter should confirm on {screen:?}"
+            );
+        }
 
-        let arena_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(arena_action, Some(UserModeUiAction::Confirm));
+        user_mode.enter_battle_result(Some(USER_MODE_BOT_FIGHTER_ID));
         assert_eq!(
-            route_user_mode_action(&mut user_mode, arena_action.unwrap()),
-            UserModeRoute::PrepareMatch
-        );
-
-        user_mode.enter_controls_briefing();
-        let fight_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(fight_action, Some(UserModeUiAction::Confirm));
-        assert_eq!(
-            route_user_mode_action(&mut user_mode, fight_action.unwrap()),
-            UserModeRoute::ConfirmBattle
-        );
-
-        user_mode.play_mode = UserPlayMode::FourPlayers;
-        assert_eq!(
-            single_player_enter_action(&user_mode, &keys),
+            keyboard_menu_confirm_action(&user_mode, &keys),
             None,
-            "multiplayer confirmation must remain scoped to each assigned seat"
+            "Enter should wait until the result menu is revealed"
         );
+        user_mode.result_menu_ready = true;
+        assert_eq!(
+            keyboard_menu_confirm_action(&user_mode, &keys),
+            Some(UserModeUiAction::Confirm)
+        );
+
+        let p1_bindings = PlayerKeyBindings::default()
+            .bindings_for_player(0)
+            .expect("P1 bindings should exist");
+        assert_eq!(
+            keyboard_assignment_user_mode_action(UserModeScreen::BattleResult, &keys, p1_bindings),
+            None,
+            "the gameplay binding path does not consume Enter"
+        );
+
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::Replay
+        );
+        user_mode.result_choice = UserModeResultChoice::ChooseCharacter;
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::ChooseCharacter
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
     }
 
     #[test]
