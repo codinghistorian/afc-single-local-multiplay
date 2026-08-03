@@ -10,6 +10,7 @@ use crate::arena_defs::{
 pub enum PropBarrierBehavior {
     Solid,
     OneWayTop,
+    SideOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

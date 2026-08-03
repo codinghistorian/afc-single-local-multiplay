@@ -57,6 +57,37 @@ script.
 
 ## Hot-path validation record
 
+The Split Causeway interactive-gate change was checked with three paired
+`FourBotStress` runs on 2026-08-02. The before build was commit `c13dcd8`; the
+after build was the interactive-gate working tree. All six runs used the same
+Apple M2 Max with 12 logical CPUs, macOS 26.5.1, Metal, the profiling profile
+with `perf`, a 1280x720 window, the `FFC00001` seed, Split Causeway, four normal
+items, four arena hazards, and four seeded bots. Every run warmed up for 30
+seconds and sampled for 300 seconds. The reported rows are the middle runs when
+ordered by frame median.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median: `c13dcd8`, run 1 of 3 | 18,358 | 16.6388 / 17.5997 / 18.3228 ms | 0.0915 / 0.1349 / 0.1605 ms | 86.18% total; 7.18% normalized | 0.4599 / 0.4597 GiB | 1,064 / 1,026 | 126 / 126 | 126 / 130 / 54 / 40 |
+| After median: interactive gates, run 2 of 3 | 30,010 | 8.6318 / 17.0642 / 18.7315 ms | 0.0700 / 0.1095 / 0.1411 ms | 111.54% total; 9.30% normalized | 0.4454 / 0.4451 GiB | 1,177 / 1,036 | 126 / 126 | 126 / 130 / 54 / 40 |
+
+Frame median changed by -48.12%, p95 by -3.04%, and p99 by +2.23%. Render
+CPU-span median changed by -23.50%, p95 by -18.83%, and p99 by -12.09%. These
+numbers mix different presentation regimes and are not evidence that the gate
+feature improved performance: all three before medians were paced near 60 Hz
+(16.6080, 16.6388, and 16.6520 ms), while all three after medians were mostly
+unlocked (8.4945, 8.6318, and 8.8116 ms). That also explains the higher process
+CPU while the after build rendered substantially more frames. `AutoNoVsync`
+was requested for every run, but macOS presentation did not behave consistently
+between the paired sets, and Bevy's Metal backend did not expose GPU timestamps.
+
+The after median ended with ten more entities, while mesh-allocation and all
+asset counts were unchanged and RSS did not grow through the sample. The gate
+work is bounded to two dynamic barriers and four eligible fighters, and prompt
+text/layout changes are cached. This is a functional hot-path validation record,
+not an optimization claim; it does not replace an accepted baseline row or
+change any target.
+
 The shared-special runtime-gate change was checked with three paired
 `FourBotStress` runs on 2026-07-28. The before build was commit `782366d`; the
 after build was the shared-special working tree. All six official runs used the

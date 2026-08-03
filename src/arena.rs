@@ -28,7 +28,8 @@ use crate::combat::{
     NEUTRAL_IMPACT_OWNER_ID, apply_impact, can_receive_impact, impact_profile,
 };
 use crate::components::{
-    Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterStats,
+    ControlAction, Controller, Fighter, FighterAction, FighterActionState, FighterInput,
+    FighterMotor, FighterStats, LocalInputAssignment, PlayerKeyBindings,
 };
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
@@ -36,14 +37,16 @@ use crate::constants::{
     ARENA_HEIGHT, ARENA_TOP_Y, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, LEDGE_SUPPORT_GRACE_MAX,
     LEDGE_SUPPORT_GRACE_SCALE,
 };
+use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
 use crate::controller_haptics::CombatHapticQueue;
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
 use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
-use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
+use crate::game_state::{GameplayPauseOwners, Hitstop, MatchState, MatchTelemetry};
 use crate::reactions::ReactionFamilyId;
 use crate::styles::FighterStyle;
 use crate::techniques::DamageElement;
+use crate::user_mode::LocalControllerReconnect;
 
 const ARENA_HAZARD_PULSE_DAMAGE: f32 = 7.0;
 const ARENA_HAZARD_PULSE_KNOCKBACK: f32 = 5.8;
@@ -92,10 +95,110 @@ const ARENA_GROUND_DEPTH_BIAS_STEP: f32 = 128.0;
 const ARENA_PLATFORM_DEPTH_BIAS_BASE: f32 = -768.0;
 const ARENA_PLATFORM_DEPTH_BIAS_STEP: f32 = 64.0;
 const ARENA_PROP_SURFACE_CLEARANCE: f32 = 0.012;
+const SPLIT_CAUSEWAY_DOOR_COUNT: usize = 2;
+const SPLIT_CAUSEWAY_DOOR_SCALE: f32 = 1.12;
+const SPLIT_CAUSEWAY_DOOR_HINGE_Z: f32 = -0.56;
+const SPLIT_CAUSEWAY_DOOR_LENGTH: f32 = 1.12;
+const SPLIT_CAUSEWAY_DOOR_THICKNESS: f32 = 0.18;
+const SPLIT_CAUSEWAY_DOOR_HEIGHT: f32 = 2.04;
+const SPLIT_CAUSEWAY_DOOR_ANIMATION_SECONDS: f32 = 0.30;
+const SPLIT_CAUSEWAY_DOOR_INTERACTION_RADIUS: f32 = 1.60;
+const SPLIT_CAUSEWAY_DOOR_INTERACTION_HEIGHT: f32 = 1.25;
+const SPLIT_CAUSEWAY_DOOR_FACING_DOT: f32 = 0.60;
+const SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH: f32 = 168.0;
+const SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT: f32 = 36.0;
 pub(crate) const ARENA_PREVIEW_RENDER_LAYER: usize = 21;
 
 #[derive(Component)]
 pub struct ArenaGeometry;
+
+#[derive(Clone, Copy, Debug)]
+struct SplitCausewayDoorGeometry {
+    cage_center: Vec2,
+    cage_yaw: f32,
+    hinge_x: f32,
+    open_angle: f32,
+}
+
+const SPLIT_CAUSEWAY_DOOR_GEOMETRY: [SplitCausewayDoorGeometry; SPLIT_CAUSEWAY_DOOR_COUNT] = [
+    SplitCausewayDoorGeometry {
+        cage_center: Vec2::new(-7.15, -1.45),
+        cage_yaw: 2.0 * PI / 180.0,
+        hinge_x: 0.78,
+        open_angle: -PI * 0.5,
+    },
+    SplitCausewayDoorGeometry {
+        cage_center: Vec2::new(7.15, -1.45),
+        cage_yaw: -2.0 * PI / 180.0,
+        hinge_x: -0.78,
+        open_angle: PI * 0.5,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SplitCausewayDoorRuntime {
+    target_open: bool,
+    open_fraction: f32,
+}
+
+#[derive(Resource, Debug)]
+pub(crate) struct SplitCausewayDoorState {
+    arena_index: usize,
+    replay_seed: u64,
+    doors: [SplitCausewayDoorRuntime; SPLIT_CAUSEWAY_DOOR_COUNT],
+    eligible_fighters: [Option<usize>; SPLIT_CAUSEWAY_DOOR_COUNT],
+}
+
+impl Default for SplitCausewayDoorState {
+    fn default() -> Self {
+        Self {
+            arena_index: usize::MAX,
+            replay_seed: u64::MAX,
+            doors: [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT],
+            eligible_fighters: [None; SPLIT_CAUSEWAY_DOOR_COUNT],
+        }
+    }
+}
+
+impl SplitCausewayDoorState {
+    fn reset_closed(&mut self, arena_index: usize, replay_seed: u64) {
+        self.arena_index = arena_index;
+        self.replay_seed = replay_seed;
+        self.doors = [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT];
+        self.eligible_fighters = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    }
+
+    pub(crate) fn toggle_for_fighter(&mut self, fighter_id: usize) -> bool {
+        let Some(door_index) = self
+            .eligible_fighters
+            .iter()
+            .position(|eligible| *eligible == Some(fighter_id))
+        else {
+            return false;
+        };
+        self.doors[door_index].target_open = !self.doors[door_index].target_open;
+        true
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SplitCausewayDoorVisual {
+    index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitCausewayDoorPromptBinding {
+    Keyboard(KeyCode),
+    Gamepad(ControllerFamily),
+}
+
+#[derive(Component, Debug)]
+pub(crate) struct SplitCausewayDoorPrompt {
+    index: usize,
+    text_entity: Entity,
+    last_text_state: Option<(usize, SplitCausewayDoorPromptBinding, bool)>,
+    last_position: Option<Vec2>,
+}
 
 #[derive(Component)]
 pub(crate) struct ArenaGlobalDirectionalLight;
@@ -689,6 +792,304 @@ pub fn sync_arena_visuals(
     }
     scene.index = selected;
     spawn_arena_geometry(&mut commands, &asset_server, &mut meshes, &mut materials);
+}
+
+pub fn sync_split_causeway_door_state(
+    match_state: Res<MatchState>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+) {
+    let arena_index = active_arena_index();
+    let should_be_closed = arena_index != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting();
+    let match_changed =
+        doors.arena_index != arena_index || doors.replay_seed != match_state.replay_seed;
+    let has_runtime_state = doors
+        .doors
+        .iter()
+        .any(|door| door.target_open || door.open_fraction > f32::EPSILON)
+        || doors.eligible_fighters.iter().any(Option::is_some);
+
+    if match_changed || (should_be_closed && has_runtime_state) {
+        doors.reset_closed(arena_index, match_state.replay_seed);
+    }
+}
+
+pub fn update_split_causeway_door_eligibility(
+    match_state: Res<MatchState>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+    fighters: Query<(
+        &Fighter,
+        &Controller,
+        &FighterMotor,
+        &FighterActionState,
+        &Transform,
+    )>,
+) {
+    doors.eligible_fighters = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    if active_arena_index() != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting() {
+        return;
+    }
+
+    let mut best = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    for (fighter, controller, motor, action, transform) in &fighters {
+        if !controller.is_human()
+            || controller.input == LocalInputAssignment::Unassigned
+            || !match_state.fighter_can_participate(fighter.id)
+            || !matches!(
+                action.action,
+                FighterAction::Idle | FighterAction::Moving | FighterAction::Jumping
+            )
+        {
+            continue;
+        }
+
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            let Some(distance_squared) = split_causeway_door_candidate_distance_squared(
+                door_index,
+                transform.translation,
+                motor.facing,
+                action.action,
+            ) else {
+                continue;
+            };
+
+            let candidate = (distance_squared, fighter.id);
+            if best[door_index].is_none_or(|current: (f32, usize)| {
+                candidate.0 < current.0 - f32::EPSILON
+                    || ((candidate.0 - current.0).abs() <= f32::EPSILON && candidate.1 < current.1)
+            }) {
+                best[door_index] = Some(candidate);
+            }
+        }
+    }
+
+    doors.eligible_fighters = best.map(|candidate| candidate.map(|(_, fighter_id)| fighter_id));
+}
+
+fn split_causeway_door_candidate_distance_squared(
+    door_index: usize,
+    fighter_position: Vec3,
+    fighter_facing: Vec3,
+    action: FighterAction,
+) -> Option<f32> {
+    if !matches!(
+        action,
+        FighterAction::Idle | FighterAction::Moving | FighterAction::Jumping
+    ) || (fighter_position.y - ARENA_TOP_Y).abs() > SPLIT_CAUSEWAY_DOOR_INTERACTION_HEIGHT
+    {
+        return None;
+    }
+    let doorway = split_causeway_door_barrier(door_index, 0.0).center;
+    let to_door = doorway - Vec2::new(fighter_position.x, fighter_position.z);
+    let distance_squared = to_door.length_squared();
+    let facing = Vec2::new(fighter_facing.x, fighter_facing.z).normalize_or_zero();
+    (distance_squared <= SPLIT_CAUSEWAY_DOOR_INTERACTION_RADIUS.powi(2)
+        && facing.dot(to_door.normalize_or_zero()) >= SPLIT_CAUSEWAY_DOOR_FACING_DOT)
+        .then_some(distance_squared)
+}
+
+pub fn advance_split_causeway_doors(
+    time: Res<Time>,
+    match_state: Res<MatchState>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+    fighters: Query<(&Fighter, &FighterStats, &FighterActionState, &Transform)>,
+) {
+    if active_arena_index() != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting() {
+        return;
+    }
+
+    let max_step = time.delta_secs() / SPLIT_CAUSEWAY_DOOR_ANIMATION_SECONDS;
+    for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+        let door = doors.doors[door_index];
+        let target = if door.target_open { 1.0 } else { 0.0 };
+        let candidate = if door.open_fraction < target {
+            (door.open_fraction + max_step).min(target)
+        } else {
+            (door.open_fraction - max_step).max(target)
+        };
+        if (candidate - door.open_fraction).abs() <= f32::EPSILON {
+            continue;
+        }
+
+        let barrier = split_causeway_door_barrier(door_index, candidate);
+        let blocked = fighters.iter().any(|(fighter, stats, action, transform)| {
+            match_state.fighter_can_participate(fighter.id)
+                && !matches!(
+                    action.action,
+                    FighterAction::RingOut | FighterAction::Respawning
+                )
+                && split_causeway_door_overlaps_fighter(&barrier, transform.translation, stats)
+        });
+        if !blocked {
+            doors.doors[door_index].open_fraction = candidate;
+        }
+    }
+}
+
+fn split_causeway_door_overlaps_fighter(
+    barrier: &ArenaBarrierDefinition,
+    position: Vec3,
+    stats: &FighterStats,
+) -> bool {
+    barrier.resolve_side_collision(
+        position,
+        FIGHTER_RADIUS * stats.item_size_multiplier(),
+        crate::constants::LANDING_SNAP_TOLERANCE,
+    ) != position
+}
+
+pub fn sync_split_causeway_door_visuals(
+    doors: Res<SplitCausewayDoorState>,
+    mut visuals: Query<(&SplitCausewayDoorVisual, &mut Transform)>,
+) {
+    for (visual, mut transform) in &mut visuals {
+        let desired =
+            split_causeway_door_transform(visual.index, doors.doors[visual.index].open_fraction);
+        if *transform != desired {
+            *transform = desired;
+        }
+    }
+}
+
+pub fn update_split_causeway_door_prompts(
+    match_state: Res<MatchState>,
+    doors: Res<SplitCausewayDoorState>,
+    bindings: Res<PlayerKeyBindings>,
+    reconnect: Res<LocalControllerReconnect>,
+    pause_owners: Option<Res<GameplayPauseOwners>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<ArenaCamera>>,
+    fighters: Query<(&Fighter, &Controller)>,
+    controller_metadata: Query<&ControllerDeviceInfo>,
+    mut prompts: Query<(&mut SplitCausewayDoorPrompt, &mut Node)>,
+    mut texts: Query<&mut Text>,
+) {
+    let input_blocked =
+        reconnect.blocks_gameplay() || pause_owners.is_some_and(|owners| owners.blocks_gameplay());
+    let camera = cameras.iter().next();
+
+    for (mut prompt, mut node) in &mut prompts {
+        let owner = doors.eligible_fighters[prompt.index];
+        let controller = owner.and_then(|owner| {
+            fighters
+                .iter()
+                .find_map(|(fighter, controller)| (fighter.id == owner).then_some(controller))
+        });
+        let binding = controller.and_then(|controller| {
+            split_causeway_door_prompt_binding(controller, &bindings, &controller_metadata)
+        });
+        let projected = camera.and_then(|(camera, camera_transform)| {
+            let position = camera
+                .world_to_viewport(
+                    camera_transform,
+                    split_causeway_doorway_anchor(prompt.index),
+                )
+                .ok()?;
+            let viewport = camera.logical_viewport_size()?;
+            (position.x >= 0.0
+                && position.y >= 0.0
+                && position.x <= viewport.x
+                && position.y <= viewport.y)
+                .then_some(position)
+        });
+        let visible = split_causeway_door_prompt_should_show(
+            active_arena_index(),
+            match_state.is_fighting(),
+            input_blocked,
+            owner.is_some(),
+            binding.is_some(),
+            projected.is_some(),
+        );
+
+        let display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        if !visible {
+            prompt.last_position = None;
+            continue;
+        }
+
+        let owner = owner.expect("visible door prompt has an owner");
+        let binding = binding.expect("visible door prompt has a binding");
+        let projected = projected.expect("visible door prompt has a projected position");
+        let desired_position = Vec2::new(
+            projected.x - SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH * 0.5,
+            projected.y - SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT - 10.0,
+        );
+        if prompt
+            .last_position
+            .is_none_or(|last| last.distance_squared(desired_position) > 0.0625)
+        {
+            node.left = Val::Px(desired_position.x);
+            node.top = Val::Px(desired_position.y);
+            prompt.last_position = Some(desired_position);
+        }
+
+        let target_open = doors.doors[prompt.index].target_open;
+        let text_state = (owner, binding, target_open);
+        if prompt.last_text_state != Some(text_state) {
+            if let Ok(mut text) = texts.get_mut(prompt.text_entity) {
+                let verb = if target_open { "CLOSE" } else { "OPEN" };
+                **text = format!(
+                    "[{}] {verb} DOOR",
+                    split_causeway_door_prompt_binding_label(binding)
+                );
+            }
+            prompt.last_text_state = Some(text_state);
+        }
+    }
+}
+
+fn split_causeway_door_prompt_should_show(
+    arena_index: usize,
+    fighting: bool,
+    input_blocked: bool,
+    has_owner: bool,
+    has_binding: bool,
+    has_projection: bool,
+) -> bool {
+    arena_index == SPLIT_CAUSEWAY_ARENA_INDEX
+        && fighting
+        && !input_blocked
+        && has_owner
+        && has_binding
+        && has_projection
+}
+
+fn split_causeway_door_prompt_binding(
+    controller: &Controller,
+    bindings: &PlayerKeyBindings,
+    controller_metadata: &Query<&ControllerDeviceInfo>,
+) -> Option<SplitCausewayDoorPromptBinding> {
+    match controller.input {
+        LocalInputAssignment::Keyboard(player) => bindings
+            .key_for(player, ControlAction::Light)
+            .map(SplitCausewayDoorPromptBinding::Keyboard),
+        LocalInputAssignment::Gamepad(entity) => Some(SplitCausewayDoorPromptBinding::Gamepad(
+            controller_info(entity, controller_metadata)
+                .map(|info| info.family)
+                .unwrap_or_default(),
+        )),
+        LocalInputAssignment::Unassigned => None,
+    }
+}
+
+fn split_causeway_door_prompt_binding_label(binding: SplitCausewayDoorPromptBinding) -> String {
+    match binding {
+        SplitCausewayDoorPromptBinding::Keyboard(key) => {
+            let raw = format!("{key:?}");
+            raw.strip_prefix("Key")
+                .or_else(|| raw.strip_prefix("Digit"))
+                .unwrap_or(&raw)
+                .to_string()
+        }
+        SplitCausewayDoorPromptBinding::Gamepad(family) => {
+            family.face_button_label(GamepadButton::West).to_string()
+        }
+    }
 }
 
 fn spawn_arena_geometry(
@@ -1466,6 +1867,214 @@ fn spawn_authored_primitives(
             ordinal += 1;
         }
     }
+
+    if arena_index == SPLIT_CAUSEWAY_ARENA_INDEX {
+        spawn_split_causeway_doors(commands, meshes, &material_handles, &mut mesh_handles);
+    }
+}
+
+fn spawn_split_causeway_doors(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material_handles: &HashMap<String, Handle<StandardMaterial>>,
+    mesh_handles: &mut HashMap<String, Handle<Mesh>>,
+) {
+    let Some(wood_dark) = material_handles.get("wood_dark").cloned() else {
+        return;
+    };
+    let Some(wood_mid) = material_handles.get("wood_mid").cloned() else {
+        return;
+    };
+    let Some(wood_light) = material_handles.get("wood_light").cloned() else {
+        return;
+    };
+    let Some(rope) = material_handles.get("rope").cloned() else {
+        return;
+    };
+    let cuboid = authored_primitive_mesh(meshes, mesh_handles, "cuboid");
+    let cylinder = authored_primitive_mesh(meshes, mesh_handles, "cylinder");
+
+    for index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+        let root = commands
+            .spawn((
+                split_causeway_door_transform(index, 0.0),
+                SplitCausewayDoorVisual { index },
+                ArenaGeometry,
+                Name::new(format!("Split Causeway gate {}", index + 1)),
+            ))
+            .id();
+
+        let pieces = [
+            (
+                cuboid.clone(),
+                wood_dark.clone(),
+                Transform::from_xyz(0.0, 0.98, 0.08).with_scale(Vec3::new(0.20, 1.86, 0.20)),
+                "hinge stile",
+            ),
+            (
+                cuboid.clone(),
+                wood_mid.clone(),
+                Transform::from_xyz(0.0, 0.98, SPLIT_CAUSEWAY_DOOR_LENGTH - 0.08)
+                    .with_scale(Vec3::new(0.20, 1.86, 0.20)),
+                "latch stile",
+            ),
+            (
+                cuboid.clone(),
+                wood_mid.clone(),
+                Transform::from_xyz(0.0, 0.54, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_scale(Vec3::new(0.20, 0.22, SPLIT_CAUSEWAY_DOOR_LENGTH)),
+                "lower rail",
+            ),
+            (
+                cuboid.clone(),
+                wood_light.clone(),
+                Transform::from_xyz(0.0, 1.46, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_scale(Vec3::new(0.20, 0.22, SPLIT_CAUSEWAY_DOOR_LENGTH)),
+                "upper rail",
+            ),
+            (
+                cuboid.clone(),
+                wood_light.clone(),
+                Transform::from_xyz(0.0, 1.0, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_rotation(Quat::from_rotation_x(-0.58))
+                    .with_scale(Vec3::new(0.15, 0.15, 1.30)),
+                "diagonal brace",
+            ),
+            (
+                cylinder.clone(),
+                rope.clone(),
+                Transform::from_xyz(0.0, 0.50, 0.08).with_scale(Vec3::new(0.28, 0.30, 0.28)),
+                "lower hinge",
+            ),
+            (
+                cylinder.clone(),
+                rope.clone(),
+                Transform::from_xyz(0.0, 1.50, 0.08).with_scale(Vec3::new(0.28, 0.30, 0.28)),
+                "upper hinge",
+            ),
+        ];
+
+        let mut children = Vec::with_capacity(pieces.len());
+        for (mesh, material, transform, piece_name) in pieces {
+            children.push(
+                commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        transform,
+                        Name::new(format!("Split Causeway gate {} {piece_name}", index + 1)),
+                    ))
+                    .id(),
+            );
+        }
+        commands.entity(root).insert_children(0, &children);
+
+        let text_entity = commands
+            .spawn((
+                Text::new("OPEN DOOR"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.98, 0.90, 0.70)),
+                TextLayout::new_with_justify(Justify::Center),
+                TextShadow::default(),
+                Pickable::IGNORE,
+            ))
+            .id();
+        let prompt = commands
+            .spawn((
+                SplitCausewayDoorPrompt {
+                    index,
+                    text_entity,
+                    last_text_state: None,
+                    last_position: None,
+                },
+                Node {
+                    display: Display::None,
+                    position_type: PositionType::Absolute,
+                    width: Val::Px(SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH),
+                    height: Val::Px(SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(7.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.035, 0.025, 0.018, 0.88)),
+                BorderColor::all(Color::srgb(0.78, 0.55, 0.27)),
+                GlobalZIndex(20),
+                Pickable::IGNORE,
+                ArenaGeometry,
+                Name::new(format!("Split Causeway gate {} prompt", index + 1)),
+            ))
+            .id();
+        commands.entity(prompt).insert_children(0, &[text_entity]);
+    }
+}
+
+fn split_causeway_door_eased_fraction(open_fraction: f32) -> f32 {
+    let fraction = open_fraction.clamp(0.0, 1.0);
+    fraction * fraction * (3.0 - 2.0 * fraction)
+}
+
+fn split_causeway_rotate_local(local: Vec2, yaw: f32) -> Vec2 {
+    let cos = yaw.cos();
+    let sin = yaw.sin();
+    Vec2::new(
+        cos * local.x + sin * local.y,
+        -sin * local.x + cos * local.y,
+    )
+}
+
+fn split_causeway_door_hinge(index: usize) -> Vec2 {
+    let geometry = SPLIT_CAUSEWAY_DOOR_GEOMETRY[index];
+    geometry.cage_center
+        + split_causeway_rotate_local(
+            Vec2::new(geometry.hinge_x, SPLIT_CAUSEWAY_DOOR_HINGE_Z) * SPLIT_CAUSEWAY_DOOR_SCALE,
+            geometry.cage_yaw,
+        )
+}
+
+fn split_causeway_door_yaw(index: usize, open_fraction: f32) -> f32 {
+    let geometry = SPLIT_CAUSEWAY_DOOR_GEOMETRY[index];
+    geometry.cage_yaw + geometry.open_angle * split_causeway_door_eased_fraction(open_fraction)
+}
+
+fn split_causeway_door_transform(index: usize, open_fraction: f32) -> Transform {
+    let hinge = split_causeway_door_hinge(index);
+    Transform::from_xyz(hinge.x, ARENA_TOP_Y, hinge.y)
+        .with_rotation(Quat::from_rotation_y(split_causeway_door_yaw(
+            index,
+            open_fraction,
+        )))
+        .with_scale(Vec3::splat(SPLIT_CAUSEWAY_DOOR_SCALE))
+}
+
+fn split_causeway_door_barrier(index: usize, open_fraction: f32) -> ArenaBarrierDefinition {
+    let yaw = split_causeway_door_yaw(index, open_fraction);
+    let hinge = split_causeway_door_hinge(index);
+    let center = hinge
+        + split_causeway_rotate_local(
+            Vec2::new(
+                0.0,
+                SPLIT_CAUSEWAY_DOOR_LENGTH * SPLIT_CAUSEWAY_DOOR_SCALE * 0.5,
+            ),
+            yaw,
+        );
+    ArenaBarrierDefinition::rectangle(
+        center.x,
+        center.y,
+        SPLIT_CAUSEWAY_DOOR_THICKNESS * SPLIT_CAUSEWAY_DOOR_SCALE * 0.5,
+        SPLIT_CAUSEWAY_DOOR_LENGTH * SPLIT_CAUSEWAY_DOOR_SCALE * 0.5,
+        yaw,
+        ARENA_TOP_Y + SPLIT_CAUSEWAY_DOOR_HEIGHT * SPLIT_CAUSEWAY_DOOR_SCALE,
+    )
+}
+
+fn split_causeway_doorway_anchor(index: usize) -> Vec3 {
+    let barrier = split_causeway_door_barrier(index, 0.0);
+    Vec3::new(barrier.center.x, ARENA_TOP_Y + 2.72, barrier.center.y)
 }
 
 fn spawn_authored_floor_pattern(
@@ -2455,10 +3064,10 @@ fn authored_collider_barrier(collider: &AuthoredCollider) -> WorldPropBarrier {
     };
     WorldPropBarrier {
         definition,
-        behavior: if collider.behavior == "one_way_top" {
-            PropBarrierBehavior::OneWayTop
-        } else {
-            PropBarrierBehavior::Solid
+        behavior: match collider.behavior.as_str() {
+            "one_way_top" => PropBarrierBehavior::OneWayTop,
+            "side_only" => PropBarrierBehavior::SideOnly,
+            _ => PropBarrierBehavior::Solid,
         },
     }
 }
@@ -4487,6 +5096,9 @@ pub fn ground_support_for_arena_with_radius(
     }
 
     for collider in arena_prop_barriers(arena) {
+        if collider.behavior == PropBarrierBehavior::SideOnly {
+            continue;
+        }
         let support = match collider.definition.support_at(Vec2::new(x, z), ledge_grace) {
             Some(crate::arena_barriers::BarrierSupport::Firm) => {
                 Some(GroundSupport::Firm(collider.definition.top_y))
@@ -4589,9 +5201,25 @@ fn prefer_ground_support(
     }
 }
 
-pub fn resolve_platform_side_collision(position: Vec3, radius: f32) -> Vec3 {
+pub fn resolve_platform_side_collision(
+    position: Vec3,
+    radius: f32,
+    doors: &SplitCausewayDoorState,
+) -> Vec3 {
     let arena = active_arena_definition();
-    resolve_platform_side_collision_for_arena(arena, position, radius)
+    let mut resolved = resolve_platform_side_collision_for_arena(arena, position, radius);
+    if active_arena_index() == SPLIT_CAUSEWAY_ARENA_INDEX {
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            resolved =
+                split_causeway_door_barrier(door_index, doors.doors[door_index].open_fraction)
+                    .resolve_side_collision(
+                        resolved,
+                        radius,
+                        crate::constants::LANDING_SNAP_TOLERANCE,
+                    );
+        }
+    }
+    resolved
 }
 
 fn resolve_platform_side_collision_for_arena(
@@ -5800,6 +6428,19 @@ mod tests {
             2
         );
         assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "lookout_outer_rail")
+                .count(),
+            2
+        );
+        assert!(
+            map.primitive_prefabs["lookout_cage"]
+                .iter()
+                .all(|primitive| !primitive.id.starts_with("rail_left")
+                    && !primitive.id.starts_with("rail_right"))
+        );
+        assert_eq!(
             map.primitives
                 .iter()
                 .filter(|primitive| primitive.id.starts_with("foundation_"))
@@ -5807,7 +6448,7 @@ mod tests {
             9
         );
         assert!(map.lights.is_empty());
-        assert_eq!(map.colliders.len(), 12);
+        assert_eq!(map.colliders.len(), 18);
     }
 
     #[test]
@@ -5845,25 +6486,236 @@ mod tests {
     #[test]
     fn split_causeway_authored_barriers_cover_both_lookout_cages() {
         let barriers = authored_arena_collision_barriers(SPLIT_CAUSEWAY_ARENA_INDEX);
-        assert_eq!(barriers.len(), 12);
+        assert_eq!(barriers.len(), 18);
         assert_eq!(
             barriers
                 .iter()
                 .filter(|barrier| barrier.definition.center.x < -6.0)
                 .count(),
-            6
+            9
         );
         assert_eq!(
             barriers
                 .iter()
                 .filter(|barrier| barrier.definition.center.x > 6.0)
                 .count(),
-            6
+            9
         );
-        assert!(
+        assert_eq!(
             barriers
                 .iter()
-                .all(|barrier| barrier.behavior == PropBarrierBehavior::Solid)
+                .filter(|barrier| barrier.behavior == PropBarrierBehavior::SideOnly)
+                .count(),
+            14
+        );
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.behavior == PropBarrierBehavior::Solid)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn split_causeway_side_only_rails_do_not_become_high_ground() {
+        let arena = &arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX];
+        let support = ground_support_for_arena_with_radius(arena, -7.15, -2.256, 0.0);
+
+        assert_eq!(support.height(), Some(ARENA_TOP_Y));
+    }
+
+    #[test]
+    fn split_causeway_closed_gates_block_and_open_gates_clear_the_doorways() {
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            let closed = split_causeway_door_barrier(door_index, 0.0);
+            let open = split_causeway_door_barrier(door_index, 1.0);
+            let doorway = Vec3::new(closed.center.x, ARENA_TOP_Y, closed.center.y);
+
+            assert_ne!(
+                closed.resolve_side_collision(
+                    doorway,
+                    FIGHTER_RADIUS,
+                    crate::constants::LANDING_SNAP_TOLERANCE,
+                ),
+                doorway
+            );
+            assert_eq!(
+                open.resolve_side_collision(
+                    doorway,
+                    FIGHTER_RADIUS,
+                    crate::constants::LANDING_SNAP_TOLERANCE,
+                ),
+                doorway
+            );
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_visual_and_collider_share_the_hinge_transform() {
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            for open_fraction in [0.0, 0.35, 1.0] {
+                let transform = split_causeway_door_transform(door_index, open_fraction);
+                let visual_center = transform.transform_point(Vec3::new(
+                    0.0,
+                    0.0,
+                    SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5,
+                ));
+                let barrier = split_causeway_door_barrier(door_index, open_fraction);
+                assert!(
+                    Vec2::new(visual_center.x, visual_center.z).distance(barrier.center) < 0.000_1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_eligibility_requires_range_facing_and_free_action() {
+        let doorway = split_causeway_door_barrier(0, 0.0).center;
+        let eligible = Vec3::new(doorway.x + 1.0, ARENA_TOP_Y, doorway.y);
+
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::NEG_X,
+                FighterAction::Idle,
+            )
+            .is_some()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::X,
+                FighterAction::Idle,
+            )
+            .is_none()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible + Vec3::X * 1.0,
+                Vec3::NEG_X,
+                FighterAction::Idle,
+            )
+            .is_none()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::NEG_X,
+                FighterAction::LightAttack1,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn split_causeway_gates_toggle_independently() {
+        let mut doors = SplitCausewayDoorState::default();
+        doors.eligible_fighters = [Some(0), Some(1)];
+
+        assert!(doors.toggle_for_fighter(0));
+        assert!(doors.doors[0].target_open);
+        assert!(!doors.doors[1].target_open);
+        assert!(doors.toggle_for_fighter(1));
+        assert!(doors.doors[1].target_open);
+        assert!(!doors.toggle_for_fighter(3));
+    }
+
+    #[test]
+    fn split_causeway_gate_sweep_stops_before_overlapping_a_fighter() {
+        let barrier = split_causeway_door_barrier(0, 0.5);
+        let stats = FighterStats::default();
+        let fighter_in_sweep = Vec3::new(barrier.center.x, ARENA_TOP_Y, barrier.center.y);
+        let fighter_clear = fighter_in_sweep + Vec3::X * 3.0;
+
+        assert!(split_causeway_door_overlaps_fighter(
+            &barrier,
+            fighter_in_sweep,
+            &stats,
+        ));
+        assert!(!split_causeway_door_overlaps_fighter(
+            &barrier,
+            fighter_clear,
+            &stats,
+        ));
+    }
+
+    #[test]
+    fn split_causeway_gates_reset_closed_for_a_new_match() {
+        let mut doors = SplitCausewayDoorState::default();
+        doors.eligible_fighters = [Some(0), Some(1)];
+        assert!(doors.toggle_for_fighter(0));
+        doors.doors[0].open_fraction = 0.75;
+
+        doors.reset_closed(SPLIT_CAUSEWAY_ARENA_INDEX, 42);
+
+        assert_eq!(doors.arena_index, SPLIT_CAUSEWAY_ARENA_INDEX);
+        assert_eq!(doors.replay_seed, 42);
+        assert_eq!(
+            doors.doors,
+            [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT]
+        );
+        assert_eq!(doors.eligible_fighters, [None; SPLIT_CAUSEWAY_DOOR_COUNT]);
+    }
+
+    #[test]
+    fn split_causeway_gate_prompts_are_limited_to_eligible_gameplay() {
+        assert!(split_causeway_door_prompt_should_show(
+            SPLIT_CAUSEWAY_ARENA_INDEX,
+            true,
+            false,
+            true,
+            true,
+            true,
+        ));
+        for hidden in [
+            split_causeway_door_prompt_should_show(0, true, false, true, true, true),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                false,
+                false,
+                true,
+                true,
+                true,
+            ),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                true,
+                false,
+                false,
+                true,
+                true,
+            ),
+        ] {
+            assert!(!hidden);
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_prompt_labels_follow_keyboard_and_controller() {
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Keyboard(
+                KeyCode::KeyC
+            )),
+            "C"
+        );
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Gamepad(
+                ControllerFamily::Xbox
+            )),
+            "X"
         );
     }
 

@@ -3,8 +3,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::arena::{
-    ArenaFighterBurn, ground_height_at_with_radius, ground_support_at_with_radius,
-    resolve_platform_side_collision,
+    ArenaFighterBurn, SplitCausewayDoorState, ground_height_at_with_radius,
+    ground_support_at_with_radius, resolve_platform_side_collision,
 };
 use crate::arena_defs::{ArenaDefinition, active_arena_definition};
 use crate::body_collision::{
@@ -528,12 +528,13 @@ pub fn collect_player_input(
     camera_control: Res<GameplayCameraControl>,
     user_mode: Res<UserModeState>,
     bindings: Res<PlayerKeyBindings>,
+    mut split_causeway_doors: ResMut<SplitCausewayDoorState>,
     mut trackers: Local<PlayerInputTrackers>,
-    mut fighters: Query<(&Controller, &mut FighterInput)>,
+    mut fighters: Query<(&Fighter, &Controller, &mut FighterInput)>,
 ) {
     let reserve_camera_inputs = !user_mode.blocks_dev_input();
 
-    for (controller, mut input) in &mut fighters {
+    for (fighter, controller, mut input) in &mut fighters {
         if !controller.is_human() {
             continue;
         }
@@ -541,7 +542,7 @@ pub fn collect_player_input(
         *input = FighterInput::default();
         let slot_index = controller.slot.index();
         trackers.reset_if_assignment_changed(slot_index, controller.input);
-        let sample = match controller.input {
+        let mut sample = match controller.input {
             LocalInputAssignment::Keyboard(_) => {
                 let Some(bindings) = bindings.bindings_for_assignment(controller.input) else {
                     continue;
@@ -556,6 +557,13 @@ pub fn collect_player_input(
             }
             LocalInputAssignment::Unassigned => continue,
         };
+
+        if split_causeway_door_interaction_requested(&sample)
+            && split_causeway_doors.toggle_for_fighter(fighter.id)
+        {
+            trackers.consume_light_until_release(slot_index);
+        }
+        trackers.suppress_consumed_light(slot_index, &mut sample);
 
         let PlayerInputTrackers {
             dash,
@@ -651,6 +659,7 @@ pub(crate) struct PlayerInputTrackers {
     dash: [DashTapTracker; FIGHTER_COUNT],
     guard: [GuardChordTracker; FIGHTER_COUNT],
     stick_flick: [StickFlickTracker; FIGHTER_COUNT],
+    light_consumed_until_release: [bool; FIGHTER_COUNT],
     assignment: [LocalInputAssignment; FIGHTER_COUNT],
 }
 
@@ -660,6 +669,7 @@ impl Default for PlayerInputTrackers {
             dash: std::array::from_fn(|_| DashTapTracker::default()),
             guard: std::array::from_fn(|_| GuardChordTracker::default()),
             stick_flick: std::array::from_fn(|_| StickFlickTracker::default()),
+            light_consumed_until_release: [false; FIGHTER_COUNT],
             assignment: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
         }
     }
@@ -674,6 +684,24 @@ impl PlayerInputTrackers {
         self.dash[slot_index] = DashTapTracker::default();
         self.guard[slot_index] = GuardChordTracker::default();
         self.stick_flick[slot_index] = StickFlickTracker::default();
+        self.light_consumed_until_release[slot_index] = false;
+    }
+
+    fn consume_light_until_release(&mut self, slot_index: usize) {
+        self.light_consumed_until_release[slot_index] = true;
+        self.guard[slot_index].cancel_pending_light();
+    }
+
+    fn suppress_consumed_light(&mut self, slot_index: usize, sample: &mut DeviceActionSample) {
+        if !self.light_consumed_until_release[slot_index] {
+            return;
+        }
+        if sample.light_held {
+            sample.light_just = false;
+            sample.light_held = false;
+        } else {
+            self.light_consumed_until_release[slot_index] = false;
+        }
     }
 }
 
@@ -695,6 +723,10 @@ struct DeviceActionSample {
     ultimate_just: bool,
     special_just: bool,
     special_kind: Option<SpecialInputKind>,
+}
+
+fn split_causeway_door_interaction_requested(sample: &DeviceActionSample) -> bool {
+    sample.light_just && !sample.heavy_held && !sample.grab_held
 }
 
 fn keyboard_action_sample(
@@ -895,6 +927,18 @@ pub(crate) struct GuardChordTracker {
     light_pressed_at: Option<f32>,
     heavy_pressed_at: Option<f32>,
     grab_pressed_at: Option<f32>,
+}
+
+impl GuardChordTracker {
+    fn cancel_pending_light(&mut self) {
+        if self
+            .pending
+            .is_some_and(|pending| pending.button == GuardChordButton::Light)
+        {
+            self.pending = None;
+        }
+        self.light_pressed_at = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4608,6 +4652,7 @@ pub fn apply_fighter_movement(
     mut commands: Commands,
     effect_assets: Res<EffectAssets>,
     hitstop: Res<Hitstop>,
+    split_causeway_doors: Res<SplitCausewayDoorState>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut feedback: ResMut<HitEffects>,
     mut haptics: ResMut<CombatHapticQueue>,
@@ -4791,6 +4836,7 @@ pub fn apply_fighter_movement(
         transform.translation = resolve_platform_side_collision(
             transform.translation,
             FIGHTER_RADIUS * stats.item_size_multiplier(),
+            &split_causeway_doors,
         );
         let correction = transform.translation - before_collision;
         let mut did_wall_bounce = false;
@@ -6725,6 +6771,67 @@ mod tests {
     }
 
     #[test]
+    fn split_causeway_door_interaction_requires_a_standalone_light_press() {
+        let light = DeviceActionSample {
+            light_just: true,
+            light_held: true,
+            ..default()
+        };
+        assert!(split_causeway_door_interaction_requested(&light));
+        assert!(!split_causeway_door_interaction_requested(
+            &DeviceActionSample {
+                heavy_held: true,
+                ..light
+            }
+        ));
+        assert!(!split_causeway_door_interaction_requested(
+            &DeviceActionSample {
+                grab_held: true,
+                ..light
+            }
+        ));
+    }
+
+    #[test]
+    fn split_causeway_door_consumes_light_until_release_without_delayed_attack() {
+        let mut trackers = PlayerInputTrackers::default();
+        trackers.guard[0].pending = Some(GuardChordPending {
+            button: GuardChordButton::Light,
+            started_at: 1.0,
+        });
+        trackers.guard[0].light_pressed_at = Some(1.0);
+        trackers.consume_light_until_release(0);
+
+        let mut pressed = DeviceActionSample {
+            light_just: true,
+            light_held: true,
+            ..default()
+        };
+        trackers.suppress_consumed_light(0, &mut pressed);
+        assert!(!pressed.light_just);
+        assert!(!pressed.light_held);
+        assert!(trackers.guard[0].pending.is_none());
+        assert_eq!(trackers.guard[0].light_pressed_at, None);
+
+        let mut held = DeviceActionSample {
+            light_held: true,
+            ..default()
+        };
+        trackers.suppress_consumed_light(0, &mut held);
+        assert!(!held.light_held);
+
+        trackers.suppress_consumed_light(0, &mut DeviceActionSample::default());
+        let mut next_press = DeviceActionSample {
+            light_just: true,
+            light_held: true,
+            ..default()
+        };
+        trackers.suppress_consumed_light(0, &mut next_press);
+        assert!(next_press.light_just);
+        assert!(next_press.light_held);
+    }
+
+    #[test]
     fn gamepad_flick_dash_requires_neutral_reset() {
         let mut tracker = StickFlickTracker::default();
         assert!(!tracker.update(Vec2::splat(0.4)));
@@ -6743,12 +6850,14 @@ mod tests {
         trackers.dash[0].left = Some(1.0);
         trackers.guard[0].guard_latched = true;
         trackers.stick_flick[0].engaged = true;
+        trackers.light_consumed_until_release[0] = true;
 
         trackers.reset_if_assignment_changed(0, LocalInputAssignment::Gamepad(second));
 
         assert_eq!(trackers.dash[0].left, None);
         assert!(!trackers.guard[0].guard_latched);
         assert!(!trackers.stick_flick[0].engaged);
+        assert!(!trackers.light_consumed_until_release[0]);
     }
 
     fn assert_vec3_close(actual: Vec3, expected: Vec3, tolerance: f32) {

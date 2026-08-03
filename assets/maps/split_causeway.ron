@@ -73,14 +73,14 @@
             (id: "rail_rear_high", kind: "cuboid", position: (0.0, 1.78, -0.72), scale: (1.90, 0.24, 0.24), material: "wood_light"),
             (id: "rail_front_low", kind: "cuboid", position: (0.0, 0.78, 0.72), scale: (1.90, 0.24, 0.24), material: "wood_mid"),
             (id: "rail_front_high", kind: "cuboid", position: (0.0, 1.78, 0.72), scale: (1.90, 0.24, 0.24), material: "wood_light"),
-            (id: "rail_left_low", kind: "cuboid", position: (-0.78, 0.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_mid"),
-            (id: "rail_left_high", kind: "cuboid", position: (-0.78, 1.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_light"),
-            (id: "rail_right_low", kind: "cuboid", position: (0.78, 0.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_mid"),
-            (id: "rail_right_high", kind: "cuboid", position: (0.78, 1.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_light"),
             (id: "cap_rear_left", kind: "cylinder", position: (-0.78, 2.24, -0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
             (id: "cap_rear_right", kind: "cylinder", position: (0.78, 2.24, -0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
             (id: "cap_front_left", kind: "cylinder", position: (-0.78, 2.24, 0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
             (id: "cap_front_right", kind: "cylinder", position: (0.78, 2.24, 0.72), scale: (0.43, 0.22, 0.43), material: "rope"),
+        ],
+        "lookout_outer_rail": [
+            (id: "rail_low", kind: "cuboid", position: (0.0, 0.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_mid"),
+            (id: "rail_high", kind: "cuboid", position: (0.0, 1.78, 0.0), scale: (0.24, 0.24, 1.68), material: "wood_light"),
         ],
         "rope_fence": [
             (id: "post_left", kind: "cylinder", position: (-0.72, 0.58, 0.0), scale: (0.18, 1.16, 0.18), material: "wood_mid"),
@@ -111,6 +111,8 @@
     primitive_prefab_instances: [
         (id: "lookout_left", prefab: "lookout_cage", position: (-7.15, 0.0, -1.45), rotation_y: 2.0, scale: (1.12, 1.12, 1.12)),
         (id: "lookout_right", prefab: "lookout_cage", position: (7.15, 0.0, -1.45), rotation_y: -2.0, scale: (1.12, 1.12, 1.12)),
+        (id: "lookout_left_outer_rail", prefab: "lookout_outer_rail", position: (-8.023, 0.0, -1.419), rotation_y: 2.0, scale: (1.12, 1.12, 1.12)),
+        (id: "lookout_right_outer_rail", prefab: "lookout_outer_rail", position: (8.023, 0.0, -1.419), rotation_y: -2.0, scale: (1.12, 1.12, 1.12)),
 
         (id: "rear_fence_left", prefab: "rope_fence", position: (-1.35, 0.24, -7.22)),
         (id: "rear_fence_right", prefab: "rope_fence", position: (1.35, 0.24, -7.22)),
@@ -168,15 +170,21 @@
     lights: [],
 
     colliders: [
-        // Only the lookout posts and substantial decor block fighters.
-        (id: "lookout_left_rear_left", kind: "circle", center: (-8.02, -2.26), radius: 0.24, top_y: 2.42),
-        (id: "lookout_left_rear_right", kind: "circle", center: (-6.28, -2.26), radius: 0.24, top_y: 2.42),
-        (id: "lookout_left_front_left", kind: "circle", center: (-8.02, -0.64), radius: 0.24, top_y: 2.42),
-        (id: "lookout_left_front_right", kind: "circle", center: (-6.28, -0.64), radius: 0.24, top_y: 2.42),
-        (id: "lookout_right_rear_left", kind: "circle", center: (6.28, -2.26), radius: 0.24, top_y: 2.42),
-        (id: "lookout_right_rear_right", kind: "circle", center: (8.02, -2.26), radius: 0.24, top_y: 2.42),
-        (id: "lookout_right_front_left", kind: "circle", center: (6.28, -0.64), radius: 0.24, top_y: 2.42),
-        (id: "lookout_right_front_right", kind: "circle", center: (8.02, -0.64), radius: 0.24, top_y: 2.42),
+        // Lookout rails block laterally without creating narrow walkable surfaces.
+        (id: "lookout_left_rear_left", kind: "circle", center: (-8.02, -2.26), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_rear_right", kind: "circle", center: (-6.28, -2.26), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_front_left", kind: "circle", center: (-8.02, -0.64), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_front_right", kind: "circle", center: (-6.28, -0.64), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_rear_rail", kind: "rectangle", center: (-7.178, -2.256), half_extents: (1.064, 0.134), rotation_y: 2.0, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_front_rail", kind: "rectangle", center: (-7.122, -0.644), half_extents: (1.064, 0.134), rotation_y: 2.0, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_left_outer_rail", kind: "rectangle", center: (-8.023, -1.419), half_extents: (0.134, 0.941), rotation_y: 2.0, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_rear_left", kind: "circle", center: (6.28, -2.26), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_rear_right", kind: "circle", center: (8.02, -2.26), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_front_left", kind: "circle", center: (6.28, -0.64), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_front_right", kind: "circle", center: (8.02, -0.64), radius: 0.24, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_rear_rail", kind: "rectangle", center: (7.178, -2.256), half_extents: (1.064, 0.134), rotation_y: -2.0, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_front_rail", kind: "rectangle", center: (7.122, -0.644), half_extents: (1.064, 0.134), rotation_y: -2.0, top_y: 2.42, behavior: "side_only"),
+        (id: "lookout_right_outer_rail", kind: "rectangle", center: (8.023, -1.419), half_extents: (0.134, 0.941), rotation_y: -2.0, top_y: 2.42, behavior: "side_only"),
         (id: "pine_left_rear", kind: "circle", center: (-8.05, -4.75), radius: 0.38, top_y: 2.30),
         (id: "pine_left_front", kind: "circle", center: (-8.88, 4.85), radius: 0.34, top_y: 1.95),
         (id: "rocks_right_rear", kind: "circle", center: (8.0, -4.75), radius: 0.46, top_y: 1.15),

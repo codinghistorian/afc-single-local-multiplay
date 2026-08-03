@@ -144,6 +144,7 @@ pub fn build_app() -> App {
         .init_resource::<game_state::Hitstop>()
         .init_resource::<game_state::MatchAnnouncements>()
         .init_resource::<game_state::GameplayPauseOwners>()
+        .init_resource::<arena::SplitCausewayDoorState>()
         .init_resource::<combat::HitEffects>()
         .init_resource::<camera::CameraActionEffects>()
         .init_resource::<components::PlayerKeyBindings>()
@@ -246,6 +247,7 @@ pub fn build_app() -> App {
                     game_state::sync_virtual_time_pause,
                 )
                     .chain(),
+                arena::sync_split_causeway_door_state,
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
                 user_mode::sync_user_mode_menu_music,
@@ -284,6 +286,7 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
+                arena::update_split_causeway_door_eligibility,
                 fighter::collect_player_input,
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 bot::bot_action_control_input,
@@ -318,6 +321,7 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
+                arena::advance_split_causeway_doors,
                 fighter::apply_fighter_movement,
                 arena::update_arena_pipe_transits,
                 fighter::separate_fighters,
@@ -430,7 +434,21 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
+            arena::sync_split_causeway_door_visuals
+                .after(arena::sync_arena_visuals)
+                .run_if(user_mode::gameplay_scene_loaded)
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
             arena::sync_arena_background_to_camera
+                .after(camera::follow_camera)
+                .run_if(user_mode::gameplay_scene_loaded)
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            arena::update_split_causeway_door_prompts
                 .after(camera::follow_camera)
                 .run_if(user_mode::gameplay_scene_loaded)
                 .in_set(GameSet::Presentation),
@@ -451,7 +469,6 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
-                user_mode::update_user_mode_controls_ui,
                 user_mode::update_key_settings_ui,
                 user_mode::update_sound_settings_ui,
             )
