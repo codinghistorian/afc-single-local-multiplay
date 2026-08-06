@@ -1042,6 +1042,17 @@ pub struct TechniqueDefinition {
     pub chain_rule: Option<TechniqueChainRule>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SpawnedSkillPredictionFacts {
+    pub effective_range: f32,
+    pub lead_distance_offset: f32,
+    pub travel_speed: f32,
+    pub fixed_travel_secs: f32,
+    pub lifetime_secs: f32,
+    pub vertical_tolerance: f32,
+    pub facing_cone_dot: Option<f32>,
+}
+
 impl TechniqueDefinition {
     pub fn duration(self) -> f32 {
         self.script.duration_secs()
@@ -1061,6 +1072,250 @@ impl TechniqueDefinition {
         self.branch_window
             .is_some_and(|window| window.contains_elapsed_secs(elapsed))
     }
+
+    /// Returns an allocation-free summary of the authored facts useful for
+    /// selecting and timing this technique. Runtime action transitions remain
+    /// authoritative in `fighter::update_fighter_state`.
+    pub fn prediction(self) -> TechniquePrediction {
+        let mut startup_ms = None;
+        let mut direct_active_end_ms = None;
+        let mut max_range = 0.0_f32;
+        let mut max_radius = 0.0_f32;
+        let mut has_direct_attack = false;
+        let mut all_direct_attacks_guardable = true;
+        let mut has_spawned_skill = false;
+        let mut spawned_skill_startup_ms = None;
+        let mut spawned_skill_range = 0.0_f32;
+        let mut spawned_skill_lead_distance_offset = 0.0_f32;
+        let mut spawned_skill_speed = 0.0_f32;
+        let mut spawned_skill_fixed_travel_ms = 0_u32;
+        let mut spawned_skill_lifetime_ms = 0_u32;
+        let mut spawned_skill_vertical_tolerance = 0.0_f32;
+        let mut spawned_skill_facing_cone_dot = None;
+        let mut authored_forward_motion = 0.0_f32;
+        let mut authored_lift_motion = 0.0_f32;
+
+        for event in self.script.events {
+            let mut include_payload = |payload_id| {
+                let payload = attack_payload_definition(payload_id);
+                let shape = attack_shape_definition(payload.shape_id);
+                let path_range = shape.path.iter().fold(0.0_f32, |range, point| {
+                    range.max((point[0] * point[0] + point[2] * point[2]).sqrt())
+                });
+                let active_end_ms = event.at_ms.saturating_add(payload.time_ms);
+
+                startup_ms = Some(startup_ms.map_or(event.at_ms, |start: u32| start.min(event.at_ms)));
+                direct_active_end_ms = Some(
+                    direct_active_end_ms
+                        .map_or(active_end_ms, |end: u32| end.max(active_end_ms)),
+                );
+                max_range = max_range.max(shape.range + path_range);
+                max_radius = max_radius.max(shape.radius);
+                has_direct_attack = true;
+                all_direct_attacks_guardable &= payload.guardable;
+            };
+
+            let mut include_spawned_skill = |facts: SpawnedSkillPredictionFacts| {
+                let replace = facts.effective_range > spawned_skill_range
+                    || (facts.effective_range == spawned_skill_range
+                        && spawned_skill_startup_ms
+                            .is_none_or(|startup| event.at_ms < startup));
+                if !replace {
+                    return;
+                }
+
+                spawned_skill_startup_ms = Some(event.at_ms);
+                spawned_skill_range = facts.effective_range;
+                spawned_skill_lead_distance_offset = facts.lead_distance_offset;
+                spawned_skill_speed = facts.travel_speed;
+                spawned_skill_fixed_travel_ms =
+                    (facts.fixed_travel_secs * MS_PER_SECOND).round() as u32;
+                spawned_skill_lifetime_ms =
+                    (facts.lifetime_secs * MS_PER_SECOND).round() as u32;
+                spawned_skill_vertical_tolerance = facts.vertical_tolerance;
+                spawned_skill_facing_cone_dot = facts.facing_cone_dot;
+            };
+
+            match event.kind {
+                MoveTimelineEventKind::Attack(payload_id) => include_payload(payload_id),
+                MoveTimelineEventKind::ChargedAttack { tap, partial, full } => {
+                    include_payload(tap);
+                    include_payload(partial);
+                    include_payload(full);
+                }
+                MoveTimelineEventKind::SpawnBeeSkill(skill) => {
+                    has_spawned_skill = true;
+                    include_spawned_skill(crate::bee_skills::bee_skill_prediction(skill));
+                }
+                MoveTimelineEventKind::SpawnPenguinSkill(skill) => {
+                    has_spawned_skill = true;
+                    if let Some(facts) = crate::penguin_skills::penguin_skill_prediction(skill) {
+                        include_spawned_skill(facts);
+                    }
+                }
+                MoveTimelineEventKind::SpawnChickSkill(_) => {
+                    has_spawned_skill = true;
+                }
+                MoveTimelineEventKind::Motion { forward, lift } => {
+                    authored_forward_motion += forward;
+                    authored_lift_motion += lift;
+                }
+                MoveTimelineEventKind::Feedback(_, _)
+                | MoveTimelineEventKind::NextTech
+                | MoveTimelineEventKind::Recover
+                | MoveTimelineEventKind::Stop => {}
+            }
+        }
+
+        TechniquePrediction {
+            id: self.id,
+            action: self.action,
+            button: self.button,
+            status: self.status,
+            startup_ms,
+            direct_active_end_ms,
+            recover_at_ms: self.script.recover_ms,
+            animation_recovery_ms: self.script.animation_recovery_ms,
+            next_tech_ms: self.script.next_tech_ms,
+            input_buffer_ms: self.input_buffer_ms,
+            stamina_cost: self.stamina_cost,
+            movement_lock: self.movement_lock,
+            cancel_window: self.cancel_window,
+            branch_window: self.branch_window,
+            is_chain: self.chain_rule.is_some(),
+            has_direct_attack,
+            all_direct_attacks_guardable: has_direct_attack && all_direct_attacks_guardable,
+            has_spawned_skill,
+            spawned_skill_startup_ms,
+            spawned_skill_range,
+            spawned_skill_lead_distance_offset,
+            spawned_skill_speed,
+            spawned_skill_fixed_travel_ms,
+            spawned_skill_lifetime_ms,
+            spawned_skill_vertical_tolerance,
+            spawned_skill_facing_cone_dot,
+            max_range,
+            max_radius,
+            authored_forward_motion,
+            authored_lift_motion,
+        }
+    }
+
+    /// Checks only authored status and resource requirements. Whether the
+    /// current action accepts a new request is intentionally left to the
+    /// authoritative fighter state machine.
+    pub fn prediction_requirements_allow(self, grounded: bool, available_stamina: f32) -> bool {
+        self.status.allows(grounded) && available_stamina >= self.stamina_cost
+    }
+}
+
+/// A compact, allocation-free view of technique data for combat prediction.
+/// `max_range + max_radius` is a conservative planar contact envelope: range
+/// includes the furthest authored shape-path offset, while radius remains
+/// separate for overlap and vertical-tolerance checks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TechniquePrediction {
+    pub id: TechniqueId,
+    pub action: FighterAction,
+    pub button: TechniqueButton,
+    pub status: TechniqueStatus,
+    /// Time to the first direct `Attack` or `ChargedAttack` timeline event.
+    pub startup_ms: Option<u32>,
+    /// End of the latest direct hitbox window. Detached spawned skills are not
+    /// included because their lifetime belongs to their spawned definition.
+    pub direct_active_end_ms: Option<u32>,
+    /// Authored time at which the technique returns control.
+    pub recover_at_ms: u32,
+    pub animation_recovery_ms: Option<u32>,
+    pub next_tech_ms: Option<u32>,
+    pub input_buffer_ms: u32,
+    pub stamina_cost: f32,
+    pub movement_lock: MovementLock,
+    pub cancel_window: Option<MsTimingWindow>,
+    pub branch_window: Option<MsTimingWindow>,
+    pub is_chain: bool,
+    pub has_direct_attack: bool,
+    pub all_direct_attacks_guardable: bool,
+    pub has_spawned_skill: bool,
+    pub spawned_skill_startup_ms: Option<u32>,
+    pub spawned_skill_range: f32,
+    pub spawned_skill_lead_distance_offset: f32,
+    pub spawned_skill_speed: f32,
+    pub spawned_skill_fixed_travel_ms: u32,
+    pub spawned_skill_lifetime_ms: u32,
+    pub spawned_skill_vertical_tolerance: f32,
+    pub spawned_skill_facing_cone_dot: Option<f32>,
+    pub max_range: f32,
+    pub max_radius: f32,
+    pub authored_forward_motion: f32,
+    pub authored_lift_motion: f32,
+}
+
+impl TechniquePrediction {
+    pub fn planar_contact_envelope(self) -> f32 {
+        self.max_range + self.max_radius
+    }
+
+    pub fn spawned_skill_contact_ms(self, distance: f32) -> Option<u32> {
+        let startup_ms = self.spawned_skill_startup_ms?;
+        if !distance.is_finite() || distance < 0.0 || distance > self.spawned_skill_range {
+            return None;
+        }
+
+        let travel_distance = (distance - self.spawned_skill_lead_distance_offset).max(0.0);
+        let linear_travel_ms = if self.spawned_skill_speed > f32::EPSILON {
+            (travel_distance / self.spawned_skill_speed * MS_PER_SECOND).ceil() as u32
+        } else if travel_distance <= f32::EPSILON {
+            0
+        } else {
+            return None;
+        };
+        let travel_ms = self
+            .spawned_skill_fixed_travel_ms
+            .saturating_add(linear_travel_ms);
+        if travel_ms > self.spawned_skill_lifetime_ms {
+            return None;
+        }
+
+        Some(startup_ms.saturating_add(travel_ms))
+    }
+
+    pub fn requirements_allow(self, grounded: bool, available_stamina: f32) -> bool {
+        self.status.allows(grounded) && available_stamina >= self.stamina_cost
+    }
+}
+
+#[cfg(test)]
+pub fn technique_prediction_for_loadout_id_in_catalog(
+    id: TechniqueId,
+    loadout: LoadoutContext,
+    catalog: &CharacterMoveCatalog,
+) -> Option<TechniquePrediction> {
+    technique_definition_for_loadout_id_in_catalog(id, loadout, catalog)
+        .map(TechniqueDefinition::prediction)
+}
+
+/// Resolves the authored move requested by a semantic button in the supplied
+/// context without mutating fighter state. Chain predicates are considered
+/// before the raw character move. The caller must still let the authoritative
+/// fighter state machine accept or reject the resulting input transition.
+pub fn technique_prediction_for_context_in_catalog(
+    context: TechniqueMatchContext,
+    available_stamina: f32,
+    catalog: &CharacterMoveCatalog,
+) -> Option<TechniquePrediction> {
+    let definition = chained_technique_for_context_in_catalog(context, catalog).or_else(|| {
+        raw_technique_for_loadout_in_catalog(
+            context.button,
+            context.grounded,
+            context.loadout,
+            catalog,
+        )
+    })?;
+
+    definition
+        .prediction_requirements_allow(context.grounded, available_stamina)
+        .then(|| definition.prediction())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

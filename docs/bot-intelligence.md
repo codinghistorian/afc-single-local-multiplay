@@ -23,10 +23,13 @@ input modifiers:
 2. Advance a 20 Hz integer decision clock. Missed epochs advance the tick but are
    collapsed into one fresh decision rather than replaying input bursts.
 3. Refresh bounded perception and per-opponent tendency memory.
-4. Score legal targets with hysteresis, then score tactical goals and legal actions.
-5. Retain the selected action for its commitment window unless an immediate safety
-   condition requires interruption.
-6. Translate semantic intent into the same press, hold, and release fields used by
+4. Score legal targets with hysteresis, then score tactical goals and legal actions
+   using authored technique timing, range, stamina, facing, and recovery facts.
+5. Estimate bounded target velocity and steer into the selected move's predicted
+   contact envelope before committing the input.
+6. Retain an offensive commitment until its exact authored fighter action is accepted
+   and completes, unless rejection, invalidation, or immediate safety interrupts it.
+7. Translate semantic intent into the same press, hold, and release fields used by
    human-controlled fighters.
 
 Planning code receives explicit snapshots, profile values, match seed, fighter ID,
@@ -60,6 +63,19 @@ Target selection considers match legality, distance, recent threat, vulnerabilit
 and ring position. A target is retained until invalid or until a challenger exceeds
 it by the configured switch margin. Action candidates use the existing combat and
 item facts rather than parallel damage or timing constants.
+
+Direct attacks derive startup, active and recovery timing, contact shape, authored
+motion, guardability, and stamina requirements from the technique catalog. Detached
+Bee and Penguin skills expose prediction facts from the same module-owned constants
+used by their runtime projectiles and placed attacks. The planner deliberately uses a
+short reliable travel window rather than the maximum lock range so Standard remains
+competent without becoming mechanically perfect.
+
+Candidate utility includes predicted contact time and recovery confidence. Fast,
+reliable attacks lead neutral play; slower heavy attacks gain value against vulnerable
+targets, and grabs gain value against observed guarding. Seeded candidate jitter is
+applied before selection, so variation can change a close decision without overriding
+legality or safety.
 
 Each bot retains a bounded eight-second tendency history for opponent aggression,
 guarding, grabs, jumping/dodging, repeated openers, and spacing. Adaptation changes
@@ -98,6 +114,21 @@ gate, commitment, and reason score without adding player-facing setup UI. Tests 
 fixed snapshot tapes to cover named randomness, canonical ordering, target
 hysteresis, reaction delay, adaptation bounds, commitments, and input-edge
 semantics.
+
+The opt-in live quality probe runs deterministic combat fixtures and fails on button
+spam or movement without authoritative action transitions, hits, and damage:
+
+```bash
+AFC_BOT_QUALITY_SCENARIO=Duel cargo run --features bot-quality
+AFC_BOT_QUALITY_SCENARIO=FourBot cargo run --features bot-quality
+```
+
+Both fixtures use Training Ground's continuous floor to isolate combat conversion.
+The latest fixed-seed Duel passed with 43 accepted attacks and 22 damaging hit ticks.
+The four-character fixture passed with 186 accepted attacks, 141 damaging hit ticks,
+damage from every fighter, four action families, and no idle, stuck, or no-hit failure.
+Ring-outs and falls remain reported diagnostics but are not required on the enclosed
+practice floor.
 
 Every code-change batch must pass `cargo run` and `cargo test`. Changes affecting
 the bot hot path also require same-hardware before/after `FourBotStress` captures

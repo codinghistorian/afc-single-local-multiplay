@@ -19,7 +19,8 @@ use crate::bot_profiles::BotProfileCatalog;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::camera::ArenaCamera;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-use crate::characters::{CharacterKind, FighterCharacter, character_label, next_character_kind};
+use crate::characters::{CharacterKind, character_label, next_character_kind};
+use crate::characters::{CharacterMoveCatalog, FighterCharacter};
 use crate::components::{
     BotBehaviorMode, BotBrain, BotMovementPlan, Controller, Fighter, FighterAction,
     FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
@@ -306,6 +307,7 @@ pub fn bot_input(
     hazard_state: Res<ArenaHazardState>,
     split_causeway_doors: Res<SplitCausewayDoorState>,
     profiles: Res<BotProfileCatalog>,
+    move_catalog: Res<CharacterMoveCatalog>,
     mut bot_runtime: ResMut<BotRuntimeStore>,
     mut bot_navigation: ResMut<BotNavigationCache>,
     mut bot_snapshot: Local<intelligence::BotSnapshotBuffer>,
@@ -321,6 +323,7 @@ pub fn bot_input(
         &FighterInventory,
         &Transform,
         &FighterSpecialState,
+        &FighterCharacter,
         &FighterStyle,
         &FighterEquipment,
         &FighterStats,
@@ -361,6 +364,7 @@ pub fn bot_input(
         inventory,
         transform,
         special_state,
+        character,
         style,
         equipment,
         stats,
@@ -402,6 +406,7 @@ pub fn bot_input(
                 motor,
                 transform.translation,
                 special_state,
+                character,
                 style,
                 equipment,
                 stats,
@@ -411,6 +416,7 @@ pub fn bot_input(
                 bot_ai_special_inputs_allowed(&user_mode),
                 &bot_snapshot,
                 &profiles,
+                &move_catalog,
                 &mut bot_runtime,
                 &mut bot_navigation,
                 &split_causeway_doors,

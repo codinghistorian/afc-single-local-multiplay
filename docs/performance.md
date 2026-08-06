@@ -52,10 +52,34 @@ script.
 | 2026-07-26 | Apple M2 Max, macOS | itch.io web release with Bevy Gilrs | Optimized WASM 12,515,927 bytes; `web_dist/` 64,722,014 extracted bytes across 207 files; ZIP 48,525,710 bytes. | Invalid packaging measurement: the build script selected a stale headless dedicated-server WASM; superseded below. |
 | 2026-07-27 | Apple M2 Max, macOS | Corrected itch.io web release | Optimized game WASM 44,263,596 bytes; `web_dist/` 103,509,569 extracted bytes across 214 files; ZIP 64,575,622 bytes. | Corrected size/package baseline after pinning the `ffc-prototype` browser-game binary; Chrome and Safari runtime measurements remain pending. |
 | 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, profiling profile with `perf` | Median of three runs: 18,000 samples; frame 16.6617 / 17.7817 / 18.3724 ms; render CPU span 0.0924 / 0.1474 / 0.1747 ms; process CPU 88.23% total / 7.35% normalized; RSS 0.4812 / 0.4246 GiB. | Accepted post-change bot-intelligence baseline; GPU timestamps unavailable, with allocation and asset steady state unchanged. |
+| 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, move-aware bot combat, profiling profile with `perf` | Median of three runs: 17,989 samples; frame 16.6779 / 18.5510 / 19.4652 ms; render CPU span 0.1255 / 0.1975 / 0.2245 ms; process CPU 94.87% total / 7.91% normalized; RSS 0.4234 / 0.4234 GiB. | Accepted functional baseline for bots that now execute authored combat; not an optimization claim. GPU timestamps unavailable; ending allocations and assets are stable. |
 | Pending | Apple M2 Max, macOS | `MapCycle100` and `Soak10Minutes` | Capture peak/end counts and memory. | Required before accepting cache or pool changes. |
 | Pending | Current Chrome and Safari | Optimized web release | Capture p95/p99 frame time, WASM, and distribution size. | Required before changing the accepted web baseline. |
 
 ## Hot-path validation record
+
+The move-aware bot-combat change was checked with three `FourBotStress` runs on
+2026-08-06 against the accepted bot-intelligence baseline below. All runs used the
+same Apple M2 Max, macOS, profiling profile, `FFC00001` seed, Split Causeway setup,
+30-second warmup, and 300-second sample. Presentation remained paced near 60 Hz in
+all three runs. The reported after row is run 1, the middle run when ordered by frame
+median.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before: accepted bot-intelligence baseline | 18,000 | 16.6617 / 17.7817 / 18.3724 ms | 0.0924 / 0.1474 / 0.1747 ms | 88.23% total; 7.35% normalized | 0.4812 / 0.4246 GiB | 1,177 / 1,032 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: move-aware combat, run 1 of 3 | 17,989 | 16.6779 / 18.5510 / 19.4652 ms | 0.1255 / 0.1975 / 0.2245 ms | 94.87% total; 7.91% normalized | 0.4234 / 0.4234 GiB | 1,100 / 1,031 | 126 / 126 | 126 / 136 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+Frame median changed by +0.0162 ms (+0.10%), p95 by +0.7693 ms (+4.33%),
+and p99 by +1.0928 ms (+5.95%). Render CPU-span overhead was 0.0331 / 0.0501 /
+0.0498 ms across median/p95/p99. Total process CPU rose by 6.64 percentage points
+while normalized CPU remained below 8%. This is the expected functional cost of bots
+now producing sustained authoritative attacks, projectiles, hits, and effects rather
+than a performance improvement. Peak RSS fell by 0.0578 GiB, ending RSS was stable,
+ending entities fell by one, mesh allocations were unchanged, and all ending asset
+counts matched. The six extra peak materials were transient combat effects. The
+change is retained for the gameplay improvement and this row becomes the functional
+baseline for subsequent bot work.
 
 The bot-intelligence change was checked with three paired `FourBotStress` runs
 on 2026-08-06. The before and after builds used the same Apple M2 Max and macOS

@@ -6,6 +6,8 @@ mod audio_settings;
 mod bee_skills;
 mod body_collision;
 mod bot;
+#[cfg(all(feature = "bot-quality", feature = "native", not(target_arch = "wasm32")))]
+mod bot_quality;
 mod bot_profiles;
 mod camera;
 mod characters;
@@ -57,12 +59,12 @@ enum GameSet {
 }
 
 fn primary_present_mode() -> PresentMode {
-    #[cfg(feature = "perf")]
+    #[cfg(any(feature = "perf", feature = "bot-quality"))]
     {
         PresentMode::AutoNoVsync
     }
 
-    #[cfg(not(feature = "perf"))]
+    #[cfg(not(any(feature = "perf", feature = "bot-quality")))]
     {
         PresentMode::AutoVsync
     }
@@ -126,6 +128,9 @@ pub fn build_app() -> App {
 
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
+
+    #[cfg(all(feature = "bot-quality", feature = "native", not(target_arch = "wasm32")))]
+    app.add_plugins(bot_quality::BotQualityPlugin);
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     app.add_systems(

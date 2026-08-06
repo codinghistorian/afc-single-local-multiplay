@@ -4,6 +4,7 @@ use crate::arena::{SplitCausewayDoorState, arena_hazard_is_active_for_kind};
 use crate::bot_profiles::{
     BOT_DECISION_HZ, BOT_OPPONENT_HISTORY_TICKS, BotProfile, BotProfileCatalog, BotProfileId,
 };
+use crate::characters::{CharacterMoveCatalog, FighterCharacter};
 use crate::components::{
     BotBehaviorMode, BotBrain, BotMovementPlan, Fighter, FighterAction, FighterActionState,
     FighterInput, FighterMotor, FighterSpecialState, FighterStats,
@@ -11,11 +12,15 @@ use crate::components::{
 use crate::constants::{
     COMBO_QUEUE_END, COMBO_QUEUE_START, FIGHTER_COUNT, ITEM_PICKUP_RANGE, MAX_STAMINA,
 };
-use crate::equipment::FighterEquipment;
+use crate::equipment::{FighterEquipment, LoadoutContext};
 use crate::game_state::MatchState;
 use crate::items::{ArenaItem, ItemKind, ItemState};
 use crate::specials::{ActiveSpecial, SpecialKind};
 use crate::styles::{FighterStyle, style_tuning};
+use crate::techniques::{
+    TechniqueButton, TechniqueMatchContext, TechniquePrediction,
+    technique_prediction_for_context_in_catalog,
+};
 
 use super::{
     BotDifficulty, BotHeldItemDecision, BotNavigationCache, BotRecoveryDecision,
@@ -294,6 +299,7 @@ struct BotIntent {
 #[derive(Clone, Copy, Debug)]
 struct BotCommitment {
     action: BotSemanticAction,
+    expected_action: Option<FighterAction>,
     expires_tick: u64,
     accepted: bool,
     last_press_tick: Option<u64>,
@@ -311,6 +317,9 @@ struct BotOpponentMemory {
     perceived_action: Option<FighterAction>,
     last_opener: Option<FighterAction>,
     repeated_openers: u8,
+    last_position: Option<Vec3>,
+    last_position_tick: u64,
+    velocity: Vec2,
 }
 
 impl Default for BotOpponentMemory {
@@ -327,11 +336,33 @@ impl Default for BotOpponentMemory {
             perceived_action: None,
             last_opener: None,
             repeated_openers: 0,
+            last_position: None,
+            last_position_tick: 0,
+            velocity: Vec2::ZERO,
         }
     }
 }
 
 impl BotOpponentMemory {
+    fn observe_position(&mut self, position: Vec3, tick: u64) {
+        if let Some(previous) = self.last_position {
+            let tick_delta = tick.saturating_sub(self.last_position_tick);
+            let delta = Vec2::new(position.x - previous.x, position.z - previous.z);
+            if tick_delta == 0 || delta.length() > 6.0 {
+                self.velocity = Vec2::ZERO;
+            } else {
+                let seconds = tick_delta as f32 * DECISION_STEP;
+                let mut sample = delta / seconds.max(DECISION_STEP);
+                if sample.length() > 12.0 {
+                    sample = sample.normalize_or_zero() * 12.0;
+                }
+                self.velocity = self.velocity * 0.55 + sample * 0.45;
+            }
+        }
+        self.last_position = Some(position);
+        self.last_position_tick = tick;
+    }
+
     fn push(&mut self, flags: u8) {
         if self.len == MEMORY_TICKS {
             let old = self.samples[self.cursor];
@@ -457,6 +488,241 @@ enum RandomStream {
     Item = 10,
 }
 
+#[derive(Default)]
+struct BotTechniqueOptions {
+    light: Option<TechniquePrediction>,
+    heavy: Option<TechniquePrediction>,
+}
+
+fn technique_options(
+    character: &FighterCharacter,
+    style: &FighterStyle,
+    equipment: &FighterEquipment,
+    motor: &FighterMotor,
+    stats: &FighterStats,
+    action: &FighterActionState,
+    catalog: &CharacterMoveCatalog,
+) -> BotTechniqueOptions {
+    let loadout = LoadoutContext::for_character(character.kind, style.kind, equipment.kind);
+    let prediction = |button| {
+        technique_prediction_for_context_in_catalog(
+            TechniqueMatchContext {
+                previous: action.technique_id,
+                button,
+                elapsed: action.elapsed,
+                style: style.kind,
+                loadout,
+                grounded: motor.grounded,
+                confirmed_hit: action.confirmed_hit,
+                cancel_window_open: action.cancel_window_open,
+                branch_window_open: action.branch_window_open,
+                current_action: action.action,
+            },
+            stats.stamina,
+            catalog,
+        )
+    };
+    BotTechniqueOptions {
+        light: prediction(TechniqueButton::A),
+        heavy: prediction(TechniqueButton::B),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoveContactWindow {
+    startup_seconds: f32,
+    envelope: f32,
+    vertical_tolerance: f32,
+    facing_dot: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoveEvaluation {
+    predicted_position: Vec3,
+    score: f32,
+    contact_seconds: f32,
+}
+
+const SPAWNED_SKILL_RELIABLE_TRAVEL_SECONDS: f32 = 0.25;
+const SPAWNED_SKILL_FALLBACK_FACING_DOT: f32 = 0.7;
+
+fn spawned_skill_reliable_range(prediction: TechniquePrediction) -> f32 {
+    if !prediction.has_spawned_skill || prediction.spawned_skill_range <= 0.0 {
+        return 0.0;
+    }
+    if prediction.spawned_skill_speed <= 0.0 {
+        return prediction.spawned_skill_range;
+    }
+
+    (prediction.spawned_skill_lead_distance_offset
+        + prediction.spawned_skill_speed * SPAWNED_SKILL_RELIABLE_TRAVEL_SECONDS)
+        .min(prediction.spawned_skill_range)
+}
+
+fn technique_engagement_envelope(prediction: TechniquePrediction) -> f32 {
+    let direct = prediction
+        .has_direct_attack
+        .then(|| prediction.planar_contact_envelope())
+        .unwrap_or(0.0);
+    let spawned = spawned_skill_reliable_range(prediction);
+    direct.max(spawned)
+}
+
+fn technique_contact_window(
+    prediction: TechniquePrediction,
+    action: BotSemanticAction,
+    distance: f32,
+) -> Option<MoveContactWindow> {
+    let direct = prediction.has_direct_attack.then(|| MoveContactWindow {
+        startup_seconds: prediction.startup_ms.unwrap_or(0) as f32 / 1_000.0,
+        envelope: prediction.planar_contact_envelope().max(0.1),
+        vertical_tolerance: prediction.max_radius.max(0.65),
+        facing_dot: match action {
+            BotSemanticAction::Heavy => 0.3,
+            _ => 0.15,
+        },
+    });
+    let reliable_spawned_range = spawned_skill_reliable_range(prediction);
+    let spawned = (distance <= reliable_spawned_range)
+        .then(|| prediction.spawned_skill_contact_ms(distance))
+        .flatten()
+        .map(|contact_ms| MoveContactWindow {
+            startup_seconds: contact_ms as f32 / 1_000.0,
+            envelope: reliable_spawned_range,
+            vertical_tolerance: prediction.spawned_skill_vertical_tolerance.max(0.1),
+            facing_dot: prediction
+                .spawned_skill_facing_cone_dot
+                .unwrap_or(SPAWNED_SKILL_FALLBACK_FACING_DOT),
+        });
+
+    match (direct, spawned) {
+        (Some(direct), Some(spawned)) => {
+            if distance <= direct.envelope && direct.startup_seconds <= spawned.startup_seconds {
+                Some(direct)
+            } else {
+                Some(spawned)
+            }
+        }
+        (Some(direct), None) => Some(direct),
+        (None, Some(spawned)) => Some(spawned),
+        (None, None) => None,
+    }
+}
+
+fn technique_execution_confidence(
+    prediction: TechniquePrediction,
+    contact_seconds: f32,
+) -> f32 {
+    let contact = (1.0 - contact_seconds / 0.75).clamp(0.0, 1.0);
+    let recovery = (1.0 - prediction.recover_at_ms as f32 / 1_000.0).clamp(0.0, 1.0);
+    contact * 0.65 + recovery * 0.35
+}
+
+fn technique_planning_confidence(
+    prediction: TechniquePrediction,
+    action: BotSemanticAction,
+) -> Option<f32> {
+    let envelope = technique_engagement_envelope(prediction);
+    let window = technique_contact_window(prediction, action, envelope * 0.65)?;
+    let neutral_tiebreak = if action == BotSemanticAction::Light {
+        0.01
+    } else {
+        0.0
+    };
+    Some(
+        technique_execution_confidence(prediction, window.startup_seconds) + neutral_tiebreak,
+    )
+}
+
+fn offensive_candidate_score(
+    prediction: TechniquePrediction,
+    action: BotSemanticAction,
+    evaluation: MoveEvaluation,
+    punish_need: f32,
+    spacing_bonus: f32,
+) -> f32 {
+    let (base, punish_weight) = match action {
+        BotSemanticAction::Heavy => (2.0, 2.4),
+        _ => (2.2, 0.8),
+    };
+    base + evaluation.score
+        + technique_execution_confidence(prediction, evaluation.contact_seconds) * 1.6
+        + spacing_bonus
+        + punish_need * punish_weight
+}
+
+fn grab_candidate_score(opponent_guard_rate: f32, punish_need: f32) -> f32 {
+    1.8 + opponent_guard_rate.clamp(0.0, 1.0) * 4.5 + punish_need * 0.35
+}
+
+fn evaluate_contact_window(
+    window: MoveContactWindow,
+    bot_position: Vec3,
+    bot_facing: Vec3,
+    target_position: Vec3,
+    target_velocity: Vec2,
+    lead_scale: f32,
+) -> Option<MoveEvaluation> {
+    let lead_seconds = window.startup_seconds.clamp(0.0, 0.35) * lead_scale.clamp(0.0, 1.0);
+    let predicted_position = target_position
+        + Vec3::new(
+            target_velocity.x * lead_seconds,
+            0.0,
+            target_velocity.y * lead_seconds,
+        );
+    let flat = Vec2::new(
+        predicted_position.x - bot_position.x,
+        predicted_position.z - bot_position.z,
+    );
+    let distance = flat.length();
+    if distance > window.envelope || (predicted_position.y - bot_position.y).abs() > window.vertical_tolerance {
+        return None;
+    }
+    let facing = Vec2::new(bot_facing.x, bot_facing.z)
+        .normalize_or_zero()
+        .dot(flat.normalize_or_zero());
+    if facing < window.facing_dot {
+        return None;
+    }
+    let ideal = window.envelope * 0.7;
+    let range_quality = (1.0 - (distance - ideal).abs() / window.envelope.max(0.01))
+        .clamp(0.0, 1.0);
+    Some(MoveEvaluation {
+        predicted_position,
+        score: range_quality * 1.6 + facing.clamp(0.0, 1.0) * 0.8,
+        contact_seconds: window.startup_seconds,
+    })
+}
+
+fn evaluate_technique(
+    prediction: TechniquePrediction,
+    action: BotSemanticAction,
+    bot_position: Vec3,
+    motor: &FighterMotor,
+    stats: &FighterStats,
+    target_position: Vec3,
+    target_velocity: Vec2,
+    lead_scale: f32,
+    stamina_reserve_ratio: f32,
+) -> Option<MoveEvaluation> {
+    if !prediction.requirements_allow(motor.grounded, stats.stamina)
+        || stats.stamina - prediction.stamina_cost
+            < MAX_STAMINA * stamina_reserve_ratio
+    {
+        return None;
+    }
+    let distance = flat_distance(bot_position, target_position);
+    let window = technique_contact_window(prediction, action, distance)?;
+    evaluate_contact_window(
+        window,
+        bot_position,
+        motor.facing,
+        target_position,
+        target_velocity,
+        lead_scale,
+    )
+}
+
 fn bot_sample(seed: u64, fighter_id: usize, tick: u64, stream: RandomStream, index: u32) -> f32 {
     let mut value = seed
         ^ (fighter_id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -488,6 +754,7 @@ pub(super) fn drive_bot(
     motor: &FighterMotor,
     position: Vec3,
     special_state: &FighterSpecialState,
+    character: &FighterCharacter,
     style: &FighterStyle,
     equipment: &FighterEquipment,
     stats: &FighterStats,
@@ -497,6 +764,7 @@ pub(super) fn drive_bot(
     special_inputs_allowed: bool,
     snapshot: &BotSnapshotBuffer,
     profiles: &BotProfileCatalog,
+    move_catalog: &CharacterMoveCatalog,
     runtime: &mut BotRuntimeStore,
     navigation: &mut BotNavigationCache,
     split_causeway_doors: &SplitCausewayDoorState,
@@ -624,6 +892,15 @@ pub(super) fn drive_bot(
     }
 
     if elapsed_ticks > 0 {
+        let techniques = technique_options(
+            character,
+            style,
+            equipment,
+            motor,
+            stats,
+            action,
+            move_catalog,
+        );
         plan_bot(
             arena_index,
             bot_id,
@@ -637,6 +914,7 @@ pub(super) fn drive_bot(
             difficulty,
             held_kind,
             special_inputs_allowed,
+            &techniques,
             snapshot,
             profile,
             replay_seed,
@@ -652,7 +930,24 @@ pub(super) fn drive_bot(
 fn action_locked(action: FighterAction) -> bool {
     matches!(
         action,
-        FighterAction::Hitstun
+        FighterAction::DashAttack
+            | FighterAction::JumpAttack
+            | FighterAction::JumpHeavyAttack
+            | FighterAction::ComboFinisher
+            | FighterAction::HeavyAttack
+            | FighterAction::HeavyAttack2
+            | FighterAction::UltimateStartup
+            | FighterAction::UltimateRush
+            | FighterAction::UltimateVictim
+            | FighterAction::GrabStartup
+            | FighterAction::Throwing
+            | FighterAction::SpecialCast
+            | FighterAction::ItemPickup
+            | FighterAction::ItemSwing
+            | FighterAction::ItemThrow
+            | FighterAction::ItemDrop
+            | FighterAction::Guarding
+            | FighterAction::Hitstun
             | FighterAction::GetUp
             | FighterAction::GuardBroken
             | FighterAction::GrabHold
@@ -754,6 +1049,7 @@ fn update_opponent_memory(
             continue;
         }
         let memory = &mut slot.opponents[fighter.id];
+        memory.observe_position(fighter.position, slot.decision_tick);
         for _ in 0..skipped {
             memory.push(0);
         }
@@ -908,6 +1204,7 @@ fn plan_bot(
     difficulty: BotDifficulty,
     held_kind: Option<ItemKind>,
     special_inputs_allowed: bool,
+    techniques: &BotTechniqueOptions,
     snapshot: &BotSnapshotBuffer,
     profile: BotProfile,
     seed: u64,
@@ -927,12 +1224,13 @@ fn plan_bot(
         slot.trace = BotDecisionTrace::default();
         return;
     };
-    let (perceived_action, opponent_aggression_rate, opponent_guard_rate) = {
+    let (perceived_action, opponent_aggression_rate, opponent_guard_rate, target_velocity) = {
         let memory = &slot.opponents[target_id];
         (
             memory.perceived_action.unwrap_or(FighterAction::Idle),
             memory.rate(0),
             memory.rate(1),
+            memory.velocity,
         )
     };
     let error = Vec2::new(
@@ -940,10 +1238,22 @@ fn plan_bot(
         signed_sample(seed, bot_id, slot.decision_tick, RandomStream::PerceptionZ, target_id as u32),
     ) * profile.perception_error_m;
     let perceived_position = target.position + Vec3::new(error.x, 0.0, error.y);
-    let distance = flat_distance(position, perceived_position);
+    let lead_scale = if difficulty == BotDifficulty::Tutorial {
+        0.6
+    } else {
+        (1.0 - profile.perception_error_m * 0.15).clamp(0.75, 1.0)
+    };
+    let intercept_position = perceived_position
+        + Vec3::new(
+            target_velocity.x * 0.15 * lead_scale,
+            0.0,
+            target_velocity.y * 0.15 * lead_scale,
+        );
+    let perceived_distance = flat_distance(position, perceived_position);
+    let distance = flat_distance(position, intercept_position);
     let direct = Vec2::new(
-        perceived_position.x - position.x,
-        perceived_position.z - position.z,
+        intercept_position.x - position.x,
+        intercept_position.z - position.z,
     )
     .normalize_or_zero();
     if bot_sample(seed, bot_id, slot.decision_tick, RandomStream::Strafe, 0) < 0.12 {
@@ -951,7 +1261,27 @@ fn plan_bot(
     }
     let strafe = Vec2::new(-direct.y, direct.x) * slot.strafe_sign;
     let personality = bot_personality(style.kind, equipment.kind);
-    let range = bot_range_band(style_tuning(style.kind).bot_preferred_range, personality);
+    let mut range = bot_range_band(style_tuning(style.kind).bot_preferred_range, personality);
+    let authored_contact_envelope = [
+        (BotSemanticAction::Light, techniques.light),
+        (BotSemanticAction::Heavy, techniques.heavy),
+    ]
+        .into_iter()
+        .filter_map(|(semantic, prediction)| {
+            let prediction = prediction?;
+            Some((
+                technique_planning_confidence(prediction, semantic)?,
+                technique_engagement_envelope(prediction),
+            ))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map_or(0.0, |(_, envelope)| envelope);
+    if authored_contact_envelope > 0.0 {
+        let authored_ideal = (authored_contact_envelope * 0.72).clamp(0.6, 2.25);
+        range.ideal = range.ideal.min(authored_ideal);
+        range.min = (range.ideal * 0.68).clamp(0.45, range.ideal - 0.1);
+        range.max = (authored_contact_envelope * 0.92).max(range.ideal + 0.15);
+    }
     let health_ratio = (stats.health / 100.0).clamp(0.0, 1.0);
     let stamina_ratio = (stats.stamina / MAX_STAMINA).clamp(0.0, 1.0);
     let danger_need = ((profile.danger_health_ratio - health_ratio)
@@ -1037,9 +1367,9 @@ fn plan_bot(
     }
 
     let destination = if selected_goal == BotGoal::CollectItem {
-        best_item.map(|value| value.0).unwrap_or(perceived_position)
+        best_item.map(|value| value.0).unwrap_or(intercept_position)
     } else {
-        perceived_position
+        intercept_position
     };
     let routed = navigation
         .next_direction(
@@ -1072,7 +1402,7 @@ fn plan_bot(
     let movement = apply_edge_steering(position, movement.normalize_or_zero());
     let delayed_target = BotTargetSnapshot {
         position: perceived_position,
-        distance,
+        distance: perceived_distance,
         facing: target.facing,
         action: perceived_action,
     };
@@ -1094,22 +1424,34 @@ fn plan_bot(
     let mistake = bot_sample(seed, bot_id, slot.decision_tick, RandomStream::Mistake, 0)
         < profile.intentional_mistake_rate;
     let mut best_action: Option<(BotSemanticAction, f32)> = None;
+    let mut consider = |candidate: BotSemanticAction, base_score: f32| {
+        let jitter = signed_sample(
+            seed,
+            bot_id,
+            slot.decision_tick,
+            RandomStream::Action,
+            candidate as u32,
+        ) * profile.utility_jitter;
+        consider_action(&mut best_action, candidate, base_score * (1.0 + jitter));
+    };
     if bot_should_jump_for_elevation(
         position,
         movement,
         motor.grounded,
         crate::arena_defs::active_arena_definition(),
     ) {
-        consider_action(&mut best_action, BotSemanticAction::Jump, 10.0);
+        consider(BotSemanticAction::Jump, 10.0);
     }
-    if slot.decision_tick >= slot.dash_ready_tick
+    if neutral_action_available(action.action)
+        && slot.decision_tick >= slot.dash_ready_tick
         && motor.grounded
         && movement.length_squared() > 0.1
         && (distance > range.max + 0.45 || selected_goal == BotGoal::Disengage)
     {
-        consider_action(&mut best_action, BotSemanticAction::Dash, 2.0);
+        consider(BotSemanticAction::Dash, 2.0);
     }
-    if let Some(kind) = held_kind {
+    if neutral_action_available(action.action) {
+        if let Some(kind) = held_kind {
         let wave = signed_sample(seed, bot_id, slot.decision_tick, RandomStream::Item, 0);
         if let Some(decision) = bot_held_item_decision(
             kind,
@@ -1118,8 +1460,7 @@ fn plan_bot(
             if slot.decision_tick >= slot.attack_ready_tick { 0.0 } else { 1.0 },
             wave,
         ) {
-            consider_action(
-                &mut best_action,
+            consider(
                 match decision {
                     BotHeldItemDecision::Light => BotSemanticAction::ItemLight,
                     BotHeldItemDecision::Heavy => BotSemanticAction::ItemHeavy,
@@ -1130,52 +1471,95 @@ fn plan_bot(
     } else if best_item.is_some_and(|(_, score, item_distance)| {
         score > 0.25 && item_distance <= ITEM_PICKUP_RANGE + 0.25
     }) {
-        consider_action(&mut best_action, BotSemanticAction::Pickup, 3.2);
+        consider(BotSemanticAction::Pickup, 3.2);
+        }
     }
 
     if !mistake && slot.decision_tick >= slot.attack_ready_tick {
-        let reserve_ok = stamina_ratio >= profile.attack_stamina_reserve_ratio;
-        if !motor.grounded && !motor.air_attack_used && distance < 1.9 {
-            consider_action(&mut best_action, BotSemanticAction::Light, 4.0 + punish_need);
+        if let Some(prediction) = techniques.light {
+            if let Some(evaluation) = evaluate_technique(
+                prediction,
+                BotSemanticAction::Light,
+                position,
+                motor,
+                stats,
+                perceived_position,
+                target_velocity,
+                lead_scale,
+                profile.attack_stamina_reserve_ratio,
+            ) {
+                let closing_bonus = 1.0
+                    - flat_distance(position, evaluation.predicted_position)
+                        / technique_engagement_envelope(prediction).max(0.1);
+                consider(
+                    BotSemanticAction::Light,
+                    offensive_candidate_score(
+                        prediction,
+                        BotSemanticAction::Light,
+                        evaluation,
+                        punish_need,
+                        closing_bonus.max(0.0),
+                    ),
+                );
+            }
         }
-        if motor.grounded && distance < 1.55 * style_modifier {
-            consider_action(&mut best_action, BotSemanticAction::Light, 3.5 + punish_need * 2.0);
+        if let Some(prediction) = techniques.heavy {
+            if let Some(evaluation) = evaluate_technique(
+                prediction,
+                BotSemanticAction::Heavy,
+                position,
+                motor,
+                stats,
+                perceived_position,
+                target_velocity,
+                lead_scale,
+                profile.attack_stamina_reserve_ratio,
+            ) {
+                consider(
+                    BotSemanticAction::Heavy,
+                    offensive_candidate_score(
+                        prediction,
+                        BotSemanticAction::Heavy,
+                        evaluation,
+                        punish_need,
+                        0.0,
+                    ),
+                );
+            }
         }
-        if reserve_ok && motor.grounded && distance < 1.95 {
-            consider_action(&mut best_action, BotSemanticAction::Heavy, 2.7 + punish_need * 2.3);
-        }
-        if difficulty == BotDifficulty::Standard && motor.grounded && distance < 0.9 {
-            consider_action(
-                &mut best_action,
+        if difficulty == BotDifficulty::Standard
+            && neutral_action_available(action.action)
+            && motor.grounded
+            && perceived_distance < 0.9
+        {
+            consider(
                 BotSemanticAction::Grab,
-                2.5 + opponent_guard_rate * 2.0,
+                grab_candidate_score(opponent_guard_rate, punish_need),
             );
         }
-        if special_inputs_allowed && held_kind.is_none() && special_state.cooldown <= 0.0 {
+        if neutral_action_available(action.action)
+            && special_inputs_allowed
+            && held_kind.is_none()
+            && special_state.cooldown <= 0.0
+        {
             if (2.4..6.0).contains(&distance) {
-                consider_action(&mut best_action, BotSemanticAction::SpecialProjectile, 2.45);
+                consider(BotSemanticAction::SpecialProjectile, 2.45);
             }
             if distance < 1.35 {
-                consider_action(&mut best_action, BotSemanticAction::SpecialTrap, 2.4);
+                consider(BotSemanticAction::SpecialTrap, 2.4);
             }
             if (1.6..3.4).contains(&distance) {
-                consider_action(&mut best_action, BotSemanticAction::SpecialHazard, 2.3);
+                consider(BotSemanticAction::SpecialHazard, 2.3);
             }
             if (1.4..3.8).contains(&distance) {
-                consider_action(&mut best_action, BotSemanticAction::SpecialShockwave, 2.35);
+                consider(BotSemanticAction::SpecialShockwave, 2.35);
             }
         }
     }
+    drop(consider);
 
-    if let Some((selected, base_score)) = best_action {
-        let jitter = signed_sample(
-            seed,
-            bot_id,
-            slot.decision_tick,
-            RandomStream::Action,
-            selected as u32,
-        ) * profile.utility_jitter;
-        if base_score * (1.0 + jitter) > 0.0 {
+    if let Some((selected, selected_score)) = best_action {
+        if selected_score > 0.0 {
             let min = profile.commitment_ticks_min as u64;
             let max = (profile.commitment_ticks_max as u64).max(min);
             let span = max - min + 1;
@@ -1191,6 +1575,11 @@ fn plan_bot(
                     .min((span - 1) as f32) as u64;
             slot.commitment = Some(BotCommitment {
                 action: selected,
+                expected_action: match selected {
+                    BotSemanticAction::Light => techniques.light.map(|prediction| prediction.action),
+                    BotSemanticAction::Heavy => techniques.heavy.map(|prediction| prediction.action),
+                    _ => None,
+                },
                 expires_tick: slot.decision_tick + duration.max(1),
                 accepted: false,
                 last_press_tick: None,
@@ -1258,17 +1647,29 @@ fn consider_action(
     }
 }
 
+fn neutral_action_available(action: FighterAction) -> bool {
+    matches!(action, FighterAction::Idle | FighterAction::Moving)
+}
+
 fn update_commitment(slot: &mut BotRuntimeSlot, state: &FighterActionState) {
     let Some(mut commitment) = slot.commitment else {
         return;
     };
-    if action_matches(commitment.action, state.action) {
+    let matches_expected = commitment.expected_action.map_or_else(
+        || action_matches(commitment.action, state.action),
+        |expected| state.action == expected,
+    );
+    if matches_expected {
+        if matches!(commitment.action, BotSemanticAction::Dash | BotSemanticAction::Jump) {
+            slot.commitment = None;
+            return;
+        }
         commitment.accepted = true;
     }
     let completed = commitment.accepted
-        && !action_matches(commitment.action, state.action)
+        && !matches_expected
         && matches!(state.action, FighterAction::Idle | FighterAction::Moving);
-    if slot.decision_tick >= commitment.expires_tick
+    if (!commitment.accepted && slot.decision_tick >= commitment.expires_tick)
         || completed
         || (commitment.accepted && (state.cancel_window_open || state.branch_window_open))
     {
@@ -1492,6 +1893,7 @@ mod tests {
                 BotDifficulty::Standard,
                 None,
                 false,
+                &BotTechniqueOptions::default(),
                 &snapshot,
                 profile,
                 seed,
@@ -1598,6 +2000,7 @@ mod tests {
         slot.decision_tick = 7;
         slot.commitment = Some(BotCommitment {
             action: BotSemanticAction::Light,
+            expected_action: Some(FighterAction::LightAttack1),
             expires_tick: 10,
             accepted: false,
             last_press_tick: None,
@@ -1609,6 +2012,233 @@ mod tests {
         actuate(&mut slot, &mut repeated);
         assert!(!repeated.light);
         slot.decision_tick += 1;
+        let mut retry = FighterInput::default();
+        actuate(&mut slot, &mut retry);
+        assert!(retry.light);
+    }
+
+    #[test]
+    fn spawned_skill_only_neutral_techniques_receive_combat_windows() {
+        let catalog = CharacterMoveCatalog::default();
+        let cases = [
+            (
+                crate::characters::CharacterKind::Bee,
+                crate::techniques::TechniqueId::BeeLight1,
+                BotSemanticAction::Light,
+            ),
+            (
+                crate::characters::CharacterKind::Bee,
+                crate::techniques::TechniqueId::BeeHeavy2,
+                BotSemanticAction::Heavy,
+            ),
+            (
+                crate::characters::CharacterKind::Penguin,
+                crate::techniques::TechniqueId::PenguinLight1,
+                BotSemanticAction::Light,
+            ),
+            (
+                crate::characters::CharacterKind::Penguin,
+                crate::techniques::TechniqueId::PenguinHeavy,
+                BotSemanticAction::Heavy,
+            ),
+        ];
+
+        for (character, technique, action) in cases {
+            let loadout = LoadoutContext::for_character(
+                character,
+                crate::styles::FighterStyleKind::Catalyst,
+                crate::equipment::EquipmentKind::CounterCell,
+            );
+            let prediction =
+                crate::techniques::technique_prediction_for_loadout_id_in_catalog(
+                    technique, loadout, &catalog,
+                )
+                .expect("fixture technique should resolve through its character catalog");
+            assert!(!prediction.has_direct_attack);
+            assert!(prediction.has_spawned_skill);
+
+            let reliable_range = spawned_skill_reliable_range(prediction);
+            let sample_distance = reliable_range * 0.9;
+            let expected_contact_ms = prediction
+                .spawned_skill_contact_ms(sample_distance)
+                .expect("a distance inside the reliable window must be authored contact");
+            let window = technique_contact_window(prediction, action, sample_distance)
+                .expect("a spawned skill is an authored offensive contact path");
+            assert_eq!(window.envelope, reliable_range);
+            assert_eq!(window.startup_seconds, expected_contact_ms as f32 / 1_000.0);
+            assert_eq!(
+                window.vertical_tolerance,
+                prediction.spawned_skill_vertical_tolerance
+            );
+            assert_eq!(
+                window.facing_dot,
+                prediction
+                    .spawned_skill_facing_cone_dot
+                    .unwrap_or(SPAWNED_SKILL_FALLBACK_FACING_DOT)
+            );
+            assert!(reliable_range <= prediction.spawned_skill_range);
+            assert!(
+                technique_contact_window(prediction, action, reliable_range + 0.01).is_none(),
+                "skill-only offense should not commit beyond its reliable travel window"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_move_wins_neutral_while_heavy_and_grab_require_context() {
+        let catalog = CharacterMoveCatalog::default();
+        let loadout = LoadoutContext::for_character(
+            crate::characters::CharacterKind::Bee,
+            crate::styles::FighterStyleKind::Catalyst,
+            crate::equipment::EquipmentKind::CounterCell,
+        );
+        let prediction = |technique| {
+            crate::techniques::technique_prediction_for_loadout_id_in_catalog(
+                technique, loadout, &catalog,
+            )
+            .expect("fixture technique should resolve")
+        };
+        let light = prediction(crate::techniques::TechniqueId::BeeLight1);
+        let heavy = prediction(crate::techniques::TechniqueId::BeeHeavy2);
+        let distance = 2.0;
+        let light_contact = technique_contact_window(light, BotSemanticAction::Light, distance)
+            .expect("light should reach neutral test spacing")
+            .startup_seconds;
+        let heavy_contact = technique_contact_window(heavy, BotSemanticAction::Heavy, distance)
+            .expect("heavy should reach neutral test spacing")
+            .startup_seconds;
+        let evaluation = |contact_seconds| MoveEvaluation {
+            predicted_position: Vec3::X * distance,
+            score: 1.8,
+            contact_seconds,
+        };
+
+        let neutral_light = offensive_candidate_score(
+            light,
+            BotSemanticAction::Light,
+            evaluation(light_contact),
+            0.0,
+            0.25,
+        );
+        let neutral_heavy = offensive_candidate_score(
+            heavy,
+            BotSemanticAction::Heavy,
+            evaluation(heavy_contact),
+            0.0,
+            0.0,
+        );
+        assert!(neutral_light > neutral_heavy);
+        assert!(neutral_light > grab_candidate_score(0.0, 0.0));
+
+        let punish_light = offensive_candidate_score(
+            light,
+            BotSemanticAction::Light,
+            evaluation(light_contact),
+            1.0,
+            0.25,
+        );
+        let punish_heavy = offensive_candidate_score(
+            heavy,
+            BotSemanticAction::Heavy,
+            evaluation(heavy_contact),
+            1.0,
+            0.0,
+        );
+        assert!(punish_heavy > punish_light);
+        assert!(grab_candidate_score(1.0, 0.0) > neutral_light);
+    }
+
+    #[test]
+    fn opponent_velocity_estimate_is_deterministic_and_resets_after_teleport() {
+        let mut first = BotOpponentMemory::default();
+        let mut repeated = BotOpponentMemory::default();
+        for (tick, position) in [
+            (1, Vec3::ZERO),
+            (2, Vec3::new(0.5, 0.0, 0.0)),
+            (3, Vec3::new(1.0, 0.0, 0.2)),
+        ] {
+            first.observe_position(position, tick);
+            repeated.observe_position(position, tick);
+        }
+        assert_eq!(first.velocity, repeated.velocity);
+        assert!(first.velocity.x > 0.0);
+        first.observe_position(Vec3::new(20.0, 0.0, 0.0), 4);
+        assert_eq!(first.velocity, Vec2::ZERO);
+    }
+
+    #[test]
+    fn contact_evaluation_leads_motion_and_requires_facing() {
+        let window = MoveContactWindow {
+            startup_seconds: 0.2,
+            envelope: 2.0,
+            vertical_tolerance: 0.8,
+            facing_dot: 0.25,
+        };
+        let evaluation = evaluate_contact_window(
+            window,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1.4, 0.0, 0.0),
+            Vec2::new(0.0, 2.0),
+            1.0,
+        )
+        .expect("crossing target remains in the authored contact envelope");
+        assert!(evaluation.predicted_position.z > 0.0);
+        assert!(evaluate_contact_window(
+            window,
+            Vec3::ZERO,
+            -Vec3::X,
+            Vec3::new(1.4, 0.0, 0.0),
+            Vec2::ZERO,
+            1.0,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn accepted_commitment_survives_acceptance_deadline_until_action_completes() {
+        let mut slot = BotRuntimeSlot::default();
+        slot.decision_tick = 5;
+        slot.commitment = Some(BotCommitment {
+            action: BotSemanticAction::Light,
+            expected_action: Some(FighterAction::LightAttack1),
+            expires_tick: 5,
+            accepted: false,
+            last_press_tick: Some(4),
+        });
+        let mut active = FighterActionState::default();
+        active.action = FighterAction::LightAttack1;
+        update_commitment(&mut slot, &active);
+        assert!(slot.commitment.is_some_and(|commitment| commitment.accepted));
+        active.action = FighterAction::Idle;
+        slot.decision_tick += 1;
+        update_commitment(&mut slot, &active);
+        assert!(slot.commitment.is_none());
+    }
+
+    #[test]
+    fn unaccepted_offensive_commitment_retries_while_movement_state_persists() {
+        let mut slot = BotRuntimeSlot::default();
+        slot.decision_tick = 7;
+        slot.commitment = Some(BotCommitment {
+            action: BotSemanticAction::Light,
+            expected_action: Some(FighterAction::LightAttack1),
+            expires_tick: 10,
+            accepted: false,
+            last_press_tick: None,
+        });
+        let mut moving = FighterActionState::default();
+        moving.action = FighterAction::Moving;
+
+        update_commitment(&mut slot, &moving);
+        assert!(slot.commitment.is_some_and(|commitment| !commitment.accepted));
+        let mut first = FighterInput::default();
+        actuate(&mut slot, &mut first);
+        assert!(first.light);
+
+        slot.decision_tick += 1;
+        update_commitment(&mut slot, &moving);
+        assert!(slot.commitment.is_some_and(|commitment| !commitment.accepted));
         let mut retry = FighterInput::default();
         actuate(&mut slot, &mut retry);
         assert!(retry.light);
