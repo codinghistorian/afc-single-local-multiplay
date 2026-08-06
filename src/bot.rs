@@ -2,13 +2,20 @@ use bevy::prelude::*;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use bevy::window::PrimaryWindow;
 
+mod intelligence;
+mod navigation;
+
+pub(crate) use intelligence::BotRuntimeStore;
+pub(crate) use navigation::BotNavigationCache;
+
 use crate::arena::{
-    ArenaHazardState, arena_hazard_affects_height, arena_hazard_is_active_for_kind,
-    ground_support_for_arena_with_radius,
+    ArenaHazardState, SplitCausewayDoorState, arena_hazard_affects_height,
+    arena_hazard_is_active_for_kind, ground_support_for_arena_with_radius,
 };
 use crate::arena_defs::{
     ArenaDefinition, ArenaHazardDefinition, ArenaHazardKind, active_arena_definition,
 };
+use crate::bot_profiles::BotProfileCatalog;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::camera::ArenaCamera;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -46,6 +53,7 @@ pub struct BotActionControl {
     jump_bot_id: Option<usize>,
     guard_bot_id: Option<usize>,
     refill_bot_id: Option<usize>,
+    last_trace_signature: Option<u64>,
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -56,6 +64,9 @@ pub fn setup_bot_action_control(mut commands: Commands) {
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl BotActionControl {
     fn select(&mut self, bot_id: usize) {
+        if self.selected_bot_id != Some(bot_id) {
+            self.last_trace_signature = None;
+        }
         self.selected_bot_id = Some(bot_id);
         if self.jump_bot_id.is_some_and(|id| id != bot_id) {
             self.jump_bot_id = None;
@@ -89,6 +100,7 @@ impl BotActionControl {
         self.jump_bot_id = None;
         self.guard_bot_id = None;
         self.refill_bot_id = None;
+        self.last_trace_signature = None;
         had_control
     }
 
@@ -292,6 +304,11 @@ pub fn bot_input(
     state: Res<MatchState>,
     user_mode: Res<UserModeState>,
     hazard_state: Res<ArenaHazardState>,
+    split_causeway_doors: Res<SplitCausewayDoorState>,
+    profiles: Res<BotProfileCatalog>,
+    mut bot_runtime: ResMut<BotRuntimeStore>,
+    mut bot_navigation: ResMut<BotNavigationCache>,
+    mut bot_snapshot: Local<intelligence::BotSnapshotBuffer>,
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))] mut action_control: ResMut<
         BotActionControl,
     >,
@@ -310,7 +327,13 @@ pub fn bot_input(
         &FighterActionState,
         Option<&BotDifficulty>,
     )>,
-    all_fighters: Query<(&Fighter, &Transform, &FighterActionState, &FighterMotor)>,
+    all_fighters: Query<(
+        &Fighter,
+        &Transform,
+        &FighterActionState,
+        &FighterMotor,
+        &FighterStats,
+    )>,
     items: Query<(&ArenaItem, &Transform)>,
     specials: Query<(&ActiveSpecial, &Transform)>,
 ) {
@@ -319,6 +342,15 @@ pub fn bot_input(
     }
 
     let dt = time.delta_secs();
+    intelligence::build_world_snapshot(
+        &mut bot_snapshot,
+        &state,
+        hazard_state.elapsed(),
+        &all_fighters,
+        &items,
+        &specials,
+    );
+    bot_runtime.begin_frame(state.replay_seed);
 
     for (
         bot,
@@ -358,6 +390,56 @@ pub fn bot_input(
             }
         }
 
+        if bot_should_drive_autonomous_inputs(brain.behavior) {
+            let held_kind = inventory
+                .held
+                .and_then(|entity| items.get(entity).ok().map(|(item, _)| item.kind));
+            intelligence::drive_bot(
+                dt,
+                state.arena_index,
+                bot.id,
+                &mut brain,
+                motor,
+                transform.translation,
+                special_state,
+                style,
+                equipment,
+                stats,
+                action,
+                difficulty,
+                held_kind,
+                bot_ai_special_inputs_allowed(&user_mode),
+                &bot_snapshot,
+                &profiles,
+                &mut bot_runtime,
+                &mut bot_navigation,
+                &split_causeway_doors,
+                &mut input,
+            );
+            #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+            if action_control.selected_bot_id == Some(bot.id) {
+                if let Some(trace) = bot_runtime.trace(bot.id) {
+                    let signature = trace.signature();
+                    if action_control.last_trace_signature != Some(signature) {
+                        info!(
+                            "bot_trace P{} target={:?} goal={:?} action={:?} reaction={} delay={}t commitment={:?} reason={:?} utility={:.2}",
+                            bot.id + 1,
+                            trace.target_id.map(|id| id + 1),
+                            trace.goal,
+                            trace.action,
+                            if trace.reaction_gated { "gated" } else { "ready" },
+                            trace.reaction_delay_ticks,
+                            trace.commitment,
+                            trace.reason,
+                            trace.utility_score,
+                        );
+                        action_control.last_trace_signature = Some(signature);
+                    }
+                }
+            }
+            continue;
+        }
+
         if !bot_should_drive_autonomous_inputs(brain.behavior) {
             brain.decision_timer = 0.0;
             brain.movement_plan_timer = 0.0;
@@ -372,7 +454,7 @@ pub fn bot_input(
         brain.attack_timer -= dt / difficulty.attack_recovery_scale();
 
         let mut nearest: Option<BotTargetSnapshot> = None;
-        for (other, other_transform, other_action, other_motor) in &all_fighters {
+        for (other, other_transform, other_action, other_motor, _other_stats) in &all_fighters {
             if other.id == bot.id
                 || !state.fighter_can_participate(other.id)
                 || !state.combat_target_allowed_for_state(bot.id, other.id)

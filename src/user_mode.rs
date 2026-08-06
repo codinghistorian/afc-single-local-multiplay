@@ -4608,11 +4608,25 @@ pub fn sync_user_mode_battle_music(
         return;
     }
 
-    if user_mode.battle_active && state.phase != MatchPhase::Fighting {
+    if clear_finished_user_mode_battle(&mut user_mode, state.phase) {
         stop_arena_music(&mut commands, &arena_music);
-        user_mode.battle_bot_ai_pending = false;
-        user_mode.battle_active = false;
     }
+}
+
+fn clear_finished_user_mode_battle(
+    user_mode: &mut UserModeState,
+    phase: MatchPhase,
+) -> bool {
+    if !user_mode.battle_active
+        || user_mode.battle_music_pending
+        || phase == MatchPhase::Fighting
+    {
+        return false;
+    }
+
+    user_mode.battle_bot_ai_pending = false;
+    user_mode.battle_active = false;
+    true
 }
 
 fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
@@ -8899,6 +8913,31 @@ mod tests {
         assert!(user_mode.battle_active);
         assert!(user_mode.restricts_bot_special_inputs());
         assert!(user_mode.hides_dev_controls());
+    }
+
+    #[test]
+    fn pending_single_player_battle_retains_bot_activation_until_fighting() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::SinglePlayer;
+        user_mode.exit_to_battle();
+
+        assert!(user_mode.battle_active);
+        assert!(user_mode.battle_music_pending);
+        assert!(user_mode.battle_bot_ai_pending);
+        assert!(!clear_finished_user_mode_battle(
+            &mut user_mode,
+            MatchPhase::Resetting,
+        ));
+        assert!(user_mode.battle_active);
+        assert!(user_mode.battle_bot_ai_pending);
+
+        user_mode.battle_music_pending = false;
+        assert!(clear_finished_user_mode_battle(
+            &mut user_mode,
+            MatchPhase::Resetting,
+        ));
+        assert!(!user_mode.battle_active);
+        assert!(!user_mode.battle_bot_ai_pending);
     }
 
     #[test]

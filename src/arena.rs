@@ -179,6 +179,14 @@ impl SplitCausewayDoorState {
         self.doors[door_index].target_open = !self.doors[door_index].target_open;
         true
     }
+
+    #[cfg(test)]
+    pub(crate) fn open_all_for_navigation_test(&mut self) {
+        for door in &mut self.doors {
+            door.target_open = true;
+            door.open_fraction = 1.0;
+        }
+    }
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -5220,6 +5228,77 @@ pub fn resolve_platform_side_collision(
         }
     }
     resolved
+}
+
+/// Returns whether a fighter-sized horizontal sweep is clear of the arena's
+/// static collision geometry. Dynamic devices, such as the Split Causeway
+/// doors, must still be checked by their owning runtime state.
+pub(crate) fn navigation_segment_clear_for_arena(
+    arena: &ArenaDefinition,
+    from: Vec3,
+    to: Vec3,
+    radius: f32,
+) -> bool {
+    const MAX_PROBES: usize = 128;
+    const POSITION_EPSILON_SQUARED: f32 = 0.000_001;
+
+    let horizontal_distance = Vec2::new(to.x - from.x, to.z - from.z).length();
+    let probe_spacing = (radius * 0.5).clamp(0.1, 0.3);
+    let probe_count = ((horizontal_distance / probe_spacing).ceil() as usize).clamp(1, MAX_PROBES);
+
+    (0..=probe_count).all(|probe| {
+        let position = from.lerp(to, probe as f32 / probe_count as f32);
+        let resolved = resolve_platform_side_collision_for_arena(arena, position, radius);
+        Vec2::new(resolved.x - position.x, resolved.z - position.z).length_squared()
+            <= POSITION_EPSILON_SQUARED
+    })
+}
+
+/// Extends the static navigation sweep with the current Split Causeway door
+/// transforms without exposing mutable arena device state to bot code.
+pub(crate) fn navigation_segment_clear_with_doors_for_arena(
+    arena: &ArenaDefinition,
+    from: Vec3,
+    to: Vec3,
+    radius: f32,
+    doors: &SplitCausewayDoorState,
+) -> bool {
+    if !navigation_segment_clear_for_arena(arena, from, to, radius) {
+        return false;
+    }
+    let arena_index = arena_definitions()
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, arena))
+        .or_else(|| {
+            arena_definitions()
+                .iter()
+                .position(|candidate| candidate.name == arena.name)
+        });
+    if arena_index != Some(SPLIT_CAUSEWAY_ARENA_INDEX) {
+        return true;
+    }
+
+    const MAX_PROBES: usize = 128;
+    const POSITION_EPSILON_SQUARED: f32 = 0.000_001;
+    let horizontal_distance = Vec2::new(to.x - from.x, to.z - from.z).length();
+    let probe_spacing = (radius * 0.5).clamp(0.1, 0.3);
+    let probe_count = ((horizontal_distance / probe_spacing).ceil() as usize).clamp(1, MAX_PROBES);
+    (0..=probe_count).all(|probe| {
+        let position = from.lerp(to, probe as f32 / probe_count as f32);
+        (0..SPLIT_CAUSEWAY_DOOR_COUNT).all(|door_index| {
+            let resolved = split_causeway_door_barrier(
+                door_index,
+                doors.doors[door_index].open_fraction,
+            )
+            .resolve_side_collision(
+                position,
+                radius,
+                crate::constants::LANDING_SNAP_TOLERANCE,
+            );
+            Vec2::new(resolved.x - position.x, resolved.z - position.z).length_squared()
+                <= POSITION_EPSILON_SQUARED
+        })
+    })
 }
 
 fn resolve_platform_side_collision_for_arena(

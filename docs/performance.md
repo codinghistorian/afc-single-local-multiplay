@@ -51,11 +51,33 @@ script.
 | 2026-07-22 | Apple M2 Max, macOS | Existing generated WASM | Approximately 78.2 MiB before the optimization program | Planning baseline; replace with exact scripted result. |
 | 2026-07-26 | Apple M2 Max, macOS | itch.io web release with Bevy Gilrs | Optimized WASM 12,515,927 bytes; `web_dist/` 64,722,014 extracted bytes across 207 files; ZIP 48,525,710 bytes. | Invalid packaging measurement: the build script selected a stale headless dedicated-server WASM; superseded below. |
 | 2026-07-27 | Apple M2 Max, macOS | Corrected itch.io web release | Optimized game WASM 44,263,596 bytes; `web_dist/` 103,509,569 extracted bytes across 214 files; ZIP 64,575,622 bytes. | Corrected size/package baseline after pinning the `ffc-prototype` browser-game binary; Chrome and Safari runtime measurements remain pending. |
-| Pending | Apple M2 Max, macOS | `FourBotStress`, profiling profile | Capture median, p95, p99, CPU/GPU time, allocations, entities, assets, and memory. | Required before accepting hot-path gains. |
+| 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, profiling profile with `perf` | Median of three runs: 18,000 samples; frame 16.6617 / 17.7817 / 18.3724 ms; render CPU span 0.0924 / 0.1474 / 0.1747 ms; process CPU 88.23% total / 7.35% normalized; RSS 0.4812 / 0.4246 GiB. | Accepted post-change bot-intelligence baseline; GPU timestamps unavailable, with allocation and asset steady state unchanged. |
 | Pending | Apple M2 Max, macOS | `MapCycle100` and `Soak10Minutes` | Capture peak/end counts and memory. | Required before accepting cache or pool changes. |
 | Pending | Current Chrome and Safari | Optimized web release | Capture p95/p99 frame time, WASM, and distribution size. | Required before changing the accepted web baseline. |
 
 ## Hot-path validation record
+
+The bot-intelligence change was checked with three paired `FourBotStress` runs
+on 2026-08-06. The before and after builds used the same Apple M2 Max and macOS
+configuration, the profiling profile with `perf`, a 30-second warmup, and a
+300-second sample. The reported rows are the middle runs when ordered by frame
+median, as required by the three-run protocol.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median, run 2 of 3 | 18,001 | 16.6565 / 17.9257 / 19.4548 ms | 0.0868 / 0.1348 / 0.1621 ms | 86.62% total; 7.22% normalized | 0.5110 / 0.4458 GiB | 1,128 / 1,032 | 126 / 126 | 126 / 137 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: bot intelligence, run 2 of 3 | 18,000 | 16.6617 / 17.7817 / 18.3724 ms | 0.0924 / 0.1474 / 0.1747 ms | 88.23% total; 7.35% normalized | 0.4812 / 0.4246 GiB | 1,177 / 1,032 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+Frame median changed by +0.0052 ms (+0.03%), while p95 improved by 0.1440 ms
+and p99 improved by 1.0824 ms. Render CPU-span overhead was at most 0.0126 ms
+across the reported percentiles. Peak and ending RSS improved, mesh allocations
+were unchanged, and all ending asset counts were unchanged. The higher entity
+peak reflects the functional bot workload; ending entities were identical.
+Metal did not expose GPU timestamps, so GPU measurements are unavailable. The
+post-change row is accepted as the new `FourBotStress` baseline because the
+frame-time distribution remained stable or improved, the measured CPU overhead
+was small and bounded, memory improved, and allocation and asset steady state
+did not regress.
 
 The Split Causeway interactive-gate change was checked with three paired
 `FourBotStress` runs on 2026-08-02. The before build was commit `c13dcd8`; the
