@@ -8,8 +8,7 @@ use crate::arena::{
 };
 use crate::arena_defs::{ArenaDefinition, arena_definition, arena_definitions};
 use crate::constants::{
-    DASH_JUMP_MIN_FORWARD_SPEED, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, JUMP_SPEED,
-    MAX_AIR_SPEED,
+    DASH_JUMP_MIN_FORWARD_SPEED, FIGHTER_COUNT, FIGHTER_RADIUS, GRAVITY, JUMP_SPEED, MAX_AIR_SPEED,
 };
 
 const NAV_CELL_SIZE: f32 = 0.75;
@@ -266,8 +265,7 @@ impl ArenaNavigationGraph {
                 }
             }
 
-            let max_dash_jump_cells =
-                (NAV_MAX_DASH_JUMP_DISTANCE / NAV_CELL_SIZE).floor() as isize;
+            let max_dash_jump_cells = (NAV_MAX_DASH_JUMP_DISTANCE / NAV_CELL_SIZE).floor() as isize;
             for (direction_x, direction_z) in DASH_JUMP_DIRECTIONS {
                 for distance in 2..=max_dash_jump_cells {
                     let dx = direction_x * distance;
@@ -341,12 +339,8 @@ impl ArenaNavigationGraph {
         let sweep_height = from.y.max(destination.y) + clearance;
         let sweep_from = Vec3::new(from.x, sweep_height, from.z);
         let sweep_to = Vec3::new(destination.x, sweep_height, destination.z);
-        navigation_segment_clear_for_arena(arena, sweep_from, sweep_to, FIGHTER_RADIUS).then_some(
-            NavigationEdge {
-                to,
-                traversal,
-            },
-        )
+        navigation_segment_clear_for_arena(arena, sweep_from, sweep_to, FIGHTER_RADIUS)
+            .then_some(NavigationEdge { to, traversal })
     }
 
     fn node_at(&self, x: isize, z: isize) -> Option<NavigationNodeId> {
@@ -432,7 +426,11 @@ fn jump_segment_crosses_gap(arena: &ArenaDefinition, from: Vec3, to: Vec3) -> bo
 }
 
 fn insert_edge(edges: &mut [Option<NavigationEdge>; NAV_MAX_EDGES], edge: NavigationEdge) {
-    if edges.iter().flatten().any(|existing| existing.to == edge.to) {
+    if edges
+        .iter()
+        .flatten()
+        .any(|existing| existing.to == edge.to)
+    {
         return;
     }
     if let Some(slot) = edges.iter_mut().find(|slot| slot.is_none()) {
@@ -679,9 +677,9 @@ fn navigation_route_segment_is_clear(
     }
     let clearance = match traversal {
         NavigationTraversal::Walk => 0.04,
-        NavigationTraversal::Jump
-        | NavigationTraversal::DashJump
-        | NavigationTraversal::Drop => NAV_JUMP_CLEARANCE,
+        NavigationTraversal::Jump | NavigationTraversal::DashJump | NavigationTraversal::Drop => {
+            NAV_JUMP_CLEARANCE
+        }
     };
     let sweep_height = from.y.max(to.y) + clearance;
     navigation_segment_clear_with_doors_for_arena(
@@ -706,7 +704,10 @@ impl Default for BotNavigationCache {
         let mut graphs = Vec::with_capacity(definitions.len());
         for arena in definitions {
             graphs.push(ArenaNavigationGraph::build(arena).unwrap_or_else(|error| {
-                panic!("failed to build navigation for arena {:?}: {error}", arena.name)
+                panic!(
+                    "failed to build navigation for arena {:?}: {error}",
+                    arena.name
+                )
             }));
         }
         Self {
@@ -763,9 +764,8 @@ impl BotNavigationCache {
                 (destination, NavigationTraversal::Walk)
             };
 
-            if !navigation_route_segment_is_clear(
-                from, waypoint, traversal, arena, blockers, doors,
-            ) {
+            if !navigation_route_segment_is_clear(from, waypoint, traversal, arena, blockers, doors)
+            {
                 route.invalidate();
                 continue;
             }
@@ -793,11 +793,12 @@ mod tests {
             assert!(graph.width <= NAV_MAX_GRID_SIDE);
             assert!(graph.depth <= NAV_MAX_GRID_SIDE);
             assert!(graph.nodes.len() <= NAV_MAX_NODES);
-            assert!(graph.nodes.iter().all(|node| node
-                .edges
-                .iter()
-                .flatten()
-                .all(|edge| (edge.to as usize) < graph.nodes.len())));
+            assert!(graph.nodes.iter().all(|node| {
+                node.edges
+                    .iter()
+                    .flatten()
+                    .all(|edge| (edge.to as usize) < graph.nodes.len())
+            }));
         }
     }
 
@@ -886,9 +887,7 @@ mod tests {
             }
             for anchor in arena.item_anchors {
                 let spawn_node = cache.graphs[arena_index].nearest_node(arena.spawn_points[0]);
-                if let Some(anchor_node) =
-                    cache.graphs[arena_index].nearest_node(anchor.position)
-                {
+                if let Some(anchor_node) = cache.graphs[arena_index].nearest_node(anchor.position) {
                     let route = cache.next_direction(
                         0,
                         0,
@@ -930,8 +929,8 @@ mod tests {
             )
             .expect("training route should exist");
         let first_node = cache.routes[0].nodes[cache.routes[0].cursor];
-        let first_waypoint = cache.graphs[TRAINING_GROUND_ARENA_INDEX].nodes[first_node as usize]
-            .position;
+        let first_waypoint =
+            cache.graphs[TRAINING_GROUND_ARENA_INDEX].nodes[first_node as usize].position;
         assert!(blockers.push(
             Vec2::new(first_waypoint.x, first_waypoint.z),
             NAV_CELL_SIZE * 0.45,

@@ -6,9 +6,13 @@ mod audio_settings;
 mod bee_skills;
 mod body_collision;
 mod bot;
-#[cfg(all(feature = "bot-quality", feature = "native", not(target_arch = "wasm32")))]
-mod bot_quality;
 mod bot_profiles;
+#[cfg(all(
+    feature = "bot-quality",
+    feature = "native",
+    not(target_arch = "wasm32")
+))]
+mod bot_quality;
 mod camera;
 mod characters;
 mod chick_skills;
@@ -129,7 +133,11 @@ pub fn build_app() -> App {
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
 
-    #[cfg(all(feature = "bot-quality", feature = "native", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "bot-quality",
+        feature = "native",
+        not(target_arch = "wasm32")
+    ))]
     app.add_plugins(bot_quality::BotQualityPlugin);
 
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

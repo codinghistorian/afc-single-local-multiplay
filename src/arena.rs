@@ -5286,15 +5286,13 @@ pub(crate) fn navigation_segment_clear_with_doors_for_arena(
     (0..=probe_count).all(|probe| {
         let position = from.lerp(to, probe as f32 / probe_count as f32);
         (0..SPLIT_CAUSEWAY_DOOR_COUNT).all(|door_index| {
-            let resolved = split_causeway_door_barrier(
-                door_index,
-                doors.doors[door_index].open_fraction,
-            )
-            .resolve_side_collision(
-                position,
-                radius,
-                crate::constants::LANDING_SNAP_TOLERANCE,
-            );
+            let resolved =
+                split_causeway_door_barrier(door_index, doors.doors[door_index].open_fraction)
+                    .resolve_side_collision(
+                        position,
+                        radius,
+                        crate::constants::LANDING_SNAP_TOLERANCE,
+                    );
             Vec2::new(resolved.x - position.x, resolved.z - position.z).length_squared()
                 <= POSITION_EPSILON_SQUARED
         })

@@ -14,9 +14,7 @@ use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
 use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
 use crate::styles::{FighterStyle, FighterStyleKind};
-use crate::techniques::{
-    AttackPayloadId, AttackShapeId, BeeSkillId, SpawnedSkillPredictionFacts,
-};
+use crate::techniques::{AttackPayloadId, AttackShapeId, BeeSkillId, SpawnedSkillPredictionFacts};
 
 const BEE_SKILL_LOCK_RANGE: f32 = 8.0;
 const BEE_SKILL_LOCK_CONE_DOT: f32 = 0.70710677;
@@ -278,9 +276,7 @@ pub fn spawn_bee_skill(
                 for side in [-1.0, 1.0] {
                     let side_vec = bee_skill_side_vec(facing) * side;
                     let spawn = origin
-                        + (Vec3::Y * 1.05
-                            + facing * BEE_WORKER_SPAWN_FORWARD
-                            + side_vec * 0.28)
+                        + (Vec3::Y * 1.05 + facing * BEE_WORKER_SPAWN_FORWARD + side_vec * 0.28)
                             * size_scale;
                     let direction = target
                         .and_then(|entity| target_position(entity, targets))
@@ -360,8 +356,8 @@ pub fn spawn_bee_skill(
                     );
                 }
             } else {
-                let spawn = origin
-                    + (Vec3::Y * 0.98 + facing * BEE_HOMING_SPAWN_FORWARD) * size_scale;
+                let spawn =
+                    origin + (Vec3::Y * 0.98 + facing * BEE_HOMING_SPAWN_FORWARD) * size_scale;
                 let direction = target
                     .and_then(|entity| target_position(entity, targets))
                     .map(|position| flat_direction(spawn, position))

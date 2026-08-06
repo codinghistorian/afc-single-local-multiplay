@@ -80,6 +80,12 @@ impl BotUtilityWeights {
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotProfile {
+    pub tactical_planning_enabled: bool,
+    pub forecast_horizon_ticks: u32,
+    pub forecast_risk_weight: f32,
+    pub tactic_learning_rate: f32,
+    pub tactic_bias_cap: f32,
+    pub near_optimal_margin: f32,
     pub reaction_ticks_min: u32,
     pub reaction_ticks_max: u32,
     pub perception_error_m: f32,
@@ -131,9 +137,9 @@ pub struct BotProfileCatalog {
 impl Default for BotProfileCatalog {
     fn default() -> Self {
         let path = PathBuf::from(BOT_PROFILE_CATALOG_PATH);
-        match load_bot_profile_catalog_file(&path).and_then(|(file, modified)| {
-            Self::from_loaded_file(file, path.clone(), modified)
-        }) {
+        match load_bot_profile_catalog_file(&path)
+            .and_then(|(file, modified)| Self::from_loaded_file(file, path.clone(), modified))
+        {
             Ok(catalog) => catalog,
             Err(error) => Self::compiled_fallback(path, error),
         }
@@ -151,11 +157,7 @@ impl BotProfileCatalog {
 
     #[allow(dead_code)]
     pub(crate) fn from_file(file: BotProfileCatalogFile) -> Result<Self, String> {
-        Self::from_loaded_file(
-            file,
-            PathBuf::from(BOT_PROFILE_CATALOG_PATH),
-            None,
-        )
+        Self::from_loaded_file(file, PathBuf::from(BOT_PROFILE_CATALOG_PATH), None)
     }
 
     fn from_loaded_file(
@@ -204,18 +206,13 @@ impl BotProfileCatalog {
                 return false;
             }
         };
-        if self.last_error.is_none()
-            && self
-                .modified
-                .is_some_and(|previous| previous >= modified)
-        {
+        if self.last_error.is_none() && self.modified.is_some_and(|previous| previous >= modified) {
             return false;
         }
 
-        match load_bot_profile_catalog_file(&self.path)
-            .and_then(|(file, loaded_modified)| {
-                normalize_profiles(&file).map(|profiles| (profiles, loaded_modified))
-            }) {
+        match load_bot_profile_catalog_file(&self.path).and_then(|(file, loaded_modified)| {
+            normalize_profiles(&file).map(|profiles| (profiles, loaded_modified))
+        }) {
             Ok((profiles, loaded_modified)) => {
                 self.profiles = profiles;
                 self.modified = loaded_modified;
@@ -324,6 +321,9 @@ fn validate_bot_profile_catalog(file: &BotProfileCatalogFile) -> Result<(), Stri
 }
 
 fn validate_bot_profile(id: BotProfileId, profile: &BotProfile) -> Result<(), String> {
+    if !(1..=40).contains(&profile.forecast_horizon_ticks) {
+        return Err(format!("{id:?}.forecast_horizon_ticks must be in 1..=40"));
+    }
     if profile.reaction_ticks_min < 1
         || profile.reaction_ticks_min > profile.reaction_ticks_max
         || profile.reaction_ticks_max > 20
@@ -349,14 +349,15 @@ fn validate_bot_profile(id: BotProfileId, profile: &BotProfile) -> Result<(), St
             "attack_stamina_reserve_ratio",
             profile.attack_stamina_reserve_ratio,
         ),
-        (
-            "intentional_mistake_rate",
-            profile.intentional_mistake_rate,
-        ),
+        ("intentional_mistake_rate", profile.intentional_mistake_rate),
         ("utility_jitter", profile.utility_jitter),
         ("adaptation_cap", profile.adaptation_cap),
         ("style_modifier_cap", profile.style_modifier_cap),
         ("equipment_modifier_cap", profile.equipment_modifier_cap),
+        ("forecast_risk_weight", profile.forecast_risk_weight),
+        ("tactic_learning_rate", profile.tactic_learning_rate),
+        ("tactic_bias_cap", profile.tactic_bias_cap),
+        ("near_optimal_margin", profile.near_optimal_margin),
     ] {
         validate_float_range(id, name, value, 0.0, 1.0)?;
     }
@@ -413,6 +414,12 @@ fn default_bot_profile_catalog_file() -> BotProfileCatalogFile {
 
 const fn standard_bot_profile() -> BotProfile {
     BotProfile {
+        tactical_planning_enabled: true,
+        forecast_horizon_ticks: 20,
+        forecast_risk_weight: 0.35,
+        tactic_learning_rate: 0.12,
+        tactic_bias_cap: 0.75,
+        near_optimal_margin: 0.25,
         reaction_ticks_min: 3,
         reaction_ticks_max: 5,
         perception_error_m: 0.18,
@@ -446,6 +453,12 @@ const fn standard_bot_profile() -> BotProfile {
 
 const fn tutorial_bot_profile() -> BotProfile {
     BotProfile {
+        tactical_planning_enabled: false,
+        forecast_horizon_ticks: 20,
+        forecast_risk_weight: 0.35,
+        tactic_learning_rate: 0.12,
+        tactic_bias_cap: 0.75,
+        near_optimal_margin: 0.25,
         reaction_ticks_min: 5,
         reaction_ticks_max: 7,
         perception_error_m: 0.35,
@@ -505,8 +518,7 @@ mod tests {
 
     #[test]
     fn committed_catalog_matches_compiled_profiles() {
-        let (file, _) =
-            load_bot_profile_catalog_file(Path::new(BOT_PROFILE_CATALOG_PATH)).unwrap();
+        let (file, _) = load_bot_profile_catalog_file(Path::new(BOT_PROFILE_CATALOG_PATH)).unwrap();
         let catalog = BotProfileCatalog::from_file(file).unwrap();
 
         assert_eq!(
@@ -529,25 +541,15 @@ mod tests {
 
         let catalog = BotProfileCatalog::from_file(file).unwrap();
 
-        assert_eq!(
-            catalog.profile(BotProfileId::Standard),
-            expected_standard
-        );
-        assert_eq!(
-            catalog.profile(BotProfileId::Tutorial),
-            expected_tutorial
-        );
+        assert_eq!(catalog.profile(BotProfileId::Standard), expected_standard);
+        assert_eq!(catalog.profile(BotProfileId::Tutorial), expected_tutorial);
     }
 
     #[test]
     fn ron_schema_is_strict() {
         let authored = include_str!("../assets/bots/bot_profiles.ron");
 
-        let unknown_field = authored.replacen(
-            "profiles: [",
-            "unexpected: 1,\n    profiles: [",
-            1,
-        );
+        let unknown_field = authored.replacen("profiles: [", "unexpected: 1,\n    profiles: [", 1);
         assert_ne!(unknown_field, authored);
         assert!(ron::from_str::<BotProfileCatalogFile>(&unknown_field).is_err());
 
@@ -586,6 +588,9 @@ mod tests {
     #[test]
     fn semantic_validation_rejects_ticks_ranges_and_nonfinite_values() {
         assert_profile_invalid(|profile| profile.reaction_ticks_min = 0);
+        assert_profile_invalid(|profile| profile.forecast_horizon_ticks = 0);
+        assert_profile_invalid(|profile| profile.forecast_horizon_ticks = 41);
+        assert_profile_invalid(|profile| profile.tactic_bias_cap = 1.01);
         assert_profile_invalid(|profile| profile.reaction_ticks_max = 21);
         assert_profile_invalid(|profile| {
             profile.reaction_ticks_min = 6;
@@ -621,8 +626,7 @@ mod tests {
     #[test]
     fn compiled_fallback_retains_error_and_exact_defaults() {
         let path = PathBuf::from("missing-bot-profiles.ron");
-        let catalog =
-            BotProfileCatalog::compiled_fallback(path.clone(), "missing".to_string());
+        let catalog = BotProfileCatalog::compiled_fallback(path.clone(), "missing".to_string());
 
         assert_eq!(catalog.path, path);
         assert_eq!(catalog.modified, None);
@@ -699,9 +703,7 @@ mod tests {
         std::fs::write(&path, recovered).unwrap();
         assert!(catalog.reload_if_changed());
         assert_eq!(
-            catalog
-                .profile(BotProfileId::Standard)
-                .target_switch_margin,
+            catalog.profile(BotProfileId::Standard).target_switch_margin,
             0.25
         );
         assert_eq!(

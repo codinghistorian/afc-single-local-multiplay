@@ -143,8 +143,8 @@ pub enum PenguinSkillKind {
 pub(crate) fn penguin_skill_prediction(
     skill: PenguinSkillId,
 ) -> Option<SpawnedSkillPredictionFacts> {
-    let placed = |range: f32, lifetime_secs: f32, vertical_tolerance: f32| {
-        SpawnedSkillPredictionFacts {
+    let placed =
+        |range: f32, lifetime_secs: f32, vertical_tolerance: f32| SpawnedSkillPredictionFacts {
             effective_range: range,
             lead_distance_offset: range,
             travel_speed: 0.0,
@@ -152,8 +152,7 @@ pub(crate) fn penguin_skill_prediction(
             lifetime_secs,
             vertical_tolerance,
             facing_cone_dot: None,
-        }
-    };
+        };
 
     Some(match skill {
         PenguinSkillId::FishTorpedo => moving_penguin_skill_prediction(
@@ -497,10 +496,7 @@ pub fn spawn_penguin_skill(
             );
         }
         PenguinSkillId::SledWake => {
-            let spawn = grounded_position(
-                origin + facing * PENGUIN_SLED_WAKE_SPAWN_FORWARD,
-                0.05,
-            );
+            let spawn = grounded_position(origin + facing * PENGUIN_SLED_WAKE_SPAWN_FORWARD, 0.05);
             spawn_sled_wake(
                 commands,
                 assets,

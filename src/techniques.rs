@@ -1094,6 +1094,7 @@ impl TechniqueDefinition {
         let mut spawned_skill_facing_cone_dot = None;
         let mut authored_forward_motion = 0.0_f32;
         let mut authored_lift_motion = 0.0_f32;
+        let mut estimated_damage = 0.0_f32;
 
         for event in self.script.events {
             let mut include_payload = |payload_id| {
@@ -1104,13 +1105,15 @@ impl TechniqueDefinition {
                 });
                 let active_end_ms = event.at_ms.saturating_add(payload.time_ms);
 
-                startup_ms = Some(startup_ms.map_or(event.at_ms, |start: u32| start.min(event.at_ms)));
+                startup_ms =
+                    Some(startup_ms.map_or(event.at_ms, |start: u32| start.min(event.at_ms)));
                 direct_active_end_ms = Some(
-                    direct_active_end_ms
-                        .map_or(active_end_ms, |end: u32| end.max(active_end_ms)),
+                    direct_active_end_ms.map_or(active_end_ms, |end: u32| end.max(active_end_ms)),
                 );
                 max_range = max_range.max(shape.range + path_range);
                 max_radius = max_radius.max(shape.radius);
+                estimated_damage =
+                    estimated_damage.max(payload.damage.max(payload.power * payload.str_scale));
                 has_direct_attack = true;
                 all_direct_attacks_guardable &= payload.guardable;
             };
@@ -1118,8 +1121,7 @@ impl TechniqueDefinition {
             let mut include_spawned_skill = |facts: SpawnedSkillPredictionFacts| {
                 let replace = facts.effective_range > spawned_skill_range
                     || (facts.effective_range == spawned_skill_range
-                        && spawned_skill_startup_ms
-                            .is_none_or(|startup| event.at_ms < startup));
+                        && spawned_skill_startup_ms.is_none_or(|startup| event.at_ms < startup));
                 if !replace {
                     return;
                 }
@@ -1130,8 +1132,7 @@ impl TechniqueDefinition {
                 spawned_skill_speed = facts.travel_speed;
                 spawned_skill_fixed_travel_ms =
                     (facts.fixed_travel_secs * MS_PER_SECOND).round() as u32;
-                spawned_skill_lifetime_ms =
-                    (facts.lifetime_secs * MS_PER_SECOND).round() as u32;
+                spawned_skill_lifetime_ms = (facts.lifetime_secs * MS_PER_SECOND).round() as u32;
                 spawned_skill_vertical_tolerance = facts.vertical_tolerance;
                 spawned_skill_facing_cone_dot = facts.facing_cone_dot;
             };
@@ -1198,6 +1199,7 @@ impl TechniqueDefinition {
             max_radius,
             authored_forward_motion,
             authored_lift_motion,
+            estimated_damage,
         }
     }
 
@@ -1249,6 +1251,9 @@ pub struct TechniquePrediction {
     pub max_radius: f32,
     pub authored_forward_motion: f32,
     pub authored_lift_motion: f32,
+    /// Largest authored direct-hit damage before defender and rule modifiers.
+    /// This is prediction-only data; authoritative damage remains in `combat`.
+    pub estimated_damage: f32,
 }
 
 impl TechniquePrediction {

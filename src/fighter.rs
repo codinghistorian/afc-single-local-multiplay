@@ -24,10 +24,10 @@ use crate::combat::{
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, ground_impact_priority};
 use crate::components::{
     Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState,
-    FighterBody, FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory,
-    FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState,
-    FighterStats, FighterUltimateState, FighterVisualRoot, LocalInputAssignment,
-    PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SpecialInputKind,
+    FighterBody, FighterContactState, FighterGrabState, FighterHand, FighterHead, FighterInput,
+    FighterInventory, FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel,
+    FighterSpecialState, FighterStats, FighterUltimateState, FighterVisualRoot,
+    LocalInputAssignment, PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SpecialInputKind,
 };
 use crate::constants::*;
 use crate::controller_haptics::{
@@ -255,6 +255,7 @@ pub fn spawn_fighters(
             Transform::from_translation(arena.spawn_points[id]),
             visibility,
         ));
+        entity.insert(FighterContactState::default());
         entity.insert(FighterAimState {
             direction: if id % 2 == 0 { Vec3::X } else { -Vec3::X },
             marker_position: arena.spawn_points[id]

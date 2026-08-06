@@ -4613,14 +4613,8 @@ pub fn sync_user_mode_battle_music(
     }
 }
 
-fn clear_finished_user_mode_battle(
-    user_mode: &mut UserModeState,
-    phase: MatchPhase,
-) -> bool {
-    if !user_mode.battle_active
-        || user_mode.battle_music_pending
-        || phase == MatchPhase::Fighting
-    {
+fn clear_finished_user_mode_battle(user_mode: &mut UserModeState, phase: MatchPhase) -> bool {
+    if !user_mode.battle_active || user_mode.battle_music_pending || phase == MatchPhase::Fighting {
         return false;
     }
 

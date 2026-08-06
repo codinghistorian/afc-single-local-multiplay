@@ -4,8 +4,15 @@ use bevy::window::PrimaryWindow;
 
 mod intelligence;
 mod navigation;
+mod tactics;
 
 pub(crate) use intelligence::BotRuntimeStore;
+#[cfg(all(
+    feature = "bot-quality",
+    feature = "native",
+    not(target_arch = "wasm32")
+))]
+pub(crate) use intelligence::run_tactics_quality_fixture;
 pub(crate) use navigation::BotNavigationCache;
 
 use crate::arena::{
@@ -23,8 +30,8 @@ use crate::characters::{CharacterKind, character_label, next_character_kind};
 use crate::characters::{CharacterMoveCatalog, FighterCharacter};
 use crate::components::{
     BotBehaviorMode, BotBrain, BotMovementPlan, Controller, Fighter, FighterAction,
-    FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
-    FighterStats,
+    FighterActionState, FighterContactState, FighterInput, FighterInventory, FighterMotor,
+    FighterSpecialState, FighterStats,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
@@ -59,7 +66,14 @@ pub struct BotActionControl {
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub fn setup_bot_action_control(mut commands: Commands) {
-    commands.init_resource::<BotActionControl>();
+    let mut control = BotActionControl::default();
+    if let Ok(value) = std::env::var("AFC_BOT_TRACE_FIGHTER")
+        && let Ok(fighter_number) = value.parse::<usize>()
+        && (1..=crate::constants::FIGHTER_COUNT).contains(&fighter_number)
+    {
+        control.select(fighter_number - 1);
+    }
+    commands.insert_resource(control);
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -336,6 +350,10 @@ pub fn bot_input(
         &FighterActionState,
         &FighterMotor,
         &FighterStats,
+        &FighterCharacter,
+        &FighterStyle,
+        &FighterEquipment,
+        Option<&FighterContactState>,
     )>,
     items: Query<(&ArenaItem, &Transform)>,
     specials: Query<(&ActiveSpecial, &Transform)>,
@@ -350,6 +368,7 @@ pub fn bot_input(
         &state,
         hazard_state.elapsed(),
         &all_fighters,
+        &move_catalog,
         &items,
         &specials,
     );
@@ -428,16 +447,33 @@ pub fn bot_input(
                     let signature = trace.signature();
                     if action_control.last_trace_signature != Some(signature) {
                         info!(
-                            "bot_trace P{} target={:?} goal={:?} action={:?} reaction={} delay={}t commitment={:?} reason={:?} utility={:.2}",
+                            "bot_trace P{} target={:?} distance={:.2} state={:?} stamina={:.1} grounded={} position=({:.2},{:.2}) goal={:?} action={:?} reaction={} delay={}t commitment={:?} reason={:?} utility={:.2} phase={:?} tactic={:?} responses={:?} forecast={:.2} step={} branch={:?} bias={:.2}",
                             bot.id + 1,
                             trace.target_id.map(|id| id + 1),
+                            trace.target_distance,
+                            action.action,
+                            stats.stamina,
+                            motor.grounded,
+                            transform.translation.x,
+                            transform.translation.z,
                             trace.goal,
                             trace.action,
-                            if trace.reaction_gated { "gated" } else { "ready" },
+                            if trace.reaction_gated {
+                                "gated"
+                            } else {
+                                "ready"
+                            },
                             trace.reaction_delay_ticks,
                             trace.commitment,
                             trace.reason,
                             trace.utility_score,
+                            trace.phase,
+                            trace.tactic,
+                            trace.predicted_responses,
+                            trace.forecast_score,
+                            trace.plan_step,
+                            trace.branch,
+                            trace.learned_bias,
                         );
                         action_control.last_trace_signature = Some(signature);
                     }
@@ -460,7 +496,7 @@ pub fn bot_input(
         brain.attack_timer -= dt / difficulty.attack_recovery_scale();
 
         let mut nearest: Option<BotTargetSnapshot> = None;
-        for (other, other_transform, other_action, other_motor, _other_stats) in &all_fighters {
+        for (other, other_transform, other_action, other_motor, _other_stats, ..) in &all_fighters {
             if other.id == bot.id
                 || !state.fighter_can_participate(other.id)
                 || !state.combat_target_allowed_for_state(bot.id, other.id)

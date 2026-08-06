@@ -10,10 +10,10 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::GameSet;
-use crate::arena_defs::{
-    TRAINING_GROUND_ARENA_INDEX, arena_definitions, set_active_arena_index,
-};
+use crate::arena_defs::{TRAINING_GROUND_ARENA_INDEX, arena_definitions, set_active_arena_index};
+use crate::bot_profiles::BotProfileCatalog;
 use crate::characters::CharacterKind;
+use crate::characters::CharacterMoveCatalog;
 use crate::components::{
     BotBehaviorMode, BotBrain, Controller, Fighter, FighterAction, FighterActionState,
     FighterInput, FighterStats, LocalInputAssignment, ParticipantKind,
@@ -44,6 +44,11 @@ impl Plugin for BotQualityPlugin {
             panic!("{SCENARIO_ENV} cannot be combined with AFC_PERF_SCENARIO");
         }
 
+        if scenario == BotQualityScenario::Tactics {
+            app.add_systems(Update, run_tactics_quality.in_set(GameSet::Global));
+            return;
+        }
+
         app.insert_resource(TimeUpdateStrategy::ManualDuration(FIXED_FRAME))
             .insert_resource(BotQualityRun::new(scenario))
             .add_systems(
@@ -53,10 +58,7 @@ impl Plugin for BotQualityPlugin {
                     .before(crate::items::setup_items)
                     .before(crate::fighter::spawn_fighters),
             )
-            .add_systems(
-                Update,
-                keep_bot_quality_running.in_set(GameSet::Global),
-            )
+            .add_systems(Update, keep_bot_quality_running.in_set(GameSet::Global))
             .add_systems(Update, collect_bot_quality.in_set(GameSet::Presentation));
     }
 }
@@ -65,6 +67,7 @@ impl Plugin for BotQualityPlugin {
 enum BotQualityScenario {
     Duel,
     FourBot,
+    Tactics,
 }
 
 impl BotQualityScenario {
@@ -76,7 +79,8 @@ impl BotQualityScenario {
         Some(match value {
             "Duel" => Self::Duel,
             "FourBot" => Self::FourBot,
-            _ => panic!("unsupported {SCENARIO_ENV}={value:?}; expected Duel or FourBot"),
+            "Tactics" => Self::Tactics,
+            _ => panic!("unsupported {SCENARIO_ENV}={value:?}; expected Duel, FourBot, or Tactics"),
         })
     }
 
@@ -84,6 +88,7 @@ impl BotQualityScenario {
         match self {
             Self::Duel => "Duel",
             Self::FourBot => "FourBot",
+            Self::Tactics => "Tactics",
         }
     }
 
@@ -91,6 +96,7 @@ impl BotQualityScenario {
         match self {
             Self::Duel => 2,
             Self::FourBot => FIGHTER_COUNT,
+            Self::Tactics => 0,
         }
     }
 
@@ -98,6 +104,7 @@ impl BotQualityScenario {
         match self {
             Self::Duel => 1_800,
             Self::FourBot => 3_600,
+            Self::Tactics => 0,
         }
     }
 
@@ -121,15 +128,99 @@ impl BotQualityScenario {
                 max_no_hit_ticks: 1_200,
                 action_families: 3,
             },
+            Self::Tactics => BotQualityThresholds {
+                movement_ticks: 0,
+                accepted_attacks: 0,
+                damaging_hits: 0,
+                max_idle_ticks: 0,
+                max_stuck_ticks: 0,
+                max_no_hit_ticks: 0,
+                action_families: 0,
+            },
         }
     }
 
     const fn arena_reason(self) -> &'static str {
         match self {
             Self::Duel => "controlled continuous practice floor",
-            Self::FourBot => "controlled continuous floor isolates multi-character combat conversion",
+            Self::FourBot => {
+                "controlled continuous floor isolates multi-character combat conversion"
+            }
+            Self::Tactics => "allocation-free authored forecast fixtures",
         }
     }
+}
+
+fn run_tactics_quality(
+    move_catalog: Res<CharacterMoveCatalog>,
+    profiles: Res<BotProfileCatalog>,
+    mut finished: Local<bool>,
+    mut app_exit: MessageWriter<AppExit>,
+) {
+    if *finished {
+        return;
+    }
+    *finished = true;
+    let report = crate::bot::run_tactics_quality_fixture(&move_catalog, &profiles);
+    let percent = |successes: u32, trials: u32| {
+        if trials == 0 {
+            0.0
+        } else {
+            successes as f32 / trials as f32 * 100.0
+        }
+    };
+    let failed_drop = if report.failed_tactic_first_half == 0 {
+        0.0
+    } else {
+        (1.0 - report.failed_tactic_second_half as f32 / report.failed_tactic_first_half as f32)
+            * 100.0
+    };
+    println!(
+        concat!(
+            "BOT_TACTICS_RESULT pass={} characters={} seeds={} ",
+            "whiff_punish={}/{}({:.1}%) anti_air={}/{}({:.1}%) ",
+            "safe_escape={}/{}({:.1}%) hit_confirm={}/{}({:.1}%) ",
+            "guard_counter_before={} guard_counter_after={} guard_trials={} ",
+            "failed_first_half={} failed_second_half={} failed_drop_percent={:.1} ",
+            "half_trials={}"
+        ),
+        report.passed(),
+        report.characters,
+        report.seeds,
+        report.whiff_punishes,
+        report.whiff_trials,
+        percent(report.whiff_punishes, report.whiff_trials),
+        report.anti_airs,
+        report.jump_trials,
+        percent(report.anti_airs, report.jump_trials),
+        report.safe_escapes,
+        report.pressure_trials,
+        percent(report.safe_escapes, report.pressure_trials),
+        report.hit_confirm_follow_ups,
+        report.hit_confirm_trials,
+        percent(report.hit_confirm_follow_ups, report.hit_confirm_trials),
+        report.guard_counter_before,
+        report.guard_counter_after,
+        report.guard_trials,
+        report.failed_tactic_first_half,
+        report.failed_tactic_second_half,
+        failed_drop,
+        report.failed_tactic_half_trials,
+    );
+    println!(
+        "BOT_TACTICS_BEHAVIORS guard={} jump={} retreat={} whiff={} pressure={} passive={}",
+        report.behavior_trials[3],
+        report.behavior_trials[1],
+        report.behavior_trials[2],
+        report.behavior_trials[0],
+        report.behavior_trials[4],
+        report.behavior_trials[5],
+    );
+    app_exit.write(if report.passed() {
+        AppExit::Success
+    } else {
+        AppExit::error()
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -387,9 +478,7 @@ fn collect_bot_quality(
                 metrics.last_offensive_family = Some(family);
                 metrics.first_attack_tick.get_or_insert(tick);
             }
-            if action.action == FighterAction::RingOut
-                && is_ringout_position(position, arena)
-            {
+            if action.action == FighterAction::RingOut && is_ringout_position(position, arena) {
                 ringout_attackers[fighter_id] = stats
                     .last_attacker
                     .filter(|attacker| *attacker < expected && *attacker != fighter_id);
@@ -421,7 +510,8 @@ fn collect_bot_quality(
         let controllable = state.fighter_can_participate(fighter_id)
             && action_is_controllable(action.action)
             && stats.respawn_timer <= 0.0;
-        let meaningful_action = !matches!(action.action, FighterAction::Idle | FighterAction::Moving);
+        let meaningful_action =
+            !matches!(action.action, FighterAction::Idle | FighterAction::Moving);
 
         if movement_requested {
             metrics.movement_ticks = metrics.movement_ticks.saturating_add(1);
