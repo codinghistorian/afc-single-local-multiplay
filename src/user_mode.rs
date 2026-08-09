@@ -77,9 +77,10 @@ const USER_MODE_NOIR_FADE_SECS: f32 = 1.2;
 const USER_MODE_RESULT_MENU_DELAY_SECS: f32 = 1.65;
 const USER_MODE_FILTER_RESET_SECS: f32 = 0.45;
 const USER_MODE_RESULT_SFX_PRIORITY: u8 = 120;
-const USER_MODE_MENU_STICK_THRESHOLD: f32 = 0.55;
-const USER_MODE_MENU_REPEAT_DELAY: f32 = 0.38;
-const USER_MODE_MENU_REPEAT_INTERVAL: f32 = 0.12;
+const USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD: f32 = 0.55;
+const USER_MODE_MENU_STICK_RELEASE_THRESHOLD: f32 = 0.35;
+const USER_MODE_MENU_REPEAT_DELAY: f32 = 0.55;
+const USER_MODE_MENU_REPEAT_INTERVAL: f32 = 0.22;
 const USER_MODE_CHOICE_FONT_SIZE: f32 = 23.8;
 const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
     CharacterKind::Cat,
@@ -2504,7 +2505,7 @@ fn controller_setup_seat_card(seat: usize) -> impl Bundle {
             ),
             (
                 UserModeDeviceJoinSeatText { seat },
-                Text::new("PRESS A OR JUMP\nTO JOIN"),
+                Text::new("PRESS CONFIRM OR JUMP\nTO JOIN"),
                 TextFont {
                     font_size: 17.0,
                     ..default()
@@ -3706,12 +3707,39 @@ fn unassigned_gamepad_user_mode_action(
     dt: f32,
     tracker: &mut MenuDirectionRepeat,
 ) -> Option<UserModeUiAction> {
-    gamepads.iter().find_map(|(entity, gamepad)| {
-        let family = controller_info(entity, metadata)
-            .map(|info| info.family)
-            .unwrap_or_default();
-        gamepad_user_mode_action(screen, gamepad, family, dt, tracker)
-    })
+    if let Some((_, action)) = gamepads
+        .iter()
+        .filter_map(|(entity, gamepad)| {
+            let family = controller_info(entity, metadata)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            gamepad_menu_button_action(gamepad, family).map(|action| (entity, action))
+        })
+        .min_by_key(|(entity, _)| entity.index())
+    {
+        return Some(action);
+    }
+
+    if let Some(source) = tracker.source_gamepad {
+        if let Ok((_, gamepad)) = gamepads.get(source) {
+            let poll = poll_gamepad_menu_direction(gamepad, dt, tracker);
+            if poll.active {
+                return poll
+                    .direction
+                    .and_then(|direction| direction_to_user_mode_action(screen, direction));
+            }
+        }
+        *tracker = MenuDirectionRepeat::default();
+    }
+
+    let (source, gamepad) = gamepads
+        .iter()
+        .filter(|(_, gamepad)| gamepad_has_fresh_menu_direction(gamepad))
+        .min_by_key(|(entity, _)| entity.index())?;
+    tracker.source_gamepad = Some(source);
+    poll_gamepad_menu_direction(gamepad, dt, tracker)
+        .direction
+        .and_then(|direction| direction_to_user_mode_action(screen, direction))
 }
 
 #[derive(SystemParam)]
@@ -5001,6 +5029,22 @@ fn controller_takeover_prompt(pending: PendingControllerTakeover) -> String {
     )
 }
 
+fn controller_reconnect_reclaim_prompt(
+    families: impl IntoIterator<Item = ControllerFamily>,
+) -> String {
+    let mut prompts = families
+        .into_iter()
+        .map(|family| format!("{} {}", family.display_name(), family.confirm_label()))
+        .collect::<Vec<_>>();
+    prompts.sort();
+    prompts.dedup();
+    if prompts.is_empty() {
+        "Confirm on the original or another unassigned controller".to_string()
+    } else {
+        format!("Press {} to reclaim a seat", prompts.join(" or "))
+    }
+}
+
 pub fn update_controller_reconnect_overlay(
     user_mode: Res<UserModeState>,
     reconnect: Res<LocalControllerReconnect>,
@@ -5037,25 +5081,18 @@ pub fn update_controller_reconnect_overlay(
         .filter_map(|(seat, missing)| missing.then_some(format!("P{}", seat + 1)))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut prompts = gamepads
+    let families = gamepads
         .iter()
         .filter(|(entity, _)| {
             !user_mode.assignment_is_joined(LocalInputAssignment::Gamepad(*entity))
         })
         .map(|(entity, _)| {
-            let family = controller_info(entity, &metadata)
+            controller_info(entity, &metadata)
                 .map(|info| info.family)
-                .unwrap_or_default();
-            format!("{} {}", family.display_name(), family.confirm_label())
+                .unwrap_or_default()
         })
         .collect::<Vec<_>>();
-    prompts.sort();
-    prompts.dedup();
-    let reconnect_prompt = if prompts.is_empty() {
-        "Confirm on the original or another unassigned controller".to_string()
-    } else {
-        format!("Press {} to reclaim a seat", prompts.join(" or "))
-    };
+    let reconnect_prompt = controller_reconnect_reclaim_prompt(families);
     let (title, body) = if let Some(pending) = reconnect.pending_takeover {
         (
             CONTROLLER_TAKEOVER_TITLE.to_string(),
@@ -5806,11 +5843,25 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct MenuDirectionRepeat {
-    direction: IVec2,
-    held_seconds: f32,
-    next_repeat: f32,
+    source_gamepad: Option<Entity>,
+    dpad_direction: IVec2,
+    dpad_held_seconds: f32,
+    next_dpad_repeat: f32,
+    stick_armed: bool,
+}
+
+impl Default for MenuDirectionRepeat {
+    fn default() -> Self {
+        Self {
+            source_gamepad: None,
+            dpad_direction: IVec2::ZERO,
+            dpad_held_seconds: 0.0,
+            next_dpad_repeat: 0.0,
+            stick_armed: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -5831,44 +5882,86 @@ impl MenuNavigationTrackers {
     }
 }
 
-fn gamepad_menu_direction(gamepad: &Gamepad) -> IVec2 {
-    let dpad = gamepad.dpad();
-    let axis = if dpad.length_squared() > 0.0 {
-        dpad
-    } else {
-        gamepad.left_stick()
-    };
-    if axis.x.abs() >= axis.y.abs() && axis.x.abs() >= USER_MODE_MENU_STICK_THRESHOLD {
+fn menu_axis_direction(axis: Vec2, threshold: f32) -> IVec2 {
+    if axis.x.abs() >= axis.y.abs() && axis.x.abs() >= threshold {
         IVec2::new(axis.x.signum() as i32, 0)
-    } else if axis.y.abs() >= USER_MODE_MENU_STICK_THRESHOLD {
+    } else if axis.y.abs() >= threshold {
         IVec2::new(0, axis.y.signum() as i32)
     } else {
         IVec2::ZERO
     }
 }
 
-fn repeated_menu_direction(
+fn repeated_dpad_direction(
     direction: IVec2,
     dt: f32,
     tracker: &mut MenuDirectionRepeat,
 ) -> Option<IVec2> {
     if direction == IVec2::ZERO {
-        *tracker = MenuDirectionRepeat::default();
+        tracker.dpad_direction = IVec2::ZERO;
+        tracker.dpad_held_seconds = 0.0;
+        tracker.next_dpad_repeat = 0.0;
         return None;
     }
-    if tracker.direction != direction {
-        tracker.direction = direction;
-        tracker.held_seconds = 0.0;
-        tracker.next_repeat = USER_MODE_MENU_REPEAT_DELAY;
+    if tracker.dpad_direction != direction {
+        tracker.dpad_direction = direction;
+        tracker.dpad_held_seconds = 0.0;
+        tracker.next_dpad_repeat = USER_MODE_MENU_REPEAT_DELAY;
         return Some(direction);
     }
 
-    tracker.held_seconds += dt;
-    if tracker.held_seconds < tracker.next_repeat {
+    tracker.dpad_held_seconds += dt;
+    if tracker.dpad_held_seconds < tracker.next_dpad_repeat {
         return None;
     }
-    tracker.next_repeat += USER_MODE_MENU_REPEAT_INTERVAL;
+    tracker.next_dpad_repeat = tracker.dpad_held_seconds + USER_MODE_MENU_REPEAT_INTERVAL;
     Some(direction)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MenuDirectionPoll {
+    direction: Option<IVec2>,
+    active: bool,
+}
+
+fn poll_gamepad_menu_direction(
+    gamepad: &Gamepad,
+    dt: f32,
+    tracker: &mut MenuDirectionRepeat,
+) -> MenuDirectionPoll {
+    let stick = gamepad.left_stick();
+    let stick_active = stick.x.abs().max(stick.y.abs()) > USER_MODE_MENU_STICK_RELEASE_THRESHOLD;
+    if !stick_active {
+        tracker.stick_armed = true;
+    }
+    let stick_direction = menu_axis_direction(stick, USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD);
+    let stick_just_activated = tracker.stick_armed && stick_direction != IVec2::ZERO;
+    if stick_direction != IVec2::ZERO {
+        tracker.stick_armed = false;
+    }
+
+    let dpad_direction =
+        menu_axis_direction(gamepad.dpad(), USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD);
+    if dpad_direction != IVec2::ZERO {
+        return MenuDirectionPoll {
+            direction: repeated_dpad_direction(dpad_direction, dt, tracker),
+            active: true,
+        };
+    }
+    repeated_dpad_direction(IVec2::ZERO, dt, tracker);
+
+    MenuDirectionPoll {
+        direction: stick_just_activated.then_some(stick_direction),
+        active: stick_active,
+    }
+}
+
+fn gamepad_has_fresh_menu_direction(gamepad: &Gamepad) -> bool {
+    menu_axis_direction(gamepad.dpad(), USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD) != IVec2::ZERO
+        || menu_axis_direction(
+            gamepad.left_stick(),
+            USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD,
+        ) != IVec2::ZERO
 }
 
 fn direction_to_user_mode_action(
@@ -5953,14 +6046,25 @@ fn gamepad_user_mode_action(
     dt: f32,
     tracker: &mut MenuDirectionRepeat,
 ) -> Option<UserModeUiAction> {
+    if let Some(action) = gamepad_menu_button_action(gamepad, family) {
+        return Some(action);
+    }
+    poll_gamepad_menu_direction(gamepad, dt, tracker)
+        .direction
+        .and_then(|direction| direction_to_user_mode_action(screen, direction))
+}
+
+fn gamepad_menu_button_action(
+    gamepad: &Gamepad,
+    family: ControllerFamily,
+) -> Option<UserModeUiAction> {
     if gamepad.just_pressed(family.back_button()) {
         return Some(UserModeUiAction::Back);
     }
     if gamepad.just_pressed(family.confirm_button()) {
         return Some(UserModeUiAction::Confirm);
     }
-    repeated_menu_direction(gamepad_menu_direction(gamepad), dt, tracker)
-        .and_then(|direction| direction_to_user_mode_action(screen, direction))
+    None
 }
 
 fn keyboard_assignment_user_mode_action(
@@ -5999,18 +6103,34 @@ fn assignment_user_mode_action(
     tracker: &mut MenuDirectionRepeat,
 ) -> Option<UserModeUiAction> {
     match assignment {
-        LocalInputAssignment::Keyboard(player) => bindings
-            .bindings_for_player(player)
-            .and_then(|bindings| keyboard_assignment_user_mode_action(screen, keys, bindings)),
-        LocalInputAssignment::Gamepad(entity) => {
-            gamepads.get(entity).ok().and_then(|(_, gamepad)| {
-                let family = controller_info(entity, metadata)
-                    .map(|info| info.family)
-                    .unwrap_or_default();
-                gamepad_user_mode_action(screen, gamepad, family, dt, tracker)
-            })
+        LocalInputAssignment::Keyboard(player) => {
+            *tracker = MenuDirectionRepeat::default();
+            bindings
+                .bindings_for_player(player)
+                .and_then(|bindings| keyboard_assignment_user_mode_action(screen, keys, bindings))
         }
-        LocalInputAssignment::Unassigned => None,
+        LocalInputAssignment::Gamepad(entity) => {
+            if tracker.source_gamepad != Some(entity) {
+                *tracker = MenuDirectionRepeat::default();
+                tracker.source_gamepad = Some(entity);
+            }
+            match gamepads.get(entity) {
+                Ok((_, gamepad)) => {
+                    let family = controller_info(entity, metadata)
+                        .map(|info| info.family)
+                        .unwrap_or_default();
+                    gamepad_user_mode_action(screen, gamepad, family, dt, tracker)
+                }
+                Err(_) => {
+                    *tracker = MenuDirectionRepeat::default();
+                    None
+                }
+            }
+        }
+        LocalInputAssignment::Unassigned => {
+            *tracker = MenuDirectionRepeat::default();
+            None
+        }
     }
 }
 
@@ -6316,14 +6436,23 @@ fn controller_setup_seat_message(
             let family = info
                 .map(|info| info.family.display_name())
                 .unwrap_or("Gamepad");
+            let controls = info
+                .map(|info| {
+                    format!(
+                        "{} confirm • {} leave",
+                        info.family.confirm_label(),
+                        info.family.face_button_label(info.family.back_button())
+                    )
+                })
+                .unwrap_or_else(|| "Confirm • Back".to_string());
             let connection = if gamepads.get(entity).is_ok() {
                 "CONNECTED"
             } else {
                 "MISSING\nReconnect or replace"
             };
-            format!("{family}\n{connection}")
+            format!("{family}\n{controls}\n{connection}")
         }
-        LocalInputAssignment::Unassigned => "PRESS A OR JUMP\nTO JOIN".to_string(),
+        LocalInputAssignment::Unassigned => "PRESS CONFIRM OR JUMP\nTO JOIN".to_string(),
     }
 }
 
@@ -6613,6 +6742,26 @@ mod tests {
 
     fn count_reconnect_gameplay_ticks(mut ticks: ResMut<ReconnectGameplayTicks>) {
         ticks.0 += 1;
+    }
+
+    fn drive_device_join_input(
+        mut user_mode: ResMut<UserModeState>,
+        keys: Res<ButtonInput<KeyCode>>,
+        bindings: Res<PlayerKeyBindings>,
+        gamepads: Query<(Entity, &Gamepad)>,
+        metadata: Query<&ControllerDeviceInfo>,
+        preferences: Res<ControlPreferences>,
+        mut rumble_requests: MessageWriter<ControllerHapticRequest>,
+    ) {
+        let _ = handle_device_join_input(
+            &mut user_mode,
+            &keys,
+            &bindings,
+            &gamepads,
+            &metadata,
+            &preferences,
+            &mut rumble_requests,
+        );
     }
 
     fn reconnect_test_app(
@@ -7327,43 +7476,332 @@ mod tests {
     }
 
     #[test]
-    fn held_gamepad_menu_direction_repeats_after_delay() {
-        let mut tracker = MenuDirectionRepeat::default();
+    fn dualsense_cross_joins_and_circle_leaves_in_mixed_controller_setup() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_device_join();
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<PlayerKeyBindings>()
+            .init_resource::<ControlPreferences>()
+            .add_message::<ControllerHapticRequest>()
+            .add_systems(Update, drive_device_join_input);
+        let xbox = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        let dualsense = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
+
+        app.update();
+
         assert_eq!(
-            repeated_menu_direction(IVec2::X, 0.0, &mut tracker),
-            Some(IVec2::X)
+            app.world().resource::<UserModeState>().input_assignments,
+            [
+                LocalInputAssignment::Gamepad(xbox),
+                LocalInputAssignment::Gamepad(dualsense),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ]
         );
+
+        release_and_clear_gamepad(&mut app, xbox, GamepadButton::South);
+        release_and_clear_gamepad(&mut app, dualsense, GamepadButton::South);
+        set_gamepad_button(&mut app, dualsense, GamepadButton::East, true);
+        app.update();
+
         assert_eq!(
-            repeated_menu_direction(IVec2::X, USER_MODE_MENU_REPEAT_DELAY - 0.01, &mut tracker),
-            None
+            app.world().resource::<UserModeState>().input_assignments,
+            [
+                LocalInputAssignment::Gamepad(xbox),
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+                LocalInputAssignment::Unassigned,
+            ]
         );
-        assert_eq!(
-            repeated_menu_direction(IVec2::X, 0.02, &mut tracker),
-            Some(IVec2::X)
-        );
-        assert_eq!(
-            repeated_menu_direction(IVec2::ZERO, 0.0, &mut tracker),
-            None
-        );
-        assert_eq!(tracker, MenuDirectionRepeat::default());
     }
 
     #[test]
-    fn gamepad_menu_stick_uses_threshold_and_dpad_priority() {
+    fn held_gamepad_dpad_repeats_after_precision_delay() {
+        let mut tracker = MenuDirectionRepeat::default();
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, 0.0, &mut tracker),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, USER_MODE_MENU_REPEAT_DELAY - 0.01, &mut tracker),
+            None
+        );
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, 0.02, &mut tracker),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_dpad_direction(
+                IVec2::X,
+                USER_MODE_MENU_REPEAT_INTERVAL - 0.02,
+                &mut tracker,
+            ),
+            None
+        );
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, 0.02, &mut tracker),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_dpad_direction(IVec2::ZERO, 0.0, &mut tracker),
+            None
+        );
+        assert_eq!(tracker.dpad_direction, IVec2::ZERO);
+        assert_eq!(tracker.dpad_held_seconds, 0.0);
+        assert_eq!(tracker.next_dpad_repeat, 0.0);
+
+        let mut delayed_frame = MenuDirectionRepeat::default();
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, 0.0, &mut delayed_frame),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_dpad_direction(
+                IVec2::X,
+                USER_MODE_MENU_REPEAT_DELAY + 2.0,
+                &mut delayed_frame,
+            ),
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            repeated_dpad_direction(IVec2::X, 0.0, &mut delayed_frame),
+            None,
+            "a delayed frame must not create catch-up repeats"
+        );
+    }
+
+    #[test]
+    fn menu_stick_requires_neutral_before_another_step_and_dpad_has_priority() {
         let mut gamepad = Gamepad::default();
         gamepad.analog_mut().set(
             GamepadAxis::LeftStickX,
-            USER_MODE_MENU_STICK_THRESHOLD - 0.01,
+            USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD - 0.01,
         );
-        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::ZERO);
+        let mut tracker = MenuDirectionRepeat::default();
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            None
+        );
 
-        gamepad
-            .analog_mut()
-            .set(GamepadAxis::LeftStickX, USER_MODE_MENU_STICK_THRESHOLD);
-        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::X);
+        gamepad.analog_mut().set(
+            GamepadAxis::LeftStickX,
+            USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD,
+        );
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            Some(IVec2::X)
+        );
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 2.0, &mut tracker).direction,
+            None,
+            "a held stick must never auto-repeat"
+        );
+
+        gamepad.analog_mut().set(
+            GamepadAxis::LeftStickX,
+            USER_MODE_MENU_STICK_RELEASE_THRESHOLD + 0.01,
+        );
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            None,
+            "hysteresis must reject partial recentering"
+        );
+        gamepad.analog_mut().set(
+            GamepadAxis::LeftStickX,
+            USER_MODE_MENU_STICK_RELEASE_THRESHOLD,
+        );
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            None
+        );
+        gamepad.analog_mut().set(
+            GamepadAxis::LeftStickX,
+            USER_MODE_MENU_STICK_ACTIVATION_THRESHOLD,
+        );
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            Some(IVec2::X)
+        );
 
         gamepad.analog_mut().set(GamepadButton::DPadUp, 1.0);
-        assert_eq!(gamepad_menu_direction(&gamepad), IVec2::Y);
+        assert_eq!(
+            poll_gamepad_menu_direction(&gamepad, 0.0, &mut tracker).direction,
+            Some(IVec2::Y)
+        );
+    }
+
+    #[test]
+    fn neutral_gamepad_does_not_reset_unassigned_controller_repeat_state() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let _neutral = world.spawn(Gamepad::default()).id();
+        let mut held_right = Gamepad::default();
+        held_right.analog_mut().set(GamepadButton::DPadRight, 1.0);
+        let held = world.spawn(held_right).id();
+        let mut system_state: SystemState<(
+            Query<(Entity, &Gamepad)>,
+            Query<&ControllerDeviceInfo>,
+        )> = SystemState::new(&mut world);
+        let mut tracker = MenuDirectionRepeat::default();
+
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    0.0,
+                    &mut tracker,
+                ),
+                Some(UserModeUiAction::Next)
+            );
+        }
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    USER_MODE_MENU_REPEAT_DELAY - 0.01,
+                    &mut tracker,
+                ),
+                None,
+                "the neutral controller must not turn a hold into a fresh press"
+            );
+        }
+        assert_eq!(tracker.source_gamepad, Some(held));
+    }
+
+    #[test]
+    fn any_controller_can_confirm_while_another_owns_menu_direction() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let mut directional = Gamepad::default();
+        directional.analog_mut().set(GamepadButton::DPadRight, 1.0);
+        let directional = world.spawn(directional).id();
+        let confirm = world.spawn(Gamepad::default()).id();
+        let mut system_state: SystemState<(
+            Query<(Entity, &Gamepad)>,
+            Query<&ControllerDeviceInfo>,
+        )> = SystemState::new(&mut world);
+        let mut tracker = MenuDirectionRepeat::default();
+
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    0.0,
+                    &mut tracker,
+                ),
+                Some(UserModeUiAction::Next)
+            );
+        }
+        world
+            .get_mut::<Gamepad>(confirm)
+            .unwrap()
+            .digital_mut()
+            .press(GamepadButton::South);
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    0.0,
+                    &mut tracker,
+                ),
+                Some(UserModeUiAction::Confirm)
+            );
+        }
+        assert_eq!(tracker.source_gamepad, Some(directional));
+    }
+
+    #[test]
+    fn changing_menu_screen_clears_directional_source_and_repeat_state() {
+        let mut world = World::new();
+        let gamepad = world.spawn_empty().id();
+        let mut trackers = MenuNavigationTrackers::default();
+        trackers.reset_for_screen(UserModeScreen::ModeSelect);
+        trackers.unassigned.source_gamepad = Some(gamepad);
+        trackers.unassigned.dpad_direction = IVec2::X;
+        trackers.unassigned.stick_armed = false;
+
+        trackers.reset_for_screen(UserModeScreen::ModeSelect);
+        assert_eq!(trackers.unassigned.source_gamepad, Some(gamepad));
+
+        trackers.reset_for_screen(UserModeScreen::PlayerCountSelect);
+        assert_eq!(trackers.unassigned, MenuDirectionRepeat::default());
+    }
+
+    #[test]
+    fn unassigned_navigation_releases_disconnected_source_for_another_controller() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let mut first_pad = Gamepad::default();
+        first_pad.analog_mut().set(GamepadButton::DPadRight, 1.0);
+        let first = world.spawn(first_pad).id();
+        let mut second_pad = Gamepad::default();
+        second_pad.analog_mut().set(GamepadButton::DPadLeft, 1.0);
+        let second = world.spawn(second_pad).id();
+        let mut system_state: SystemState<(
+            Query<(Entity, &Gamepad)>,
+            Query<&ControllerDeviceInfo>,
+        )> = SystemState::new(&mut world);
+        let mut tracker = MenuDirectionRepeat::default();
+
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    0.0,
+                    &mut tracker,
+                ),
+                Some(UserModeUiAction::Next)
+            );
+        }
+        assert_eq!(tracker.source_gamepad, Some(first));
+        world.entity_mut(first).remove::<Gamepad>();
+        {
+            let (gamepads, metadata) = system_state.get(&world);
+            assert_eq!(
+                unassigned_gamepad_user_mode_action(
+                    UserModeScreen::ControlsHub,
+                    &gamepads,
+                    &metadata,
+                    0.0,
+                    &mut tracker,
+                ),
+                Some(UserModeUiAction::Previous)
+            );
+        }
+        assert_eq!(tracker.source_gamepad, Some(second));
     }
 
     #[test]
@@ -7577,6 +8015,78 @@ mod tests {
     }
 
     #[test]
+    fn mixed_xbox_and_dualsense_ownership_survives_dualsense_replacement() {
+        let mut app = reconnect_test_app(
+            UserPlayMode::TwoPlayers,
+            [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
+        );
+        let xbox = app
+            .world_mut()
+            .spawn((
+                Gamepad::default(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        let dualsense = app
+            .world_mut()
+            .spawn((
+                Gamepad::default(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
+        let assignments = [
+            LocalInputAssignment::Gamepad(xbox),
+            LocalInputAssignment::Gamepad(dualsense),
+            LocalInputAssignment::Unassigned,
+            LocalInputAssignment::Unassigned,
+        ];
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .input_assignments = assignments;
+        for (seat, assignment) in assignments.into_iter().enumerate() {
+            app.world_mut().resource_mut::<LocalSetup>().slots[seat].input = assignment;
+        }
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<LocalControllerReconnect>()
+                .any_missing()
+        );
+
+        app.world_mut().entity_mut(dualsense).remove::<Gamepad>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .missing_seats,
+            [false, true, false, false]
+        );
+
+        let replacement = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
+        app.update();
+
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(
+            user_mode.input_assignments[0],
+            LocalInputAssignment::Gamepad(xbox)
+        );
+        assert_eq!(
+            user_mode.input_assignments[1],
+            LocalInputAssignment::Gamepad(replacement)
+        );
+        assert_eq!(
+            app.world().resource::<LocalSetup>().slots[1].input,
+            LocalInputAssignment::Gamepad(replacement)
+        );
+    }
+
+    #[test]
     fn takeover_is_scoped_to_selected_single_player_screens() {
         let mut user_mode = UserModeState::default();
         user_mode.play_mode = UserPlayMode::SinglePlayer;
@@ -7684,6 +8194,95 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn reconnect_prompt_uses_available_controller_family_labels() {
+        assert_eq!(
+            controller_reconnect_reclaim_prompt([]),
+            "Confirm on the original or another unassigned controller"
+        );
+        assert_eq!(
+            controller_reconnect_reclaim_prompt([ControllerFamily::PlayStation]),
+            "Press PlayStation Cross to reclaim a seat"
+        );
+        assert_eq!(
+            controller_reconnect_reclaim_prompt([
+                ControllerFamily::Xbox,
+                ControllerFamily::PlayStation,
+                ControllerFamily::Nintendo,
+                ControllerFamily::PlayStation,
+            ]),
+            "Press Nintendo A or PlayStation Cross or Xbox A to reclaim a seat"
+        );
+    }
+
+    #[test]
+    fn dualsense_takeover_uses_two_cross_presses_and_circle_cancels() {
+        let mut accept_app = takeover_test_app(UserModeScreen::CharacterSelect);
+        let controller = accept_app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
+        accept_app.update();
+        assert_eq!(
+            accept_app
+                .world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover,
+            Some(PendingControllerTakeover {
+                entity: controller,
+                family: ControllerFamily::PlayStation,
+            })
+        );
+        assert_eq!(
+            accept_app
+                .world()
+                .resource::<UserModeState>()
+                .input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        release_and_clear_gamepad(&mut accept_app, controller, GamepadButton::South);
+        accept_app.update();
+        set_gamepad_button(&mut accept_app, controller, GamepadButton::South, true);
+        accept_app.update();
+        assert_eq!(
+            accept_app
+                .world()
+                .resource::<UserModeState>()
+                .input_assignments[0],
+            LocalInputAssignment::Gamepad(controller)
+        );
+
+        let mut cancel_app = takeover_test_app(UserModeScreen::ArenaSelect);
+        let controller = cancel_app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
+        cancel_app.update();
+        release_and_clear_gamepad(&mut cancel_app, controller, GamepadButton::South);
+        set_gamepad_button(&mut cancel_app, controller, GamepadButton::East, true);
+        cancel_app.update();
+        assert_eq!(
+            cancel_app
+                .world()
+                .resource::<UserModeState>()
+                .input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert_eq!(
+            cancel_app
+                .world()
+                .resource::<LocalControllerReconnect>()
+                .resume_kind,
+            Some(ControllerReconnectResumeKind::TakeoverCanceled)
+        );
     }
 
     #[test]
@@ -9828,6 +10427,12 @@ mod tests {
         use bevy::ecs::system::SystemState;
 
         let mut world = World::new();
+        let dualsense = world
+            .spawn((
+                Gamepad::default(),
+                connected_controller_info(ControllerFamily::PlayStation),
+            ))
+            .id();
         let mut system_state: SystemState<(
             Query<Entity, With<Gamepad>>,
             Query<&ControllerDeviceInfo>,
@@ -9836,11 +10441,19 @@ mod tests {
 
         assert_eq!(
             controller_setup_seat_message(LocalInputAssignment::Unassigned, &gamepads, &metadata,),
-            "PRESS A OR JUMP\nTO JOIN"
+            "PRESS CONFIRM OR JUMP\nTO JOIN"
         );
         assert_eq!(
             controller_setup_seat_message(LocalInputAssignment::Keyboard(2), &gamepads, &metadata,),
             "KEYBOARD 3\nCONNECTED"
+        );
+        assert_eq!(
+            controller_setup_seat_message(
+                LocalInputAssignment::Gamepad(dualsense),
+                &gamepads,
+                &metadata,
+            ),
+            "PlayStation\nCross confirm • Circle leave\nCONNECTED"
         );
     }
 

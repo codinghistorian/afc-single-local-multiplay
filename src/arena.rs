@@ -6794,6 +6794,18 @@ mod tests {
             )),
             "X"
         );
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Gamepad(
+                ControllerFamily::PlayStation
+            )),
+            "Square"
+        );
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Gamepad(
+                ControllerFamily::Nintendo
+            )),
+            "Y"
+        );
     }
 
     #[test]

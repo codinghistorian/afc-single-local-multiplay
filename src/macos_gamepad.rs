@@ -19,8 +19,9 @@ use objc2_game_controller::{
     GCHapticsLocalityRightHandle,
 };
 
-use crate::control_settings::ControlPreferences;
-use crate::control_settings::ControllerDeviceInfo;
+use crate::control_settings::{
+    ControlPreferences, ControllerDeviceInfo, ControllerFamily, classify_controller_family,
+};
 use crate::controller_haptics::{
     ControllerHapticCommand, ControllerHapticRequest, ControllerHapticsSystems, HapticAvailability,
     HapticPattern, HapticPlaybackEvent, HapticPlaybackResult, HapticPurpose, HapticSegmentKind,
@@ -119,10 +120,25 @@ fn sync_macos_gamepads(
 
     for captured in &controllers {
         let snapshot = &captured.snapshot;
+        let current = existing
+            .iter()
+            .find(|(_, id, _)| **id == snapshot.id)
+            .map(|(entity, _, connected)| (entity, connected));
+        let cached_family =
+            current.and_then(|(entity, _)| metadata.get_mut(entity).ok().map(|info| info.family));
+        let mut new_display_name = None;
+        let family = cached_family.unwrap_or_else(|| {
+            let display_name = controller_display_name(&captured.controller);
+            let family = classify_controller_family(&display_name, None);
+            new_display_name = Some(display_name);
+            family
+        });
         // SAFETY: Apple GameController objects are accessed on the main thread
         // and retained for the duration of this system.
         let device_haptics = unsafe { captured.controller.haptics() };
-        let haptic_layout = device_haptics.as_deref().map(macos_haptic_layout);
+        let haptic_layout = device_haptics
+            .as_deref()
+            .map(|haptics| macos_haptic_layout(family, haptics));
         let availability = if device_haptics.is_some() {
             // A non-null GCDeviceHaptics only means that macOS exposes its
             // haptics API. In particular, a wired Xbox controller can expose
@@ -145,14 +161,18 @@ fn sync_macos_gamepads(
                         active: Vec::new(),
                     });
             device.haptics = device_haptics;
+            if device.layout != layout {
+                let _ = device.stop();
+                device.engines = None;
+                device.layout = layout;
+            }
             if preferences.vibration.enabled() && device.engines.is_none() {
                 if let Err(error) = device.ensure_engines() {
                     debug!("Could not prewarm controller haptics: {error}");
                 }
             }
         }
-        if let Some((entity, _, connected)) = existing.iter().find(|(_, id, _)| **id == snapshot.id)
-        {
+        if let Some((entity, connected)) = current {
             if connected {
                 if let Ok(mut gamepad) = gamepads.get_mut(entity) {
                     apply_snapshot(&mut gamepad, snapshot);
@@ -171,7 +191,8 @@ fn sync_macos_gamepads(
                 }
             }
         } else {
-            let display_name = controller_display_name(&captured.controller);
+            let display_name = new_display_name
+                .expect("a newly discovered Apple controller has a classified display name");
             let mut gamepad = Gamepad::default();
             apply_snapshot(&mut gamepad, snapshot);
             info!(
@@ -204,7 +225,7 @@ fn sync_macos_gamepads(
     }
 }
 
-fn macos_haptic_layout(haptics: &GCDeviceHaptics) -> MacOsHapticLayout {
+fn macos_haptic_layout(family: ControllerFamily, haptics: &GCDeviceHaptics) -> MacOsHapticLayout {
     // SAFETY: `haptics` is retained by its controller/device state while the
     // immutable locality set is inspected. The framework owns all referenced
     // extern string constants for the process lifetime.
@@ -216,9 +237,30 @@ fn macos_haptic_layout(haptics: &GCDeviceHaptics) -> MacOsHapticLayout {
             GCHapticsLocalityHandles,
         )
     };
-    if localities.containsObject(left_handle) && localities.containsObject(right_handle) {
+    preferred_macos_haptic_layout(
+        family,
+        localities.containsObject(left_handle),
+        localities.containsObject(right_handle),
+        localities.containsObject(handles),
+    )
+}
+
+fn preferred_macos_haptic_layout(
+    family: ControllerFamily,
+    supports_left_handle: bool,
+    supports_right_handle: bool,
+    supports_combined_handles: bool,
+) -> MacOsHapticLayout {
+    if family != ControllerFamily::PlayStation {
+        // Apple's default locality produces the expected whole-controller
+        // vibration on Xbox Series controllers. Some Xbox devices advertise
+        // individual handle engines that accept patterns without moving their
+        // physical motors, so only DualSense uses the split route.
+        return MacOsHapticLayout::Default;
+    }
+    if supports_left_handle && supports_right_handle {
         MacOsHapticLayout::DualHandles
-    } else if localities.containsObject(handles) {
+    } else if supports_combined_handles {
         MacOsHapticLayout::Handles
     } else {
         // Apple guarantees the default locality whenever GCDeviceHaptics
@@ -286,9 +328,9 @@ impl MacOsHapticDevice {
                     let (left_handle, right_handle) =
                         unsafe { (GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle) };
                     MacOsHapticEngines::DualHandles {
-                        // Xbox-compatible dual-motor routing: the left handle
-                        // receives the strong/low-frequency channel and the
-                        // right handle receives the weak/high-frequency channel.
+                        // DualSense exposes separate handle actuators. The
+                        // left handle receives the strong/low-frequency channel
+                        // and the right receives the weak/high-frequency one.
                         strong: create_macos_haptic_engine(
                             &self.haptics,
                             left_handle,
@@ -812,5 +854,35 @@ mod tests {
 
         apply_snapshot(&mut gamepad, &test_snapshot(0.0));
         assert!(gamepad.just_released(GamepadButton::South));
+    }
+
+    #[test]
+    fn xbox_and_other_controllers_use_verified_default_haptic_locality() {
+        for family in [
+            ControllerFamily::Xbox,
+            ControllerFamily::Nintendo,
+            ControllerFamily::Generic,
+        ] {
+            assert_eq!(
+                preferred_macos_haptic_layout(family, true, true, true),
+                MacOsHapticLayout::Default
+            );
+        }
+    }
+
+    #[test]
+    fn playstation_haptics_prefer_dual_handles_with_capability_fallbacks() {
+        assert_eq!(
+            preferred_macos_haptic_layout(ControllerFamily::PlayStation, true, true, true),
+            MacOsHapticLayout::DualHandles
+        );
+        assert_eq!(
+            preferred_macos_haptic_layout(ControllerFamily::PlayStation, true, false, true),
+            MacOsHapticLayout::Handles
+        );
+        assert_eq!(
+            preferred_macos_haptic_layout(ControllerFamily::PlayStation, false, false, false),
+            MacOsHapticLayout::Default
+        );
     }
 }
