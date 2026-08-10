@@ -102,6 +102,7 @@ mod user_mode;
 
 #[cfg(target_arch = "wasm32")]
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, PresentMode, WindowResolution};
 
@@ -178,15 +179,17 @@ fn primary_window_config() -> Window {
 /// Keeping construction separate from execution lets benchmarks and future
 /// integration tests configure the app before driving frames.
 pub fn build_app() -> App {
-    let default_plugins = DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(primary_window_config()),
-        exit_condition: primary_window_exit_condition(),
-        // Automated profiling runs must finish their labeled measurement even
-        // if an external desktop/session manager sends a close request. The
-        // performance runner exits explicitly with AppExit after reporting.
-        close_when_requested: !cfg!(feature = "perf"),
-        ..default()
-    });
+    let default_plugins = DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: Some(primary_window_config()),
+            exit_condition: primary_window_exit_condition(),
+            // Automated profiling runs must finish their labeled measurement even
+            // if an external desktop/session manager sends a close request. The
+            // performance runner exits explicitly with AppExit after reporting.
+            close_when_requested: !cfg!(feature = "perf"),
+            ..default()
+        })
+        .disable::<LogPlugin>();
 
     #[cfg(target_arch = "wasm32")]
     let default_plugins = default_plugins.set(AssetPlugin {
@@ -196,9 +199,15 @@ pub fn build_app() -> App {
 
     let mut app = App::new();
 
+    // Valve requires SteamAPI_Init to run before the graphics device is
+    // created so Steam Overlay can hook the renderer. Keep logging available
+    // for Steam startup diagnostics, but defer every graphics-bearing default
+    // plugin until after the native runtime owns the Steam client.
+    app.add_plugins(LogPlugin::default());
+    let native_online_runtime = native_online::NativeOnlineRuntime::default();
     app.add_plugins(default_plugins);
     app.insert_non_send_resource(online_client::EmbeddedOnlineClientController::default());
-    app.insert_non_send_resource(native_online::NativeOnlineRuntime::default());
+    app.insert_non_send_resource(native_online_runtime);
     app.insert_non_send_resource(native_online_app::NativeOnlineApplication::default());
 
     #[cfg(feature = "perf")]

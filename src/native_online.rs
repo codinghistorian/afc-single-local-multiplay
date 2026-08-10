@@ -62,6 +62,7 @@ use crate::steam_transport::{SteamP2pSession, SteamTransport, SteamTransportConf
 pub const STEAM_APP_ID_ENV: &str = "AFC_STEAM_APP_ID";
 pub const STEAM_SPACEWAR_OPT_IN_ENV: &str = "AFC_STEAM_DEV_SPACEWAR_480";
 pub const COMPILED_STEAM_APP_ID: Option<&str> = option_env!("AFC_COMPILED_STEAM_APP_ID");
+pub const COMPILED_SPACEWAR_OPT_IN: bool = cfg!(feature = "spacewar-dev");
 pub const AUTH_SIGNAL_CHANNEL: u32 = 0x41_46_43;
 pub const MAX_NATIVE_ONLINE_EVENTS: usize = 128;
 pub const MAX_AUTH_SIGNALS_PER_PUMP: usize = 16;
@@ -155,21 +156,25 @@ impl NativeSteamReleaseConfig {
     }
 
     pub fn from_environment() -> Result<Self, NativeOnlineConfigError> {
-        Self::from_sources(COMPILED_STEAM_APP_ID, cfg!(debug_assertions), |key| {
-            std::env::var(key).ok()
-        })
+        Self::from_sources(
+            COMPILED_STEAM_APP_ID,
+            cfg!(debug_assertions),
+            COMPILED_SPACEWAR_OPT_IN,
+            |key| std::env::var(key).ok(),
+        )
     }
 
     #[cfg(test)]
     fn from_lookup(
         lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, NativeOnlineConfigError> {
-        Self::from_sources(None, true, lookup)
+        Self::from_sources(None, true, false, lookup)
     }
 
     fn from_sources(
         compiled_raw: Option<&str>,
         development_build: bool,
+        compiled_spacewar_opt_in: bool,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, NativeOnlineConfigError> {
         let compiled = compiled_raw.map(parse_app_id).transpose()?;
@@ -188,11 +193,12 @@ impl NativeSteamReleaseConfig {
         let app_id = compiled
             .or(if development_build { runtime } else { None })
             .ok_or(NativeOnlineConfigError::MissingAppId)?;
-        let spacewar_opt_in = match lookup(STEAM_SPACEWAR_OPT_IN_ENV).as_deref() {
+        let runtime_spacewar_opt_in = match lookup(STEAM_SPACEWAR_OPT_IN_ENV).as_deref() {
             None | Some("0") => false,
             Some("1") => true,
             Some(_) => return Err(NativeOnlineConfigError::InvalidSpacewarOptIn),
         };
+        let spacewar_opt_in = compiled_spacewar_opt_in || runtime_spacewar_opt_in;
         if app_id.get() == SPACEWAR_APP_ID {
             if !development_build {
                 return Err(NativeOnlineConfigError::SpacewarForbiddenInRelease);
@@ -4416,6 +4422,18 @@ mod tests {
         );
         assert!(development.steam_client_config().validate().is_ok());
 
+        let compiled_development =
+            NativeSteamReleaseConfig::from_sources(Some("480"), true, true, |_| None).unwrap();
+        assert_eq!(compiled_development, development);
+
+        let invalid_compiled_opt_in =
+            NativeSteamReleaseConfig::from_sources(Some("123456"), true, true, |_| None)
+                .unwrap_err();
+        assert_eq!(
+            invalid_compiled_opt_in,
+            NativeOnlineConfigError::InvalidSpacewarOptIn
+        );
+
         let production = NativeSteamReleaseConfig::from_lookup(|key| match key {
             STEAM_APP_ID_ENV => Some("123456".to_owned()),
             _ => None,
@@ -4429,8 +4447,10 @@ mod tests {
 
     #[test]
     fn release_uses_only_the_baked_app_id_and_rejects_runtime_mismatch() {
-        let release = NativeSteamReleaseConfig::from_sources(Some("123456"), false, |_| None)
-            .expect("a release binary uses its compile-time App ID without process configuration");
+        let release =
+            NativeSteamReleaseConfig::from_sources(Some("123456"), false, false, |_| None).expect(
+                "a release binary uses its compile-time App ID without process configuration",
+            );
         assert_eq!(release.app_id().get(), 123_456);
         assert_eq!(
             restart_app_id_for_profile(release, true),
@@ -4438,19 +4458,20 @@ mod tests {
         );
         assert_eq!(restart_app_id_for_profile(release, false), None);
 
-        let same = NativeSteamReleaseConfig::from_sources(Some("123456"), false, |key| {
+        let same = NativeSteamReleaseConfig::from_sources(Some("123456"), false, false, |key| {
             (key == STEAM_APP_ID_ENV).then(|| "123456".to_owned())
         })
         .unwrap();
         assert_eq!(same, release);
 
-        let mismatch = NativeSteamReleaseConfig::from_sources(Some("123456"), false, |key| {
-            (key == STEAM_APP_ID_ENV).then(|| "654321".to_owned())
-        })
-        .unwrap_err();
+        let mismatch =
+            NativeSteamReleaseConfig::from_sources(Some("123456"), false, false, |key| {
+                (key == STEAM_APP_ID_ENV).then(|| "654321".to_owned())
+            })
+            .unwrap_err();
         assert_eq!(mismatch, NativeOnlineConfigError::AppIdMismatch);
 
-        let runtime_only = NativeSteamReleaseConfig::from_sources(None, false, |key| {
+        let runtime_only = NativeSteamReleaseConfig::from_sources(None, false, false, |key| {
             (key == STEAM_APP_ID_ENV).then(|| "123456".to_owned())
         })
         .unwrap_err();
@@ -4459,7 +4480,7 @@ mod tests {
 
     #[test]
     fn release_never_uses_spacewar_even_with_the_development_opt_in() {
-        let error = NativeSteamReleaseConfig::from_sources(Some("480"), false, |key| {
+        let error = NativeSteamReleaseConfig::from_sources(Some("480"), false, true, |key| {
             (key == STEAM_SPACEWAR_OPT_IN_ENV).then(|| "1".to_owned())
         })
         .unwrap_err();
@@ -4472,13 +4493,13 @@ mod tests {
 
     #[test]
     fn development_runtime_override_must_match_a_baked_app_id() {
-        let mismatch = NativeSteamReleaseConfig::from_sources(Some("123456"), true, |key| {
+        let mismatch = NativeSteamReleaseConfig::from_sources(Some("123456"), true, false, |key| {
             (key == STEAM_APP_ID_ENV).then(|| "654321".to_owned())
         })
         .unwrap_err();
         assert_eq!(mismatch, NativeOnlineConfigError::AppIdMismatch);
 
-        let runtime_only = NativeSteamReleaseConfig::from_sources(None, true, |key| {
+        let runtime_only = NativeSteamReleaseConfig::from_sources(None, true, false, |key| {
             (key == STEAM_APP_ID_ENV).then(|| "654321".to_owned())
         })
         .unwrap();

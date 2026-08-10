@@ -35,6 +35,10 @@ perf-alloc = ["perf"]
 trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
 steam-net = ["native-net", "lightyear/steam", "dep:steamworks"]
+# Compile-time opt-in for private debug builds that use Valve's shared
+# Spacewar App ID. build.rs rejects this feature outside guarded App ID 480
+# development builds, so it cannot be carried into a shipping client.
+spacewar-dev = []
 shipping = ["native", "steam-net"]
 
 [dependencies]

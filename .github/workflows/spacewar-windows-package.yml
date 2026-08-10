@@ -36,7 +36,7 @@ jobs:
           AFC_STEAM_APP_ID: "480"
         run: >-
           cargo build --locked --no-default-features
-          --features native,steam-net --bin ffc-prototype
+          --features native,steam-net,spacewar-dev --bin ffc-prototype
       - name: Assemble and validate private test package
         shell: pwsh
         run: |
@@ -82,6 +82,7 @@ jobs:
           [ordered]@{
             source_commit = $env:GITHUB_SHA
             source_tag = $env:GITHUB_REF_NAME
+            spacewar_compile_opt_in = $true
             release_identity = $identity
           } | ConvertTo-Json -Depth 8 | Set-Content `
             (Join-Path $stage "spacewar-build.json") `

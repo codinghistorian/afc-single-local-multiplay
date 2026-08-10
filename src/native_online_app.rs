@@ -6484,7 +6484,7 @@ pub fn online_localized(key: &str) -> &'static str {
         "online.error.steam_unavailable" => "Steam online services are unavailable.",
         "online.error.steam_disconnected" => "Steam disconnected.",
         "online.error.overlay_unavailable" => {
-            "Steam Overlay is unavailable. Enable it in Steam, then try again."
+            "Steam Overlay did not attach to this process. Relaunch with the platform test launcher, or invite and join through Steam Friends & Chat."
         }
         "online.error.release_configuration" => "The online release configuration is invalid.",
         "online.error.lobby_unavailable" => "That lobby is no longer available.",

@@ -96,6 +96,7 @@ fn main() {
     let native_enabled = env::var_os("CARGO_FEATURE_NATIVE").is_some();
     let dev_hot_reload_enabled = env::var_os("CARGO_FEATURE_DEV_HOT_RELOAD").is_some();
     let steam_net_enabled = env::var_os("CARGO_FEATURE_STEAM_NET").is_some();
+    let spacewar_dev_enabled = env::var_os("CARGO_FEATURE_SPACEWAR_DEV").is_some();
     let shipping_enabled = env::var_os("CARGO_FEATURE_SHIPPING").is_some();
     let release_shipping = profile == "release" && shipping_enabled;
     validate_release_build(ReleaseBuildInputs {
@@ -104,6 +105,7 @@ fn main() {
         steam_app_id,
         shipping_enabled,
         steam_net_enabled,
+        spacewar_dev_enabled,
         native_enabled,
         dev_hot_reload_enabled,
     })
@@ -153,12 +155,33 @@ pub(crate) struct ReleaseBuildInputs<'a> {
     pub(crate) steam_app_id: Option<u32>,
     pub(crate) shipping_enabled: bool,
     pub(crate) steam_net_enabled: bool,
+    pub(crate) spacewar_dev_enabled: bool,
     pub(crate) native_enabled: bool,
     pub(crate) dev_hot_reload_enabled: bool,
 }
 
 pub(crate) fn validate_release_build(inputs: ReleaseBuildInputs<'_>) -> Result<(), String> {
     validate_build_label(inputs.release_label)?;
+
+    if inputs.spacewar_dev_enabled {
+        if inputs.profile != "debug" || inputs.shipping_enabled {
+            return Err(
+                "Cargo feature `spacewar-dev` is restricted to the non-shipping debug profile"
+                    .to_owned(),
+            );
+        }
+        if !inputs.native_enabled || !inputs.steam_net_enabled {
+            return Err(
+                "Cargo feature `spacewar-dev` requires Cargo features `native` and `steam-net`"
+                    .to_owned(),
+            );
+        }
+        if inputs.steam_app_id != Some(SPACEWAR_APP_ID) {
+            return Err(format!(
+                "Cargo feature `spacewar-dev` requires {STEAM_APP_ID_ENV}={SPACEWAR_APP_ID}"
+            ));
+        }
+    }
 
     let release_steam_client = inputs.profile == "release" && inputs.steam_net_enabled;
     if release_steam_client {

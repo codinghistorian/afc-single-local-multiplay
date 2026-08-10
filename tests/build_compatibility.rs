@@ -195,6 +195,7 @@ fn release_inputs() -> ReleaseBuildInputs<'static> {
         steam_app_id: Some(123_456),
         shipping_enabled: true,
         steam_net_enabled: true,
+        spacewar_dev_enabled: false,
         native_enabled: true,
         dev_hot_reload_enabled: false,
     }
@@ -264,6 +265,37 @@ fn debug_feature_union_is_not_mislabeled_as_a_release_artifact() {
     debug.steam_app_id = None;
     debug.dev_hot_reload_enabled = true;
     validate_release_build(debug).unwrap();
+}
+
+#[test]
+fn spacewar_feature_is_restricted_to_guarded_debug_clients() {
+    let mut spacewar = release_inputs();
+    spacewar.profile = "debug";
+    spacewar.release_label = "development";
+    spacewar.steam_app_id = Some(480);
+    spacewar.shipping_enabled = false;
+    spacewar.spacewar_dev_enabled = true;
+    validate_release_build(spacewar).unwrap();
+
+    let mut invalid = spacewar;
+    invalid.profile = "release";
+    assert!(validate_release_build(invalid).is_err());
+
+    let mut invalid = spacewar;
+    invalid.shipping_enabled = true;
+    assert!(validate_release_build(invalid).is_err());
+
+    let mut invalid = spacewar;
+    invalid.steam_app_id = Some(123_456);
+    assert!(validate_release_build(invalid).is_err());
+
+    let mut invalid = spacewar;
+    invalid.native_enabled = false;
+    assert!(validate_release_build(invalid).is_err());
+
+    let mut invalid = spacewar;
+    invalid.steam_net_enabled = false;
+    assert!(validate_release_build(invalid).is_err());
 }
 
 #[test]
