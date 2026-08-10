@@ -37,5 +37,9 @@ The macOS launcher builds both peers with the same Cargo features, initializes
 Steam before Metal, and signs the local executable with Steam Overlay's required
 development entitlements.
 
+If an Online Error appears, capture the complete message and its Diagnostic
+code. Numeric diagnostics are enabled only in this guarded Spacewar test build;
+ordinary and shipping clients keep internal detail hidden.
+
 App ID 480 is shared by other developers. Use private or friends-only lobbies,
 and distribute this package only to the intended testers.

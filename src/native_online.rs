@@ -7,6 +7,8 @@
 //! `steam-net` retain the same screen model and fail closed with a localizable
 //! unavailable reason.
 
+#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+use core::ffi::c_void;
 use core::fmt;
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 use std::collections::VecDeque;
@@ -561,6 +563,27 @@ pub enum AuthSignalError {
     ReceiveBudgetExceeded,
     UnexpectedManifestSender,
     ConflictingManifest,
+}
+
+/// Stable local diagnostics for the pre-game Steam signaling boundary.
+/// These values are never serialized and shipping UI keeps them hidden.
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const fn auth_signal_detail_code(error: AuthSignalError) -> u16 {
+    match error {
+        AuthSignalError::EmptyTicket => 201,
+        AuthSignalError::TicketTooLarge => 202,
+        AuthSignalError::InvalidEnvelope => 203,
+        AuthSignalError::InvalidIdentity => 204,
+        AuthSignalError::WrongLobby => 205,
+        AuthSignalError::WrongRecipient => 206,
+        AuthSignalError::SenderMismatch => 207,
+        AuthSignalError::UnexpectedPurpose => 208,
+        AuthSignalError::PeerNotInLobby => 209,
+        AuthSignalError::TransportFailed => 210,
+        AuthSignalError::ReceiveBudgetExceeded => 211,
+        AuthSignalError::UnexpectedManifestSender => 212,
+        AuthSignalError::ConflictingManifest => 213,
+    }
 }
 
 /// Secret-bearing fixed envelope. Debug output intentionally redacts the bytes.
@@ -1322,7 +1345,18 @@ fn runtime_failure(error: &NativeOnlineRuntimeError) -> OnlineFailure {
         code,
         severity: OnlineFailureSeverity::Fatal,
         recovery,
-        detail_code: 0,
+        detail_code: match error {
+            NativeOnlineRuntimeError::Signal(error) => auth_signal_detail_code(*error),
+            NativeOnlineRuntimeError::Transport(_) => 220,
+            NativeOnlineRuntimeError::Capacity => 221,
+            NativeOnlineRuntimeError::Unavailable(_) => 222,
+            NativeOnlineRuntimeError::Configuration(_) => 223,
+            NativeOnlineRuntimeError::Steam(_) => 224,
+            NativeOnlineRuntimeError::Lobby(_) => 225,
+            NativeOnlineRuntimeError::TimeRegression => 226,
+            NativeOnlineRuntimeError::InvalidAuthenticatedRoster => 227,
+            NativeOnlineRuntimeError::EndpointIdentityMismatch => 228,
+        },
     }
 }
 
@@ -1684,6 +1718,70 @@ mod real {
         }
     }
 
+    /// `steamworks` 0.12.2's `session_request_callback` convenience method
+    /// discards the returned callback handle internally, which unregisters the
+    /// callback immediately. Register the raw callback through `Client` so the
+    /// handle can be retained by [`SteamAuthSignalChannel`].
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    struct RetainedNetworkingMessagesSessionRequest {
+        remote: steamworks::sys::SteamNetworkingIdentity,
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    unsafe impl steamworks::Callback for RetainedNetworkingMessagesSessionRequest {
+        const ID: i32 = steamworks::sys::SteamNetworkingMessagesSessionRequest_t_k_iCallback as i32;
+
+        unsafe fn from_raw(raw: *mut c_void) -> Self {
+            // SAFETY: Steam invokes this callback ID with the matching packed
+            // SDK callback structure for the exact pinned binding.
+            let callback = unsafe {
+                raw.cast::<steamworks::sys::SteamNetworkingMessagesSessionRequest_t>()
+                    .read_unaligned()
+            };
+            Self {
+                remote: callback.m_identityRemote,
+            }
+        }
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn auth_signal_user_from_raw_identity(
+        identity: &mut steamworks::sys::SteamNetworkingIdentity,
+    ) -> Option<SteamUserId> {
+        // SAFETY: `identity` is the initialized value supplied by Steam's
+        // session-request callback and remains alive for this call.
+        let raw =
+            unsafe { steamworks::sys::SteamAPI_SteamNetworkingIdentity_GetSteamID64(identity) };
+        SteamUserId::new(raw).ok()
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn accept_raw_auth_signal_session(identity: &steamworks::sys::SteamNetworkingIdentity) -> bool {
+        // SAFETY: the interface comes from the initialized Steam client and is
+        // null-checked; `identity` is an SDK-initialized callback value.
+        unsafe {
+            let messages = steamworks::sys::SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
+            !messages.is_null()
+                && steamworks::sys::SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(
+                    messages, identity,
+                )
+        }
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn close_raw_auth_signal_session(identity: &steamworks::sys::SteamNetworkingIdentity) {
+        // SAFETY: the interface comes from the initialized Steam client and is
+        // null-checked; `identity` is an SDK-initialized callback value.
+        unsafe {
+            let messages = steamworks::sys::SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
+            if !messages.is_null() {
+                let _ = steamworks::sys::SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser(
+                    messages, identity,
+                );
+            }
+        }
+    }
+
     fn auth_signal_peer_failure(error: AuthSignalError) -> OnlineFailure {
         let (code, severity, recovery) = match error {
             AuthSignalError::ReceiveBudgetExceeded => (
@@ -1706,12 +1804,14 @@ mod real {
             code,
             severity,
             recovery,
-            detail_code: 0,
+            detail_code: auth_signal_detail_code(error),
         }
     }
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
     pub(super) struct SteamAuthSignalChannel {
+        // Drop callback registrations before the state captured by them.
+        _callback_handles: Vec<steamworks::CallbackHandle>,
         messages: steamworks::networking_messages::NetworkingMessages,
         policy: Arc<Mutex<SignalAdmissionPolicy>>,
         failed: Arc<AtomicBool>,
@@ -1729,31 +1829,29 @@ mod real {
             let policy = Arc::new(Mutex::new(SignalAdmissionPolicy::default()));
             let failed = Arc::new(AtomicBool::new(false));
             let failed_users = Arc::new(Mutex::new(ArrayVec::new()));
+            let mut callback_handles = Vec::with_capacity(2);
 
-            messages.session_request_callback({
+            callback_handles.push(client.register_callback({
                 let policy = policy.clone();
-                move |request| {
-                    let Some(raw_user) = request.remote().steam_id().map(|id| id.raw()) else {
-                        request.reject();
-                        return;
-                    };
-                    let user = SteamUserId::new(raw_user).ok();
+                move |mut request: RetainedNetworkingMessagesSessionRequest| {
+                    let user = auth_signal_user_from_raw_identity(&mut request.remote);
                     let allowed = user.is_some_and(|user| {
                         policy.lock().ok().is_some_and(|policy| policy.allows(user))
                     });
                     if allowed {
-                        let _ = request.accept();
+                        let _ = accept_raw_auth_signal_session(&request.remote);
                     } else {
-                        request.reject();
+                        close_raw_auth_signal_session(&request.remote);
                     }
                 }
-            });
-            messages.session_failed_callback({
+            }));
+            callback_handles.push(client.register_callback({
                 let failed = failed.clone();
                 let failed_users = failed_users.clone();
                 let policy = policy.clone();
-                move |info| {
-                    let user = info
+                move |event: steamworks::networking_messages::NetworkingMessagesSessionFailed| {
+                    let user = event
+                        .info
                         .identity_remote()
                         .and_then(|identity| identity.steam_id())
                         .and_then(|id| SteamUserId::new(id.raw()).ok());
@@ -1787,9 +1885,10 @@ mod real {
                         close_attributed_auth_signal_session(user);
                     }
                 }
-            });
+            }));
 
             Self {
+                _callback_handles: callback_handles,
                 messages,
                 policy,
                 failed,
@@ -4920,6 +5019,38 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn auth_signal_diagnostic_codes_are_stable_and_distinct() {
+        let errors = [
+            AuthSignalError::EmptyTicket,
+            AuthSignalError::TicketTooLarge,
+            AuthSignalError::InvalidEnvelope,
+            AuthSignalError::InvalidIdentity,
+            AuthSignalError::WrongLobby,
+            AuthSignalError::WrongRecipient,
+            AuthSignalError::SenderMismatch,
+            AuthSignalError::UnexpectedPurpose,
+            AuthSignalError::PeerNotInLobby,
+            AuthSignalError::TransportFailed,
+            AuthSignalError::ReceiveBudgetExceeded,
+            AuthSignalError::UnexpectedManifestSender,
+            AuthSignalError::ConflictingManifest,
+        ];
+        let mut codes = [0_u16; 13];
+        for (index, error) in errors.into_iter().enumerate() {
+            codes[index] = auth_signal_detail_code(error);
+        }
+        assert_eq!(
+            codes,
+            [
+                201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213
+            ]
+        );
+        for (index, code) in codes.into_iter().enumerate() {
+            assert!(!codes[..index].contains(&code));
+        }
     }
 
     #[test]

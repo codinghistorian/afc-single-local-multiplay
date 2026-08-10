@@ -32,10 +32,10 @@ use crate::match_presentation::{
     PresentedMatchOutcome,
 };
 use crate::native_online::{
-    CommittedAuthenticatedRoster, NativeOnlineActions, NativeOnlineAvailability,
-    NativeOnlineCommand, NativeOnlineCreateRequest, NativeOnlineEndpoint, NativeOnlineRuntime,
-    NativeOnlineRuntimeError, NativeOnlineScreen, NativeOnlineUnavailableReason,
-    NativeOnlineViewModel, NativeOnlineVisibility,
+    COMPILED_SPACEWAR_OPT_IN, CommittedAuthenticatedRoster, NativeOnlineActions,
+    NativeOnlineAvailability, NativeOnlineCommand, NativeOnlineCreateRequest, NativeOnlineEndpoint,
+    NativeOnlineRuntime, NativeOnlineRuntimeError, NativeOnlineScreen,
+    NativeOnlineUnavailableReason, NativeOnlineViewModel, NativeOnlineVisibility,
 };
 use crate::network_protocol::{
     DefinitionId, MAX_LOCAL_SEATS, MatchId, PeerId, ReconnectClaim, RetryDisposition, TeamId,
@@ -328,6 +328,7 @@ pub struct NativeOnlineApplicationMetrics {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeOnlineApplicationError {
     Runtime,
+    RuntimePort,
     InvalidAction,
     MissingLocalIdentity,
     MissingLocalPeer,
@@ -347,6 +348,31 @@ pub enum NativeOnlineApplicationError {
     TimelineExhausted,
 }
 
+/// Stable, local-only detail identities for application-composition failures.
+const fn application_error_detail_code(error: &NativeOnlineApplicationError) -> u16 {
+    match error {
+        NativeOnlineApplicationError::Runtime => 301,
+        NativeOnlineApplicationError::RuntimePort => 319,
+        NativeOnlineApplicationError::InvalidAction => 302,
+        NativeOnlineApplicationError::MissingLocalIdentity => 303,
+        NativeOnlineApplicationError::MissingLocalPeer => 304,
+        NativeOnlineApplicationError::MissingJoinIntent => 305,
+        NativeOnlineApplicationError::MissingManifest => 306,
+        NativeOnlineApplicationError::MissingCommittedRoster => 307,
+        NativeOnlineApplicationError::MissingListenHost => 308,
+        NativeOnlineApplicationError::EndpointCapacity => 309,
+        NativeOnlineApplicationError::AuthorityCommandCapacity => 310,
+        NativeOnlineApplicationError::AuthorityDisconnected => 311,
+        NativeOnlineApplicationError::ListenStart => 312,
+        NativeOnlineApplicationError::RemoteStart => 313,
+        NativeOnlineApplicationError::Presentation => 314,
+        NativeOnlineApplicationError::TrustedResultsDisabled => 315,
+        NativeOnlineApplicationError::DedicatedModeDisabled => 316,
+        NativeOnlineApplicationError::EntropyUnavailable => 317,
+        NativeOnlineApplicationError::TimelineExhausted => 318,
+    }
+}
+
 impl fmt::Display for NativeOnlineApplicationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "native online application failed: {self:?}")
@@ -357,7 +383,7 @@ impl std::error::Error for NativeOnlineApplicationError {}
 
 impl From<NativeOnlineRuntimeError> for NativeOnlineApplicationError {
     fn from(_: NativeOnlineRuntimeError) -> Self {
-        Self::Runtime
+        Self::RuntimePort
     }
 }
 
@@ -739,7 +765,7 @@ impl NativeOnlineApplication {
     ) -> Result<(), NativeOnlineApplicationError> {
         let result = self.dispatch_inner(runtime, action, now_ms);
         if let Err(error) = &result {
-            self.observe_application_error(error);
+            self.observe_application_or_runtime_error(runtime, error);
         }
         result
     }
@@ -1299,8 +1325,25 @@ impl NativeOnlineApplication {
                 OnlineFailureSeverity::Fatal
             },
             recovery,
-            detail_code: 0,
+            detail_code: application_error_detail_code(error),
         });
+    }
+
+    fn observe_application_or_runtime_error<R: NativeOnlineRuntimePort>(
+        &mut self,
+        runtime: &R,
+        error: &NativeOnlineApplicationError,
+    ) {
+        if matches!(error, NativeOnlineApplicationError::RuntimePort)
+            && let Some(failure) = runtime.view_model().failure
+        {
+            // The native runtime already projected the precise typed cause.
+            // Preserve it instead of replacing it with a generic application
+            // composition error while crossing this abstraction boundary.
+            self.failure_override = Some(failure);
+            return;
+        }
+        self.observe_application_error(error);
     }
 
     fn observe_terminal_worker(
@@ -1400,7 +1443,7 @@ pub fn drive_native_online_application(world: &mut World) {
     } else {
         application.set_content_ready(content_ready);
         if let Err(error) = application.pump(&mut runtime, now_ms) {
-            application.observe_application_error(&error);
+            application.observe_application_or_runtime_error(&runtime, &error);
         }
         let steam_input_action_set = if application.accepts_gameplay_input()
             && !application.leave_confirmation_open
@@ -1414,7 +1457,10 @@ pub fn drive_native_online_application(world: &mut World) {
             .set_steam_input_action_set(steam_input_action_set)
             .is_err()
         {
-            application.observe_application_error(&NativeOnlineApplicationError::Runtime);
+            application.observe_application_or_runtime_error(
+                &runtime,
+                &NativeOnlineApplicationError::RuntimePort,
+            );
         }
 
         if application.active.is_some() {
@@ -3542,7 +3588,7 @@ mod tests {
 
         assert_eq!(
             application.dispatch(&mut runtime, NativeOnlineUiAction::AddSeat, 60),
-            Err(NativeOnlineApplicationError::Runtime)
+            Err(NativeOnlineApplicationError::RuntimePort)
         );
         assert_eq!(application.editor, before);
         assert!(runtime.commands.is_empty());
@@ -4892,12 +4938,14 @@ mod tests {
                 },
                 "{retry:?}"
             );
-            assert!(
-                !native_online_details(&snapshot)
-                    .contains(&disconnect.message.detail_code.to_string())
+            let details = native_online_details(&snapshot);
+            assert_eq!(
+                details.contains(&disconnect.message.detail_code.to_string()),
+                COMPILED_SPACEWAR_OPT_IN && expected_screen == NativeOnlineScreen::Error,
+                "{retry:?}"
             );
             assert!(
-                !native_online_details(&snapshot).contains(
+                !details.contains(
                     &disconnect
                         .message
                         .last_confirmed_tick
@@ -5108,7 +5156,7 @@ mod tests {
             code: OnlineFailureCode::InternalCapacity,
             severity: OnlineFailureSeverity::Fatal,
             recovery: OnlineRecoveryAction::ReturnToMenu,
-            detail_code: 0,
+            detail_code: 309,
         };
         assert!(application.active.is_none());
         assert!(application.staged_endpoints.is_empty());
@@ -5178,6 +5226,70 @@ mod tests {
         assert_eq!(
             online_localized(snapshot.availability.message_key()),
             "Online play is not supported on this platform."
+        );
+    }
+
+    #[test]
+    fn application_failures_retain_stable_local_diagnostic_identity() {
+        let mut application = NativeOnlineApplication::default();
+        application.observe_application_error(&NativeOnlineApplicationError::Runtime);
+        assert_eq!(
+            application
+                .failure_override
+                .map(|failure| failure.detail_code),
+            Some(301)
+        );
+        application.observe_application_error(&NativeOnlineApplicationError::ListenStart);
+        assert_eq!(
+            application
+                .failure_override
+                .map(|failure| failure.detail_code),
+            Some(312)
+        );
+
+        application.observe_application_error(&NativeOnlineApplicationError::RuntimePort);
+        assert_eq!(
+            application
+                .failure_override
+                .map(|failure| failure.detail_code),
+            Some(319)
+        );
+    }
+
+    #[test]
+    fn runtime_port_failure_keeps_the_runtime_typed_diagnostic() {
+        let mut application = NativeOnlineApplication::default();
+        let mut runtime = FakeRuntime::available();
+        let failure = OnlineFailure {
+            code: OnlineFailureCode::AuthenticationFailed,
+            severity: OnlineFailureSeverity::Fatal,
+            recovery: OnlineRecoveryAction::ReturnToMenu,
+            detail_code: 203,
+        };
+        runtime.view.failure = Some(failure);
+
+        application.observe_application_or_runtime_error(
+            &runtime,
+            &NativeOnlineApplicationError::RuntimePort,
+        );
+
+        assert_eq!(application.failure_override, Some(failure));
+    }
+
+    #[cfg(feature = "spacewar-dev")]
+    #[test]
+    fn spacewar_error_screen_exposes_only_the_stable_numeric_diagnostic() {
+        let mut snapshot = NativeOnlineUiSnapshot::default();
+        snapshot.screen = NativeOnlineScreen::Error;
+        snapshot.failure = Some(OnlineFailure {
+            code: OnlineFailureCode::MalformedTraffic,
+            severity: OnlineFailureSeverity::Fatal,
+            recovery: OnlineRecoveryAction::ReturnToLobby,
+            detail_code: 203,
+        });
+        assert_eq!(
+            native_online_details(&snapshot),
+            "Malformed network traffic was rejected.\nDiagnostic code: MalformedTraffic-203"
         );
     }
 
@@ -6149,10 +6261,24 @@ fn native_online_details(snapshot: &NativeOnlineUiSnapshot) -> String {
         return online_localized(snapshot.availability.message_key()).to_owned();
     }
     if snapshot.screen == NativeOnlineScreen::Error {
-        return snapshot
-            .failure
-            .map(|failure| online_localized(failure.message_key()).to_owned())
-            .unwrap_or_else(|| online_localized("online.error.internal").to_owned());
+        let failure = snapshot.failure.unwrap_or(OnlineFailure {
+            code: OnlineFailureCode::InternalFailure,
+            severity: OnlineFailureSeverity::Fatal,
+            recovery: OnlineRecoveryAction::ReturnToMenu,
+            detail_code: 0,
+        });
+        let message = online_localized(failure.message_key());
+        // Numeric internals remain hidden in shipping clients. The explicitly
+        // guarded Spacewar build exposes them so cross-machine test screenshots
+        // identify the failing local subsystem without remote-authored text.
+        return if failure.detail_code == 0 || !COMPILED_SPACEWAR_OPT_IN {
+            message.to_owned()
+        } else {
+            format!(
+                "{message}\nDiagnostic code: {:?}-{}",
+                failure.code, failure.detail_code
+            )
+        };
     }
     let loadout = snapshot.selected_loadout;
     let quality = quality_label(snapshot.network_quality.quality);

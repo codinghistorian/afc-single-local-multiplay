@@ -72,8 +72,16 @@ relaunch request.
 For explicit development against Valve's Spacewar test App ID only:
 
 ```bash
-AFC_STEAM_APP_ID=480 AFC_STEAM_DEV_SPACEWAR_480=1 cargo run --features steam-net
+AFC_STEAM_APP_ID=480 AFC_STEAM_DEV_SPACEWAR_480=1 \
+  cargo run --locked --no-default-features \
+  --features native,steam-net,spacewar-dev
 ```
+
+Use this exact feature set for every App ID 480 peer. The `spacewar-dev`
+compile-time guard is part of the development build identity, so omitting it
+produces a client that cannot join the Windows Spacewar test artifact. On macOS,
+prefer `packaging/spacewar/macos/run-spacewar.sh`, which also prepares Steam
+Overlay correctly.
 
 App ID 480 fails closed unless that opt-in is present, and the opt-in is rejected
 for every other App ID. The default build does not link Steam and displays an

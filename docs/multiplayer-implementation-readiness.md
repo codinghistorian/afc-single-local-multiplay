@@ -135,7 +135,9 @@ AFC_BUILD_ID=<IMMUTABLE_RELEASE_LABEL> AFC_STEAM_APP_ID=<REAL_AFC_APP_ID> \
 The explicit development-only Spacewar launch is:
 
 ```sh
-AFC_STEAM_APP_ID=480 AFC_STEAM_DEV_SPACEWAR_480=1 cargo run --features steam-net
+AFC_STEAM_APP_ID=480 AFC_STEAM_DEV_SPACEWAR_480=1 \
+  cargo run --locked --no-default-features \
+  --features native,steam-net,spacewar-dev
 ```
 
 Do not set `AFC_STEAM_DEV_SPACEWAR_480` for a real App ID or release candidate.
