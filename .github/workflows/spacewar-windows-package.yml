@@ -1,0 +1,108 @@
+name: Spacewar Windows test package
+
+on:
+  push:
+    tags:
+      - "spacewar-test-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spacewar-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}\target\spacewar-windows
+
+jobs:
+  package-windows:
+    name: Package Windows x86-64 development client
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          lfs: true
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: spacewar-windows-debug
+      - name: Build App ID 480 development client
+        env:
+          AFC_STEAM_APP_ID: "480"
+        run: >-
+          cargo build --locked --no-default-features
+          --features native,steam-net --bin ffc-prototype
+      - name: Assemble and validate private test package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binary = Join-Path $env:CARGO_TARGET_DIR "debug/ffc-prototype.exe"
+          $identityText = & $binary --release-identity
+          if ($LASTEXITCODE -ne 0) {
+            throw "The player identity query failed with exit code $LASTEXITCODE."
+          }
+          $identity = $identityText | ConvertFrom-Json
+          if ($identity.shipping -ne $false -or $identity.steam_app_id -ne 480) {
+            throw "Expected a non-shipping development identity compiled for App ID 480."
+          }
+
+          $steamDlls = @(
+            Get-ChildItem `
+              (Join-Path $env:CARGO_TARGET_DIR "debug/build/steamworks-sys-*/out/steam_api64.dll") `
+              -File
+          )
+          if ($steamDlls.Count -ne 1) {
+            throw "Expected exactly one steam_api64.dll, found $($steamDlls.Count)."
+          }
+
+          $stage = Join-Path $env:GITHUB_WORKSPACE "dist/spacewar/windows-x86_64"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $binary (Join-Path $stage "ffc-prototype.exe")
+          Copy-Item $steamDlls[0].FullName (Join-Path $stage "steam_api64.dll")
+          Copy-Item `
+            (Join-Path $env:GITHUB_WORKSPACE "assets") `
+            (Join-Path $stage "assets") `
+            -Recurse
+          Copy-Item `
+            (Join-Path $env:GITHUB_WORKSPACE "packaging/spacewar/windows/run-spacewar.bat") `
+            (Join-Path $stage "run-spacewar.bat")
+          Copy-Item `
+            (Join-Path $env:GITHUB_WORKSPACE "packaging/spacewar/windows/README.txt") `
+            (Join-Path $stage "README.txt")
+
+          [ordered]@{
+            source_commit = $env:GITHUB_SHA
+            source_tag = $env:GITHUB_REF_NAME
+            release_identity = $identity
+          } | ConvertTo-Json -Depth 8 | Set-Content `
+            (Join-Path $stage "spacewar-build.json") `
+            -Encoding utf8
+
+          if (Test-Path (Join-Path $stage "steam_appid.txt")) {
+            throw "The Spacewar package must use the guarded launcher, not steam_appid.txt."
+          }
+          foreach ($required in @(
+            "ffc-prototype.exe",
+            "steam_api64.dll",
+            "run-spacewar.bat",
+            "README.txt",
+            "spacewar-build.json",
+            "assets/steam_input/action_manifest.vdf",
+            "assets/steam_input/generic_gamepad_default.vdf",
+            "assets/steam_input/steam_deck_default.vdf"
+          )) {
+            if (-not (Test-Path (Join-Path $stage $required) -PathType Leaf)) {
+              throw "Missing required package file: $required"
+            }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afc-spacewar-windows-${{ github.ref_name }}-${{ github.sha }}
+          path: dist/spacewar/windows-x86_64/
+          if-no-files-found: error
+          retention-days: 14
