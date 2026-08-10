@@ -827,6 +827,15 @@ pub enum SteamBackendError {
     SteamInputActionMissing,
 }
 
+const fn is_recoverable_steam_input_startup_error(error: SteamBackendError) -> bool {
+    matches!(
+        error,
+        SteamBackendError::SteamInputInitializationFailed
+            | SteamBackendError::SteamInputManifestInvalid
+            | SteamBackendError::SteamInputActionMissing
+    )
+}
+
 impl fmt::Display for SteamBackendError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "Steam backend failure: {self:?}")
@@ -5591,7 +5600,7 @@ mod real {
     /// and its callback pump private.
     pub struct RealSteamBackend {
         client: steamworks::Client,
-        steam_input: RealSteamInputState,
+        steam_input: Option<RealSteamInputState>,
         overlay_active: Arc<AtomicBool>,
         callback_mailbox: Arc<Mutex<RealCallbackMailbox>>,
         callback_integrity_failure: Arc<AtomicBool>,
@@ -5628,7 +5637,18 @@ mod real {
                 return Err(SteamBackendError::NotLoggedOn);
             }
             let local_user = backend_user(client.user().steam_id())?;
-            let steam_input = RealSteamInputState::initialize(&client)?;
+            let steam_input = match RealSteamInputState::initialize(&client) {
+                Ok(steam_input) => Some(steam_input),
+                Err(error) if is_recoverable_steam_input_startup_error(error) => {
+                    bevy::log::warn!(
+                        ?error,
+                        app_id = app_id.get(),
+                        "Steam Input unavailable; continuing with Steam networking and native input"
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            };
 
             let callback_mailbox = Arc::new(Mutex::new(RealCallbackMailbox::new(local_user)));
             let callback_integrity_failure = Arc::new(AtomicBool::new(false));
@@ -5914,7 +5934,11 @@ mod real {
         }
 
         fn steam_input_snapshot(&self) -> SteamInputSnapshot {
-            self.steam_input.snapshot
+            self.steam_input
+                .as_ref()
+                .map_or_else(SteamInputSnapshot::default, |steam_input| {
+                    steam_input.snapshot
+                })
         }
 
         fn is_overlay_enabled(&self) -> bool {
@@ -5929,17 +5953,20 @@ mod real {
             &mut self,
             action_set: SteamInputActionSet,
         ) -> Result<(), SteamBackendError> {
-            if self.steam_input.desired_action_set == action_set {
+            let Some(steam_input) = self.steam_input.as_mut() else {
+                return Ok(());
+            };
+            if steam_input.desired_action_set == action_set {
                 return Ok(());
             }
-            self.steam_input.desired_action_set = action_set;
+            steam_input.desired_action_set = action_set;
             let action_set_handle = match action_set {
-                SteamInputActionSet::Gameplay => self.steam_input.gameplay_action_set,
-                SteamInputActionSet::Menu => self.steam_input.menu_action_set,
+                SteamInputActionSet::Gameplay => steam_input.gameplay_action_set,
+                SteamInputActionSet::Menu => steam_input.menu_action_set,
             };
             {
                 let input = self.client.input();
-                for controller in self.steam_input.assignments.handles.iter().flatten() {
+                for controller in steam_input.assignments.handles.iter().flatten() {
                     input.activate_action_set_handle(controller.get(), action_set_handle);
                 }
             }
@@ -5953,8 +5980,10 @@ mod real {
             &mut self,
             local_ordinal: usize,
         ) -> Result<bool, SteamBackendError> {
-            let Some(controller) = self
-                .steam_input
+            let Some(steam_input) = self.steam_input.as_ref() else {
+                return Ok(false);
+            };
+            let Some(controller) = steam_input
                 .assignments
                 .handles
                 .get(local_ordinal)
@@ -6303,30 +6332,31 @@ mod real {
 
     impl RealSteamBackend {
         fn refresh_steam_input(&mut self) {
+            let Some(steam_input) = self.steam_input.as_mut() else {
+                return;
+            };
             let input = self.client.input();
             input.run_frame();
             let mut connected = [0_u64; MAX_STEAM_INPUT_DISCOVERED_CONTROLLERS];
             let connected_len = input
                 .get_connected_controllers_slice(&mut connected)
                 .min(connected.len());
-            self.steam_input
+            steam_input
                 .assignments
                 .reconcile(&connected[..connected_len]);
 
             let mut snapshot = SteamInputSnapshot::default();
-            for (local_ordinal, controller) in
-                self.steam_input.assignments.handles.iter().enumerate()
-            {
+            for (local_ordinal, controller) in steam_input.assignments.handles.iter().enumerate() {
                 let Some(controller) = *controller else {
                     continue;
                 };
                 let raw = controller.get();
-                let action_set_handle = match self.steam_input.desired_action_set {
-                    SteamInputActionSet::Gameplay => self.steam_input.gameplay_action_set,
-                    SteamInputActionSet::Menu => self.steam_input.menu_action_set,
+                let action_set_handle = match steam_input.desired_action_set {
+                    SteamInputActionSet::Gameplay => steam_input.gameplay_action_set,
+                    SteamInputActionSet::Menu => steam_input.menu_action_set,
                 };
                 input.activate_action_set_handle(raw, action_set_handle);
-                let analog = input.get_analog_action_data(raw, self.steam_input.movement_action);
+                let analog = input.get_analog_action_data(raw, steam_input.movement_action);
                 let movement = if analog.bActive && analog.x.is_finite() && analog.y.is_finite() {
                     // Steam's joystick convention is +Y up; the game binding
                     // layer uses -Y for screen/world-forward before applying
@@ -6339,7 +6369,7 @@ mod real {
                 let mut gameplay_held = InputMask::NONE;
                 for (button, action) in RawInputButton::ALL
                     .into_iter()
-                    .zip(self.steam_input.gameplay_actions)
+                    .zip(steam_input.gameplay_actions)
                 {
                     let data = input.get_digital_action_data(raw, action);
                     if data.bActive && data.bState {
@@ -6350,7 +6380,7 @@ mod real {
                 let mut menu_held = SteamMenuInputMask::NONE;
                 for (action, handle) in SteamMenuAction::ALL
                     .into_iter()
-                    .zip(self.steam_input.menu_actions)
+                    .zip(steam_input.menu_actions)
                 {
                     let data = input.get_digital_action_data(raw, handle);
                     if data.bActive && data.bState {
@@ -6365,7 +6395,7 @@ mod real {
                     menu_held,
                 };
             }
-            self.steam_input.snapshot = snapshot;
+            steam_input.snapshot = snapshot;
         }
     }
 
@@ -6398,7 +6428,9 @@ mod real {
                 }
             }
             self.client.friends().clear_rich_presence();
-            self.client.input().shutdown();
+            if self.steam_input.is_some() {
+                self.client.input().shutdown();
+            }
         }
     }
 
@@ -6997,6 +7029,27 @@ mod tests {
         let mut secret = vec![0xA5; MAX_STEAM_AUTH_TICKET_BYTES];
         zeroize_ticket_bytes(&mut secret);
         assert!(secret.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn only_steam_input_startup_failures_are_recoverable() {
+        for error in [
+            SteamBackendError::SteamInputInitializationFailed,
+            SteamBackendError::SteamInputManifestInvalid,
+            SteamBackendError::SteamInputActionMissing,
+        ] {
+            assert!(is_recoverable_steam_input_startup_error(error));
+        }
+
+        for error in [
+            SteamBackendError::InitializationFailed,
+            SteamBackendError::AppIdMismatch,
+            SteamBackendError::NotLoggedOn,
+            SteamBackendError::AuthenticationFailed,
+            SteamBackendError::IntegrityFailure,
+        ] {
+            assert!(!is_recoverable_steam_input_startup_error(error));
+        }
     }
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
