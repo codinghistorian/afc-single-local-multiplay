@@ -65,7 +65,9 @@ pub const STEAM_APP_ID_ENV: &str = "AFC_STEAM_APP_ID";
 pub const STEAM_SPACEWAR_OPT_IN_ENV: &str = "AFC_STEAM_DEV_SPACEWAR_480";
 pub const COMPILED_STEAM_APP_ID: Option<&str> = option_env!("AFC_COMPILED_STEAM_APP_ID");
 pub const COMPILED_SPACEWAR_OPT_IN: bool = cfg!(feature = "spacewar-dev");
-pub const AUTH_SIGNAL_CHANNEL: u32 = 0x41_46_43;
+/// This runtime owns one `ISteamNetworkingMessages` route, so use Valve's
+/// efficient default channel instead of a large mnemonic value.
+pub const AUTH_SIGNAL_CHANNEL: u32 = 0;
 pub const MAX_NATIVE_ONLINE_EVENTS: usize = 128;
 pub const MAX_AUTH_SIGNALS_PER_PUMP: usize = 16;
 /// A single Steam user may consume at most one quarter of the bounded
@@ -76,9 +78,13 @@ pub const MAX_AUTH_SIGNALS_PER_USER_PER_PUMP: usize =
     MAX_AUTH_SIGNALS_PER_PUMP / MAX_STEAM_LOBBY_MEMBERS;
 
 const AUTH_SIGNAL_MAGIC: [u8; 4] = *b"AFCA";
-const AUTH_SIGNAL_VERSION: u8 = 2;
+const AUTH_SIGNAL_VERSION: u8 = 3;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const AUTH_SIGNAL_KIND_HELLO: u8 = 0;
 const AUTH_SIGNAL_KIND_TICKET: u8 = 1;
 const AUTH_SIGNAL_KIND_MANIFEST: u8 = 2;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const SESSION_HELLO_SIGNAL_BYTES: usize = 32;
 const AUTH_SIGNAL_HEADER_BYTES: usize = 62;
 const MANIFEST_SIGNAL_HEADER_BYTES: usize = 32;
 const MAX_AUTH_SIGNAL_BYTES: usize =
@@ -563,6 +569,20 @@ pub enum AuthSignalError {
     ReceiveBudgetExceeded,
     UnexpectedManifestSender,
     ConflictingManifest,
+    SessionAcceptanceFailed,
+    SessionLocalOffline,
+    SessionRelayUnavailable,
+    SessionNetworkConfigUnavailable,
+    SessionRightsDenied,
+    SessionRemoteTimeout,
+    SessionCryptFailure,
+    SessionProtocolMismatch,
+    SessionInternalFailure,
+    SessionSteamConnectivity,
+    SessionRendezvousFailed,
+    SessionNatFirewall,
+    SessionPeerRejected,
+    SessionUnknownFailure,
 }
 
 /// Stable local diagnostics for the pre-game Steam signaling boundary.
@@ -583,6 +603,98 @@ const fn auth_signal_detail_code(error: AuthSignalError) -> u16 {
         AuthSignalError::ReceiveBudgetExceeded => 211,
         AuthSignalError::UnexpectedManifestSender => 212,
         AuthSignalError::ConflictingManifest => 213,
+        AuthSignalError::SessionAcceptanceFailed => 214,
+        AuthSignalError::SessionLocalOffline => 215,
+        AuthSignalError::SessionRelayUnavailable => 216,
+        AuthSignalError::SessionNetworkConfigUnavailable => 217,
+        AuthSignalError::SessionRightsDenied => 218,
+        AuthSignalError::SessionRemoteTimeout => 219,
+        AuthSignalError::SessionCryptFailure => 229,
+        AuthSignalError::SessionProtocolMismatch => 230,
+        AuthSignalError::SessionInternalFailure => 231,
+        AuthSignalError::SessionSteamConnectivity => 232,
+        AuthSignalError::SessionRendezvousFailed => 233,
+        AuthSignalError::SessionNatFirewall => 234,
+        AuthSignalError::SessionPeerRejected => 235,
+        AuthSignalError::SessionUnknownFailure => 236,
+    }
+}
+
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const fn auth_signal_error_is_transport(error: AuthSignalError) -> bool {
+    matches!(
+        error,
+        AuthSignalError::TransportFailed
+            | AuthSignalError::SessionAcceptanceFailed
+            | AuthSignalError::SessionLocalOffline
+            | AuthSignalError::SessionRelayUnavailable
+            | AuthSignalError::SessionNetworkConfigUnavailable
+            | AuthSignalError::SessionRightsDenied
+            | AuthSignalError::SessionRemoteTimeout
+            | AuthSignalError::SessionCryptFailure
+            | AuthSignalError::SessionProtocolMismatch
+            | AuthSignalError::SessionInternalFailure
+            | AuthSignalError::SessionSteamConnectivity
+            | AuthSignalError::SessionRendezvousFailed
+            | AuthSignalError::SessionNatFirewall
+            | AuthSignalError::SessionPeerRejected
+            | AuthSignalError::SessionUnknownFailure
+    )
+}
+
+/// Non-secret, lobby-bound message used to establish the implicit Steam
+/// messaging session symmetrically before either peer sends an auth ticket.
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AuthSessionHelloSignal {
+    lobby: SteamLobbyId,
+    sender: SteamUserId,
+    recipient: SteamUserId,
+}
+
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+impl AuthSessionHelloSignal {
+    const fn new(lobby: SteamLobbyId, sender: SteamUserId, recipient: SteamUserId) -> Self {
+        Self {
+            lobby,
+            sender,
+            recipient,
+        }
+    }
+
+    #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+    fn encode(self) -> EncodedPreGameSignal {
+        let mut encoded = EncodedPreGameSignal {
+            bytes: [0; MAX_AUTH_SIGNAL_BYTES],
+            len: SESSION_HELLO_SIGNAL_BYTES,
+        };
+        encoded.bytes[0..4].copy_from_slice(&AUTH_SIGNAL_MAGIC);
+        encoded.bytes[4] = AUTH_SIGNAL_VERSION;
+        encoded.bytes[5] = AUTH_SIGNAL_KIND_HELLO;
+        encoded.bytes[6..8].fill(0);
+        encoded.bytes[8..16].copy_from_slice(&self.lobby.get().to_le_bytes());
+        encoded.bytes[16..24].copy_from_slice(&self.sender.get().to_le_bytes());
+        encoded.bytes[24..32].copy_from_slice(&self.recipient.get().to_le_bytes());
+        encoded
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, AuthSignalError> {
+        if bytes.len() != SESSION_HELLO_SIGNAL_BYTES
+            || bytes[0..4] != AUTH_SIGNAL_MAGIC
+            || bytes[4] != AUTH_SIGNAL_VERSION
+            || bytes[5] != AUTH_SIGNAL_KIND_HELLO
+            || bytes[6] != 0
+            || bytes[7] != 0
+        {
+            return Err(AuthSignalError::InvalidEnvelope);
+        }
+        let lobby =
+            SteamLobbyId::new(read_u64(bytes, 8)?).map_err(|_| AuthSignalError::InvalidIdentity)?;
+        let sender =
+            SteamUserId::new(read_u64(bytes, 16)?).map_err(|_| AuthSignalError::InvalidIdentity)?;
+        let recipient =
+            SteamUserId::new(read_u64(bytes, 24)?).map_err(|_| AuthSignalError::InvalidIdentity)?;
+        Ok(Self::new(lobby, sender, recipient))
     }
 }
 
@@ -850,6 +962,7 @@ impl BootstrapManifestSignal {
 
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 enum PreGameSignal {
+    Hello(AuthSessionHelloSignal),
     Ticket(AuthTicketSignal),
     Manifest(BootstrapManifestSignal),
 }
@@ -908,6 +1021,7 @@ fn classify_manifest_ingress(
 impl PreGameSignal {
     fn sender(&self) -> SteamUserId {
         match self {
+            Self::Hello(signal) => signal.sender,
             Self::Ticket(signal) => signal.sender,
             Self::Manifest(signal) => signal.sender,
         }
@@ -917,6 +1031,9 @@ impl PreGameSignal {
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 fn decode_pre_game_signal(bytes: &[u8]) -> Result<PreGameSignal, AuthSignalError> {
     match bytes.get(5).copied() {
+        Some(AUTH_SIGNAL_KIND_HELLO) => {
+            Ok(PreGameSignal::Hello(AuthSessionHelloSignal::decode(bytes)?))
+        }
         Some(AUTH_SIGNAL_KIND_TICKET) => {
             Ok(PreGameSignal::Ticket(AuthTicketSignal::decode(bytes)?))
         }
@@ -1512,7 +1629,7 @@ mod real {
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
     use arrayvec::ArrayVec;
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use steamworks::networking_types::{NetworkingIdentity, SendFlags};
+    use steamworks::networking_types::{NetConnectionEnd, NetworkingIdentity, SendFlags};
 
     use super::*;
     use crate::steam_platform::MemberReadiness;
@@ -1658,6 +1775,91 @@ mod real {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SignalSessionRequestAction {
+        Accept,
+        Defer,
+        Reject,
+    }
+
+    fn classify_signal_session_request(
+        policy: SignalAdmissionPolicy,
+        user: Option<SteamUserId>,
+    ) -> SignalSessionRequestAction {
+        let Some(user) = user else {
+            return SignalSessionRequestAction::Reject;
+        };
+        if policy.active_lobby.is_none() || policy.quarantined.contains(&Some(user)) {
+            return SignalSessionRequestAction::Reject;
+        }
+        if policy.contains_member(user) {
+            SignalSessionRequestAction::Accept
+        } else {
+            // Lobby membership and networking-message callbacks are delivered
+            // independently. Keep an unknown request unaccepted while the
+            // next roster refresh determines whether it is a valid member.
+            SignalSessionRequestAction::Defer
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct PrimedSignalSessions {
+        lobby: Option<SteamLobbyId>,
+        users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    }
+
+    impl Default for PrimedSignalSessions {
+        fn default() -> Self {
+            Self {
+                lobby: None,
+                users: [None; MAX_STEAM_LOBBY_MEMBERS],
+            }
+        }
+    }
+
+    impl PrimedSignalSessions {
+        fn pending_for(
+            &mut self,
+            policy: SignalAdmissionPolicy,
+        ) -> [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS] {
+            if self.lobby != policy.active_lobby {
+                self.lobby = policy.active_lobby;
+                self.users = [None; MAX_STEAM_LOBBY_MEMBERS];
+            } else {
+                for slot in &mut self.users {
+                    if slot.is_some_and(|user| !policy.contains_member(user)) {
+                        *slot = None;
+                    }
+                }
+            }
+
+            let mut pending = [None; MAX_STEAM_LOBBY_MEMBERS];
+            for user in policy.users.iter().flatten().copied() {
+                if !policy.allows(user) || self.users.contains(&Some(user)) {
+                    continue;
+                }
+                if let Some(slot) = pending.iter_mut().find(|slot| slot.is_none()) {
+                    *slot = Some(user);
+                }
+            }
+            pending
+        }
+
+        fn mark_sent(&mut self, lobby: SteamLobbyId, user: SteamUserId) {
+            if self.lobby != Some(lobby) || self.users.contains(&Some(user)) {
+                return;
+            }
+            if let Some(slot) = self.users.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(user);
+            }
+        }
+
+        fn clear(&mut self) {
+            self.lobby = None;
+            self.users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        }
+    }
+
     #[derive(Clone, Copy)]
     pub(super) struct AuthSignalAdmission {
         active_lobby: Option<SteamLobbyId>,
@@ -1782,6 +1984,79 @@ mod real {
         }
     }
 
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AuthSignalSessionFailure {
+        source: SteamUserId,
+        error: AuthSignalError,
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn record_auth_signal_session_failure(
+        failed: &AtomicBool,
+        session_failures: &Mutex<ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS>>,
+        failure: AuthSignalSessionFailure,
+    ) {
+        let Ok(mut session_failures) = session_failures.lock() else {
+            failed.store(true, Ordering::Release);
+            return;
+        };
+        if let Some(existing) = session_failures
+            .iter_mut()
+            .find(|existing| existing.source == failure.source)
+        {
+            *existing = failure;
+            return;
+        }
+        if session_failures.try_push(failure).is_err() {
+            failed.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn classify_auth_signal_session_failure(reason: Option<NetConnectionEnd>) -> AuthSignalError {
+        match reason {
+            Some(NetConnectionEnd::LocalOfflineMode) => AuthSignalError::SessionLocalOffline,
+            Some(
+                NetConnectionEnd::LocalManyRelayConnectivity
+                | NetConnectionEnd::LocalHostedServerPrimaryRelay
+                | NetConnectionEnd::LocalP2PICENoPublicAddresses
+                | NetConnectionEnd::MiscNoRelaySessionsToClient,
+            ) => AuthSignalError::SessionRelayUnavailable,
+            Some(NetConnectionEnd::LocalNetworkConfig) => {
+                AuthSignalError::SessionNetworkConfigUnavailable
+            }
+            Some(NetConnectionEnd::LocalRights) => AuthSignalError::SessionRightsDenied,
+            Some(NetConnectionEnd::RemoteTimeout | NetConnectionEnd::MiscTimeout) => {
+                AuthSignalError::SessionRemoteTimeout
+            }
+            Some(NetConnectionEnd::RemoteBadEncrypt | NetConnectionEnd::RemoteBadCert) => {
+                AuthSignalError::SessionCryptFailure
+            }
+            Some(NetConnectionEnd::RemoteBadProtocolVersion) => {
+                AuthSignalError::SessionProtocolMismatch
+            }
+            Some(NetConnectionEnd::MiscInternalError) => AuthSignalError::SessionInternalFailure,
+            Some(NetConnectionEnd::MiscSteamConnectivity) => {
+                AuthSignalError::SessionSteamConnectivity
+            }
+            Some(NetConnectionEnd::MiscP2PRendezvous) => AuthSignalError::SessionRendezvousFailed,
+            Some(
+                NetConnectionEnd::RemoteP2PICENoPublicAddresses
+                | NetConnectionEnd::MiscP2PNATFirewall,
+            ) => AuthSignalError::SessionNatFirewall,
+            Some(NetConnectionEnd::App(_) | NetConnectionEnd::MiscPeerSentNoConnection) => {
+                AuthSignalError::SessionPeerRejected
+            }
+            Some(
+                NetConnectionEnd::Invalid
+                | NetConnectionEnd::MiscGeneric
+                | NetConnectionEnd::Other(_),
+            )
+            | None => AuthSignalError::SessionUnknownFailure,
+        }
+    }
+
     fn auth_signal_peer_failure(error: AuthSignalError) -> OnlineFailure {
         let (code, severity, recovery) = match error {
             AuthSignalError::ReceiveBudgetExceeded => (
@@ -1789,7 +2064,7 @@ mod real {
                 OnlineFailureSeverity::Fatal,
                 OnlineRecoveryAction::ReturnToLobby,
             ),
-            AuthSignalError::TransportFailed => (
+            error if auth_signal_error_is_transport(error) => (
                 OnlineFailureCode::ConnectionTimedOut,
                 OnlineFailureSeverity::Recoverable,
                 OnlineRecoveryAction::Reconnect,
@@ -1814,8 +2089,10 @@ mod real {
         _callback_handles: Vec<steamworks::CallbackHandle>,
         messages: steamworks::networking_messages::NetworkingMessages,
         policy: Arc<Mutex<SignalAdmissionPolicy>>,
+        primed: Mutex<PrimedSignalSessions>,
+        local_user: SteamUserId,
         failed: Arc<AtomicBool>,
-        failed_users: Arc<Mutex<ArrayVec<SteamUserId, MAX_STEAM_LOBBY_MEMBERS>>>,
+        session_failures: Arc<Mutex<ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS>>>,
         callback_owner_alive: Arc<AtomicBool>,
         _ownership: Arc<RealClientOwnershipGuard>,
     }
@@ -1828,28 +2105,52 @@ mod real {
             let messages = client.networking_messages();
             let policy = Arc::new(Mutex::new(SignalAdmissionPolicy::default()));
             let failed = Arc::new(AtomicBool::new(false));
-            let failed_users = Arc::new(Mutex::new(ArrayVec::new()));
+            let session_failures = Arc::new(Mutex::new(ArrayVec::new()));
             let mut callback_handles = Vec::with_capacity(2);
 
             callback_handles.push(client.register_callback({
                 let policy = policy.clone();
+                let failed = failed.clone();
+                let session_failures = session_failures.clone();
                 move |mut request: RetainedNetworkingMessagesSessionRequest| {
                     let user = auth_signal_user_from_raw_identity(&mut request.remote);
-                    let allowed = user.is_some_and(|user| {
-                        policy.lock().ok().is_some_and(|policy| policy.allows(user))
-                    });
-                    if allowed {
-                        let _ = accept_raw_auth_signal_session(&request.remote);
-                    } else {
-                        close_raw_auth_signal_session(&request.remote);
+                    let action = match policy.lock() {
+                        Ok(policy) => classify_signal_session_request(*policy, user),
+                        Err(_) => {
+                            failed.store(true, Ordering::Release);
+                            SignalSessionRequestAction::Reject
+                        }
+                    };
+                    match action {
+                        SignalSessionRequestAction::Accept => {
+                            if !accept_raw_auth_signal_session(&request.remote) {
+                                if let Some(source) = user {
+                                    record_auth_signal_session_failure(
+                                        &failed,
+                                        &session_failures,
+                                        AuthSignalSessionFailure {
+                                            source,
+                                            error: AuthSignalError::SessionAcceptanceFailed,
+                                        },
+                                    );
+                                } else {
+                                    failed.store(true, Ordering::Release);
+                                }
+                            }
+                        }
+                        SignalSessionRequestAction::Defer => {}
+                        SignalSessionRequestAction::Reject => {
+                            close_raw_auth_signal_session(&request.remote);
+                        }
                     }
                 }
             }));
             callback_handles.push(client.register_callback({
                 let failed = failed.clone();
-                let failed_users = failed_users.clone();
+                let session_failures = session_failures.clone();
                 let policy = policy.clone();
                 move |event: steamworks::networking_messages::NetworkingMessagesSessionFailed| {
+                    let error = classify_auth_signal_session_failure(event.info.end_reason());
                     let user = event
                         .info
                         .identity_remote()
@@ -1870,20 +2171,14 @@ mod real {
                         close_attributed_auth_signal_session(user);
                         return;
                     }
-                    let Ok(mut failed_users) = failed_users.lock() else {
-                        failed.store(true, Ordering::Release);
-                        return;
-                    };
-                    if failed_users.contains(&user) {
-                        return;
-                    }
-                    if failed_users.try_push(user).is_err() {
-                        // The admission policy permits at most the fixed lobby
-                        // capacity, so this can only be a redundant or stale
-                        // callback race. Close the attributable session without
-                        // converting it into host-global failure.
-                        close_attributed_auth_signal_session(user);
-                    }
+                    record_auth_signal_session_failure(
+                        &failed,
+                        &session_failures,
+                        AuthSignalSessionFailure {
+                            source: user,
+                            error,
+                        },
+                    );
                 }
             }));
 
@@ -1891,8 +2186,10 @@ mod real {
                 _callback_handles: callback_handles,
                 messages,
                 policy,
+                primed: Mutex::new(PrimedSignalSessions::default()),
+                local_user: platform.local_user(),
                 failed,
-                failed_users,
+                session_failures,
                 callback_owner_alive,
                 _ownership: ownership,
             }
@@ -1904,11 +2201,37 @@ mod real {
                 users: admission.users,
                 quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
             };
-            if let Ok(mut policy) = self.policy.lock() {
+            let policy_snapshot = if let Ok(mut policy) = self.policy.lock() {
                 policy.carry_quarantine_into(&mut next);
                 *policy = next;
+                next
             } else {
                 self.failed.store(true, Ordering::Release);
+                return;
+            };
+            let pending = if let Ok(mut primed) = self.primed.lock() {
+                primed.pending_for(policy_snapshot)
+            } else {
+                self.failed.store(true, Ordering::Release);
+                return;
+            };
+            let Some(lobby) = policy_snapshot.active_lobby else {
+                return;
+            };
+            for recipient in pending.into_iter().flatten() {
+                let hello = AuthSessionHelloSignal::new(lobby, self.local_user, recipient).encode();
+                if self.send_encoded(recipient, hello).is_err() {
+                    // Policy refresh runs every pump, so an unsent hello stays
+                    // pending and is retried without turning one transient SDK
+                    // send failure into a process-global fault.
+                    continue;
+                }
+                if let Ok(mut primed) = self.primed.lock() {
+                    primed.mark_sent(lobby, recipient);
+                } else {
+                    self.failed.store(true, Ordering::Release);
+                    return;
+                }
             }
         }
 
@@ -1947,7 +2270,11 @@ mod real {
                 .lock()
                 .map_err(|_| AuthSignalError::TransportFailed)?
                 .clear_quarantine();
-            self.failed_users
+            self.session_failures
+                .lock()
+                .map_err(|_| AuthSignalError::TransportFailed)?
+                .clear();
+            self.primed
                 .lock()
                 .map_err(|_| AuthSignalError::TransportFailed)?
                 .clear();
@@ -1955,12 +2282,18 @@ mod real {
         }
 
         fn quiesce_admission(&self) -> Result<(), AuthSignalError> {
-            let mut policy = self
-                .policy
+            {
+                let mut policy = self
+                    .policy
+                    .lock()
+                    .map_err(|_| AuthSignalError::TransportFailed)?;
+                policy.active_lobby = None;
+                policy.users = [None; MAX_STEAM_LOBBY_MEMBERS];
+            }
+            self.primed
                 .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?;
-            policy.active_lobby = None;
-            policy.users = [None; MAX_STEAM_LOBBY_MEMBERS];
+                .map_err(|_| AuthSignalError::TransportFailed)?
+                .clear();
             Ok(())
         }
 
@@ -2003,28 +2336,28 @@ mod real {
             {
                 return Err(AuthSignalError::TransportFailed);
             }
-            let failed_users: ArrayVec<SteamUserId, MAX_STEAM_LOBBY_MEMBERS> = {
-                let mut failed_users = self
-                    .failed_users
+            let session_failures: ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS> = {
+                let mut session_failures = self
+                    .session_failures
                     .lock()
                     .map_err(|_| AuthSignalError::TransportFailed)?;
-                failed_users.drain(..).collect()
+                session_failures.drain(..).collect()
             };
             let mut outcomes =
                 Vec::with_capacity(MAX_AUTH_SIGNALS_PER_PUMP + MAX_STEAM_LOBBY_MEMBERS);
-            for source in failed_users {
-                if !self.peer_is_member(source)? {
+            for failure in session_failures {
+                if !self.peer_is_member(failure.source)? {
                     // Membership is the first admission gate. A callback that
                     // raced a terminal departure must not consume the bounded
                     // quarantine for a user the refreshed policy already
                     // rejects and whose attributable session can be closed.
-                    close_attributed_auth_signal_session(source);
+                    close_attributed_auth_signal_session(failure.source);
                     continue;
                 }
-                self.quarantine_peer(source)?;
+                self.quarantine_peer(failure.source)?;
                 outcomes.push(AuthSignalIngress::Rejected {
-                    source,
-                    error: AuthSignalError::TransportFailed,
+                    source: failure.source,
+                    error: failure.error,
                 });
             }
             let messages = self
@@ -2415,6 +2748,9 @@ mod real {
                     }
                     AuthSignalIngress::Accepted { source, signal } => {
                         let result = match signal {
+                            PreGameSignal::Hello(signal) => {
+                                self.consume_session_hello(source, signal)
+                            }
                             PreGameSignal::Ticket(signal) => self
                                 .consume_ticket_signal(source, signal, now_ms)
                                 .map(|_| ()),
@@ -2805,6 +3141,23 @@ mod real {
             self.signaling.send_ticket(signal)?;
             exchange.sent = true;
             self.ticket_exchanges[index] = Some(exchange);
+            Ok(())
+        }
+
+        fn consume_session_hello(
+            &self,
+            source: SteamUserId,
+            signal: AuthSessionHelloSignal,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.coordinator.status().lobby != Some(signal.lobby) {
+                return Err(AuthSignalError::WrongLobby.into());
+            }
+            if signal.recipient != self.platform.local_user() {
+                return Err(AuthSignalError::WrongRecipient.into());
+            }
+            if signal.sender != source {
+                return Err(AuthSignalError::SenderMismatch.into());
+            }
             Ok(())
         }
 
@@ -4238,6 +4591,109 @@ mod real {
         }
 
         #[test]
+        fn signal_session_requests_defer_until_lobby_membership_is_known() {
+            let lobby = SteamLobbyId::new(690).unwrap();
+            let member = SteamUserId::new(691).unwrap();
+            let pending_member = SteamUserId::new(692).unwrap();
+            let mut policy = SignalAdmissionPolicy {
+                active_lobby: Some(lobby),
+                users: [Some(member), None, None, None],
+                quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
+            };
+
+            assert_eq!(
+                classify_signal_session_request(policy, Some(member)),
+                SignalSessionRequestAction::Accept
+            );
+            assert_eq!(
+                classify_signal_session_request(policy, Some(pending_member)),
+                SignalSessionRequestAction::Defer
+            );
+            assert_eq!(
+                classify_signal_session_request(policy, None),
+                SignalSessionRequestAction::Reject
+            );
+
+            policy.quarantine(member);
+            assert_eq!(
+                classify_signal_session_request(policy, Some(member)),
+                SignalSessionRequestAction::Reject
+            );
+            policy.active_lobby = None;
+            assert_eq!(
+                classify_signal_session_request(policy, Some(pending_member)),
+                SignalSessionRequestAction::Reject
+            );
+        }
+
+        #[test]
+        fn session_hello_priming_retries_and_resets_at_membership_boundaries() {
+            let lobby = SteamLobbyId::new(693).unwrap();
+            let retained = SteamUserId::new(694).unwrap();
+            let replacement = SteamUserId::new(695).unwrap();
+            let policy = SignalAdmissionPolicy {
+                active_lobby: Some(lobby),
+                users: [Some(retained), None, None, None],
+                quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
+            };
+            let mut primed = PrimedSignalSessions::default();
+
+            assert_eq!(
+                primed.pending_for(policy),
+                [Some(retained), None, None, None]
+            );
+            primed.mark_sent(lobby, retained);
+            assert_eq!(primed.pending_for(policy), [None; MAX_STEAM_LOBBY_MEMBERS]);
+
+            let replaced = SignalAdmissionPolicy {
+                active_lobby: Some(lobby),
+                users: [Some(replacement), None, None, None],
+                quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
+            };
+            assert_eq!(
+                primed.pending_for(replaced),
+                [Some(replacement), None, None, None]
+            );
+
+            primed.mark_sent(lobby, replacement);
+            let next_lobby = SignalAdmissionPolicy {
+                active_lobby: Some(SteamLobbyId::new(696).unwrap()),
+                users: [Some(replacement), None, None, None],
+                quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
+            };
+            assert_eq!(
+                primed.pending_for(next_lobby),
+                [Some(replacement), None, None, None]
+            );
+            primed.clear();
+            assert_eq!(primed.lobby, None);
+            assert_eq!(primed.users, [None; MAX_STEAM_LOBBY_MEMBERS]);
+        }
+
+        #[cfg(feature = "steam-net")]
+        #[test]
+        fn steam_session_end_reasons_keep_actionable_diagnostics() {
+            assert_eq!(
+                classify_auth_signal_session_failure(Some(NetConnectionEnd::LocalOfflineMode)),
+                AuthSignalError::SessionLocalOffline
+            );
+            assert_eq!(
+                classify_auth_signal_session_failure(Some(NetConnectionEnd::RemoteTimeout)),
+                AuthSignalError::SessionRemoteTimeout
+            );
+            assert_eq!(
+                classify_auth_signal_session_failure(Some(
+                    NetConnectionEnd::MiscPeerSentNoConnection,
+                )),
+                AuthSignalError::SessionPeerRejected
+            );
+            assert_eq!(
+                classify_auth_signal_session_failure(None),
+                AuthSignalError::SessionUnknownFailure
+            );
+        }
+
+        #[test]
         fn signal_quarantine_is_peer_scoped_and_clears_at_session_boundary() {
             let lobby = SteamLobbyId::new(700).unwrap();
             let rejected = SteamUserId::new(701).unwrap();
@@ -4608,7 +5064,7 @@ mod tests {
     #[test]
     fn auth_signal_round_trip_is_exact_and_debug_redacts_secret() {
         let (lobby, sender, recipient, peer) = ids();
-        let match_id = crate::network_protocol::MatchId::new(*b"auth-ticket-v2-1").unwrap();
+        let match_id = crate::network_protocol::MatchId::new(*b"auth-ticket-v3-1").unwrap();
         let signal = AuthTicketSignal::new(
             lobby,
             sender,
@@ -4627,7 +5083,7 @@ mod tests {
         let encoded = signal.encode();
         assert_eq!(encoded.len, AUTH_SIGNAL_HEADER_BYTES + 4);
         assert_eq!(&encoded.as_slice()[0..4], b"AFCA");
-        assert_eq!(encoded.as_slice()[4], 2);
+        assert_eq!(encoded.as_slice()[4], AUTH_SIGNAL_VERSION);
         assert_eq!(encoded.as_slice()[5], AUTH_SIGNAL_KIND_TICKET);
         assert_eq!(encoded.as_slice()[6], 1);
         assert_eq!(encoded.as_slice()[7], 0);
@@ -4650,6 +5106,33 @@ mod tests {
         assert_eq!(decoded.sender_revision, 8);
         assert_eq!(decoded.match_id, Some(match_id));
         assert_eq!(decoded.ticket(), &[7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn auth_session_hello_round_trip_is_lobby_and_peer_bound() {
+        let (lobby, sender, recipient, _) = ids();
+        let hello = AuthSessionHelloSignal::new(lobby, sender, recipient);
+        let encoded = hello.encode();
+
+        assert_eq!(encoded.len, SESSION_HELLO_SIGNAL_BYTES);
+        assert_eq!(&encoded.as_slice()[0..4], b"AFCA");
+        assert_eq!(encoded.as_slice()[4], AUTH_SIGNAL_VERSION);
+        assert_eq!(encoded.as_slice()[5], AUTH_SIGNAL_KIND_HELLO);
+        assert_eq!(&encoded.as_slice()[8..16], &lobby.get().to_le_bytes());
+        assert_eq!(&encoded.as_slice()[16..24], &sender.get().to_le_bytes());
+        assert_eq!(&encoded.as_slice()[24..32], &recipient.get().to_le_bytes());
+
+        assert!(matches!(
+            decode_pre_game_signal(encoded.as_slice()).unwrap(),
+            PreGameSignal::Hello(decoded) if decoded == hello
+        ));
+
+        let mut malformed = encoded.as_slice().to_vec();
+        malformed[6] = 1;
+        assert_eq!(
+            AuthSessionHelloSignal::decode(&malformed).unwrap_err(),
+            AuthSignalError::InvalidEnvelope
+        );
     }
 
     #[test]
@@ -4710,7 +5193,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_signal_v2_rejects_v1_zero_epochs_and_purpose_match_mismatch() {
+    fn auth_signal_v3_rejects_v1_zero_epochs_and_purpose_match_mismatch() {
         let (lobby, sender, recipient, peer) = ids();
         assert_eq!(
             AuthTicketSignal::new(
@@ -4792,7 +5275,7 @@ mod tests {
             AuthSignalError::InvalidEnvelope
         );
         let mut initial_with_match = initial.as_slice().to_vec();
-        initial_with_match[44..60].copy_from_slice(b"auth-ticket-v2-2");
+        initial_with_match[44..60].copy_from_slice(b"auth-ticket-v3-2");
         assert_eq!(
             AuthTicketSignal::decode(&initial_with_match).unwrap_err(),
             AuthSignalError::InvalidEnvelope
@@ -5037,15 +5520,30 @@ mod tests {
             AuthSignalError::ReceiveBudgetExceeded,
             AuthSignalError::UnexpectedManifestSender,
             AuthSignalError::ConflictingManifest,
+            AuthSignalError::SessionAcceptanceFailed,
+            AuthSignalError::SessionLocalOffline,
+            AuthSignalError::SessionRelayUnavailable,
+            AuthSignalError::SessionNetworkConfigUnavailable,
+            AuthSignalError::SessionRightsDenied,
+            AuthSignalError::SessionRemoteTimeout,
+            AuthSignalError::SessionCryptFailure,
+            AuthSignalError::SessionProtocolMismatch,
+            AuthSignalError::SessionInternalFailure,
+            AuthSignalError::SessionSteamConnectivity,
+            AuthSignalError::SessionRendezvousFailed,
+            AuthSignalError::SessionNatFirewall,
+            AuthSignalError::SessionPeerRejected,
+            AuthSignalError::SessionUnknownFailure,
         ];
-        let mut codes = [0_u16; 13];
+        let mut codes = [0_u16; 27];
         for (index, error) in errors.into_iter().enumerate() {
             codes[index] = auth_signal_detail_code(error);
         }
         assert_eq!(
             codes,
             [
-                201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213
+                201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216,
+                217, 218, 219, 229, 230, 231, 232, 233, 234, 235, 236,
             ]
         );
         for (index, code) in codes.into_iter().enumerate() {
