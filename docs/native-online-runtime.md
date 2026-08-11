@@ -204,18 +204,26 @@ results/rematch, return, and error screens without depending on Bevy UI types.
 
 Authentication cannot use Steam lobby chat, and the gameplay transport cannot
 carry packets before authenticated admission. The runtime therefore owns a
-dedicated reliable `ISteamNetworkingMessages` channel for exactly two bounded
+dedicated reliable `ISteamNetworkingMessages` channel for exactly three bounded
 pre-game messages:
 
-1. Steam authentication ticket, at most 1024 bytes;
-2. owner-to-client canonical `StartMessage::Manifest` AFC wire packet.
+1. a non-secret, lobby-bound 32-byte session hello;
+2. Steam authentication ticket, at most 1024 bytes;
+3. owner-to-client canonical `StartMessage::Manifest` AFC wire packet.
 
 Incoming message sessions are accepted only for Steam identities in the union of
 the current bounded lobby roster and coordinator-authorized committed peer
 leases. This lets an exact same-match reconnect survive callback-order gaps
 without opening admission to an arbitrary nonmember.
 
-Authentication tickets use envelope version 2 and a 62-byte fixed header:
+The symmetric session hello is sent only after the remote Steam member has a
+coherent readiness/loadout declaration. A process cannot author that declaration
+until its own lobby-enter transition completes, so a host-side membership callback
+cannot race ahead and open a message session that the joining client still has to
+reject. An earlier incoming request from a member whose declaration callback is
+still pending remains unaccepted; the later symmetric hello implicitly accepts it.
+
+Authentication tickets use envelope version 3 and a 62-byte fixed header:
 magic/version/kind/purpose, active lobby, actual Steam sender, recipient,
 sender `PeerId`, non-zero owner and sender declaration revisions, 16 `MatchId`
 bytes, and exact ticket length. Initial tickets require an all-zero `MatchId`;

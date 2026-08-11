@@ -1052,6 +1052,12 @@ fn zeroize_ticket_bytes(bytes: &mut [u8]) {
 pub trait SteamBackend {
     fn configured_app_id(&self) -> Result<SteamAppId, SteamBackendError>;
     fn local_user(&self) -> Result<SteamUserId, SteamBackendError>;
+
+    /// Starts Steam relay configuration and latency discovery before any P2P
+    /// feature needs it. The native SDK operation is asynchronous and cannot
+    /// fail synchronously; backends without relay networking may ignore it.
+    fn initialize_relay_network_access(&mut self) {}
+
     fn pump_callbacks(&mut self) -> Result<(), SteamBackendError>;
     fn poll_event(&mut self) -> Option<SteamBackendEvent>;
     fn take_callback_overflow(&mut self) -> bool;
@@ -1349,7 +1355,7 @@ pub struct SteamPlatform<B: SteamBackend> {
 impl<B: SteamBackend> SteamPlatform<B> {
     pub fn new(
         config: SteamClientConfig,
-        backend: B,
+        mut backend: B,
         now_ms: u64,
     ) -> Result<Self, SteamPlatformError> {
         config.validate()?;
@@ -1360,6 +1366,11 @@ impl<B: SteamBackend> SteamPlatform<B> {
             ));
         }
         let local_user = backend.local_user()?;
+        // Valve recommends starting this at application startup because relay
+        // configuration and latency discovery normally take several seconds.
+        // In particular, pre-game ISteamNetworkingMessages traffic must not be
+        // the first operation that starts relay access.
+        backend.initialize_relay_network_access();
         let launch_command = backend.launch_command_line()?;
         let mut platform = Self {
             config,
@@ -3634,6 +3645,7 @@ struct FakeSteamState {
     overlay_enabled: bool,
     overlay_active: bool,
     overlay_enabled_query_count: u32,
+    relay_initialization_count: u32,
     callback_pump_count: u32,
     invite_overlay_open_count: u32,
     steam_input_snapshot: SteamInputSnapshot,
@@ -3852,6 +3864,13 @@ impl FakeSteamControl {
         self.shared
             .lock()
             .map(|state| state.callback_pump_count)
+            .unwrap_or(0)
+    }
+
+    pub fn relay_initialization_count(&self) -> u32 {
+        self.shared
+            .lock()
+            .map(|state| state.relay_initialization_count)
             .unwrap_or(0)
     }
 
@@ -4437,6 +4456,7 @@ impl FakeSteamBackend {
             overlay_enabled: false,
             overlay_active: false,
             overlay_enabled_query_count: 0,
+            relay_initialization_count: 0,
             callback_pump_count: 0,
             invite_overlay_open_count: 0,
             steam_input_snapshot: SteamInputSnapshot::default(),
@@ -4482,6 +4502,13 @@ impl SteamBackend for FakeSteamBackend {
 
     fn local_user(&self) -> Result<SteamUserId, SteamBackendError> {
         self.with_state(|state| Ok(state.local_user))
+    }
+
+    fn initialize_relay_network_access(&mut self) {
+        let _ = self.with_state_mut(|state| {
+            state.relay_initialization_count = state.relay_initialization_count.saturating_add(1);
+            Ok(())
+        });
     }
 
     fn pump_callbacks(&mut self) -> Result<(), SteamBackendError> {
@@ -5874,6 +5901,10 @@ mod real {
             backend_user(self.client.user().steam_id())
         }
 
+        fn initialize_relay_network_access(&mut self) {
+            self.client.networking_utils().init_relay_network_access();
+        }
+
         fn pump_callbacks(&mut self) -> Result<(), SteamBackendError> {
             self.client.run_callbacks();
             if self
@@ -7029,6 +7060,17 @@ mod tests {
         let mut secret = vec![0xA5; MAX_STEAM_AUTH_TICKET_BYTES];
         zeroize_ticket_bytes(&mut secret);
         assert!(secret.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn platform_starts_relay_access_during_construction() {
+        let (backend, control) = FakeSteamBackend::new(app_id(), user(89));
+        assert_eq!(control.relay_initialization_count(), 0);
+
+        let _platform = SteamPlatform::new(config(), backend, NOW_MS).unwrap();
+
+        assert_eq!(control.relay_initialization_count(), 1);
+        assert_eq!(control.callback_pump_count(), 0);
     }
 
     #[test]

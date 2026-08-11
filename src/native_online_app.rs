@@ -63,7 +63,7 @@ use crate::steam_platform::{
     SteamInputActionSet, SteamInputControllerSnapshot, SteamInputSnapshot, SteamMenuAction,
     SteamMenuInputMask, SteamOverlayRequestStatus, SteamUserId,
 };
-use crate::steam_transport::SteamConnectionId;
+use crate::steam_transport::{SteamConnectionId, SteamRelayAvailability, SteamRelayStatus};
 use crate::tick_input::{
     InputMask, LocalSeatId, LocalTickInputState, QuantizedMovement, RawInputButton,
     RenderInputSample,
@@ -5289,7 +5289,18 @@ mod tests {
         });
         assert_eq!(
             native_online_details(&snapshot),
-            "Malformed network traffic was rejected.\nDiagnostic code: MalformedTraffic-203"
+            "Malformed network traffic was rejected.\nDiagnostic code: MalformedTraffic-203\nSteam relay: UNKNOWN  |  Config: UNKNOWN  |  Reachable: UNKNOWN"
+        );
+
+        snapshot.relay_status = SteamRelayStatus {
+            availability: SteamRelayAvailability::Current,
+            network_config: SteamRelayAvailability::Current,
+            any_relay: SteamRelayAvailability::Failed,
+            ping_measurement_in_progress: false,
+        };
+        assert!(
+            native_online_details(&snapshot)
+                .ends_with("Steam relay: READY  |  Config: READY  |  Reachable: FAILED")
         );
     }
 
@@ -5527,6 +5538,7 @@ pub struct NativeOnlineUiSnapshot {
     pub local_ready: bool,
     pub all_members_ready: bool,
     pub network_quality: NetworkQualitySnapshot,
+    pub relay_status: SteamRelayStatus,
     pub input_delay_calibration: InputDelayCalibrationSnapshot,
     pub countdown_start_tick: Option<SimTick>,
     pub outcome: Option<OnlineMatchOutcome>,
@@ -5565,6 +5577,7 @@ impl Default for NativeOnlineUiSnapshot {
             local_ready: false,
             all_members_ready: false,
             network_quality: NetworkQualitySnapshot::default(),
+            relay_status: SteamRelayStatus::default(),
             input_delay_calibration: InputDelayCalibrationSnapshot::default(),
             countdown_start_tick: None,
             outcome: None,
@@ -5647,6 +5660,7 @@ impl NativeOnlineApplication {
             local_ready: native.local_ready,
             all_members_ready: native.all_members_ready,
             network_quality: native.network_quality,
+            relay_status: native.relay_status,
             input_delay_calibration: native.input_delay_calibration,
             countdown_start_tick: native.countdown_start_tick,
             outcome: native.outcome,
@@ -6275,8 +6289,10 @@ fn native_online_details(snapshot: &NativeOnlineUiSnapshot) -> String {
             message.to_owned()
         } else {
             format!(
-                "{message}\nDiagnostic code: {:?}-{}",
-                failure.code, failure.detail_code
+                "{message}\nDiagnostic code: {:?}-{}\n{}",
+                failure.code,
+                failure.detail_code,
+                relay_status_text(snapshot.relay_status),
             )
         };
     }
@@ -6303,21 +6319,28 @@ fn native_online_details(snapshot: &NativeOnlineUiSnapshot) -> String {
             equipment_label_for_definition(loadout.equipment),
             loadout.team.get() + 1,
         ),
-        NativeOnlineScreen::Lobby => format!(
-            "Members: {}  |  Fighters: {}  |  Your couch seats: {}\nReady: {}  |  Everyone ready: {}  |  Network: {}\n{}\nSeat {}: {} / {} / {} / Team {}",
-            snapshot.lobby_members,
-            snapshot.total_seats,
-            snapshot.local_seats,
-            yes_no(snapshot.local_ready),
-            yes_no(snapshot.all_members_ready),
-            quality,
-            input_delay_calibration_text(snapshot.input_delay_calibration),
-            snapshot.selected_seat + 1,
-            character_label_for_definition(loadout.character),
-            style_label_for_definition(loadout.style),
-            equipment_label_for_definition(loadout.equipment),
-            loadout.team.get() + 1,
-        ),
+        NativeOnlineScreen::Lobby => {
+            let relay = if COMPILED_SPACEWAR_OPT_IN {
+                format!("\n{}", relay_status_text(snapshot.relay_status))
+            } else {
+                String::new()
+            };
+            format!(
+                "Members: {}  |  Fighters: {}  |  Your couch seats: {}\nReady: {}  |  Everyone ready: {}  |  Network: {}{relay}\n{}\nSeat {}: {} / {} / {} / Team {}",
+                snapshot.lobby_members,
+                snapshot.total_seats,
+                snapshot.local_seats,
+                yes_no(snapshot.local_ready),
+                yes_no(snapshot.all_members_ready),
+                quality,
+                input_delay_calibration_text(snapshot.input_delay_calibration),
+                snapshot.selected_seat + 1,
+                character_label_for_definition(loadout.character),
+                style_label_for_definition(loadout.style),
+                equipment_label_for_definition(loadout.equipment),
+                loadout.team.get() + 1,
+            )
+        }
         NativeOnlineScreen::Countdown => format!(
             "Authority start tick: {}  |  Local network tick: {}\nNetwork: {} ({} ms / {}.{:02}% loss)",
             snapshot.countdown_start_tick.map_or(0, SimTick::get),
@@ -6505,6 +6528,34 @@ fn quality_label(quality: NetworkQuality) -> &'static str {
         NetworkQuality::Warning => "WARNING",
         NetworkQuality::Degraded => "DEGRADED",
         NetworkQuality::Reject => "UNPLAYABLE",
+    }
+}
+
+fn relay_status_text(status: SteamRelayStatus) -> String {
+    format!(
+        "Steam relay: {}  |  Config: {}  |  Reachable: {}{}",
+        relay_availability_label(status.availability),
+        relay_availability_label(status.network_config),
+        relay_availability_label(status.any_relay),
+        if status.ping_measurement_in_progress {
+            "  |  Measuring"
+        } else {
+            ""
+        },
+    )
+}
+
+fn relay_availability_label(availability: SteamRelayAvailability) -> &'static str {
+    match availability {
+        SteamRelayAvailability::Unknown => "UNKNOWN",
+        SteamRelayAvailability::NeverTried => "NOT STARTED",
+        SteamRelayAvailability::Waiting => "WAITING",
+        SteamRelayAvailability::Attempting => "STARTING",
+        SteamRelayAvailability::Current => "READY",
+        SteamRelayAvailability::CannotTry => "UNAVAILABLE",
+        SteamRelayAvailability::Failed => "FAILED",
+        SteamRelayAvailability::PreviouslyAvailable => "LOST",
+        SteamRelayAvailability::Retrying => "RETRYING",
     }
 }
 

@@ -55,6 +55,8 @@ use crate::steam_platform::{
     AuthTicketHandle, LobbyCreateRequest, LobbyMetadata, LobbyVisibility, SteamBackend,
     SteamPlatform, SteamPlatformState,
 };
+#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+use crate::steam_transport::steam_client_relay_status;
 use crate::steam_transport::{
     AdmittedSteamEndpoint, SteamConnectionId, SteamRelayStatus, SteamTransportError,
 };
@@ -1632,7 +1634,7 @@ mod real {
     use steamworks::networking_types::{NetConnectionEnd, NetworkingIdentity, SendFlags};
 
     use super::*;
-    use crate::steam_platform::MemberReadiness;
+    use crate::steam_platform::{LobbyMember, MemberReadiness};
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
     use crate::steam_platform::{RealClientOwnershipGuard, RealSteamBackend};
 
@@ -1665,6 +1667,14 @@ mod real {
         endpoints.retain(|endpoint| {
             endpoint.admitted.remote_user != user || endpoint.admitted.connection != connection
         });
+    }
+
+    /// A newly visible Steam lobby member may still be completing its local
+    /// LobbyEnter transition. Waiting for its coherent member declaration
+    /// proves that process has entered the lobby and published application
+    /// state before the other peer opens an ISteamNetworkingMessages session.
+    fn member_can_open_auth_signal_session(member: &LobbyMember) -> bool {
+        matches!(member.readiness, MemberReadiness::Declared { .. }) && member.loadout.is_some()
     }
 
     fn reconcile_runtime_identity_handoffs(
@@ -1868,6 +1878,9 @@ mod real {
 
     pub(super) trait NativeAuthSignalPort {
         fn refresh_policy(&self, admission: AuthSignalAdmission);
+        fn relay_status(&self) -> Option<SteamRelayStatus> {
+            None
+        }
         fn peer_is_quarantined(&self, user: SteamUserId) -> Result<bool, AuthSignalError>;
         fn quarantine_peer(&self, user: SteamUserId) -> Result<(), AuthSignalError>;
         fn reset_session_isolation(&self) -> Result<(), AuthSignalError>;
@@ -2057,6 +2070,25 @@ mod real {
         }
     }
 
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    fn classify_auth_signal_session_failure_with_relay(
+        reason: Option<NetConnectionEnd>,
+        relay: SteamRelayStatus,
+    ) -> AuthSignalError {
+        let classified = classify_auth_signal_session_failure(reason);
+        if classified != AuthSignalError::SessionRendezvousFailed {
+            return classified;
+        }
+        if relay.network_config.is_terminal_failure() {
+            AuthSignalError::SessionNetworkConfigUnavailable
+        } else if relay.availability.is_terminal_failure() || relay.any_relay.is_terminal_failure()
+        {
+            AuthSignalError::SessionRelayUnavailable
+        } else {
+            classified
+        }
+    }
+
     fn auth_signal_peer_failure(error: AuthSignalError) -> OnlineFailure {
         let (code, severity, recovery) = match error {
             AuthSignalError::ReceiveBudgetExceeded => (
@@ -2087,7 +2119,9 @@ mod real {
     pub(super) struct SteamAuthSignalChannel {
         // Drop callback registrations before the state captured by them.
         _callback_handles: Vec<steamworks::CallbackHandle>,
+        client: steamworks::Client,
         messages: steamworks::networking_messages::NetworkingMessages,
+        relay_status: Mutex<SteamRelayStatus>,
         policy: Arc<Mutex<SignalAdmissionPolicy>>,
         primed: Mutex<PrimedSignalSessions>,
         local_user: SteamUserId,
@@ -2149,8 +2183,12 @@ mod real {
                 let failed = failed.clone();
                 let session_failures = session_failures.clone();
                 let policy = policy.clone();
+                let relay_client = client.clone();
                 move |event: steamworks::networking_messages::NetworkingMessagesSessionFailed| {
-                    let error = classify_auth_signal_session_failure(event.info.end_reason());
+                    let error = classify_auth_signal_session_failure_with_relay(
+                        event.info.end_reason(),
+                        steam_client_relay_status(&relay_client),
+                    );
                     let user = event
                         .info
                         .identity_remote()
@@ -2184,6 +2222,8 @@ mod real {
 
             Self {
                 _callback_handles: callback_handles,
+                relay_status: Mutex::new(steam_client_relay_status(&client)),
+                client,
                 messages,
                 policy,
                 primed: Mutex::new(PrimedSignalSessions::default()),
@@ -2201,14 +2241,28 @@ mod real {
                 users: admission.users,
                 quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
             };
-            let policy_snapshot = if let Ok(mut policy) = self.policy.lock() {
+            let (policy_snapshot, entered_lobby) = if let Ok(mut policy) = self.policy.lock() {
+                let entered_lobby =
+                    next.active_lobby.is_some() && policy.active_lobby != next.active_lobby;
                 policy.carry_quarantine_into(&mut next);
                 *policy = next;
-                next
+                (next, entered_lobby)
             } else {
                 self.failed.store(true, Ordering::Release);
                 return;
             };
+            if entered_lobby {
+                // A new lobby is also the recovery boundary for a relay setup
+                // attempt that failed while the process sat in the menu.
+                self.client.networking_utils().init_relay_network_access();
+            }
+            let current_relay = steam_client_relay_status(&self.client);
+            if let Ok(mut relay_status) = self.relay_status.lock() {
+                *relay_status = current_relay;
+            } else {
+                self.failed.store(true, Ordering::Release);
+                return;
+            }
             let pending = if let Ok(mut primed) = self.primed.lock() {
                 primed.pending_for(policy_snapshot)
             } else {
@@ -2396,6 +2450,10 @@ mod real {
             self.apply_policy(admission);
         }
 
+        fn relay_status(&self) -> Option<SteamRelayStatus> {
+            self.relay_status.lock().ok().map(|status| *status)
+        }
+
         fn peer_is_quarantined(&self, user: SteamUserId) -> Result<bool, AuthSignalError> {
             SteamAuthSignalChannel::peer_is_quarantined(self, user)
         }
@@ -2536,12 +2594,16 @@ mod real {
         }
 
         pub(super) fn view_model(&self) -> NativeOnlineViewModel {
-            project_view(
+            let mut view = project_view(
                 NativeOnlineAvailability::Available,
                 self.coordinator.status(),
                 self.local_declaration,
                 self.runtime_failure,
-            )
+            );
+            if let Some(relay_status) = self.signaling.relay_status() {
+                view.relay_status = relay_status;
+            }
+            view
         }
 
         pub(super) fn execute(
@@ -2786,7 +2848,7 @@ mod real {
             admission.active_lobby = Some(lobby);
             let local = self.platform.local_user();
             for member in self.platform.roster().iter().flatten() {
-                if member.user == local {
+                if member.user == local || !member_can_open_auth_signal_session(member) {
                     continue;
                 }
                 if let Some(slot) = admission.users.iter_mut().find(|slot| slot.is_none()) {
@@ -4591,6 +4653,38 @@ mod real {
         }
 
         #[test]
+        fn auth_signal_session_waits_for_remote_lobby_declaration() {
+            let remote = SteamUserId::new(689).unwrap();
+            let declaration = test_member(remote, PeerId::new(688).unwrap(), 0, 1);
+            let loadout = crate::steam_platform::MemberLoadoutDeclaration::new(
+                &crate::online_roster::encode_member_declaration(&declaration),
+            )
+            .unwrap();
+
+            assert!(!member_can_open_auth_signal_session(&LobbyMember {
+                user: remote,
+                readiness: MemberReadiness::Pending,
+                loadout: None,
+            }));
+            assert!(!member_can_open_auth_signal_session(&LobbyMember {
+                user: remote,
+                readiness: MemberReadiness::Declared {
+                    ready: false,
+                    local_seats: 1,
+                },
+                loadout: None,
+            }));
+            assert!(member_can_open_auth_signal_session(&LobbyMember {
+                user: remote,
+                readiness: MemberReadiness::Declared {
+                    ready: false,
+                    local_seats: 1,
+                },
+                loadout: Some(loadout),
+            }));
+        }
+
+        #[test]
         fn signal_session_requests_defer_until_lobby_membership_is_known() {
             let lobby = SteamLobbyId::new(690).unwrap();
             let member = SteamUserId::new(691).unwrap();
@@ -4690,6 +4784,37 @@ mod real {
             assert_eq!(
                 classify_auth_signal_session_failure(None),
                 AuthSignalError::SessionUnknownFailure
+            );
+
+            let failed_network_config = SteamRelayStatus {
+                network_config: crate::steam_transport::SteamRelayAvailability::Failed,
+                ..SteamRelayStatus::default()
+            };
+            assert_eq!(
+                classify_auth_signal_session_failure_with_relay(
+                    Some(NetConnectionEnd::MiscP2PRendezvous),
+                    failed_network_config,
+                ),
+                AuthSignalError::SessionNetworkConfigUnavailable
+            );
+
+            let failed_relay = SteamRelayStatus {
+                any_relay: crate::steam_transport::SteamRelayAvailability::CannotTry,
+                ..SteamRelayStatus::default()
+            };
+            assert_eq!(
+                classify_auth_signal_session_failure_with_relay(
+                    Some(NetConnectionEnd::MiscP2PRendezvous),
+                    failed_relay,
+                ),
+                AuthSignalError::SessionRelayUnavailable
+            );
+            assert_eq!(
+                classify_auth_signal_session_failure_with_relay(
+                    Some(NetConnectionEnd::MiscP2PRendezvous),
+                    SteamRelayStatus::default(),
+                ),
+                AuthSignalError::SessionRendezvousFailed
             );
         }
 

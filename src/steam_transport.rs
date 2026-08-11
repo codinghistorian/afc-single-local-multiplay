@@ -191,6 +191,42 @@ impl Default for SteamRelayStatus {
     }
 }
 
+/// Reads Steam's process-global relay readiness into the bounded status used by
+/// the runtime and guarded development UI. Steam's free-form diagnostic string
+/// deliberately does not cross this boundary.
+#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+pub(crate) fn steam_client_relay_status(client: &steamworks::Client) -> SteamRelayStatus {
+    let status = client.networking_utils().detailed_relay_network_status();
+    SteamRelayStatus {
+        availability: map_steam_relay_availability(status.availability()),
+        network_config: map_steam_relay_availability(status.network_config()),
+        any_relay: map_steam_relay_availability(status.any_relay()),
+        ping_measurement_in_progress: status.is_ping_measurement_in_progress(),
+    }
+}
+
+#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+fn map_steam_relay_availability(
+    availability: Result<
+        steamworks::networking_types::NetworkingAvailability,
+        steamworks::networking_types::NetworkingAvailabilityError,
+    >,
+) -> SteamRelayAvailability {
+    use steamworks::networking_types::{NetworkingAvailability, NetworkingAvailabilityError};
+
+    match availability {
+        Ok(NetworkingAvailability::NeverTried) => SteamRelayAvailability::NeverTried,
+        Ok(NetworkingAvailability::Waiting) => SteamRelayAvailability::Waiting,
+        Ok(NetworkingAvailability::Attempting) => SteamRelayAvailability::Attempting,
+        Ok(NetworkingAvailability::Current) => SteamRelayAvailability::Current,
+        Err(NetworkingAvailabilityError::Unknown) => SteamRelayAvailability::Unknown,
+        Err(NetworkingAvailabilityError::CannotTry) => SteamRelayAvailability::CannotTry,
+        Err(NetworkingAvailabilityError::Failed) => SteamRelayAvailability::Failed,
+        Err(NetworkingAvailabilityError::Previously) => SteamRelayAvailability::PreviouslyAvailable,
+        Err(NetworkingAvailabilityError::Retrying) => SteamRelayAvailability::Retrying,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SteamConnectionQuality {
     pub ping_ms: Option<u32>,
@@ -2874,8 +2910,7 @@ mod real {
     use steamworks::networking_sockets::{ListenSocket, NetConnection};
     use steamworks::networking_types::{
         AppNetConnectionEnd, ConnectionRequest, ListenSocketEvent, NetConnectionEnd,
-        NetworkingAvailability, NetworkingAvailabilityError, NetworkingConnectionState,
-        NetworkingIdentity, SendFlags,
+        NetworkingConnectionState, NetworkingIdentity, SendFlags,
     };
 
     struct RealConnection {
@@ -3099,16 +3134,7 @@ mod real {
 
         fn relay_status(&self) -> Result<SteamRelayStatus, SteamTransportError> {
             self.ensure_callback_owner()?;
-            let status = self
-                .client
-                .networking_utils()
-                .detailed_relay_network_status();
-            Ok(SteamRelayStatus {
-                availability: map_availability(status.availability()),
-                network_config: map_availability(status.network_config()),
-                any_relay: map_availability(status.any_relay()),
-                ping_measurement_in_progress: status.is_ping_measurement_in_progress(),
-            })
+            Ok(steam_client_relay_status(&self.client))
         }
 
         fn open_p2p_listener(&mut self, virtual_port: i32) -> Result<(), SteamTransportError> {
@@ -3440,24 +3466,6 @@ mod real {
                 platform.local_user(),
             );
             Self::from_backend(Box::new(backend), session, config, now_ms)
-        }
-    }
-
-    fn map_availability(
-        availability: Result<NetworkingAvailability, NetworkingAvailabilityError>,
-    ) -> SteamRelayAvailability {
-        match availability {
-            Ok(NetworkingAvailability::NeverTried) => SteamRelayAvailability::NeverTried,
-            Ok(NetworkingAvailability::Waiting) => SteamRelayAvailability::Waiting,
-            Ok(NetworkingAvailability::Attempting) => SteamRelayAvailability::Attempting,
-            Ok(NetworkingAvailability::Current) => SteamRelayAvailability::Current,
-            Err(NetworkingAvailabilityError::Unknown) => SteamRelayAvailability::Unknown,
-            Err(NetworkingAvailabilityError::CannotTry) => SteamRelayAvailability::CannotTry,
-            Err(NetworkingAvailabilityError::Failed) => SteamRelayAvailability::Failed,
-            Err(NetworkingAvailabilityError::Previously) => {
-                SteamRelayAvailability::PreviouslyAvailable
-            }
-            Err(NetworkingAvailabilityError::Retrying) => SteamRelayAvailability::Retrying,
         }
     }
 
