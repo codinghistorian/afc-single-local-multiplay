@@ -134,7 +134,7 @@ the exact sealed inputs:
 
 ```text
 python3 scripts/validate_spacewar_acceptance.py validate private-record.jsonl \
-  --source-tag spacewar-test-8 \
+  --source-tag spacewar-test-9 \
   --source-commit <40-lowercase-hex> \
   --compatibility-build-id <32-lowercase-hex> \
   --gameplay-content-hash <64-lowercase-hex> \

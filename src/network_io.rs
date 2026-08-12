@@ -664,6 +664,17 @@ impl NonBlockingDatagramEndpoint for UdpEndpoint {
                     self.metrics.receive_would_block.saturating_add(1);
                 ReceiveOutcome::Empty
             }
+            // Windows reports WSAEMSGSIZE when a UDP datagram does not fit the
+            // supplied receive buffer instead of returning the truncated byte
+            // count. That is the same bounded oversized-datagram outcome AFC
+            // observes directly on Unix sockets.
+            Err(error) if is_oversized_datagram_io_error(&error) => {
+                self.metrics.oversized_datagrams =
+                    self.metrics.oversized_datagrams.saturating_add(1);
+                ReceiveOutcome::Oversized {
+                    observed_at_least: MAX_AFC_DATAGRAM_BYTES + 1,
+                }
+            }
             Err(error) if is_disconnected_io_error(error.kind()) => {
                 self.metrics.disconnected_errors =
                     self.metrics.disconnected_errors.saturating_add(1);
@@ -674,6 +685,20 @@ impl NonBlockingDatagramEndpoint for UdpEndpoint {
                 ReceiveOutcome::IoError(error.kind())
             }
         }
+    }
+}
+
+fn is_oversized_datagram_io_error(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // WSAEMSGSIZE. `std::io::ErrorKind` currently maps this Winsock error
+        // to `Uncategorized`, so retain the stable native code at this adapter.
+        error.raw_os_error() == Some(10_040)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
     }
 }
 

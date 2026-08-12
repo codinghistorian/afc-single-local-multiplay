@@ -187,7 +187,12 @@ impl ReplayArchive {
             .map_err(|source| io_error("remove temporary file", source))?;
         cleanup.disarm();
         restrict_private_file(&path)?;
-        File::open(&path)
+        // `sync_all` requires a write-capable handle on Windows. The file was
+        // already flushed before its hard link was published, but flushing the
+        // published name as well keeps this durability boundary explicit.
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
             .and_then(|file| file.sync_all())
             .map_err(|source| io_error("sync published file", source))?;
         sync_directory(&self.root)?;

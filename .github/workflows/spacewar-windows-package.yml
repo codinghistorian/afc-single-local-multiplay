@@ -46,6 +46,10 @@ jobs:
       - name: Test exact App ID 480 feature identity
         env:
           AFC_STEAM_APP_ID: "480"
+          # Real-time worker integration tests own several cooperating threads.
+          # Isolate test cases so unrelated Windows runner load cannot consume
+          # their wall-clock transport budgets.
+          RUST_TEST_THREADS: "1"
         run: >-
           cargo test --locked --no-default-features
           --features native,steam-net,spacewar-dev
