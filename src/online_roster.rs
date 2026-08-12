@@ -394,6 +394,10 @@ impl OnlineRoster {
         self.metrics
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = OnlineRosterMember> + '_ {
+        self.members.iter().flatten().copied()
+    }
+
     pub fn member(&self, peer_id: PeerId) -> Option<&OnlineRosterMember> {
         self.members
             .iter()

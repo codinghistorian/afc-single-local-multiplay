@@ -32,6 +32,7 @@ use crate::online_roster::{
     OnlineRosterMember, OnlineSeatSelection, decode_member_declaration, encode_member_declaration,
 };
 use crate::simulation::SimTick;
+use crate::steam_control::{SteamControlIdentity, SteamControlMessage};
 use crate::steam_platform::{
     AdmissionPurpose, AuthTicketHandle, AuthenticatedSteamPeer, IssuedAuthTicket, LobbyExitReason,
     LobbyJoinIntent, LobbyMetadata, LobbyVisibility, MAX_STEAM_LOBBY_MEMBERS, MemberDataOutcome,
@@ -40,11 +41,12 @@ use crate::steam_platform::{
     SteamPlatformState, SteamUserId,
 };
 use crate::steam_transport::{
-    AdmittedSteamEndpoint, SteamConnectionId, SteamConnectionQuality, SteamP2pSession,
-    SteamRelayStatus, SteamTransport, SteamTransportCloseReason, SteamTransportConfig,
-    SteamTransportError, SteamTransportEvent, SteamTransportRetirementStatus, SteamTransportRole,
+    AdmittedSteamEndpoint, RETAINED_STEAM_PEER_TRACE_CAPACITY, SteamConnectionId,
+    SteamConnectionQuality, SteamControlIngress, SteamNetworkReadiness, SteamP2pSession,
+    SteamPeerSetupPhase, SteamPeerTrace, SteamRelayAvailability, SteamRelayStatus, SteamTransport,
+    SteamTransportCloseReason, SteamTransportConfig, SteamTransportError, SteamTransportEvent,
+    SteamTransportRetirementStatus, SteamTransportRole,
 };
-
 pub const MAX_ONLINE_LOBBY_EVENTS: usize = 128;
 pub const DEFAULT_ONLINE_LOBBY_EVENT_CAPACITY: usize = 64;
 pub const DEFAULT_QUALITY_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -187,6 +189,29 @@ pub enum OnlineLobbyPhase {
 }
 
 impl OnlineLobbyPhase {
+    pub const fn diagnostic_code(self) -> u16 {
+        match self {
+            Self::OfflineMenu => 201,
+            Self::InvitePending => 202,
+            Self::CreatingLobby => 203,
+            Self::JoiningLobby => 204,
+            Self::Lobby => 205,
+            Self::Connecting => 206,
+            Self::Authenticating => 207,
+            Self::ManifestAgreement => 208,
+            Self::Loading => 209,
+            Self::InitialSync => 210,
+            Self::Ready => 211,
+            Self::Countdown => 212,
+            Self::Fighting => 213,
+            Self::Reconnecting => 214,
+            Self::ConfirmingResult => 215,
+            Self::Results => 216,
+            Self::ReturningToLobby => 217,
+            Self::Failed => 218,
+        }
+    }
+
     pub fn can_transition_to(self, next: Self) -> bool {
         if next == Self::Failed && self != Self::Failed {
             return true;
@@ -323,6 +348,17 @@ impl OnlineFlowMachine {
     pub const fn is_expired(self, now_ms: u64) -> bool {
         matches!(self.deadline_at_ms, Some(deadline) if now_ms >= deadline)
     }
+
+    fn extend_deadline(&mut self, paused_ms: u64) -> Result<(), OnlineLobbyError> {
+        if let Some(deadline_at_ms) = self.deadline_at_ms {
+            self.deadline_at_ms = Some(
+                deadline_at_ms
+                    .checked_add(paused_ms)
+                    .ok_or(OnlineLobbyError::InvalidConfiguration)?,
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,6 +397,12 @@ pub enum OnlineLobbyEvent {
         owner: SteamUserId,
         role: OnlineLobbyRole,
     },
+    SteamBackendReconnectStarted {
+        deadline_at_ms: u64,
+    },
+    SteamBackendReconnectRecovered {
+        paused_ms: u64,
+    },
     RosterChanged {
         members: u8,
         seats: u8,
@@ -368,6 +410,16 @@ pub enum OnlineLobbyEvent {
         live_bindings: [Option<OnlinePeerIdentity>; MAX_STEAM_LOBBY_MEMBERS],
     },
     TransportRequested(SteamP2pSession),
+    ControlReady {
+        connection: SteamConnectionId,
+        user: SteamUserId,
+        generation: u32,
+    },
+    ControlRetrying {
+        user: SteamUserId,
+        previous_connection: SteamConnectionId,
+        retry_at_ms: u64,
+    },
     AuthenticationRequired {
         user: SteamUserId,
         reconnect: bool,
@@ -386,6 +438,15 @@ pub enum OnlineLobbyEvent {
         connection: Option<SteamConnectionId>,
         failure: OnlineFailure,
     },
+    /// A Steam account session for a roster member that is not the remote end
+    /// of this process's authority-star socket has been validated.
+    RosterPeerAuthenticated {
+        user: SteamUserId,
+    },
+    RosterPeerAuthenticationRejected {
+        user: SteamUserId,
+        failure: OnlineFailure,
+    },
     EndpointReady {
         connection: SteamConnectionId,
         user: SteamUserId,
@@ -397,12 +458,18 @@ pub enum OnlineLobbyEvent {
         user: SteamUserId,
         peer_id: PeerId,
         reconnect_allowed: bool,
+        /// This was the final pre-game control-generation close and can be
+        /// recovered by a peer-scoped manual Steam setup retry.
+        pregame_setup_retry: bool,
     },
     QualityChanged {
         user: SteamUserId,
         quality: NetworkQualitySnapshot,
     },
     ManifestCommitted(ManifestHash),
+    ManifestAborted {
+        reason_code: u16,
+    },
     DropGameplayEndpoints,
     MatchEnded(OnlineMatchOutcome),
     ReturnedToLobby {
@@ -427,14 +494,46 @@ pub struct OnlineLobbyStatus {
     pub effective_joinable: bool,
     pub all_members_ready: bool,
     pub connected_remote_peers: u8,
+    pub secure_remote_peers: u8,
+    pub required_remote_peers: u8,
+    /// Steam accounts whose application-ticket validation completed for the
+    /// current lobby epoch. This is deliberately independent from physical
+    /// socket state: clients can validate non-owner roster members without
+    /// opening client-to-client connections.
+    pub verified_remote_accounts: u8,
+    pub required_remote_accounts: u8,
     pub transport_installed: bool,
     pub relay_status: SteamRelayStatus,
+    pub steam_network_readiness: SteamNetworkReadiness,
+    pub setup_stage: OnlineSetupStage,
+    pub start_blocker: Option<OnlineStartBlocker>,
     pub manifest_hash: Option<ManifestHash>,
     pub countdown_start_tick: Option<SimTick>,
     pub network_quality: NetworkQualitySnapshot,
     pub input_delay_calibration: InputDelayCalibrationSnapshot,
     pub outcome: Option<OnlineMatchOutcome>,
     pub failure: Option<OnlineFailure>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineSetupStage {
+    PreparingSteamNetwork,
+    Connecting,
+    ValidatingAccount,
+    Secure,
+    WaitingForManifest,
+    GameplayReady,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineStartBlocker {
+    PreparingSteamNetwork,
+    Connecting,
+    ValidatingAccount,
+    WaitingForDeclarations,
+    CalibratingQuality,
+    QualityRejected,
+    WaitingForManifest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,6 +560,7 @@ pub enum OnlineLobbyError {
     AdmissionQuiesced,
     RetiringTransportCapacity,
     MissingAuthenticatedAdmission,
+    RemoteAccountVerificationCapacity,
     ManifestMismatch,
     ManifestDeclarationsPending,
     PeersNotReady,
@@ -671,8 +771,25 @@ pub struct OnlineLobbyCoordinator {
     local_declaration: Option<OnlineRosterMember>,
     bindings: [Option<PeerBinding>; MAX_STEAM_LOBBY_MEMBERS],
     pending_incoming: [Option<PendingIncoming>; MAX_STEAM_LOBBY_MEMBERS],
+    pending_setup_retries: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
     quality_rejected_users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    /// Steam identities proven permanently invalid or hostile during this
+    /// lobby membership epoch. A fresh socket generation must not bypass the
+    /// peer-scoped quarantine; actual lobby departure clears the record.
+    permanently_rejected_users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    /// Exact Steam membership snapshot used to scope account verification.
+    /// Unlike `bindings`, this includes members for which this process never
+    /// owns a direct socket (the normal client case in a 3-4 player star).
+    lobby_users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    verified_remote_accounts: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    /// Declarations that currently have coherent readiness/loadout metadata,
+    /// independent from whether this process has a direct authenticated link.
+    coherent_declaration_count: usize,
     roster: OnlineRoster,
+    /// Complete peer-id-bearing roster reconstructed from an exact authority
+    /// manifest. Clients retain this because their direct roster intentionally
+    /// contains only themselves and the listen owner.
+    validated_manifest_roster: Option<OnlineRoster>,
     lobby_member_count: usize,
     platform_total_seats: usize,
     seat_capacity: u8,
@@ -680,7 +797,9 @@ pub struct OnlineLobbyCoordinator {
     roster_all_ready: bool,
     transport_request: Option<SteamP2pSession>,
     transport: Option<SteamTransport>,
+    control_bootstrap: bool,
     retiring_transports: VecDeque<RetiringSteamTransport>,
+    completed_peer_traces: VecDeque<SteamPeerTrace>,
     retirement_metrics: OnlineTransportRetirementMetrics,
     /// A user-visible leave may transition UI immediately, but the Steam lobby
     /// and its auth sessions remain owned until all retired transports finish.
@@ -689,6 +808,12 @@ pub struct OnlineLobbyCoordinator {
     /// capability may cross the application boundary after this is raised.
     admission_quiesced: bool,
     relay_status: SteamRelayStatus,
+    steam_backend_reconnect_started_at_ms: Option<u64>,
+    steam_backend_reconnect_deadline_at_ms: Option<u64>,
+    deferred_reconnect_transport_events: VecDeque<SteamTransportEvent>,
+    /// Bounds Steam relay/certificate readiness even while the UI remains in
+    /// Lobby, whose general flow state intentionally has no deadline.
+    network_initialization_started_at_ms: Option<u64>,
     endpoints: VecDeque<AdmittedSteamEndpoint>,
     issued_tickets: Vec<PendingIssuedTicket>,
     events: VecDeque<OnlineLobbyEvent>,
@@ -733,8 +858,14 @@ impl OnlineLobbyCoordinator {
             local_declaration: None,
             bindings: std::array::from_fn(|_| None),
             pending_incoming: [None; MAX_STEAM_LOBBY_MEMBERS],
+            pending_setup_retries: [None; MAX_STEAM_LOBBY_MEMBERS],
             quality_rejected_users: [None; MAX_STEAM_LOBBY_MEMBERS],
+            permanently_rejected_users: [None; MAX_STEAM_LOBBY_MEMBERS],
+            lobby_users: [None; MAX_STEAM_LOBBY_MEMBERS],
+            verified_remote_accounts: [None; MAX_STEAM_LOBBY_MEMBERS],
+            coherent_declaration_count: 0,
             roster: OnlineRoster::default(),
+            validated_manifest_roster: None,
             lobby_member_count: 0,
             platform_total_seats: 0,
             seat_capacity: 0,
@@ -742,11 +873,19 @@ impl OnlineLobbyCoordinator {
             roster_all_ready: false,
             transport_request: None,
             transport: None,
+            control_bootstrap: false,
             retiring_transports: VecDeque::with_capacity(MAX_RETIRING_STEAM_TRANSPORTS),
+            completed_peer_traces: VecDeque::with_capacity(RETAINED_STEAM_PEER_TRACE_CAPACITY),
             retirement_metrics: OnlineTransportRetirementMetrics::default(),
             pending_platform_leave: false,
             admission_quiesced: false,
             relay_status: SteamRelayStatus::default(),
+            steam_backend_reconnect_started_at_ms: None,
+            steam_backend_reconnect_deadline_at_ms: None,
+            deferred_reconnect_transport_events: VecDeque::with_capacity(
+                config.transport.event_capacity,
+            ),
+            network_initialization_started_at_ms: None,
             endpoints: VecDeque::with_capacity(MAX_STEAM_LOBBY_MEMBERS),
             issued_tickets: Vec::with_capacity(MAX_STEAM_LOBBY_MEMBERS),
             events: VecDeque::with_capacity(config.event_capacity),
@@ -772,6 +911,14 @@ impl OnlineLobbyCoordinator {
         self.local_user
     }
 
+    pub const fn steam_backend_reconnect_pending(&self) -> bool {
+        self.steam_backend_reconnect_deadline_at_ms.is_some()
+    }
+
+    pub fn take_completed_peer_trace(&mut self) -> Option<SteamPeerTrace> {
+        self.completed_peer_traces.pop_front()
+    }
+
     pub const fn local_declaration(&self) -> Option<OnlineRosterMember> {
         self.local_declaration
     }
@@ -793,6 +940,7 @@ impl OnlineLobbyCoordinator {
         observed_revision: u16,
     ) -> bool {
         !self.user_is_retiring(user)
+            && !self.is_permanently_rejected(user)
             && self
                 .committed_peer_leases
                 .iter()
@@ -836,14 +984,126 @@ impl OnlineLobbyCoordinator {
     }
 
     pub fn status(&self) -> OnlineLobbyStatus {
+        let required_member_count = self
+            .validated_manifest_roster
+            .as_ref()
+            .map(OnlineRoster::len)
+            .unwrap_or(self.lobby_member_count);
+        let required_remote_peers = match self.role {
+            Some(OnlineLobbyRole::ListenAuthority) => required_member_count.saturating_sub(1),
+            Some(OnlineLobbyRole::Client)
+                if required_member_count > 1 && self.owner != Some(self.local_user) =>
+            {
+                1
+            }
+            _ => 0,
+        };
+        let required_remote_accounts = if self.role.is_some() {
+            required_member_count.saturating_sub(1)
+        } else {
+            0
+        };
+        let verified_remote_accounts = if let Some(roster) = &self.validated_manifest_roster {
+            roster
+                .iter()
+                .filter(|member| member.authenticated_user.get() != self.local_user.get())
+                .filter(|member| {
+                    SteamUserId::new(member.authenticated_user.get())
+                        .is_ok_and(|user| self.remote_account_is_verified(user))
+                })
+                .count()
+        } else {
+            self.lobby_users
+                .iter()
+                .flatten()
+                .filter(|user| self.remote_account_is_verified(**user))
+                .count()
+        };
         let connected_remote_peers = self
-            .bindings
-            .iter()
-            .flatten()
-            .filter(|binding| {
-                binding.user != self.local_user && !binding.retiring && binding.connection.is_some()
+            .transport
+            .as_ref()
+            .map(|transport| {
+                self.bindings
+                    .iter()
+                    .flatten()
+                    .filter(|binding| {
+                        binding.user != self.local_user
+                            && !binding.retiring
+                            && transport.connection_for_user(binding.user).is_some_and(|connection| {
+                                transport.connection_state(connection)
+                                    == Some(crate::steam_transport::SteamTransportConnectionState::Connected)
+                            })
+                    })
+                    .count()
             })
-            .count();
+            .unwrap_or(0);
+        let secure_remote_peers = self
+            .transport
+            .as_ref()
+            .map(|transport| {
+                self.bindings
+                    .iter()
+                    .flatten()
+                    .filter(|binding| {
+                        binding.user != self.local_user
+                            && !binding.retiring
+                            && binding.authenticated
+                            && transport.connection_for_user(binding.user).is_some_and(
+                                |connection| {
+                                    transport.setup_phase(connection)
+                                        >= Some(SteamPeerSetupPhase::Secure)
+                                },
+                            )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut steam_network_readiness = self
+            .transport
+            .as_ref()
+            .map(SteamTransport::network_readiness)
+            .unwrap_or_default();
+        if self.steam_backend_reconnect_pending() {
+            steam_network_readiness.relay.availability = SteamRelayAvailability::Retrying;
+            steam_network_readiness.authentication = SteamRelayAvailability::Retrying;
+        }
+        let setup_stage = if !steam_network_readiness.is_ready() {
+            OnlineSetupStage::PreparingSteamNetwork
+        } else if secure_remote_peers < required_remote_peers
+            || verified_remote_accounts < required_remote_accounts
+        {
+            let authenticating = self.transport.as_ref().is_some_and(|transport| {
+                self.bindings.iter().flatten().any(|binding| {
+                    transport
+                        .connection_for_user(binding.user)
+                        .is_some_and(|connection| {
+                            transport.setup_phase(connection)
+                                == Some(SteamPeerSetupPhase::Authenticating)
+                        })
+                })
+            });
+            if authenticating
+                || (secure_remote_peers >= required_remote_peers
+                    && verified_remote_accounts < required_remote_accounts)
+            {
+                OnlineSetupStage::ValidatingAccount
+            } else {
+                OnlineSetupStage::Connecting
+            }
+        } else if self.flow.phase() == OnlineLobbyPhase::ManifestAgreement {
+            OnlineSetupStage::WaitingForManifest
+        } else if matches!(
+            self.flow.phase(),
+            OnlineLobbyPhase::Loading
+                | OnlineLobbyPhase::InitialSync
+                | OnlineLobbyPhase::Ready
+                | OnlineLobbyPhase::Countdown
+                | OnlineLobbyPhase::Fighting
+        ) {
+            OnlineSetupStage::GameplayReady
+        } else {
+            OnlineSetupStage::Secure
+        };
         let network_quality = self
             .bindings
             .iter()
@@ -852,6 +1112,30 @@ impl OnlineLobbyCoordinator {
             .map(|binding| binding.quality.snapshot())
             .max_by_key(|snapshot| snapshot.quality)
             .unwrap_or_default();
+        let input_delay_calibration = self.input_delay_calibration();
+        let start_blocker = if !steam_network_readiness.is_ready() {
+            Some(OnlineStartBlocker::PreparingSteamNetwork)
+        } else if !self.roster_all_ready {
+            Some(OnlineStartBlocker::WaitingForDeclarations)
+        } else if secure_remote_peers < required_remote_peers {
+            Some(match setup_stage {
+                OnlineSetupStage::ValidatingAccount => OnlineStartBlocker::ValidatingAccount,
+                _ => OnlineStartBlocker::Connecting,
+            })
+        } else if verified_remote_accounts < required_remote_accounts {
+            Some(OnlineStartBlocker::ValidatingAccount)
+        } else {
+            match input_delay_calibration.state {
+                InputDelayCalibrationState::Calibrating => {
+                    Some(OnlineStartBlocker::CalibratingQuality)
+                }
+                InputDelayCalibrationState::Unplayable => Some(OnlineStartBlocker::QualityRejected),
+                _ if self.flow.phase() == OnlineLobbyPhase::ManifestAgreement => {
+                    Some(OnlineStartBlocker::WaitingForManifest)
+                }
+                _ => None,
+            }
+        };
         OnlineLobbyStatus {
             phase: self.flow.phase(),
             deadline_at_ms: self.flow.deadline_at_ms(),
@@ -860,21 +1144,28 @@ impl OnlineLobbyCoordinator {
             role: self.role,
             pending_join: self.pending_join,
             lobby_members: self.lobby_member_count.min(u8::MAX as usize) as u8,
-            roster_members: self.roster.len().min(u8::MAX as usize) as u8,
+            roster_members: self.coherent_declaration_count.min(u8::MAX as usize) as u8,
             total_seats: self.platform_total_seats.min(u8::MAX as usize) as u8,
             seat_capacity: self.seat_capacity,
             effective_joinable: self.effective_joinable,
             all_members_ready: self.roster_all_ready,
             connected_remote_peers: connected_remote_peers.min(u8::MAX as usize) as u8,
+            secure_remote_peers: secure_remote_peers.min(u8::MAX as usize) as u8,
+            required_remote_peers: required_remote_peers.min(u8::MAX as usize) as u8,
+            verified_remote_accounts: verified_remote_accounts.min(u8::MAX as usize) as u8,
+            required_remote_accounts: required_remote_accounts.min(u8::MAX as usize) as u8,
             transport_installed: self.transport.is_some(),
-            relay_status: self.relay_status,
+            relay_status: steam_network_readiness.relay,
+            steam_network_readiness,
+            setup_stage,
+            start_blocker,
             manifest_hash: self
                 .match_config
                 .as_ref()
                 .map(|config| config.manifest.manifest_hash),
             countdown_start_tick: self.countdown_start_tick,
             network_quality,
-            input_delay_calibration: self.input_delay_calibration(),
+            input_delay_calibration,
             outcome: self.outcome,
             failure: self.failure,
         }
@@ -965,6 +1256,74 @@ impl OnlineLobbyCoordinator {
         self.match_config.as_ref()
     }
 
+    /// Iterates the canonical peer-id-bearing roster for the current match.
+    ///
+    /// Before manifest validation this is the directly authenticated roster.
+    /// After an exact remote manifest is accepted it is the complete
+    /// reconstructed lobby snapshot, including accounts for which this client
+    /// intentionally has no direct socket.
+    pub fn roster_members(&self) -> impl Iterator<Item = OnlineRosterMember> + '_ {
+        self.validated_manifest_roster
+            .as_ref()
+            .unwrap_or(&self.roster)
+            .iter()
+    }
+
+    /// Records application-level Steam account validation independently from
+    /// physical star-topology socket admission. The operation is idempotent so
+    /// reordered and duplicate validation callbacks cannot inflate status.
+    pub fn record_remote_account_verified(
+        &mut self,
+        user: SteamUserId,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let belongs_to_epoch = self.lobby_users.contains(&Some(user))
+            || self
+                .validated_manifest_roster
+                .as_ref()
+                .is_some_and(|roster| {
+                    roster
+                        .iter()
+                        .any(|member| member.authenticated_user.get() == user.get())
+                });
+        if user == self.local_user || !belongs_to_epoch {
+            return Err(OnlineLobbyError::PeerIdentityMismatch);
+        }
+        if self.verified_remote_accounts.contains(&Some(user)) {
+            return Ok(());
+        }
+        let slot = self
+            .verified_remote_accounts
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(OnlineLobbyError::RemoteAccountVerificationCapacity)?;
+        *slot = Some(user);
+        Ok(())
+    }
+
+    /// Revokes one account-verification lease without disturbing any unrelated
+    /// account or socket generation.
+    pub fn revoke_remote_account_verification(&mut self, user: SteamUserId) -> bool {
+        let mut removed = false;
+        for slot in &mut self.verified_remote_accounts {
+            if *slot == Some(user) {
+                *slot = None;
+                removed = true;
+            }
+        }
+        removed
+    }
+
+    pub fn remote_account_is_verified(&self, user: SteamUserId) -> bool {
+        user != self.local_user
+            && (self.verified_remote_accounts.contains(&Some(user))
+                || self
+                    .binding(user)
+                    .is_some_and(|binding| binding.authenticated && !binding.retiring))
+    }
+
     pub fn take_endpoint(&mut self) -> Option<AdmittedSteamEndpoint> {
         if self.admission_quiesced {
             self.endpoints.clear();
@@ -973,12 +1332,351 @@ impl OnlineLobbyCoordinator {
         self.endpoints.pop_front()
     }
 
+    pub fn poll_control(&mut self) -> Option<SteamControlIngress> {
+        self.transport.as_mut()?.poll_control()
+    }
+
+    pub fn accept_control_ingress(
+        &mut self,
+        token: crate::steam_transport::SteamControlIngressToken,
+    ) -> Result<(), OnlineLobbyError> {
+        self.transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?
+            .accept_control_ingress(token)?;
+        Ok(())
+    }
+
+    pub fn reject_control_ingress(
+        &mut self,
+        token: crate::steam_transport::SteamControlIngressToken,
+    ) -> Result<(), OnlineLobbyError> {
+        self.transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?
+            .reject_control_ingress(token)?;
+        Ok(())
+    }
+
+    pub fn queue_control_for_user(
+        &mut self,
+        user: SteamUserId,
+        message: SteamControlMessage,
+    ) -> Result<u32, OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        let connection = transport
+            .connection_for_user(user)
+            .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+        transport
+            .queue_control(connection, message)
+            .map_err(Into::into)
+    }
+
+    pub fn control_connection_for_user(&self, user: SteamUserId) -> Option<SteamConnectionId> {
+        self.transport.as_ref()?.connection_for_user(user)
+    }
+
+    pub fn control_is_ready_for_user(&self, user: SteamUserId) -> bool {
+        let Some(transport) = self.transport.as_ref() else {
+            return false;
+        };
+        let Some(connection) = transport.connection_for_user(user) else {
+            return false;
+        };
+        transport
+            .setup_phase(connection)
+            .is_some_and(|phase| phase >= SteamPeerSetupPhase::ControlReady)
+    }
+
+    pub fn begin_control_manifest_agreement(
+        &mut self,
+        user: SteamUserId,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        let connection = transport
+            .connection_for_user(user)
+            .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+        transport.begin_manifest_agreement(connection)?;
+        Ok(())
+    }
+
+    pub fn enter_control_manifest_agreement(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        if self.flow.phase() == OnlineLobbyPhase::Lobby {
+            self.transition(OnlineLobbyPhase::ManifestAgreement, now_ms)?;
+        } else {
+            self.require_phase(OnlineLobbyPhase::ManifestAgreement)?;
+        }
+        Ok(())
+    }
+
+    pub fn control_outbox_is_empty(&self, user: SteamUserId) -> bool {
+        let Some(transport) = self.transport.as_ref() else {
+            return false;
+        };
+        let Some(connection) = transport.connection_for_user(user) else {
+            return false;
+        };
+        transport.outstanding_control_frames(connection) == Some(0)
+    }
+
+    pub fn can_queue_control_for_users(
+        &self,
+        users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    ) -> bool {
+        let Some(transport) = self.transport.as_ref() else {
+            return false;
+        };
+        users.iter().flatten().all(|user| {
+            let Some(connection) = transport.connection_for_user(*user) else {
+                return false;
+            };
+            transport
+                .outstanding_control_frames(connection)
+                .is_some_and(|frames| frames < self.config.transport.event_capacity)
+        })
+    }
+
+    pub fn finalize_control_secure(&mut self, user: SteamUserId) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let admission = self
+            .binding(user)
+            .and_then(|binding| binding.authenticated.then_some(binding.admission).flatten())
+            .ok_or(OnlineLobbyError::MissingAuthenticatedAdmission)?;
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        let connection = transport
+            .connection_for_user(user)
+            .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+        if transport.setup_phase(connection) == Some(SteamPeerSetupPhase::Authenticating) {
+            transport.mark_secure(connection, admission)?;
+        } else if transport.setup_phase(connection) != Some(SteamPeerSetupPhase::Secure) {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        if let Some(binding) = self.binding_mut(user) {
+            binding.connection = Some(connection);
+            binding.pending_connection = None;
+            binding.precommit_rtt.reset();
+        }
+        Ok(())
+    }
+
+    pub fn promote_control_connection(
+        &mut self,
+        user: SteamUserId,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        let connection = transport
+            .connection_for_user(user)
+            .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+        transport.promote_to_gameplay(connection)?;
+        Ok(())
+    }
+
+    pub fn arm_control_gameplay_receive(
+        &mut self,
+        user: SteamUserId,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        let connection = transport
+            .connection_for_user(user)
+            .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+        transport.arm_gameplay_receive(connection)?;
+        Ok(())
+    }
+
     pub fn active_connection_for_user(&self, user: SteamUserId) -> Option<SteamConnectionId> {
         self.binding(user).and_then(|binding| binding.connection)
     }
 
+    /// Rebuilds only one quarantined authority-star control link while
+    /// preserving the Steam lobby and every unrelated peer connection.
+    ///
+    /// Clients explicitly originate the replacement connection. A listen
+    /// authority clears its side and waits for that client, preserving the
+    /// authority-star topology without enabling symmetric-connect mode.
+    pub fn retry_control_setup<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        user: SteamUserId,
+        generation: SteamConnectionId,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending()
+            || !self.control_bootstrap
+            || self.admission_quiesced
+            || self.match_config.is_some()
+            || self.is_permanently_rejected(user)
+            || !matches!(
+                self.flow.phase(),
+                OnlineLobbyPhase::Lobby
+                    | OnlineLobbyPhase::Connecting
+                    | OnlineLobbyPhase::Authenticating
+            )
+            || user == self.local_user
+            || !platform
+                .roster()
+                .iter()
+                .flatten()
+                .any(|member| member.user == user)
+        {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        match self.role {
+            Some(OnlineLobbyRole::ListenAuthority) => {}
+            Some(OnlineLobbyRole::Client) if self.owner == Some(user) => {}
+            Some(OnlineLobbyRole::Client) | None => return Err(OnlineLobbyError::InvalidState),
+        }
+        let active_generation = self
+            .transport
+            .as_ref()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?
+            .connection_for_user(user);
+        if active_generation.is_some_and(|active| active != generation) {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+
+        self.cancel_issued_ticket_for_user(platform, user);
+        let _ = platform.end_peer_authentication(user);
+        self.revoke_remote_account_verification(user);
+        for slot in &mut self.pending_incoming {
+            if slot.is_some_and(|pending| pending.user == user) {
+                *slot = None;
+            }
+        }
+        for slot in &mut self.pending_setup_retries {
+            if *slot == Some(user) {
+                *slot = None;
+            }
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        match active_generation {
+            Some(_) => {
+                transport.retry_control_generation(user, now_ms)?;
+            }
+            None => {
+                transport.retry_closed_control_generation(user, generation, now_ms)?;
+            }
+        }
+
+        if let Some(binding) = self.binding_mut(user) {
+            binding.authenticated = false;
+            binding.admission = None;
+            binding.pending_connection = None;
+            binding.connection = None;
+            binding.precommit_rtt.reset();
+        }
+        if self.flow.phase() != OnlineLobbyPhase::Lobby {
+            self.force_phase(OnlineLobbyPhase::Lobby, now_ms)?;
+        }
+        self.failure = None;
+
+        Ok(())
+    }
+
+    /// Re-attempts identityless Steam relay/certificate setup in-place. This
+    /// preserves the lobby invitation and all authority-star link identities;
+    /// per-peer Retry uses `retry_control_setup` instead.
+    pub fn retry_steam_network_initialization(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending()
+            || !self.control_bootstrap
+            || self.admission_quiesced
+            || self.match_config.is_some()
+            || !matches!(
+                self.flow.phase(),
+                OnlineLobbyPhase::Lobby
+                    | OnlineLobbyPhase::Connecting
+                    | OnlineLobbyPhase::Authenticating
+                    | OnlineLobbyPhase::Failed
+            )
+        {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or(OnlineLobbyError::TransportNotInstalled)?;
+        transport.retry_network_initialization()?;
+        self.relay_status = transport.relay_status();
+        self.network_initialization_started_at_ms =
+            (!transport.network_readiness().is_ready()).then_some(now_ms);
+        self.failure = None;
+        if self.flow.phase() == OnlineLobbyPhase::Failed {
+            self.force_phase(OnlineLobbyPhase::Lobby, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Retires only Steam authentication capability after a recoverable
+    /// validation result. The physical link stays quarantined long enough for
+    /// the authority to deliver an attributed retry instruction.
+    pub fn prepare_peer_authentication_retry<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        user: SteamUserId,
+    ) -> Result<(), OnlineLobbyError> {
+        if !self.control_bootstrap
+            || self.match_config.is_some()
+            || user == self.local_user
+            || self.binding(user).is_none()
+        {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        self.cancel_issued_ticket_for_user(platform, user);
+        let _ = platform.end_peer_authentication(user);
+        self.revoke_remote_account_verification(user);
+        if let Some(binding) = self.binding_mut(user) {
+            binding.authenticated = false;
+            binding.admission = None;
+        }
+        Ok(())
+    }
+
     pub const fn admission_is_quiesced(&self) -> bool {
         self.admission_quiesced
+    }
+
+    pub const fn uses_control_bootstrap(&self) -> bool {
+        self.control_bootstrap
     }
 
     /// Atomically fences every new online capability while preserving already
@@ -997,6 +1695,7 @@ impl OnlineLobbyCoordinator {
             !matches!(
                 event,
                 OnlineLobbyEvent::TransportRequested(_)
+                    | OnlineLobbyEvent::ControlRetrying { .. }
                     | OnlineLobbyEvent::AuthTicketReady { .. }
                     | OnlineLobbyEvent::AuthenticationRequired { .. }
                     | OnlineLobbyEvent::PeerAuthenticated { .. }
@@ -1006,6 +1705,7 @@ impl OnlineLobbyCoordinator {
 
         let pending: Vec<_> = self.pending_incoming.iter().flatten().copied().collect();
         self.pending_incoming = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.pending_setup_retries = [None; MAX_STEAM_LOBBY_MEMBERS];
         if let Some(transport) = &mut self.transport {
             for incoming in pending {
                 if transport
@@ -1106,6 +1806,12 @@ impl OnlineLobbyCoordinator {
         record.ticket.take()
     }
 
+    pub fn auth_ticket_is_ready(&self, lease: AuthTicketLease) -> bool {
+        self.issued_tickets
+            .iter()
+            .any(|record| record.lease == lease && record.ready && record.ticket.is_some())
+    }
+
     pub fn begin_create<B: SteamBackend>(
         &mut self,
         platform: &mut SteamPlatform<B>,
@@ -1180,6 +1886,9 @@ impl OnlineLobbyCoordinator {
         platform: &mut SteamPlatform<B>,
         declaration: OnlineRosterMember,
     ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
         self.require_phase(OnlineLobbyPhase::Lobby)?;
         self.validate_local_declaration_identity(declaration)?;
         if let Some(prior) = self.local_declaration {
@@ -1233,9 +1942,15 @@ impl OnlineLobbyCoordinator {
         remote_user: SteamUserId,
         purpose: AdmissionPurpose,
     ) -> Result<AuthTicketLease, OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
         self.require_lobby()?;
         if self.admission_quiesced {
             return Err(OnlineLobbyError::AdmissionQuiesced);
+        }
+        if self.is_permanently_rejected(remote_user) {
+            return Err(OnlineLobbyError::PeerIdentityMismatch);
         }
         if self.is_quality_rejected(remote_user) || self.user_is_retiring(remote_user) {
             return Err(OnlineLobbyError::QualityPolicyRejected);
@@ -1511,23 +2226,66 @@ impl OnlineLobbyCoordinator {
     }
 
     /// Ends every platform and transport capability attributable to one
-    /// remote user, then removes its coordinator binding. This is the
-    /// peer-scoped fail-closed path for malformed pre-game signaling: the
-    /// lobby owner and unrelated peers remain operational.
+    /// remote user, then removes its coordinator binding. This default path
+    /// classifies a permanent Steam ticket/account rejection; hostile AFCP
+    /// input supplies its own explicit close reason through the variant below.
+    /// The lobby owner and unrelated peers remain operational.
     pub fn isolate_peer_authentication<B: SteamBackend>(
         &mut self,
         platform: &mut SteamPlatform<B>,
         user: SteamUserId,
     ) -> Result<Option<PeerId>, OnlineLobbyError> {
+        self.isolate_peer_authentication_with_reason(
+            platform,
+            user,
+            SteamTransportCloseReason::AuthenticationRejected,
+        )
+    }
+
+    /// Same peer-scoped capability teardown with an explicit privacy-safe
+    /// terminal classification. AFCP hostile-input handling uses
+    /// `MalformedControlTraffic`; Steam ticket/account rejection uses
+    /// `AuthenticationRejected`; ordinary lobby departure remains
+    /// `Requested`. Other permanent wire reasons are accepted when the
+    /// transport itself attributes hostile input to this lobby identity.
+    pub fn isolate_peer_authentication_with_reason<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        user: SteamUserId,
+        close_reason: SteamTransportCloseReason,
+    ) -> Result<Option<PeerId>, OnlineLobbyError> {
         if user == self.local_user {
             return Err(OnlineLobbyError::PeerIdentityMismatch);
         }
+        if !matches!(
+            close_reason,
+            SteamTransportCloseReason::Requested
+                | SteamTransportCloseReason::AdmissionRejected
+                | SteamTransportCloseReason::InboundQueueOverflow
+                | SteamTransportCloseReason::OversizedDatagram
+                | SteamTransportCloseReason::MalformedControlTraffic
+                | SteamTransportCloseReason::ProtocolViolation
+                | SteamTransportCloseReason::AuthenticationRejected
+        ) {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        if close_reason != SteamTransportCloseReason::Requested {
+            self.mark_permanently_rejected(user)?;
+        }
         let peer_id = self.binding(user).map(|binding| binding.peer_id);
         let close_result = if let Some(transport) = self.transport.as_mut() {
-            transport.close_connections_for_user(user).map(|_| ())
+            transport
+                .close_connections_for_user_with_reason(user, close_reason)
+                .map(|_| ())
         } else {
             Ok(())
         };
+        // `close_connections_for_user_with_reason` finalizes the connection
+        // inside the still-active transport. Move that bounded trace across
+        // the coordinator boundary immediately so the runtime can persist it
+        // in the same isolation call instead of waiting for another pump or
+        // unrelated transport teardown.
+        self.retain_active_completed_peer_traces();
 
         for slot in &mut self.pending_incoming {
             if slot.is_some_and(|pending| pending.user == user) {
@@ -1538,6 +2296,7 @@ impl OnlineLobbyCoordinator {
             .retain(|endpoint| endpoint.remote_user != user);
         self.cancel_issued_ticket_for_user(platform, user);
         let _ = platform.end_peer_authentication(user);
+        self.revoke_remote_account_verification(user);
         if let Some(slot) = self
             .bindings
             .iter_mut()
@@ -1564,12 +2323,18 @@ impl OnlineLobbyCoordinator {
         purpose: AdmissionPurpose,
         now_ms: u64,
     ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
         let lobby = self.require_lobby()?;
         if self.admission_quiesced {
             return Err(OnlineLobbyError::AdmissionQuiesced);
         }
         peer_id.validate()?;
         if user == self.local_user {
+            return Err(OnlineLobbyError::PeerIdentityMismatch);
+        }
+        if self.is_permanently_rejected(user) {
             return Err(OnlineLobbyError::PeerIdentityMismatch);
         }
         if self.is_quality_rejected(user) || self.user_is_retiring(user) {
@@ -1608,7 +2373,20 @@ impl OnlineLobbyCoordinator {
             }
             return Err(error.into());
         }
-        if self.role == Some(OnlineLobbyRole::Client) {
+        if self.control_bootstrap {
+            let connection = self
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.connection_for_user(user))
+                .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+            self.transport
+                .as_mut()
+                .expect("control bootstrap has an installed transport")
+                .mark_authenticating(connection)?;
+            if let Some(binding) = self.binding_mut(user) {
+                binding.pending_connection = Some(connection);
+            }
+        } else if self.role == Some(OnlineLobbyRole::Client) {
             if purpose == AdmissionPurpose::Reconnect && self.reconnect_resume.is_none() {
                 self.reconnect_resume = Some(match self.flow.phase() {
                     OnlineLobbyPhase::Countdown => ReconnectResumePhase::Countdown,
@@ -1649,9 +2427,54 @@ impl OnlineLobbyCoordinator {
         if expected.role == SteamTransportRole::ListenAuthority {
             transport.start_listening()?;
         }
+        if self.steam_backend_reconnect_pending() {
+            transport.pause_pregame_deadlines(now_ms)?;
+        }
         self.relay_status = transport.relay_status();
+        self.network_initialization_started_at_ms =
+            (!transport.network_readiness().is_ready()).then_some(now_ms);
+        self.control_bootstrap = false;
         self.transport = Some(transport);
         self.try_connect_client(now_ms)
+    }
+
+    /// Installs the AFCP bootstrap transport. Clients open exactly one
+    /// quarantined connection to the lobby owner immediately; Ready and
+    /// loadout metadata do not control the physical link lifetime.
+    pub fn install_control_transport(
+        &mut self,
+        mut transport: SteamTransport,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.admission_quiesced {
+            return Err(OnlineLobbyError::AdmissionQuiesced);
+        }
+        if self.transport.is_some() {
+            return Err(OnlineLobbyError::TransportAlreadyInstalled);
+        }
+        let expected = self
+            .transport_request
+            .or_else(|| self.expected_transport_session())
+            .ok_or(OnlineLobbyError::InvalidState)?;
+        if transport.session() != expected || transport.local_user() != self.local_user {
+            return Err(OnlineLobbyError::TransportSessionMismatch);
+        }
+        self.transport_request = None;
+        match expected.role {
+            SteamTransportRole::ListenAuthority => transport.start_listening()?,
+            SteamTransportRole::Client => {
+                transport.connect_control(expected.authority_user, now_ms)?;
+            }
+        }
+        if self.steam_backend_reconnect_pending() {
+            transport.pause_pregame_deadlines(now_ms)?;
+        }
+        self.relay_status = transport.relay_status();
+        self.network_initialization_started_at_ms =
+            (!transport.network_readiness().is_ready()).then_some(now_ms);
+        self.control_bootstrap = true;
+        self.transport = Some(transport);
+        Ok(())
     }
 
     /// Authority-only immutable match commit. Every Steam member must have a
@@ -1664,6 +2487,9 @@ impl OnlineLobbyCoordinator {
         current_tick: SimTick,
         now_ms: u64,
     ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
         self.require_phase(OnlineLobbyPhase::Lobby)?;
         if self.role != Some(OnlineLobbyRole::ListenAuthority) {
             return Err(OnlineLobbyError::InvalidState);
@@ -1672,6 +2498,7 @@ impl OnlineLobbyCoordinator {
         self.rebuild_roster(platform)?;
         if !self.roster_all_ready
             || !self.all_remote_members_connected(platform)
+            || !self.all_remote_accounts_verified(platform)
             || self.bindings.iter().flatten().any(|binding| {
                 binding.connection.is_some() && binding.quality.quality() == NetworkQuality::Reject
             })
@@ -1719,13 +2546,15 @@ impl OnlineLobbyCoordinator {
             return Err(OnlineLobbyError::ManifestMismatch);
         }
         let config = self.roster.build_headless_config(options, current_tick)?;
+        let canonical_roster = copy_online_roster(&self.roster)?;
         let manifest_hash = config.manifest.manifest_hash;
         platform.set_accepting_peers(false)?;
         // Keep the auth-gated P2P listen socket alive for same-identity
         // reconnects. Lobby joinability is the new-peer admission gate;
         // stopping this socket would also disable the documented reclaim path.
-        self.match_config = Some(config);
         self.capture_committed_peer_leases(platform)?;
+        self.match_config = Some(config);
+        self.validated_manifest_roster = Some(canonical_roster);
         self.committed_input_delay_calibration = Some(InputDelayCalibrationSnapshot {
             state: InputDelayCalibrationState::Committed,
             ..calibration
@@ -1736,12 +2565,15 @@ impl OnlineLobbyCoordinator {
 
     /// Accepts the exact authority manifest after the AFC handshake. This is
     /// used by clients and by the listen authority's local session.
-    pub fn accept_manifest<B: SteamBackend>(
+    pub fn prepare_remote_manifest<B: SteamBackend>(
         &mut self,
         platform: &SteamPlatform<B>,
         config: HeadlessMatchConfig,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
         self.require_phase(OnlineLobbyPhase::ManifestAgreement)?;
         config
             .validate()
@@ -1774,10 +2606,171 @@ impl OnlineLobbyCoordinator {
         if !config.manifest.ownership.peer_owns_any_seat(authority_peer) {
             return Err(OnlineLobbyError::ManifestMismatch);
         }
-        self.validate_exact_manifest_from_platform(platform, &config, authority_peer)?;
-        self.match_config = Some(config);
+        if !self.all_remote_accounts_verified(platform) {
+            return Err(OnlineLobbyError::PeersNotReady);
+        }
+        let canonical_roster =
+            self.validate_exact_manifest_from_platform(platform, &config, authority_peer)?;
         self.capture_committed_peer_leases(platform)?;
+        self.match_config = Some(config);
+        self.validated_manifest_roster = Some(canonical_roster);
+        Ok(())
+    }
+
+    pub fn commit_prepared_manifest(&mut self, now_ms: u64) -> Result<(), OnlineLobbyError> {
+        if self.steam_backend_reconnect_pending() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        self.require_phase(OnlineLobbyPhase::ManifestAgreement)?;
+        if self.match_config.is_none() {
+            return Err(OnlineLobbyError::ManifestMismatch);
+        }
         self.transition(OnlineLobbyPhase::Loading, now_ms)
+    }
+
+    pub fn queue_manifest_abort(
+        &mut self,
+        transaction: Option<crate::steam_control::ManifestTransactionId>,
+        reason_code: u16,
+    ) -> Result<(), OnlineLobbyError> {
+        self.require_phase(OnlineLobbyPhase::ManifestAgreement)?;
+        let lobby = self.require_lobby()?;
+        let mut users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        let mut count = 0_usize;
+        for binding in self.bindings.iter().flatten() {
+            if binding.user != self.local_user
+                && self.control_connection_for_user(binding.user).is_some()
+            {
+                users[count] = Some(binding.user);
+                count += 1;
+            }
+        }
+        for user in users[..count].iter().flatten().copied() {
+            let identity = SteamControlIdentity::new(lobby, self.local_user, user)
+                .map_err(SteamTransportError::ControlCodec)?;
+            self.queue_control_for_user(
+                user,
+                SteamControlMessage::Abort {
+                    identity,
+                    transaction,
+                    code: reason_code,
+                    permanent: false,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn abort_manifest_agreement<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        reason_code: u16,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if self.flow.phase() == OnlineLobbyPhase::Lobby && self.match_config.is_none() {
+            return Ok(());
+        }
+        self.require_phase(OnlineLobbyPhase::ManifestAgreement)?;
+        if let Some(transport) = &mut self.transport {
+            let connections: Vec<_> = self
+                .bindings
+                .iter()
+                .flatten()
+                .filter_map(|binding| transport.connection_for_user(binding.user))
+                .collect();
+            for connection in connections {
+                transport.abort_manifest_agreement(connection)?;
+                if let Some(trace) = transport.peer_trace(connection) {
+                    if self.completed_peer_traces.len() == RETAINED_STEAM_PEER_TRACE_CAPACITY {
+                        self.completed_peer_traces.pop_front();
+                    }
+                    self.completed_peer_traces.push_back(trace);
+                }
+            }
+        }
+        self.match_config = None;
+        self.validated_manifest_roster = None;
+        self.committed_input_delay_calibration = None;
+        self.committed_peer_leases = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.committed_member_revisions = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.countdown_start_tick = None;
+        self.failure = None;
+        if self.role == Some(OnlineLobbyRole::ListenAuthority) {
+            platform.set_accepting_peers(true)?;
+        }
+        self.transition(OnlineLobbyPhase::Lobby, now_ms)?;
+        self.push_event(OnlineLobbyEvent::ManifestAborted { reason_code })
+    }
+
+    /// Rolls an unexposed post-commit setup back to Lobby. This is legal only
+    /// while every socket is still quarantined or receive-armed; once any
+    /// gameplay endpoint was released the match must use ordinary terminal
+    /// handling instead of pretending the commit never happened.
+    pub fn cancel_committed_setup<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        reason_code: u16,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        let connections = std::array::from_fn(|index| {
+            let binding = self.bindings[index].as_ref()?;
+            let connection = self.transport.as_ref()?.connection_for_user(binding.user)?;
+            Some((binding.user, connection))
+        });
+        self.cancel_committed_setup_exact(platform, connections, reason_code, now_ms)
+    }
+
+    /// Rolls back only the frozen socket generations supplied by the AFCP
+    /// transaction owner. Missing or replaced generations are deliberately
+    /// skipped: a stale transaction must never mutate a replacement link.
+    pub fn cancel_committed_setup_exact<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        participants: [Option<(SteamUserId, SteamConnectionId)>; MAX_STEAM_LOBBY_MEMBERS],
+        reason_code: u16,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if !matches!(
+            self.flow.phase(),
+            OnlineLobbyPhase::ManifestAgreement | OnlineLobbyPhase::Loading
+        ) {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        if !self.endpoints.is_empty() {
+            return Err(OnlineLobbyError::InvalidState);
+        }
+        if let Some(transport) = &mut self.transport {
+            for (user, connection) in participants.iter().flatten().copied() {
+                if transport.connection_for_user(user) != Some(connection) {
+                    continue;
+                }
+                transport.abort_manifest_agreement(connection)?;
+            }
+        }
+        self.match_config = None;
+        self.validated_manifest_roster = None;
+        self.committed_input_delay_calibration = None;
+        self.committed_peer_leases = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.committed_member_revisions = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.countdown_start_tick = None;
+        self.failure = None;
+        if self.role == Some(OnlineLobbyRole::ListenAuthority) {
+            platform.set_accepting_peers(true)?;
+        }
+        self.transition(OnlineLobbyPhase::Lobby, now_ms)?;
+        self.push_event(OnlineLobbyEvent::ManifestAborted { reason_code })
+    }
+
+    /// Compatibility helper for callers that already completed their own
+    /// prepare/commit exchange atomically.
+    pub fn accept_manifest<B: SteamBackend>(
+        &mut self,
+        platform: &SteamPlatform<B>,
+        config: HeadlessMatchConfig,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        self.prepare_remote_manifest(platform, config, now_ms)?;
+        self.commit_prepared_manifest(now_ms)
     }
 
     /// Reconstructs the complete canonical roster from coherent Steam member
@@ -1790,7 +2783,7 @@ impl OnlineLobbyCoordinator {
         platform: &SteamPlatform<B>,
         config: &HeadlessMatchConfig,
         authority_peer: PeerId,
-    ) -> Result<(), OnlineLobbyError> {
+    ) -> Result<OnlineRoster, OnlineLobbyError> {
         if platform.state() != SteamPlatformState::InLobby(self.require_lobby()?)
             || platform.roster_len() == 0
         {
@@ -1904,7 +2897,7 @@ impl OnlineLobbyCoordinator {
         if canonical.manifest != *manifest {
             return Err(OnlineLobbyError::ManifestMismatch);
         }
-        Ok(())
+        Ok(rebuilt)
     }
 
     pub fn mark_content_loaded(&mut self, now_ms: u64) -> Result<(), OnlineLobbyError> {
@@ -2119,7 +3112,16 @@ impl OnlineLobbyCoordinator {
         self.transition(OnlineLobbyPhase::ReturningToLobby, now_ms)?;
         self.push_event(OnlineLobbyEvent::DropGameplayEndpoints)?;
         self.teardown_match_transport(platform, now_ms)?;
+        for user in self.lobby_users.iter().flatten().copied() {
+            if user != self.local_user {
+                // Direct peers do not own a roster-only session, and the
+                // platform treats that uniform teardown as an idempotent no-op.
+                platform.end_roster_authentication(user)?;
+            }
+        }
         self.match_config = None;
+        self.validated_manifest_roster = None;
+        self.verified_remote_accounts = [None; MAX_STEAM_LOBBY_MEMBERS];
         self.committed_input_delay_calibration = None;
         self.countdown_start_tick = None;
         self.outcome = None;
@@ -2236,11 +3238,47 @@ impl OnlineLobbyCoordinator {
             }
         }
         for event in transport_events {
+            let advances_setup = matches!(
+                event,
+                SteamTransportEvent::ControlReady { .. }
+                    | SteamTransportEvent::SetupPhaseChanged { .. }
+                    | SteamTransportEvent::ControlRetrying { .. }
+                    | SteamTransportEvent::ConnectionReady { .. }
+            );
+            if self.steam_backend_reconnect_pending() && advances_setup {
+                if self.deferred_reconnect_transport_events.len()
+                    >= self.config.transport.event_capacity
+                {
+                    return Err(OnlineLobbyError::EventQueueOverflow);
+                }
+                self.deferred_reconnect_transport_events.push_back(event);
+                continue;
+            }
             if let Err(error) = self.handle_transport_event(platform, event, now_ms) {
                 let failure = self.failure_for_error(&error);
                 self.fail(platform, failure, now_ms);
                 return Err(error);
             }
+        }
+        if !self.steam_backend_reconnect_pending() {
+            while let Some(event) = self.deferred_reconnect_transport_events.pop_front() {
+                if let Err(error) = self.handle_transport_event(platform, event, now_ms) {
+                    let failure = self.failure_for_error(&error);
+                    self.fail(platform, failure, now_ms);
+                    return Err(error);
+                }
+            }
+        }
+        // A successful automatic control-generation retry keeps the active
+        // transport installed. Drain the retired generation's trace now so a
+        // later successful setup cannot strand its failure evidence inside
+        // the live transport until an unrelated teardown.
+        self.retain_active_completed_peer_traces();
+        if self.steam_backend_reconnect_pending() {
+            return Ok(());
+        }
+        if self.enforce_network_initialization_deadline(platform, now_ms)? {
+            return Ok(());
         }
         self.sample_connection_quality(platform, now_ms)?;
 
@@ -2258,6 +3296,14 @@ impl OnlineLobbyCoordinator {
             self.fail(platform, failure, now_ms);
         } else if self.flow.is_expired(now_ms) {
             let failure = timeout_failure(self.flow.phase());
+            if self.flow.phase() == OnlineLobbyPhase::ManifestAgreement {
+                // The coordinator deliberately does not invent an unscoped
+                // transaction here. NativeOnlineCore owns the AFCP manifest
+                // transaction identifier and queues the exact scoped Abort
+                // when it consumes the resulting ManifestAborted event.
+                self.abort_manifest_agreement(platform, failure.detail_code, now_ms)?;
+                return Ok(());
+            }
             if matches!(
                 self.flow.phase(),
                 OnlineLobbyPhase::CreatingLobby | OnlineLobbyPhase::JoiningLobby
@@ -2267,6 +3313,77 @@ impl OnlineLobbyCoordinator {
             self.fail(platform, failure, now_ms);
         }
         Ok(())
+    }
+
+    fn enforce_network_initialization_deadline<B: SteamBackend>(
+        &mut self,
+        _platform: &mut SteamPlatform<B>,
+        now_ms: u64,
+    ) -> Result<bool, OnlineLobbyError> {
+        if !matches!(
+            self.flow.phase(),
+            OnlineLobbyPhase::Lobby
+                | OnlineLobbyPhase::Connecting
+                | OnlineLobbyPhase::Authenticating
+                | OnlineLobbyPhase::ManifestAgreement
+        ) {
+            self.network_initialization_started_at_ms = None;
+            return Ok(false);
+        }
+        let Some(readiness) = self
+            .transport
+            .as_ref()
+            .map(SteamTransport::network_readiness)
+        else {
+            self.network_initialization_started_at_ms = None;
+            return Ok(false);
+        };
+        if readiness.is_ready() {
+            self.network_initialization_started_at_ms = None;
+            return Ok(false);
+        }
+        let started_at_ms = *self
+            .network_initialization_started_at_ms
+            .get_or_insert(now_ms);
+        let deadline_at_ms = started_at_ms
+            .checked_add(self.config.timeouts.platform_operation_ms)
+            .ok_or(OnlineLobbyError::InvalidConfiguration)?;
+        if !readiness.has_terminal_failure() && now_ms < deadline_at_ms {
+            return Ok(false);
+        }
+
+        // `SteamTransport::from_backend` already repeats a terminal relay/auth
+        // initialization once when Online is entered. Reaching this branch
+        // means that retry remained terminal, or that Steam never left its
+        // nonterminal preparation states within the bounded setup window.
+        let detail_code = (u16::from(readiness.relay.availability.diagnostic_code()) << 8)
+            | u16::from(readiness.authentication.diagnostic_code());
+        self.network_initialization_started_at_ms = None;
+        let failure = online_failure(
+            OnlineFailureCode::SteamUnavailable,
+            OnlineFailureSeverity::Recoverable,
+            OnlineRecoveryAction::Retry,
+            detail_code,
+        );
+        // This is a process-global preparation failure, not a peer or socket
+        // integrity failure. Keep the quarantined transport installed so the
+        // in-lobby Retry action can re-run relay/certificate initialization
+        // without discarding the lobby invitation or healthy peer state.
+        self.failure = Some(failure);
+        let from = self.flow.phase();
+        if from != OnlineLobbyPhase::Failed {
+            self.flow.transition(
+                OnlineLobbyPhase::Failed,
+                now_ms.max(self.flow.entered_at_ms()),
+                self.config.timeouts,
+            )?;
+            self.push_event(OnlineLobbyEvent::StateChanged {
+                from,
+                to: OnlineLobbyPhase::Failed,
+            })?;
+        }
+        self.push_event(OnlineLobbyEvent::Failure(failure))?;
+        Ok(true)
     }
 
     fn refresh_transport_incoming_policy<B: SteamBackend>(
@@ -2282,6 +3399,13 @@ impl OnlineLobbyCoordinator {
             }
             return Ok(());
         }
+        if self.steam_backend_reconnect_pending() {
+            // The platform roster cache is intentionally not trusted until
+            // recovery reconciliation succeeds. Preserve the last coherent
+            // exact-identity allow-list instead of converting a transient
+            // Steam outage into an empty admission roster.
+            return Ok(());
+        }
         let mut allowed = [self.local_user; MAX_STEAM_LOBBY_MEMBERS];
         let mut count = 0_usize;
         if self.match_config.is_some() {
@@ -2292,6 +3416,7 @@ impl OnlineLobbyCoordinator {
                 if binding.user != self.local_user
                     && !binding.retiring
                     && !self.is_quality_rejected(binding.user)
+                    && !self.is_permanently_rejected(binding.user)
                 {
                     allowed[count] = binding.user;
                     count += 1;
@@ -2304,6 +3429,7 @@ impl OnlineLobbyCoordinator {
                 if member.user != self.local_user
                     && !self.user_is_retiring(member.user)
                     && !self.is_quality_rejected(member.user)
+                    && !self.is_permanently_rejected(member.user)
                 {
                     allowed[count] = member.user;
                     count += 1;
@@ -2361,10 +3487,73 @@ impl OnlineLobbyCoordinator {
                     role: self.role.expect("role was just installed"),
                 })
             }
+            SteamPlatformEvent::BackendReconnectStarted { deadline_at_ms } => {
+                let lobby = self.lobby.ok_or(OnlineLobbyError::InvalidState)?;
+                if platform.state() != SteamPlatformState::InLobby(lobby) {
+                    return Err(OnlineLobbyError::InvalidState);
+                }
+                if self.steam_backend_reconnect_deadline_at_ms.is_none() {
+                    if let Some(transport) = &mut self.transport {
+                        transport.pause_pregame_deadlines(now_ms)?;
+                    }
+                    self.steam_backend_reconnect_started_at_ms = Some(now_ms);
+                    self.steam_backend_reconnect_deadline_at_ms = Some(deadline_at_ms);
+                    self.push_event(OnlineLobbyEvent::SteamBackendReconnectStarted {
+                        deadline_at_ms,
+                    })?;
+                }
+                Ok(())
+            }
+            SteamPlatformEvent::BackendReconnectRecovered => {
+                let Some(started_at_ms) = self.steam_backend_reconnect_started_at_ms else {
+                    return Ok(());
+                };
+                let lobby = self.lobby.ok_or(OnlineLobbyError::InvalidState)?;
+                if platform.state() != SteamPlatformState::InLobby(lobby)
+                    || platform.lobby_owner() != self.owner
+                {
+                    return Err(OnlineLobbyError::PeerIdentityMismatch);
+                }
+                let metadata = platform
+                    .lobby_metadata()
+                    .ok_or(OnlineLobbyError::InvalidState)?;
+                let recovered_contract = LobbyContract::first_release(metadata)?;
+                if self.lobby_contract != Some(recovered_contract) {
+                    return Err(OnlineLobbyError::ManifestMismatch);
+                }
+
+                // SteamPlatform emits recovery only after one coherent,
+                // authoritative metadata/owner/roster reread has committed to
+                // its cached active-lobby state. Do not perform a second
+                // backend read here: a transient failure between those reads
+                // would otherwise consume a successful grace and tear down a
+                // healthy socket generation.
+                self.steam_backend_reconnect_started_at_ms = None;
+                self.steam_backend_reconnect_deadline_at_ms = None;
+                let paused_ms = now_ms.saturating_sub(started_at_ms);
+                if let Some(transport) = &mut self.transport {
+                    transport.resume_pregame_deadlines(now_ms)?;
+                }
+                self.flow.extend_deadline(paused_ms)?;
+                if let Some(started) = self.network_initialization_started_at_ms.as_mut() {
+                    *started = started
+                        .checked_add(paused_ms)
+                        .ok_or(OnlineLobbyError::InvalidConfiguration)?;
+                }
+                self.last_quality_sample_ms = self
+                    .last_quality_sample_ms
+                    .checked_add(paused_ms)
+                    .ok_or(OnlineLobbyError::InvalidConfiguration)?;
+                self.rebuild_roster(platform)?;
+                self.push_event(OnlineLobbyEvent::SteamBackendReconnectRecovered { paused_ms })
+            }
             SteamPlatformEvent::LobbyCreateFailed(error) => Err(error.into()),
             SteamPlatformEvent::LobbyJoinRejected { reason, .. } => Err(reason.into()),
             SteamPlatformEvent::LobbyRosterChanged { lobby } => {
                 if Some(lobby) != self.lobby {
+                    if self.local_leave_is_draining() {
+                        return Ok(());
+                    }
                     return Err(OnlineLobbyError::InvalidState);
                 }
                 self.reconcile_departed_lobby_bindings(platform, now_ms)?;
@@ -2372,6 +3561,9 @@ impl OnlineLobbyCoordinator {
             }
             SteamPlatformEvent::LobbyMetadataChanged { lobby } => {
                 if Some(lobby) != self.lobby {
+                    if self.local_leave_is_draining() {
+                        return Ok(());
+                    }
                     return Err(OnlineLobbyError::InvalidState);
                 }
                 let metadata = platform
@@ -2389,6 +3581,9 @@ impl OnlineLobbyCoordinator {
                 outcome,
             } => {
                 if Some(lobby) != self.lobby {
+                    if self.local_leave_is_draining() {
+                        return Ok(());
+                    }
                     return Err(OnlineLobbyError::InvalidState);
                 }
                 match outcome {
@@ -2547,6 +3742,15 @@ impl OnlineLobbyCoordinator {
                 if Some(lobby) != self.lobby {
                     return Err(OnlineLobbyError::InvalidState);
                 }
+                if self.binding(user).is_none() {
+                    // Authentication callbacks can outlive the match
+                    // generation whose ticket created them. A fresh
+                    // generation always reserves its binding before starting
+                    // validation, so an unbound callback is stale and grants
+                    // no capability.
+                    let _ = platform.end_peer_authentication(user);
+                    return Ok(());
+                }
                 if self.admission_quiesced {
                     let _ = platform.end_peer_authentication(user);
                     if let Some(binding) = self.binding_mut(user)
@@ -2569,12 +3773,23 @@ impl OnlineLobbyCoordinator {
                 binding.admission = Some(admission);
                 let peer_id = binding.peer_id;
                 self.rebuild_roster(platform)?;
+                self.record_remote_account_verified(user)?;
                 self.push_event(OnlineLobbyEvent::PeerAuthenticated {
                     user,
                     peer_id,
                     reconnect: admission.purpose == AdmissionPurpose::Reconnect,
                 })?;
-                if self.role == Some(OnlineLobbyRole::Client) {
+                if self.control_bootstrap {
+                    let connection = self
+                        .transport
+                        .as_ref()
+                        .and_then(|transport| transport.connection_for_user(user))
+                        .ok_or(OnlineLobbyError::MissingPeerBinding(user))?;
+                    if let Some(binding) = self.binding_mut(user) {
+                        binding.pending_connection = Some(connection);
+                    }
+                    Ok(())
+                } else if self.role == Some(OnlineLobbyRole::Client) {
                     self.try_connect_client(now_ms)
                 } else {
                     self.try_admit_incoming(user, now_ms)
@@ -2600,6 +3815,48 @@ impl OnlineLobbyCoordinator {
                 }
                 let failure = OnlineFailure::from_auth_rejection(reason);
                 self.handle_attributed_authentication_rejection(platform, user, failure, now_ms)
+            }
+            SteamPlatformEvent::RosterPeerAuthenticated { lobby, user } => {
+                if Some(lobby) != self.lobby {
+                    return Err(OnlineLobbyError::InvalidState);
+                }
+                if self.admission_quiesced
+                    || !platform
+                        .roster()
+                        .iter()
+                        .flatten()
+                        .any(|member| member.user == user)
+                {
+                    let _ = platform.end_roster_authentication(user);
+                    return Ok(());
+                }
+                self.record_remote_account_verified(user)?;
+                self.push_event(OnlineLobbyEvent::RosterPeerAuthenticated { user })
+            }
+            SteamPlatformEvent::RosterPeerAuthenticationRejected {
+                lobby,
+                user,
+                reason,
+            } => {
+                if Some(lobby) != self.lobby {
+                    return Err(OnlineLobbyError::InvalidState);
+                }
+                if !platform
+                    .roster()
+                    .iter()
+                    .flatten()
+                    .any(|member| member.user == user)
+                {
+                    let _ = platform.end_roster_authentication(user);
+                    self.revoke_remote_account_verification(user);
+                    return Ok(());
+                }
+                self.revoke_remote_account_verification(user);
+                let failure = OnlineFailure::from_auth_rejection(reason);
+                self.push_event(OnlineLobbyEvent::RosterPeerAuthenticationRejected {
+                    user,
+                    failure,
+                })
             }
         }
     }
@@ -2664,8 +3921,13 @@ impl OnlineLobbyCoordinator {
             return Err(OnlineLobbyError::InvalidState);
         }
         let connection = self.active_connection_for_user(user);
+        let transient = failure.severity == OnlineFailureSeverity::Recoverable
+            && failure.recovery == OnlineRecoveryAction::Retry;
         let isolate_result = if local_rejected {
             Ok(None)
+        } else if transient {
+            self.prepare_peer_authentication_retry(platform, user)
+                .map(|()| self.binding(user).map(|binding| binding.peer_id))
         } else {
             self.isolate_peer_authentication(platform, user)
         };
@@ -2682,8 +3944,52 @@ impl OnlineLobbyCoordinator {
         self.rebuild_roster(platform)?;
         isolate_result?;
 
-        if client_owner_rejected || local_rejected {
+        if (client_owner_rejected || local_rejected) && !transient {
             self.fail(platform, failure, now_ms);
+        }
+        Ok(())
+    }
+
+    fn handle_permanent_transport_rejection<B: SteamBackend>(
+        &mut self,
+        platform: &mut SteamPlatform<B>,
+        user: SteamUserId,
+        peer_id: PeerId,
+        reason: SteamTransportCloseReason,
+        now_ms: u64,
+    ) -> Result<(), OnlineLobbyError> {
+        if user == self.local_user
+            || self.binding(user).map(|binding| binding.peer_id) != Some(peer_id)
+            || !platform
+                .roster()
+                .iter()
+                .flatten()
+                .any(|member| member.user == user)
+        {
+            return Err(OnlineLobbyError::PeerIdentityMismatch);
+        }
+        let failure =
+            permanent_pregame_close_failure(reason).ok_or(OnlineLobbyError::InvalidState)?;
+        let client_owner_rejected =
+            self.role == Some(OnlineLobbyRole::Client) && self.owner == Some(user);
+
+        // Isolation happens before the event/barrier pair so no upper layer
+        // can observe the rejection while the old admission capability still
+        // exists. This path is pre-game and the exact generation was already
+        // checked by `ConnectionClosed`; `None` lets the runtime quarantine a
+        // pre-attach identity without mistaking it for a stale gameplay map.
+        self.isolate_peer_authentication_with_reason(platform, user, reason)?;
+        self.push_event(OnlineLobbyEvent::PeerAuthenticationRejected {
+            user,
+            connection: None,
+            failure,
+        })?;
+        self.rebuild_roster(platform)?;
+
+        if client_owner_rejected {
+            self.fail(platform, failure, now_ms);
+        } else if self.flow.phase() != OnlineLobbyPhase::Lobby {
+            self.force_phase(OnlineLobbyPhase::Lobby, now_ms)?;
         }
         Ok(())
     }
@@ -2709,7 +4015,10 @@ impl OnlineLobbyCoordinator {
                 {
                     return Err(OnlineLobbyError::TransportSessionMismatch);
                 }
-                if self.admission_quiesced || self.user_is_retiring(user) {
+                if self.admission_quiesced
+                    || self.user_is_retiring(user)
+                    || self.is_permanently_rejected(user)
+                {
                     self.transport
                         .as_mut()
                         .ok_or(OnlineLobbyError::TransportNotInstalled)?
@@ -2739,6 +4048,13 @@ impl OnlineLobbyCoordinator {
                         .close_connection_for_quality_policy(connection)?;
                     return Ok(());
                 }
+                if self.control_bootstrap {
+                    self.transport
+                        .as_mut()
+                        .ok_or(OnlineLobbyError::TransportNotInstalled)?
+                        .accept_control(connection, now_ms)?;
+                    return Ok(());
+                }
                 let slot = self
                     .pending_incoming
                     .iter_mut()
@@ -2758,6 +4074,77 @@ impl OnlineLobbyCoordinator {
                 }
             }
             SteamTransportEvent::IncomingRejected { .. } => Ok(()),
+            SteamTransportEvent::ControlRetrying {
+                connection,
+                lobby,
+                user,
+                retry_at_ms,
+            } => {
+                if Some(lobby) != self.lobby || !self.control_bootstrap {
+                    return Err(OnlineLobbyError::TransportSessionMismatch);
+                }
+                if self.flow.phase() == OnlineLobbyPhase::ManifestAgreement {
+                    self.abort_manifest_agreement(
+                        platform,
+                        SteamTransportCloseReason::ConnectTimedOut.diagnostic_code(),
+                        now_ms,
+                    )?;
+                } else if self.flow.phase() == OnlineLobbyPhase::Loading {
+                    self.cancel_committed_setup(
+                        platform,
+                        SteamTransportCloseReason::ConnectTimedOut.diagnostic_code(),
+                        now_ms,
+                    )?;
+                }
+                if !self.pending_setup_retries.contains(&Some(user)) {
+                    let slot = self
+                        .pending_setup_retries
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(OnlineLobbyError::EndpointQueueOverflow)?;
+                    *slot = Some(user);
+                }
+                if let Some(binding) = self.binding_mut(user) {
+                    binding.pending_connection = None;
+                    binding.connection = None;
+                    binding.admission = None;
+                    binding.authenticated = false;
+                    binding.precommit_rtt.reset();
+                }
+                let _ = platform.end_peer_authentication(user);
+                self.cancel_issued_ticket_for_user(platform, user);
+                self.push_event(OnlineLobbyEvent::ControlRetrying {
+                    user,
+                    previous_connection: connection,
+                    retry_at_ms,
+                })
+            }
+            SteamTransportEvent::ControlReady {
+                connection,
+                lobby,
+                user,
+                generation,
+            } => {
+                if Some(lobby) != self.lobby || !self.control_bootstrap {
+                    return Err(OnlineLobbyError::TransportSessionMismatch);
+                }
+                if let Some(slot) = self
+                    .pending_setup_retries
+                    .iter_mut()
+                    .find(|slot| **slot == Some(user))
+                {
+                    *slot = None;
+                }
+                if let Some(binding) = self.binding_mut(user) {
+                    binding.pending_connection = Some(connection);
+                }
+                self.push_event(OnlineLobbyEvent::ControlReady {
+                    connection,
+                    user,
+                    generation,
+                })
+            }
+            SteamTransportEvent::SetupPhaseChanged { .. } => Ok(()),
             SteamTransportEvent::ConnectionReady {
                 connection,
                 lobby,
@@ -2811,7 +4198,7 @@ impl OnlineLobbyCoordinator {
                         self.failure = None;
                         self.authority_disconnect = None;
                         self.transition(OnlineLobbyPhase::InitialSync, now_ms)?;
-                    } else {
+                    } else if !self.control_bootstrap {
                         self.transition(OnlineLobbyPhase::ManifestAgreement, now_ms)?;
                     }
                 }
@@ -2831,6 +4218,16 @@ impl OnlineLobbyCoordinator {
                 if Some(lobby) != self.lobby {
                     return Ok(());
                 }
+                let setup_retry_expired = if let Some(slot) = self
+                    .pending_setup_retries
+                    .iter_mut()
+                    .find(|slot| **slot == Some(user))
+                {
+                    *slot = None;
+                    true
+                } else {
+                    false
+                };
                 if let Some(slot) = self.pending_incoming.iter_mut().find(|slot| {
                     slot.is_some_and(|pending| {
                         pending.user == user && pending.connection == connection
@@ -2863,7 +4260,7 @@ impl OnlineLobbyCoordinator {
                         Some(binding) => {
                             let was_connected = binding.connection == Some(connection);
                             let was_pending = binding.pending_connection == Some(connection);
-                            if !was_connected && !was_pending {
+                            if !was_connected && !was_pending && !setup_retry_expired {
                                 return Ok(());
                             }
                             if was_connected {
@@ -2872,8 +4269,9 @@ impl OnlineLobbyCoordinator {
                             if was_pending {
                                 binding.pending_connection = None;
                             }
-                            let still_has_link = binding.connection.is_some()
-                                || binding.pending_connection.is_some();
+                            let still_has_link = !setup_retry_expired
+                                && (binding.connection.is_some()
+                                    || binding.pending_connection.is_some());
                             if !still_has_link {
                                 binding.admission = None;
                                 binding.authenticated = false;
@@ -2891,7 +4289,7 @@ impl OnlineLobbyCoordinator {
                             }
                             (
                                 binding.peer_id,
-                                was_connected,
+                                was_connected || setup_retry_expired,
                                 still_has_link,
                                 terminal_cleanup,
                                 deferred,
@@ -2907,6 +4305,18 @@ impl OnlineLobbyCoordinator {
                 if terminal_cleanup || deferred {
                     return Ok(());
                 }
+                let pregame_setup = self.match_config.is_none()
+                    && matches!(
+                        self.flow.phase(),
+                        OnlineLobbyPhase::Lobby
+                            | OnlineLobbyPhase::Connecting
+                            | OnlineLobbyPhase::Authenticating
+                    );
+                if pregame_setup && permanent_pregame_close_failure(reason).is_some() {
+                    return self.handle_permanent_transport_rejection(
+                        platform, user, peer_id, reason, now_ms,
+                    );
+                }
                 if !was_connected
                     && matches!(
                         reason,
@@ -2915,6 +4325,23 @@ impl OnlineLobbyCoordinator {
                             | SteamTransportCloseReason::QualityPolicyRejected
                     )
                 {
+                    return Ok(());
+                }
+                if pregame_setup && pregame_close_is_transient(reason) {
+                    // Exhausting the one automatic socket retry is an
+                    // actionable pre-game condition, not a reason to destroy
+                    // the lobby invitation or unrelated authority-star links.
+                    self.push_event(OnlineLobbyEvent::PeerDisconnected {
+                        connection,
+                        user,
+                        peer_id,
+                        reconnect_allowed: false,
+                        pregame_setup_retry: true,
+                    })?;
+                    if self.flow.phase() != OnlineLobbyPhase::Lobby {
+                        self.force_phase(OnlineLobbyPhase::Lobby, now_ms)?;
+                    }
+                    self.failure = None;
                     return Ok(());
                 }
                 self.finish_peer_disconnect(connection, user, peer_id, reason, now_ms)
@@ -2939,8 +4366,16 @@ impl OnlineLobbyCoordinator {
         platform: &SteamPlatform<B>,
     ) -> Result<(), OnlineLobbyError> {
         let mut rebuilt = OnlineRoster::default();
+        let mut lobby_users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        let mut coherent_declaration_count = 0_usize;
         self.lobby_member_count = platform.roster_len();
-        for member in platform.roster().iter().flatten() {
+        for (member_index, member) in platform.roster().iter().flatten().enumerate() {
+            lobby_users[member_index] = Some(member.user);
+            if matches!(member.readiness, MemberReadiness::Declared { local_seats, .. }
+                if member.loadout.is_some_and(|loadout| loadout.seat_count() == local_seats))
+            {
+                coherent_declaration_count += 1;
+            }
             let Some(binding) = self.binding(member.user) else {
                 continue;
             };
@@ -2965,15 +4400,42 @@ impl OnlineLobbyCoordinator {
             )?;
             rebuilt.upsert(declaration)?;
         }
+        let membership_changed =
+            self.lobby_member_count != 0 && !same_lobby_user_set(&self.lobby_users, &lobby_users);
+        let mut retained_verified = [None; MAX_STEAM_LOBBY_MEMBERS];
+        if self.match_config.is_some() || !membership_changed {
+            let mut retained_count = 0_usize;
+            for user in self.verified_remote_accounts.iter().flatten().copied() {
+                let belongs_to_epoch = if self.match_config.is_some() {
+                    self.validated_manifest_roster
+                        .as_ref()
+                        .is_some_and(|roster| {
+                            roster
+                                .iter()
+                                .any(|member| member.authenticated_user.get() == user.get())
+                        })
+                } else {
+                    lobby_users.contains(&Some(user))
+                };
+                if user != self.local_user && belongs_to_epoch {
+                    retained_verified[retained_count] = Some(user);
+                    retained_count += 1;
+                }
+            }
+        }
+        self.lobby_users = lobby_users;
+        self.verified_remote_accounts = retained_verified;
+        self.coherent_declaration_count = coherent_declaration_count;
         self.roster = rebuilt;
+        if self.match_config.is_none() {
+            self.validated_manifest_roster = None;
+        }
         self.platform_total_seats = usize::from(platform.accepted_seat_total());
         self.seat_capacity = platform.seat_capacity().unwrap_or(0);
         self.effective_joinable = platform.effective_joinable();
-        self.roster_all_ready = platform.all_members_match_ready()
-            && self.roster.len() == self.lobby_member_count
-            && self.roster.total_seats() > 0;
+        self.roster_all_ready = platform.all_members_match_ready();
         self.push_event(OnlineLobbyEvent::RosterChanged {
-            members: self.roster.len().min(u8::MAX as usize) as u8,
+            members: self.coherent_declaration_count.min(u8::MAX as usize) as u8,
             seats: self.platform_total_seats.min(u8::MAX as usize) as u8,
             all_ready: self.roster_all_ready,
             live_bindings: std::array::from_fn(|index| {
@@ -3093,8 +4555,11 @@ impl OnlineLobbyCoordinator {
                     first_error = Some(error);
                 }
             } else {
-                if let Err(error) = self.isolate_peer_authentication(platform, user)
-                    && first_error.is_none()
+                if let Err(error) = self.isolate_peer_authentication_with_reason(
+                    platform,
+                    user,
+                    SteamTransportCloseReason::Requested,
+                ) && first_error.is_none()
                 {
                     first_error = Some(error);
                 }
@@ -3107,6 +4572,26 @@ impl OnlineLobbyCoordinator {
                         *slot = None;
                     }
                 }
+                for slot in &mut self.permanently_rejected_users {
+                    if *slot == Some(user) {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        // Permanent isolation removes the mutable binding immediately, so a
+        // later membership callback cannot discover it through `bindings`.
+        // The Steam roster itself is the authority for releasing that
+        // lobby-epoch quarantine after an actual departure.
+        for slot in &mut self.permanently_rejected_users {
+            if slot.is_some_and(|user| {
+                !platform
+                    .roster()
+                    .iter()
+                    .flatten()
+                    .any(|member| member.user == user)
+            }) {
+                *slot = None;
             }
         }
         match first_error {
@@ -3135,7 +4620,9 @@ impl OnlineLobbyCoordinator {
         // every live auth/ticket/endpoint capability while retaining only the
         // immutable user-to-peer lease and its quality history.
         let close_result = if let Some(transport) = self.transport.as_mut() {
-            transport.close_connections_for_user(user).map(|_| ())
+            transport
+                .close_connections_for_user_with_reason(user, SteamTransportCloseReason::Requested)
+                .map(|_| ())
         } else {
             Ok(())
         };
@@ -3222,6 +4709,7 @@ impl OnlineLobbyCoordinator {
             user,
             peer_id,
             reconnect_allowed: resume.is_some(),
+            pregame_setup_retry: false,
         })?;
         if self.role == Some(OnlineLobbyRole::Client) && Some(user) == self.owner {
             if let Some(resume) = resume {
@@ -3231,7 +4719,7 @@ impl OnlineLobbyCoordinator {
                         OnlineFailureCode::ConnectionTimedOut,
                         OnlineFailureSeverity::Recoverable,
                         OnlineRecoveryAction::Reconnect,
-                        reason as u16,
+                        reason.diagnostic_code(),
                     ));
                 }
                 if self.flow.phase() != OnlineLobbyPhase::Reconnecting {
@@ -3252,6 +4740,12 @@ impl OnlineLobbyCoordinator {
                 || self
                     .binding(member.user)
                     .is_some_and(|binding| binding.authenticated && binding.connection.is_some())
+        })
+    }
+
+    fn all_remote_accounts_verified<B: SteamBackend>(&self, platform: &SteamPlatform<B>) -> bool {
+        platform.roster().iter().flatten().all(|member| {
+            member.user == self.local_user || self.remote_account_is_verified(member.user)
         })
     }
 
@@ -3499,6 +4993,7 @@ impl OnlineLobbyCoordinator {
                 user,
                 peer_id,
                 reconnect_allowed: false,
+                pregame_setup_retry: false,
             })
         } else {
             self.fail(
@@ -3598,6 +5093,23 @@ impl OnlineLobbyCoordinator {
 
     fn is_quality_rejected(&self, user: SteamUserId) -> bool {
         self.quality_rejected_users.contains(&Some(user))
+    }
+
+    fn is_permanently_rejected(&self, user: SteamUserId) -> bool {
+        self.permanently_rejected_users.contains(&Some(user))
+    }
+
+    fn mark_permanently_rejected(&mut self, user: SteamUserId) -> Result<(), OnlineLobbyError> {
+        if self.is_permanently_rejected(user) {
+            return Ok(());
+        }
+        let slot = self
+            .permanently_rejected_users
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(OnlineLobbyError::InvalidState)?;
+        *slot = Some(user);
+        Ok(())
     }
 
     fn mark_quality_rejected(&mut self, user: SteamUserId) -> Result<(), OnlineLobbyError> {
@@ -3777,7 +5289,20 @@ impl OnlineLobbyCoordinator {
     fn failure_for_error(&self, error: &OnlineLobbyError) -> OnlineFailure {
         match error {
             OnlineLobbyError::Steam(error) => OnlineFailure::from_steam(*error),
-            OnlineLobbyError::Transport(error) => failure_from_transport_error(*error),
+            OnlineLobbyError::Transport(error) => {
+                let mut failure = failure_from_transport_error(*error);
+                if matches!(
+                    self.flow.phase(),
+                    OnlineLobbyPhase::Lobby
+                        | OnlineLobbyPhase::Connecting
+                        | OnlineLobbyPhase::Authenticating
+                        | OnlineLobbyPhase::ManifestAgreement
+                ) && failure.recovery == OnlineRecoveryAction::Reconnect
+                {
+                    failure.recovery = OnlineRecoveryAction::Retry;
+                }
+                failure
+            }
             OnlineLobbyError::ManifestMismatch
             | OnlineLobbyError::Roster(_)
             | OnlineLobbyError::Protocol(_) => online_failure(
@@ -3892,8 +5417,10 @@ impl OnlineLobbyCoordinator {
 
         self.transport_request = None;
         self.relay_status = SteamRelayStatus::default();
+        self.network_initialization_started_at_ms = None;
         self.endpoints.clear();
         self.pending_incoming = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.pending_setup_retries = [None; MAX_STEAM_LOBBY_MEMBERS];
 
         let mut authenticated_users = [None; MAX_STEAM_LOBBY_MEMBERS];
         let mut authenticated_count = 0_usize;
@@ -3922,12 +5449,15 @@ impl OnlineLobbyCoordinator {
 
         let issued_tickets = std::mem::take(&mut self.issued_tickets);
         let Some(mut transport) = self.transport.take() else {
+            self.control_bootstrap = false;
             self.finish_retiring_resources(platform, authenticated_users, issued_tickets);
             return Ok(());
         };
+        self.control_bootstrap = false;
 
         self.retirement_metrics.started = self.retirement_metrics.started.saturating_add(1);
         let status = transport.begin_retirement(now_ms);
+        self.retain_completed_peer_traces(&mut transport);
         if status == SteamTransportRetirementStatus::Draining {
             self.retiring_transports.push_back(RetiringSteamTransport {
                 transport,
@@ -3943,6 +5473,31 @@ impl OnlineLobbyCoordinator {
             self.finish_retiring_resources(platform, authenticated_users, issued_tickets);
         }
         Ok(())
+    }
+
+    fn retain_completed_peer_traces(&mut self, transport: &mut SteamTransport) {
+        while let Some(trace) = transport.take_completed_peer_trace() {
+            if self.completed_peer_traces.len() == RETAINED_STEAM_PEER_TRACE_CAPACITY {
+                self.completed_peer_traces.pop_front();
+            }
+            self.completed_peer_traces.push_back(trace);
+        }
+    }
+
+    fn retain_active_completed_peer_traces(&mut self) {
+        loop {
+            let trace = self
+                .transport
+                .as_mut()
+                .and_then(SteamTransport::take_completed_peer_trace);
+            let Some(trace) = trace else {
+                break;
+            };
+            if self.completed_peer_traces.len() == RETAINED_STEAM_PEER_TRACE_CAPACITY {
+                self.completed_peer_traces.pop_front();
+            }
+            self.completed_peer_traces.push_back(trace);
+        }
     }
 
     fn pump_retiring_transports<B: SteamBackend>(
@@ -3962,6 +5517,7 @@ impl OnlineLobbyCoordinator {
             // queue, and retirement pumping performs no backend receive.
             while retiring.transport.poll_event().is_some() {}
             let status = retiring.transport.pump_retirement(now_ms);
+            self.retain_completed_peer_traces(&mut retiring.transport);
             if status == SteamTransportRetirementStatus::Draining {
                 self.retiring_transports.push_back(retiring);
                 continue;
@@ -3995,6 +5551,12 @@ impl OnlineLobbyCoordinator {
         }
         self.pending_platform_leave = false;
         Ok(())
+    }
+
+    fn local_leave_is_draining(&self) -> bool {
+        self.pending_platform_leave
+            && self.lobby.is_none()
+            && self.flow.phase() == OnlineLobbyPhase::OfflineMenu
     }
 
     fn record_retirement_outcome(&mut self, status: SteamTransportRetirementStatus) {
@@ -4044,9 +5606,19 @@ impl OnlineLobbyCoordinator {
         self.seat_capacity = 0;
         self.effective_joinable = false;
         self.roster_all_ready = false;
+        self.network_initialization_started_at_ms = None;
+        self.steam_backend_reconnect_started_at_ms = None;
+        self.steam_backend_reconnect_deadline_at_ms = None;
+        self.deferred_reconnect_transport_events.clear();
         self.pending_incoming = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.pending_setup_retries = [None; MAX_STEAM_LOBBY_MEMBERS];
         self.quality_rejected_users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.permanently_rejected_users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.lobby_users = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.verified_remote_accounts = [None; MAX_STEAM_LOBBY_MEMBERS];
+        self.coherent_declaration_count = 0;
         self.roster = OnlineRoster::default();
+        self.validated_manifest_roster = None;
     }
 
     fn clear_lobby_state(&mut self) {
@@ -4055,10 +5627,12 @@ impl OnlineLobbyCoordinator {
         self.local_declaration = None;
         self.bindings = std::array::from_fn(|_| None);
         self.transport = None;
+        self.control_bootstrap = false;
         self.transport_request = None;
         self.endpoints.clear();
         self.issued_tickets.clear();
         self.match_config = None;
+        self.validated_manifest_roster = None;
         self.committed_input_delay_calibration = None;
         self.countdown_start_tick = None;
         self.reconnect_resume = None;
@@ -4123,6 +5697,27 @@ fn manifest_peer_groups(
         return Err(OnlineLobbyError::ManifestMismatch);
     }
     Ok((groups, group_count))
+}
+
+fn copy_online_roster(source: &OnlineRoster) -> Result<OnlineRoster, OnlineLobbyError> {
+    let mut copy = OnlineRoster::default();
+    for member in source.iter() {
+        copy.upsert(member)?;
+    }
+    Ok(copy)
+}
+
+fn same_lobby_user_set(
+    left: &[Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+    right: &[Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+) -> bool {
+    left.iter()
+        .flatten()
+        .all(|user| right.contains(&Some(*user)))
+        && right
+            .iter()
+            .flatten()
+            .all(|user| left.contains(&Some(*user)))
 }
 
 fn manifest_declaration_matches_group(
@@ -4192,7 +5787,7 @@ fn timeout_failure(phase: OnlineLobbyPhase) -> OnlineFailure {
         code,
         OnlineFailureSeverity::Recoverable,
         recovery,
-        phase as u16,
+        phase.diagnostic_code(),
     )
 }
 
@@ -4232,7 +5827,40 @@ fn failure_from_transport_error(error: SteamTransportError) -> OnlineFailure {
             OnlineRecoveryAction::ReturnToMenu,
         ),
     };
-    online_failure(code, severity, recovery, error as u16)
+    online_failure(code, severity, recovery, error.diagnostic_code())
+}
+
+const fn pregame_close_is_transient(reason: SteamTransportCloseReason) -> bool {
+    matches!(
+        reason,
+        SteamTransportCloseReason::ConnectTimedOut
+            | SteamTransportCloseReason::RemoteClosed
+            | SteamTransportCloseReason::LocalProblem
+            | SteamTransportCloseReason::BackendFailure
+            | SteamTransportCloseReason::TransportFault
+    )
+}
+
+const fn permanent_pregame_close_failure(
+    reason: SteamTransportCloseReason,
+) -> Option<OnlineFailure> {
+    let code = match reason {
+        SteamTransportCloseReason::AdmissionRejected
+        | SteamTransportCloseReason::AuthenticationRejected => {
+            OnlineFailureCode::AuthenticationFailed
+        }
+        SteamTransportCloseReason::InboundQueueOverflow => OnlineFailureCode::RateLimited,
+        SteamTransportCloseReason::OversizedDatagram
+        | SteamTransportCloseReason::MalformedControlTraffic
+        | SteamTransportCloseReason::ProtocolViolation => OnlineFailureCode::MalformedTraffic,
+        _ => return None,
+    };
+    Some(online_failure(
+        code,
+        OnlineFailureSeverity::Fatal,
+        OnlineRecoveryAction::ReturnToLobby,
+        reason.diagnostic_code(),
+    ))
 }
 
 fn transport_error_for_close(reason: SteamTransportCloseReason) -> SteamTransportError {
@@ -4241,17 +5869,21 @@ fn transport_error_for_close(reason: SteamTransportCloseReason) -> SteamTranspor
         | SteamTransportCloseReason::AdmissionTimedOut => {
             SteamTransportError::AdmissionIdentityMismatch
         }
-        SteamTransportCloseReason::ConnectTimedOut | SteamTransportCloseReason::RemoteClosed => {
-            SteamTransportError::BackendUnavailable
-        }
+        SteamTransportCloseReason::ConnectTimedOut
+        | SteamTransportCloseReason::RemoteClosed
+        | SteamTransportCloseReason::LocalProblem
+        | SteamTransportCloseReason::BackendFailure => SteamTransportError::BackendUnavailable,
         SteamTransportCloseReason::Requested
         | SteamTransportCloseReason::QualityPolicyRejected
-        | SteamTransportCloseReason::LocalProblem
         | SteamTransportCloseReason::EndpointDropped
         | SteamTransportCloseReason::InboundQueueOverflow
         | SteamTransportCloseReason::OversizedDatagram
-        | SteamTransportCloseReason::BackendFailure
-        | SteamTransportCloseReason::TransportFault => SteamTransportError::BackendOperationFailed,
+        | SteamTransportCloseReason::TransportFault
+        | SteamTransportCloseReason::MalformedControlTraffic
+        | SteamTransportCloseReason::ProtocolViolation
+        | SteamTransportCloseReason::AuthenticationRejected => {
+            SteamTransportError::BackendOperationFailed
+        }
     }
 }
 
@@ -4309,7 +5941,9 @@ mod tests {
         FakeSteamControl, JoinOrigin, LicenseStatus, LobbyCreateRequest, LobbyMetadata,
         LobbyVisibility, RegionCode, SteamAppId, SteamClientConfig,
     };
-    use crate::steam_transport::{FakeSteamTransportNetwork, SteamTransportConnectionState};
+    use crate::steam_transport::{
+        FakeSteamTransportNetwork, SteamRelayAvailability, SteamTransportConnectionState,
+    };
 
     const HOST_RAW: u64 = 7_001;
     const CLIENT_RAW: u64 = 7_002;
@@ -4607,6 +6241,39 @@ mod tests {
         );
         coordinator.flow.phase = OnlineLobbyPhase::ManifestAgreement;
         (platform, control, coordinator, lobby, members)
+    }
+
+    fn four_member_client_fixture() -> (
+        SteamPlatform<FakeSteamBackend>,
+        OnlineLobbyCoordinator,
+        [OnlineRosterMember; 4],
+    ) {
+        let host_user = user(81_101);
+        let local_user = user(81_104);
+        let members = [
+            member(host_user, peer(10_111), 1, true, 0, 0),
+            member(user(81_102), peer(10_112), 1, true, 1, 1),
+            member(user(81_103), peer(10_113), 1, true, 2, 0),
+            member(local_user, peer(10_114), 1, true, 3, 1),
+        ];
+        let lobby = SteamLobbyId::new(88_402).unwrap();
+        let (mut platform, control) = fake_platform(local_user);
+        // Seed the three already-present accounts; the fake backend enforces
+        // the real join capacity gate and adds this process's local account.
+        seed_lobby_members(&control, lobby, host_user, &members[..3], 4);
+        let mut coordinator =
+            OnlineLobbyCoordinator::new(local_user, coordinator_config(), 0).unwrap();
+        coordinator
+            .begin_join(&mut platform, join_intent(lobby), members[3], 0)
+            .unwrap();
+        coordinator.pump(&mut platform, 1).unwrap();
+        coordinator
+            .reserve_peer_binding(host_user, members[0].peer_id)
+            .unwrap();
+        coordinator.binding_mut(host_user).unwrap().authenticated = true;
+        coordinator.rebuild_roster(&platform).unwrap();
+        coordinator.flow.phase = OnlineLobbyPhase::ManifestAgreement;
+        (platform, coordinator, members)
     }
 
     fn join_intent(lobby: SteamLobbyId) -> LobbyJoinIntent {
@@ -5116,6 +6783,259 @@ mod tests {
         let loading = timeout_failure(OnlineLobbyPhase::Loading);
         assert_eq!(loading.code, OnlineFailureCode::LoadingTimedOut);
         assert_eq!(loading.recovery, OnlineRecoveryAction::ReturnToLobby);
+    }
+
+    #[test]
+    fn transient_native_close_reasons_project_to_recoverable_connectivity_failures() {
+        for reason in [
+            SteamTransportCloseReason::ConnectTimedOut,
+            SteamTransportCloseReason::RemoteClosed,
+            SteamTransportCloseReason::LocalProblem,
+            SteamTransportCloseReason::BackendFailure,
+            SteamTransportCloseReason::TransportFault,
+        ] {
+            assert!(pregame_close_is_transient(reason));
+            assert_eq!(
+                transport_error_for_close(reason),
+                if reason == SteamTransportCloseReason::TransportFault {
+                    SteamTransportError::BackendOperationFailed
+                } else {
+                    SteamTransportError::BackendUnavailable
+                }
+            );
+        }
+        for reason in [
+            SteamTransportCloseReason::AdmissionRejected,
+            SteamTransportCloseReason::InboundQueueOverflow,
+            SteamTransportCloseReason::OversizedDatagram,
+            SteamTransportCloseReason::MalformedControlTraffic,
+            SteamTransportCloseReason::ProtocolViolation,
+            SteamTransportCloseReason::AuthenticationRejected,
+        ] {
+            assert!(!pregame_close_is_transient(reason));
+            assert!(permanent_pregame_close_failure(reason).is_some());
+        }
+        assert_eq!(
+            transport_error_for_close(SteamTransportCloseReason::ProtocolViolation),
+            SteamTransportError::BackendOperationFailed
+        );
+    }
+
+    #[test]
+    fn permanent_pregame_closes_quarantine_the_attributed_identity_without_retry() {
+        for reason in [
+            SteamTransportCloseReason::AdmissionRejected,
+            SteamTransportCloseReason::InboundQueueOverflow,
+            SteamTransportCloseReason::OversizedDatagram,
+            SteamTransportCloseReason::MalformedControlTraffic,
+            SteamTransportCloseReason::ProtocolViolation,
+            SteamTransportCloseReason::AuthenticationRejected,
+        ] {
+            let host_user = user(HOST_RAW);
+            let client_user = user(CLIENT_RAW);
+            let (mut platform, control, mut coordinator, lobby, _, client_member) =
+                auth_lobby_fixture(host_user);
+            let connection =
+                SteamConnectionId::new(86_000 + u32::from(reason.diagnostic_code())).unwrap();
+            platform
+                .begin_peer_authentication(
+                    lobby,
+                    client_user,
+                    &[9, 8, 7],
+                    AdmissionPurpose::Initial,
+                    1,
+                )
+                .unwrap();
+            coordinator
+                .reserve_peer_binding(client_user, client_member.peer_id)
+                .unwrap();
+            let binding = coordinator.binding_mut(client_user).unwrap();
+            binding.authenticated = true;
+            binding.admission = Some(AuthenticatedSteamPeer {
+                lobby,
+                user: client_user,
+                license_owner_user: client_user,
+                authenticated_user: client_user.authenticated(),
+                local_seats: 1,
+                purpose: AdmissionPurpose::Initial,
+            });
+            binding.pending_connection = Some(connection);
+            while coordinator.poll_event().is_some() {}
+
+            coordinator
+                .handle_transport_event(
+                    &mut platform,
+                    SteamTransportEvent::ConnectionClosed {
+                        connection,
+                        lobby,
+                        user: client_user,
+                        reason,
+                    },
+                    2,
+                )
+                .unwrap();
+
+            assert_eq!(
+                coordinator.status().phase,
+                OnlineLobbyPhase::Lobby,
+                "{reason:?}"
+            );
+            assert!(coordinator.status().failure.is_none(), "{reason:?}");
+            assert!(coordinator.binding(client_user).is_none(), "{reason:?}");
+            assert!(
+                coordinator.is_permanently_rejected(client_user),
+                "{reason:?}"
+            );
+            assert!(control.ended_auth_session(client_user), "{reason:?}");
+            let events: Vec<_> = std::iter::from_fn(|| coordinator.poll_event()).collect();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    OnlineLobbyEvent::PeerAuthenticationRejected {
+                        user,
+                        connection: None,
+                        failure,
+                    } if *user == client_user
+                        && failure.detail_code == reason.diagnostic_code()
+                        && failure.recovery == OnlineRecoveryAction::ReturnToLobby
+                )),
+                "{reason:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    OnlineLobbyEvent::PeerDisconnected {
+                        user,
+                        pregame_setup_retry: true,
+                        ..
+                    } if *user == client_user
+                )),
+                "{reason:?}"
+            );
+            assert_eq!(
+                coordinator.retry_control_setup(&mut platform, client_user, connection, 3),
+                Err(OnlineLobbyError::InvalidState),
+                "{reason:?}"
+            );
+            assert_eq!(
+                coordinator.begin_peer_authentication(
+                    &mut platform,
+                    client_user,
+                    client_member.peer_id,
+                    &[1, 2, 3],
+                    AdmissionPurpose::Initial,
+                    3,
+                ),
+                Err(OnlineLobbyError::PeerIdentityMismatch),
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_pregame_quarantine_is_released_only_after_lobby_departure() {
+        let host_user = user(HOST_RAW);
+        let client_user = user(CLIENT_RAW);
+        let (mut platform, control, mut coordinator, lobby, _, client_member) =
+            auth_lobby_fixture(host_user);
+        let connection = SteamConnectionId::new(86_900).unwrap();
+        coordinator
+            .reserve_peer_binding(client_user, client_member.peer_id)
+            .unwrap();
+        coordinator
+            .binding_mut(client_user)
+            .unwrap()
+            .pending_connection = Some(connection);
+        coordinator
+            .handle_transport_event(
+                &mut platform,
+                SteamTransportEvent::ConnectionClosed {
+                    connection,
+                    lobby,
+                    user: client_user,
+                    reason: SteamTransportCloseReason::ProtocolViolation,
+                },
+                2,
+            )
+            .unwrap();
+        assert!(coordinator.is_permanently_rejected(client_user));
+
+        control
+            .emit_membership_change(
+                lobby,
+                client_user,
+                crate::steam_platform::LobbyMembershipChange::Left,
+            )
+            .unwrap();
+        coordinator.pump(&mut platform, 3).unwrap();
+        assert!(!coordinator.is_permanently_rejected(client_user));
+    }
+
+    #[test]
+    fn transient_pregame_closes_keep_peer_scoped_manual_retry_available() {
+        for reason in [
+            SteamTransportCloseReason::ConnectTimedOut,
+            SteamTransportCloseReason::RemoteClosed,
+            SteamTransportCloseReason::LocalProblem,
+            SteamTransportCloseReason::BackendFailure,
+            SteamTransportCloseReason::TransportFault,
+        ] {
+            let host_user = user(HOST_RAW);
+            let client_user = user(CLIENT_RAW);
+            let (mut platform, _, mut coordinator, lobby, _, client_member) =
+                auth_lobby_fixture(host_user);
+            let connection =
+                SteamConnectionId::new(87_000 + u32::from(reason.diagnostic_code())).unwrap();
+            coordinator
+                .reserve_peer_binding(client_user, client_member.peer_id)
+                .unwrap();
+            coordinator
+                .binding_mut(client_user)
+                .unwrap()
+                .pending_connection = Some(connection);
+            while coordinator.poll_event().is_some() {}
+
+            coordinator
+                .handle_transport_event(
+                    &mut platform,
+                    SteamTransportEvent::ConnectionClosed {
+                        connection,
+                        lobby,
+                        user: client_user,
+                        reason,
+                    },
+                    2,
+                )
+                .unwrap();
+
+            assert!(coordinator.binding(client_user).is_some(), "{reason:?}");
+            assert!(
+                !coordinator.is_permanently_rejected(client_user),
+                "{reason:?}"
+            );
+            let events: Vec<_> = std::iter::from_fn(|| coordinator.poll_event()).collect();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    OnlineLobbyEvent::PeerDisconnected {
+                        connection: observed,
+                        user,
+                        pregame_setup_retry: true,
+                        reconnect_allowed: false,
+                        ..
+                    } if *observed == connection && *user == client_user
+                )),
+                "{reason:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    OnlineLobbyEvent::PeerAuthenticationRejected { user, .. }
+                        if *user == client_user
+                )),
+                "{reason:?}"
+            );
+        }
     }
 
     #[test]
@@ -5670,8 +7590,23 @@ mod tests {
         let (platform, _, mut coordinator, _, members) = three_member_client_fixture();
         let config = manifest_for_members(&members, members[0].peer_id, *b"manifest-three01");
 
+        let pending = coordinator.status();
+        assert_eq!(pending.roster_members, 3);
+        assert!(pending.all_members_ready);
+        assert_eq!(pending.required_remote_peers, 1);
+        assert_eq!(pending.verified_remote_accounts, 1);
+        assert_eq!(pending.required_remote_accounts, 2);
+
+        assert_eq!(
+            coordinator.accept_manifest(&platform, config.clone(), 2),
+            Err(OnlineLobbyError::PeersNotReady)
+        );
         coordinator
-            .accept_manifest(&platform, config.clone(), 2)
+            .record_remote_account_verified(user(81_002))
+            .unwrap();
+
+        coordinator
+            .accept_manifest(&platform, config.clone(), 3)
             .unwrap();
 
         assert_eq!(coordinator.status().phase, OnlineLobbyPhase::Loading);
@@ -5680,11 +7615,258 @@ mod tests {
             Some(config.manifest)
         );
         assert!(coordinator.binding(user(81_002)).is_none());
+        let retained: Vec<_> = coordinator.roster_members().collect();
+        assert_eq!(retained.len(), 3);
+        assert!(retained.contains(&members[1]));
+    }
+
+    #[test]
+    fn four_member_client_retains_full_manifest_roster_and_tracks_accounts_separately() {
+        let (platform, mut coordinator, members) = four_member_client_fixture();
+        let status = coordinator.status();
+        assert_eq!(status.roster_members, 4);
+        assert!(status.all_members_ready);
+        assert_eq!(status.required_remote_peers, 1);
+        assert_eq!(status.secure_remote_peers, 0);
+        assert_eq!(status.verified_remote_accounts, 1);
+        assert_eq!(status.required_remote_accounts, 3);
+
+        coordinator
+            .record_remote_account_verified(user(81_102))
+            .unwrap();
+        coordinator
+            .record_remote_account_verified(user(81_103))
+            .unwrap();
+        // Reordered duplicate completion is idempotent.
+        coordinator
+            .record_remote_account_verified(user(81_102))
+            .unwrap();
+        assert_eq!(coordinator.status().verified_remote_accounts, 3);
+        assert_eq!(
+            coordinator.record_remote_account_verified(user(99_999)),
+            Err(OnlineLobbyError::PeerIdentityMismatch)
+        );
+
+        let config = manifest_for_members(&members, members[0].peer_id, *b"manifest-four001");
+        coordinator.accept_manifest(&platform, config, 2).unwrap();
+        let retained: Vec<_> = coordinator.roster_members().collect();
+        assert_eq!(retained.len(), 4);
+        for member in members {
+            assert!(retained.contains(&member));
+        }
+        assert!(coordinator.binding(user(81_102)).is_none());
+        assert!(coordinator.binding(user(81_103)).is_none());
+    }
+
+    #[test]
+    fn steam_network_preparation_is_bounded_while_lobby_phase_has_no_deadline() {
+        let (mut platform, _, mut coordinator, _, _, _) = auth_lobby_fixture(user(HOST_RAW));
+        let session = coordinator
+            .take_transport_request()
+            .expect("lobby entry requests its Steam transport");
+        let network = FakeSteamTransportNetwork::new(8).unwrap();
+        let mut transport = network
+            .create_transport(user(HOST_RAW), session, coordinator.config.transport, 1)
+            .unwrap();
+        let waiting = SteamRelayStatus {
+            availability: SteamRelayAvailability::Waiting,
+            network_config: SteamRelayAvailability::Waiting,
+            any_relay: SteamRelayAvailability::Waiting,
+            ping_measurement_in_progress: true,
+        };
+        network.set_relay_status(user(HOST_RAW), waiting).unwrap();
+        transport.pump(2).unwrap();
+        coordinator.install_control_transport(transport, 2).unwrap();
+
+        coordinator.pump(&mut platform, 15_001).unwrap();
+        assert_eq!(coordinator.status().phase, OnlineLobbyPhase::Lobby);
+        assert_eq!(
+            coordinator.status().setup_stage,
+            OnlineSetupStage::PreparingSteamNetwork
+        );
+
+        coordinator.pump(&mut platform, 15_002).unwrap();
+        let status = coordinator.status();
+        assert_eq!(status.phase, OnlineLobbyPhase::Failed);
+        assert_eq!(
+            status.failure,
+            Some(online_failure(
+                OnlineFailureCode::SteamUnavailable,
+                OnlineFailureSeverity::Recoverable,
+                OnlineRecoveryAction::Retry,
+                (u16::from(SteamRelayAvailability::Waiting.diagnostic_code()) << 8)
+                    | u16::from(SteamRelayAvailability::Current.diagnostic_code()),
+            ))
+        );
+        assert_eq!(status.lobby, Some(session.lobby));
+        assert!(status.transport_installed);
+
+        network
+            .set_relay_status(
+                user(HOST_RAW),
+                SteamRelayStatus {
+                    availability: SteamRelayAvailability::Current,
+                    network_config: SteamRelayAvailability::Current,
+                    any_relay: SteamRelayAvailability::Current,
+                    ping_measurement_in_progress: false,
+                },
+            )
+            .unwrap();
+        coordinator
+            .retry_steam_network_initialization(15_003)
+            .unwrap();
+        let recovered = coordinator.status();
+        assert_eq!(recovered.phase, OnlineLobbyPhase::Lobby);
+        assert_eq!(recovered.lobby, Some(session.lobby));
+        assert!(recovered.transport_installed);
+        assert!(recovered.steam_network_readiness.is_ready());
+        assert_eq!(recovered.failure, None);
+    }
+
+    #[test]
+    fn backend_reconnect_grace_preserves_presecure_generation_and_incoming_identity_policy() {
+        let host_user = user(HOST_RAW);
+        let client_user = user(CLIENT_RAW);
+        let (mut platform, control, mut coordinator, lobby, _, _) = auth_lobby_fixture(host_user);
+        let session = coordinator
+            .take_transport_request()
+            .expect("lobby entry requests a control transport");
+        let network = FakeSteamTransportNetwork::new(16).unwrap();
+        let host_transport = network
+            .create_transport(host_user, session, coordinator.config.transport, 1)
+            .unwrap();
+        coordinator
+            .install_control_transport(host_transport, 1)
+            .unwrap();
+        coordinator.pump(&mut platform, 2).unwrap();
+        assert!(
+            coordinator
+                .transport
+                .as_ref()
+                .unwrap()
+                .incoming_user_is_allowed(client_user)
+        );
+
+        let mut client_transport = network
+            .create_transport(
+                client_user,
+                SteamP2pSession {
+                    role: SteamTransportRole::Client,
+                    ..session
+                },
+                coordinator.config.transport,
+                2,
+            )
+            .unwrap();
+        let connection = client_transport.connect_control(host_user, 3).unwrap();
+        coordinator.pump(&mut platform, 3).unwrap();
+        client_transport.pump(4).unwrap();
+        coordinator.pump(&mut platform, 4).unwrap();
+        assert_eq!(
+            coordinator.control_connection_for_user(client_user),
+            Some(connection)
+        );
+        coordinator
+            .transport
+            .as_mut()
+            .unwrap()
+            .mark_authenticating(connection)
+            .unwrap();
+        coordinator.pump(&mut platform, 5).unwrap();
+        while coordinator.poll_event().is_some() {}
+
+        // The original authentication deadline is approximately 15 seconds
+        // after connection. Cross it in wall-clock time while remaining well
+        // inside the platform's 10-second backend recovery grace.
+        control.emit_disconnect().unwrap();
+        coordinator.pump(&mut platform, 14_000).unwrap();
+        assert!(coordinator.steam_backend_reconnect_pending());
+        coordinator.pump(&mut platform, 19_000).unwrap();
+        assert_eq!(
+            coordinator.control_connection_for_user(client_user),
+            Some(connection),
+            "the original generation must not expire while Steam callbacks are unavailable"
+        );
+        assert!(
+            coordinator
+                .transport
+                .as_ref()
+                .unwrap()
+                .incoming_user_is_allowed(client_user),
+            "the last coherent lobby identity policy must survive the outage"
+        );
+        assert_eq!(
+            coordinator
+                .transport
+                .as_ref()
+                .unwrap()
+                .setup_phase(connection),
+            Some(SteamPeerSetupPhase::Authenticating)
+        );
+        assert_eq!(
+            coordinator.record_remote_account_verified(client_user),
+            Err(OnlineLobbyError::InvalidState),
+            "account verification cannot advance while Steam is unavailable"
+        );
+        assert_eq!(
+            coordinator.enter_control_manifest_agreement(19_000),
+            Err(OnlineLobbyError::InvalidState),
+            "manifest negotiation cannot advance during reconnect grace"
+        );
+
+        // Recovery's first metadata read is the platform's authoritative
+        // reconciliation. A hypothetical second backend read would fail;
+        // coordinator recovery must consume the committed cached snapshot.
+        control
+            .fail_lobby_data_read_on_occurrence(lobby, "afc_schema", 2)
+            .unwrap();
+        control.emit_connect().unwrap();
+        coordinator.pump(&mut platform, 20_000).unwrap();
+        assert!(!coordinator.steam_backend_reconnect_pending());
+        assert_eq!(
+            coordinator.control_connection_for_user(client_user),
+            Some(connection)
+        );
+        coordinator
+            .transport
+            .as_mut()
+            .unwrap()
+            .mark_secure(
+                connection,
+                AuthenticatedSteamPeer {
+                    lobby,
+                    user: client_user,
+                    license_owner_user: client_user,
+                    authenticated_user: client_user.authenticated(),
+                    local_seats: 1,
+                    purpose: AdmissionPurpose::Initial,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .transport
+                .as_ref()
+                .unwrap()
+                .setup_phase(connection),
+            Some(SteamPeerSetupPhase::Secure)
+        );
+        assert!(
+            !std::iter::from_fn(|| coordinator.poll_event()).any(|event| matches!(
+                event,
+                OnlineLobbyEvent::ControlRetrying { .. }
+                    | OnlineLobbyEvent::PeerDisconnected { .. }
+            )),
+            "recovery of the same generation must not require a manual Retry"
+        );
     }
 
     #[test]
     fn exact_manifest_reconstruction_rejects_omission_mutation_and_peer_reassignment() {
         let (platform, _, mut omitted_client, _, members) = three_member_client_fixture();
+        omitted_client
+            .record_remote_account_verified(user(81_002))
+            .unwrap();
         let omitted = manifest_for_members(
             &[members[0], members[2]],
             members[0].peer_id,
@@ -5696,6 +7878,9 @@ mod tests {
         );
 
         let (platform, _, mut mutated_client, _, members) = three_member_client_fixture();
+        mutated_client
+            .record_remote_account_verified(user(81_002))
+            .unwrap();
         let mutated_third = member(
             user(81_002),
             members[1].peer_id,
@@ -5715,6 +7900,9 @@ mod tests {
         );
 
         let (platform, _, mut reassigned_client, _, members) = three_member_client_fixture();
+        reassigned_client
+            .record_remote_account_verified(user(81_002))
+            .unwrap();
         let reassigned_third = member(
             user(81_002),
             members[1].peer_id,
@@ -5746,6 +7934,9 @@ mod tests {
     fn pending_coherent_declaration_defers_manifest_until_snapshot_is_complete() {
         let (mut platform, control, mut coordinator, lobby, members) =
             three_member_client_fixture();
+        coordinator
+            .record_remote_account_verified(user(81_002))
+            .unwrap();
         let config = manifest_for_members(&members, members[0].peer_id, *b"manifest-pend001");
         let third_user = user(81_002);
         control

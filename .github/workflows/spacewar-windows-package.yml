@@ -31,6 +31,30 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: spacewar-windows-debug
+      - name: Verify immutable source tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF_NAME -notmatch '^spacewar-test-[0-9]+$') {
+            throw "Unexpected Spacewar tag name: $env:GITHUB_REF_NAME"
+          }
+          $head = (git rev-parse --verify HEAD).Trim()
+          $tagCommit = (git rev-list -n 1 $env:GITHUB_REF_NAME).Trim()
+          if ($head -ne $env:GITHUB_SHA -or $tagCommit -ne $env:GITHUB_SHA) {
+            throw "The checked-out commit, source tag, and GITHUB_SHA must match exactly."
+          }
+      - name: Test exact App ID 480 feature identity
+        env:
+          AFC_STEAM_APP_ID: "480"
+        run: >-
+          cargo test --locked --no-default-features
+          --features native,steam-net,spacewar-dev
+      - name: Check all targets with exact App ID 480 feature identity
+        env:
+          AFC_STEAM_APP_ID: "480"
+        run: >-
+          cargo check --locked --no-default-features
+          --features native,steam-net,spacewar-dev --all-targets
       - name: Build App ID 480 development client
         env:
           AFC_STEAM_APP_ID: "480"
@@ -63,6 +87,12 @@ jobs:
           if ($identity.shipping -ne $false -or $identity.steam_app_id -ne 480) {
             throw "Expected a non-shipping development identity compiled for App ID 480."
           }
+          if (
+            $identity.compatibility_build_id -notmatch '^[0-9a-f]{32}$' -or
+            $identity.gameplay_content_hash -notmatch '^[0-9a-f]{64}$'
+          ) {
+            throw "The compiled release identity contains malformed build hashes."
+          }
 
           $stage = Join-Path $env:GITHUB_WORKSPACE "dist/spacewar/windows-x86_64"
           New-Item -ItemType Directory -Force $stage | Out-Null
@@ -79,11 +109,23 @@ jobs:
             (Join-Path $env:GITHUB_WORKSPACE "packaging/spacewar/windows/README.txt") `
             (Join-Path $stage "README.txt")
 
+          $stagedBinary = Join-Path $stage "ffc-prototype.exe"
+          $stagedIdentityText = & $stagedBinary --release-identity
+          if ($LASTEXITCODE -ne 0) {
+            throw "The staged player identity query failed with exit code $LASTEXITCODE."
+          }
+          $stagedIdentity = $stagedIdentityText | ConvertFrom-Json
+          $builtIdentityJson = $identity | ConvertTo-Json -Depth 8 -Compress
+          $stagedIdentityJson = $stagedIdentity | ConvertTo-Json -Depth 8 -Compress
+          if ($builtIdentityJson -cne $stagedIdentityJson) {
+            throw "The built and staged executable release identities differ."
+          }
+
           [ordered]@{
             source_commit = $env:GITHUB_SHA
             source_tag = $env:GITHUB_REF_NAME
             spacewar_compile_opt_in = $true
-            release_identity = $identity
+            release_identity = $stagedIdentity
           } | ConvertTo-Json -Depth 8 | Set-Content `
             (Join-Path $stage "spacewar-build.json") `
             -Encoding utf8
@@ -105,9 +147,23 @@ jobs:
               throw "Missing required package file: $required"
             }
           }
+
+          $artifactRoot = Join-Path $env:GITHUB_WORKSPACE "dist/artifacts"
+          New-Item -ItemType Directory -Force $artifactRoot | Out-Null
+          $shortCommit = $env:GITHUB_SHA.Substring(0, 12)
+          $archiveName = "afc-spacewar-windows-$($env:GITHUB_REF_NAME)-$shortCommit.zip"
+          $archive = Join-Path $artifactRoot $archiveName
+          Compress-Archive `
+            -Path (Join-Path $stage "*") `
+            -DestinationPath $archive `
+            -CompressionLevel Optimal
+          $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$archiveHash  $archiveName" | Set-Content `
+            "$archive.sha256" `
+            -Encoding ascii
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: afc-spacewar-windows-${{ github.ref_name }}-${{ github.sha }}
-          path: dist/spacewar/windows-x86_64/
+          path: dist/artifacts/
           if-no-files-found: error
           retention-days: 14

@@ -1,6 +1,6 @@
 # Steam Gameplay Transport
 
-- Status: **implemented production listen path; native two-account release validation pending**
+- Status: **implemented production listen path; physical Steam validation pending**
 - Source: `src/steam_transport.rs`
 - Feature: `steam-net`
 - Binding: exact `steamworks = 0.12.2`
@@ -27,13 +27,18 @@ not run callbacks or receive/admit native traffic themselves.
 ## Authenticated connection flow
 
 The listen authority opens `CreateListenSocketP2P` on virtual port 0 by default.
-The client connects to the lobby authority's exact Steam networking identity with
-`ConnectP2P`. An inbound `Connecting` callback is retained as
-`PendingAdmission`; it is never accepted automatically.
+The client immediately connects to the lobby authority's exact Steam networking
+identity with `ConnectP2P` after lobby entry. The authority promptly accepts a
+current lobby member into a quarantined `ControlReady` connection; this is not
+gameplay admission and grants no seat.
 
-The authority must pass the matching `AuthenticatedSteamPeer` previously consumed
-from `SteamPlatform`. The transport checks all of the following again before
-calling `AcceptConnection`:
+Both sides then exchange one-use Steam tickets over the same connection. Before
+promotion, the authority must pass the matching `AuthenticatedSteamPeer`
+previously consumed from `SteamPlatform`. This direct exchange secures the
+physical star link; AFCP v2 subsequently routes recipient-bound tickets between
+clients through the authority so every participant authenticates all `N-1`
+remote accounts without adding client-to-client sockets. The transport checks all
+of the following:
 
 - exact lobby ID;
 - exact remote Steam ID;
@@ -56,8 +61,12 @@ counted without producing attacker-amplifiable public events. Callback work is
 limited per pump and excess callbacks remain queued for a later pump; ordinary
 callback bursts no longer close the listener or healthy connections. A hard
 identityless backend/inbox corruption still faults closed. Missing or mismatched
-authenticated admissions are rejected. An AFC endpoint is exposed only after
-Steam reports the connection as `Connected`.
+authenticated admissions are rejected. The security phase is monotonic:
+`Connecting -> ControlReady -> Authenticating -> Secure -> ManifestAgreement ->
+GameplayReceiveArmed -> GameplayReady`. `GameplayReceiveArmed` buffers AFCN for
+the exact manifest transaction but exposes no endpoint and permits no gameplay
+send. An AFC endpoint is exposed only after explicit `GameplayReady` promotion
+following the final activation receipt barrier.
 
 An overlapping connection for the same remote identity is rejected at both the
 transport and backend layers by default. `mark_connection_replacement_eligible`
@@ -73,6 +82,42 @@ the exact tag and never fall back from a stale tagged callback to a newer link
 with the same Steam user. A fresh between-match transport therefore cannot alias
 a callback retained for an old retirement.
 
+## AFCP v2 delivery and setup barriers
+
+Lobby schema 4 and AFCP v2 keep all pre-game control on the quarantined star
+connections. `RosterPrepare` / `RosterAccepted` freeze a full-roster auth epoch.
+`RoutedAuthTicket` retains separate identities for the outer physical hop and the
+logical ticket issuer/recipient, plus a stable non-zero logical ticket ID;
+`RoutedAuthAccepted` follows the reverse star route. The authority may validate
+the outer hop and routing membership, but it treats the recipient-bound ticket
+bytes as opaque; only the logical recipient starts the Steam auth session.
+`RosterAuthComplete` closes the epoch only after
+every participant has validated every other account.
+
+AFCP uses Steam reliable/no-Nagle delivery plus its own bounded application
+sequence and cumulative ACK. The sender retains each encoded frame until the
+remote application accepts it. Decoding alone does not ACK it: the runtime must
+consume the opaque ingress token, at which point the transport first validates
+the ACK generation and transmitted upper bound, applies any piggyback ACK, and
+queues the inbound sequence ACK. Semantic rejection applies neither ACK and
+rejects later ingress for that connection generation. `LinkHello` is always sent
+before a standalone ACK. Same-generation duplicate frames and duplicate ACKs are
+idempotent.
+
+Manifest control is keyed by a non-zero transaction ID and an immutable set of
+`(SteamUserId, SteamConnectionId)` participants. The authority waits for every
+`ManifestAccepted`, sends `ManifestCommit`, and waits for every
+`ManifestCommitAccepted`. It then arms every exact connection for hidden AFCN
+receive buffering before sending `GameplayActivate`. Clients arm before replying
+`GameplayActivated` and stay quarantined. After all replies, the authority sends
+the same direction-aware `GameplayActivated` as a reliable final release, promotes
+its endpoints, and clients promote only upon receiving that release.
+Frames for a known retired transaction are still semantically ACKed and ignored:
+deleting already sequenced reliable frames would create gaps. `SetupCancel` or a
+recoverable abort rolls `ManifestAgreement` and `GameplayReceiveArmed` back to
+`Secure` only before the final-release barrier; a handed-off `GameplayReady`
+endpoint is never rolled back in place.
+
 ## Datagram behavior
 
 Every endpoint implements `NonBlockingDatagramEndpoint`. Both application-facing
@@ -81,9 +126,15 @@ is bounded. AFC's 1,200-byte datagram ceiling is applied before copying an inbou
 Steam message. An oversized Steam message or a full inbound endpoint queue closes
 that peer rather than dropping canonical protocol data silently.
 
-The adapter sends `UNRELIABLE_NO_DELAY`. Reliability, ordering, retry, sequencing,
-and acknowledgement remain owned by `NetworkRuntime`; using Steam reliable mode
-underneath it would add head-of-line blocking and duplicate retransmission policy.
+Promoted AFC gameplay datagrams use `UNRELIABLE_NO_DELAY`. Reliability, ordering,
+retry, sequencing, and acknowledgement remain owned by `NetworkRuntime`; using
+Steam reliable mode underneath gameplay would add head-of-line blocking and
+duplicate retransmission policy. Quarantined AFCP control frames use
+`RELIABLE_NO_NAGLE` plus bounded application sequence/ack retention. A non-AFCP
+datagram received before `GameplayReceiveArmed` closes the connection as malformed
+traffic. Once armed, valid AFCN is buffered behind the hidden endpoint; local AFCN
+sends remain disabled until `GameplayReady`.
+
 Steam send-buffer pressure retains the already-queued datagram for a later pump;
 continued pressure fills the bounded endpoint queue and makes subsequent sends
 return `SendOutcome::Full` with their original datagram.
@@ -117,10 +168,33 @@ state and continues draining callbacks.
 
 ## Relay and quality status
 
-The real backend calls `InitRelayNetworkAccess` during construction and polls the
-detailed relay status without logging Steam's unbounded diagnostic string. It
-exposes bounded enums for overall availability, network configuration, any-relay
-reachability, and ping-measurement progress.
+The real backend calls both `InitRelayNetworkAccess` and `InitAuthentication`
+during construction and polls both readiness states without logging Steam's
+unbounded diagnostic string. It exposes bounded enums for overall availability,
+certificate/authentication readiness, network configuration, any-relay
+reachability, and ping-measurement progress. Online preparation is capped at 15
+seconds, and entering Online can retry terminal initialization failures rather
+than permanently poisoning the process.
+
+An early transient control-socket failure receives one replacement generation
+after an exact 500 ms backoff only when at least five seconds remain in the
+original 15-second connection/authentication setup window, which continues after
+`ControlReady` until the direct link reaches `Secure`. Both sides retire the old
+generation, cancel its ticket/auth state, and issue fresh one-use tickets. The
+retry is never used for malformed protocol, identity, ownership, or ticket
+failures. A later or second transient failure becomes the lobby's actionable
+Retry path. Because clients are the only connection originators, only the client
+acts on an exhausted physical-link Retry; the authority passively waits for and
+authenticates the replacement. The action retains Steam lobby membership and the
+invitation rather than returning to the online menu.
+
+An in-lobby Steam backend disconnect has a distinct 10-second grace. Existing
+lobby/auth/socket capabilities and promoted gameplay endpoints remain installed,
+and the transport continues pumping, but the authority accepts no new incoming
+users and no new setup capability advances. AFC defers bounded auth/setup callback
+results and extends setup/activation deadlines by the measured pause. Recovery
+must revalidate local membership, lobby metadata, and owner before deferred work
+resumes; expiry or failed revalidation leaves the lobby.
 
 For connected peers, `connection_quality` reports sanitized integer metrics:
 ping, local/remote delivery rate, packet and byte rates, estimated send rate,
@@ -175,14 +249,18 @@ The native runtime/coordinator enforces these integrated invariants:
 
 1. construct a transport only while the platform is in the exact compatible lobby;
 2. close lobby joinability before accepting countdown/start transitions;
-3. send auth tickets only after `AuthTicketReady` and consume platform admission
-   before `admit_incoming` or `connect_p2p`;
-4. move `AdmittedSteamEndpoint.endpoint` into the matching remote client or listen
+3. require role-aware secure-link counts (authority `N-1`, client one) and `N-1`
+   verified remote accounts per participant before starting a manifest transaction;
+4. send auth tickets only after `AuthTicketReady` and consume platform admission
+   before a quarantined connection can become `Secure`;
+5. bind manifest acceptance, commit acceptance, receive arming, and activation to
+   one immutable participant/connection-generation set;
+6. move `AdmittedSteamEndpoint.endpoint` into the matching remote client or listen
    authority and retain its authenticated peer/seat binding; and
-5. move the old transport into coordinator-owned retirement during teardown,
+7. move the old transport into coordinator-owned retirement during teardown,
    continue bounded outbound-only pumping, and release its match-scoped Steam
    tickets/authentication only after retirement reaches a terminal outcome.
 
 Release still requires invite, launch join, timeout, unplug/reconnect, host loss,
-queue pressure, relay status and clean shutdown validation with two licensed Steam
-accounts on separate machines.
+queue pressure, relay status and clean shutdown validation with licensed Steam
+accounts on separate machines, including a four-account star/routed-auth run.

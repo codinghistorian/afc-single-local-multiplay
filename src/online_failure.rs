@@ -7,7 +7,8 @@
 use crate::network_protocol::{DisconnectCode, DisconnectMessage, RetryDisposition};
 use crate::session::SessionError;
 use crate::steam_platform::{
-    LobbyExitReason, PeerAuthenticationRejection, SteamBackendError, SteamPlatformError,
+    AuthSessionStartFailure, AuthValidationFailure, LobbyExitReason, PeerAuthenticationRejection,
+    SteamBackendError, SteamPlatformError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,21 +209,38 @@ impl OnlineFailure {
     }
 
     pub const fn from_auth_rejection(reason: PeerAuthenticationRejection) -> Self {
-        use crate::steam_platform::AuthValidationFailure;
-
-        let code = match reason {
+        let (code, severity, recovery) = match reason {
             PeerAuthenticationRejection::Validation(
                 AuthValidationFailure::VacBanned | AuthValidationFailure::PublisherBan,
-            ) => OnlineFailureCode::PlatformBanned,
-            PeerAuthenticationRejection::DoesNotHaveLicense => OnlineFailureCode::OwnershipFailed,
+            ) => (
+                OnlineFailureCode::PlatformBanned,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
+            ),
+            PeerAuthenticationRejection::Validation(
+                AuthValidationFailure::UserNotConnected | AuthValidationFailure::VacCheckTimedOut,
+            )
+            | PeerAuthenticationRejection::IntentExpired => (
+                OnlineFailureCode::AuthenticationTimedOut,
+                OnlineFailureSeverity::Recoverable,
+                OnlineRecoveryAction::Retry,
+            ),
+            PeerAuthenticationRejection::DoesNotHaveLicense => (
+                OnlineFailureCode::OwnershipFailed,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
+            ),
             PeerAuthenticationRejection::NoAuthentication
-            | PeerAuthenticationRejection::Validation(_) => OnlineFailureCode::AuthenticationFailed,
-            PeerAuthenticationRejection::IntentExpired => OnlineFailureCode::AuthenticationTimedOut,
+            | PeerAuthenticationRejection::Validation(_) => (
+                OnlineFailureCode::AuthenticationFailed,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
+            ),
         };
         Self {
             code,
-            severity: OnlineFailureSeverity::Fatal,
-            recovery: OnlineRecoveryAction::ReturnToMenu,
+            severity,
+            recovery,
             detail_code: 0,
         }
     }
@@ -274,6 +292,34 @@ impl OnlineFailure {
                 OnlineFailureCode::SteamDisconnected,
                 OnlineFailureSeverity::Recoverable,
                 OnlineRecoveryAction::Retry,
+            ),
+            SteamPlatformError::Backend(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::ExpiredTicket,
+            )) => (
+                OnlineFailureCode::AuthenticationTimedOut,
+                OnlineFailureSeverity::Recoverable,
+                OnlineRecoveryAction::Retry,
+            ),
+            SteamPlatformError::Backend(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::InvalidVersion | AuthSessionStartFailure::GameMismatch,
+            )) => (
+                OnlineFailureCode::IncompatibleVersion,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
+            ),
+            SteamPlatformError::Backend(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::InvalidTicket,
+            )) => (
+                OnlineFailureCode::AuthenticationFailed,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
+            ),
+            SteamPlatformError::Backend(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::DuplicateRequest,
+            )) => (
+                OnlineFailureCode::InternalFailure,
+                OnlineFailureSeverity::Fatal,
+                OnlineRecoveryAction::ReturnToMenu,
             ),
             SteamPlatformError::Backend(SteamBackendError::InitializationFailed)
             | SteamPlatformError::Backend(SteamBackendError::AlreadyInitialized) => (
@@ -525,8 +571,6 @@ mod tests {
 
     #[test]
     fn vac_and_publisher_bans_have_a_distinct_fatal_projection() {
-        use crate::steam_platform::AuthValidationFailure;
-
         for reason in [
             AuthValidationFailure::VacBanned,
             AuthValidationFailure::PublisherBan,
@@ -536,6 +580,54 @@ mod tests {
             assert_eq!(failure.code, OnlineFailureCode::PlatformBanned);
             assert_eq!(failure.severity, OnlineFailureSeverity::Fatal);
         }
+    }
+
+    #[test]
+    fn transient_auth_backend_results_offer_retry_without_weakening_permanent_rejections() {
+        for reason in [
+            PeerAuthenticationRejection::Validation(AuthValidationFailure::UserNotConnected),
+            PeerAuthenticationRejection::Validation(AuthValidationFailure::VacCheckTimedOut),
+            PeerAuthenticationRejection::IntentExpired,
+        ] {
+            let failure = OnlineFailure::from_auth_rejection(reason);
+            assert_eq!(failure.code, OnlineFailureCode::AuthenticationTimedOut);
+            assert_eq!(failure.severity, OnlineFailureSeverity::Recoverable);
+            assert_eq!(failure.recovery, OnlineRecoveryAction::Retry);
+        }
+
+        for reason in [
+            PeerAuthenticationRejection::Validation(AuthValidationFailure::TicketInvalid),
+            PeerAuthenticationRejection::Validation(
+                AuthValidationFailure::TicketNetworkIdentityFailure,
+            ),
+            PeerAuthenticationRejection::Validation(AuthValidationFailure::TicketAlreadyUsed),
+        ] {
+            let failure = OnlineFailure::from_auth_rejection(reason);
+            assert_eq!(failure.code, OnlineFailureCode::AuthenticationFailed);
+            assert_eq!(failure.severity, OnlineFailureSeverity::Fatal);
+            assert_eq!(failure.recovery, OnlineRecoveryAction::ReturnToMenu);
+        }
+    }
+
+    #[test]
+    fn immediate_auth_session_results_keep_their_retry_and_integrity_meaning() {
+        let expired = OnlineFailure::from_steam(SteamPlatformError::Backend(
+            SteamBackendError::AuthSessionRejected(AuthSessionStartFailure::ExpiredTicket),
+        ));
+        assert_eq!(expired.code, OnlineFailureCode::AuthenticationTimedOut);
+        assert_eq!(expired.recovery, OnlineRecoveryAction::Retry);
+
+        let cross_game = OnlineFailure::from_steam(SteamPlatformError::Backend(
+            SteamBackendError::AuthSessionRejected(AuthSessionStartFailure::GameMismatch),
+        ));
+        assert_eq!(cross_game.code, OnlineFailureCode::IncompatibleVersion);
+        assert_eq!(cross_game.severity, OnlineFailureSeverity::Fatal);
+
+        let duplicate = OnlineFailure::from_steam(SteamPlatformError::Backend(
+            SteamBackendError::AuthSessionRejected(AuthSessionStartFailure::DuplicateRequest),
+        ));
+        assert_eq!(duplicate.code, OnlineFailureCode::InternalFailure);
+        assert_eq!(duplicate.recovery, OnlineRecoveryAction::ReturnToMenu);
     }
 
     #[test]

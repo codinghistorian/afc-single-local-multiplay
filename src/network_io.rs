@@ -192,6 +192,18 @@ impl AfcDatagram {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len()]
     }
+
+    /// Overwrites the complete fixed-capacity backing store before a
+    /// secret-bearing transport frame is released.
+    ///
+    /// Ordinary AFC datagrams are not secret-bearing and do not pay this cost.
+    /// Steam's pre-game control transport invokes it for encoded authentication
+    /// tickets and for untrusted inbound AFCP scratch copies.
+    pub(crate) fn zeroize(&mut self) {
+        self.bytes.fill(0);
+        std::hint::black_box(&mut self.bytes);
+        self.len = 0;
+    }
 }
 
 impl Default for AfcDatagram {

@@ -3,26 +3,30 @@
 //! The deterministic simulation never owns this service. On a native Steam
 //! build, one [`NativeOnlineRuntime`] owns the sole real Steam platform,
 //! [`OnlineLobbyCoordinator`], the Steam gameplay transport factory, and a
-//! bounded pre-game authentication signaling channel. Builds without
+//! bounded AFCP control stream on each quarantined socket. Builds without
 //! `steam-net` retain the same screen model and fail closed with a localizable
 //! unavailable reason.
 
-#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-use core::ffi::c_void;
 use core::fmt;
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 use std::collections::VecDeque;
 
 use crate::headless::HeadlessMatchConfig;
+#[cfg(test)]
 use crate::match_config::current_compatibility;
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 use crate::match_config::headless_config_from_manifest;
+#[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+use crate::multiplayer_diagnostics::resolve_diagnostics_root;
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+use crate::multiplayer_diagnostics::{AuthorityDiagnosticsArchive, SteamPregameTraceDiagnostic};
+#[cfg(test)]
 use crate::network_codec::encode_packet;
+#[cfg(test)]
 use crate::network_codec::{WireMessage, decode_packet};
-use crate::network_protocol::{
-    DefinitionId, MatchManifest, PeerId, RetryDisposition, StartMessage,
-};
+#[cfg(test)]
+use crate::network_protocol::StartMessage;
+use crate::network_protocol::{DefinitionId, MatchManifest, PeerId, RetryDisposition};
 use crate::network_quality::{InputDelayCalibrationSnapshot, NetworkQualitySnapshot};
 use crate::online_failure::{
     OnlineFailure, OnlineFailureCode, OnlineFailureSeverity, OnlineRecoveryAction,
@@ -35,7 +39,8 @@ use crate::online_lobby::{
     OnlineLobbyCoordinator,
 };
 use crate::online_lobby::{
-    OnlineLobbyError, OnlineLobbyEvent, OnlineLobbyRole, OnlineMatchOutcome,
+    OnlineLobbyError, OnlineLobbyEvent, OnlineLobbyRole, OnlineMatchOutcome, OnlineSetupStage,
+    OnlineStartBlocker,
 };
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 use crate::online_lobby::{OnlineLobbyPhase, OnlineLobbyStatus};
@@ -45,6 +50,11 @@ use crate::online_roster::{
 use crate::reconnect::{AuthenticatedPeer, AuthenticatedUserId};
 use crate::remote_online_client::RemoteAuthorityDisconnect;
 use crate::simulation::SimTick;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+use crate::steam_control::{
+    AccountAuthEpoch, ManifestTransactionId, SteamAuthTicketPayload, SteamControlIdentity,
+    SteamControlMessage,
+};
 use crate::steam_platform::{
     AdmissionPurpose, LobbyJoinIntent, MAX_STEAM_AUTH_TICKET_BYTES, MAX_STEAM_LOBBY_MEMBERS,
     RegionCode, SPACEWAR_APP_ID, SteamAppId, SteamClientConfig, SteamInputActionSet,
@@ -53,25 +63,29 @@ use crate::steam_platform::{
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 use crate::steam_platform::{
     AuthTicketHandle, LobbyCreateRequest, LobbyMetadata, LobbyVisibility, SteamBackend,
-    SteamPlatform, SteamPlatformState,
+    SteamPlatform,
 };
-#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-use crate::steam_transport::steam_client_relay_status;
 use crate::steam_transport::{
-    AdmittedSteamEndpoint, SteamConnectionId, SteamRelayStatus, SteamTransportError,
+    AdmittedSteamEndpoint, SteamConnectionId, SteamNetworkReadiness, SteamRelayStatus,
+    SteamTransportError,
 };
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
-use crate::steam_transport::{SteamP2pSession, SteamTransport, SteamTransportConfig};
+use crate::steam_transport::{
+    SteamP2pSession, SteamTransport, SteamTransportCloseReason, SteamTransportConfig,
+};
 
 pub const STEAM_APP_ID_ENV: &str = "AFC_STEAM_APP_ID";
 pub const STEAM_SPACEWAR_OPT_IN_ENV: &str = "AFC_STEAM_DEV_SPACEWAR_480";
 pub const COMPILED_STEAM_APP_ID: Option<&str> = option_env!("AFC_COMPILED_STEAM_APP_ID");
 pub const COMPILED_SPACEWAR_OPT_IN: bool = cfg!(feature = "spacewar-dev");
-/// This runtime owns one `ISteamNetworkingMessages` route, so use Valve's
-/// efficient default channel instead of a large mnemonic value.
-pub const AUTH_SIGNAL_CHANNEL: u32 = 0;
 pub const MAX_NATIVE_ONLINE_EVENTS: usize = 128;
 pub const MAX_AUTH_SIGNALS_PER_PUMP: usize = 16;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const AUTH_RETRY_DIRECT_ABORT_CODE: u16 = 0xA101;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const AUTH_RETRY_ROSTER_ABORT_CODE: u16 = 0xA102;
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const AUTH_REJECT_ROSTER_ABORT_CODE_BASE: u16 = 0xA200;
 /// A single Steam user may consume at most one quarter of the bounded
 /// pre-game receive budget. Exceeding this quota invalidates only that user's
 /// outcomes; it never invalidates another user's signal. Steam's shared
@@ -79,16 +93,23 @@ pub const MAX_AUTH_SIGNALS_PER_PUMP: usize = 16;
 pub const MAX_AUTH_SIGNALS_PER_USER_PER_PUMP: usize =
     MAX_AUTH_SIGNALS_PER_PUMP / MAX_STEAM_LOBBY_MEMBERS;
 
+#[cfg(test)]
 const AUTH_SIGNAL_MAGIC: [u8; 4] = *b"AFCA";
+#[cfg(test)]
 const AUTH_SIGNAL_VERSION: u8 = 3;
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 const AUTH_SIGNAL_KIND_HELLO: u8 = 0;
+#[cfg(test)]
 const AUTH_SIGNAL_KIND_TICKET: u8 = 1;
+#[cfg(test)]
 const AUTH_SIGNAL_KIND_MANIFEST: u8 = 2;
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 const SESSION_HELLO_SIGNAL_BYTES: usize = 32;
+#[cfg(test)]
 const AUTH_SIGNAL_HEADER_BYTES: usize = 62;
+#[cfg(test)]
 const MANIFEST_SIGNAL_HEADER_BYTES: usize = 32;
+#[cfg(test)]
 const MAX_AUTH_SIGNAL_BYTES: usize =
     MANIFEST_SIGNAL_HEADER_BYTES + crate::network_codec::MAX_PACKET_BYTES;
 
@@ -103,6 +124,17 @@ pub enum NativeOnlineUnavailableReason {
 }
 
 impl NativeOnlineUnavailableReason {
+    pub const fn diagnostic_code(self) -> u16 {
+        match self {
+            Self::SteamFeatureDisabled => 101,
+            Self::UnsupportedPlatform => 102,
+            Self::MissingAppId => 103,
+            Self::InvalidAppId => 104,
+            Self::SpacewarRequiresExplicitOptIn => 105,
+            Self::SteamInitializationFailed => 106,
+        }
+    }
+
     pub const fn message_key(self) -> &'static str {
         match self {
             Self::SteamFeatureDisabled => "online.unavailable.steam_feature_disabled",
@@ -340,6 +372,9 @@ pub enum NativeOnlineCommand {
     DeclineJoin,
     SetLocalDeclaration(OnlineRosterMember),
     SetReady(bool),
+    /// Retries the single attributed, recoverable Steam setup failure while
+    /// preserving the lobby and unrelated authority-star links.
+    RetrySteamSetup,
     CommitManifest {
         options: OnlineManifestOptions,
         current_tick: SimTick,
@@ -354,7 +389,7 @@ pub enum NativeOnlineCommand {
     /// Internal application-to-coordinator handoff for an authenticated,
     /// match-bound authority terminal observed by the remote worker.
     ApplyAuthorityDisconnect(RemoteAuthorityDisconnect),
-    /// Irreversibly fences new transport, ticket, authentication-signal, and
+    /// Irreversibly fences new transport, ticket, AFCP-control, and
     /// gameplay-endpoint admission for the current match while established
     /// connections remain available for bounded terminal/ACK drain.
     QuiesceAdmission,
@@ -446,6 +481,13 @@ pub struct NativeOnlineViewModel {
     pub local_ready: bool,
     pub all_members_ready: bool,
     pub connected_remote_peers: u8,
+    pub secure_remote_peers: u8,
+    pub required_remote_peers: u8,
+    pub verified_remote_accounts: u8,
+    pub required_remote_accounts: u8,
+    pub steam_network_readiness: SteamNetworkReadiness,
+    pub setup_stage: OnlineSetupStage,
+    pub start_blocker: Option<OnlineStartBlocker>,
     pub network_quality: NetworkQualitySnapshot,
     pub input_delay_calibration: InputDelayCalibrationSnapshot,
     pub relay_status: SteamRelayStatus,
@@ -644,9 +686,8 @@ const fn auth_signal_error_is_transport(error: AuthSignalError) -> bool {
     )
 }
 
-/// Non-secret, lobby-bound message used to establish the implicit Steam
-/// messaging session symmetrically before either peer sends an auth ticket.
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+/// Legacy pre-AFCP codec fixture retained only by migration/hostility unit tests.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AuthSessionHelloSignal {
     lobby: SteamLobbyId,
@@ -654,7 +695,7 @@ struct AuthSessionHelloSignal {
     recipient: SteamUserId,
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 impl AuthSessionHelloSignal {
     const fn new(lobby: SteamLobbyId, sender: SteamUserId, recipient: SteamUserId) -> Self {
         Self {
@@ -664,7 +705,6 @@ impl AuthSessionHelloSignal {
         }
     }
 
-    #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
     fn encode(self) -> EncodedPreGameSignal {
         let mut encoded = EncodedPreGameSignal {
             bytes: [0; MAX_AUTH_SIGNAL_BYTES],
@@ -769,7 +809,7 @@ impl AuthTicketSignal {
         &self.ticket[..usize::from(self.ticket_len)]
     }
 
-    #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+    #[cfg(test)]
     fn encode(&self) -> EncodedPreGameSignal {
         let mut encoded = EncodedPreGameSignal {
             bytes: [0; MAX_AUTH_SIGNAL_BYTES],
@@ -798,6 +838,7 @@ impl AuthTicketSignal {
         encoded
     }
 
+    #[cfg(test)]
     pub fn decode(bytes: &[u8]) -> Result<Self, AuthSignalError> {
         if bytes.len() < AUTH_SIGNAL_HEADER_BYTES
             || bytes.len() > MAX_AUTH_SIGNAL_BYTES
@@ -908,7 +949,7 @@ impl BootstrapManifestSignal {
         })
     }
 
-    #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+    #[cfg(test)]
     fn encode(&self) -> Result<EncodedPreGameSignal, AuthSignalError> {
         let mut packet = [0; crate::network_codec::MAX_PACKET_BYTES];
         let packet_len = encode_packet(
@@ -933,6 +974,7 @@ impl BootstrapManifestSignal {
         Ok(encoded)
     }
 
+    #[cfg(test)]
     pub fn decode(bytes: &[u8]) -> Result<Self, AuthSignalError> {
         if bytes.len() <= MANIFEST_SIGNAL_HEADER_BYTES
             || bytes.len() > MAX_AUTH_SIGNAL_BYTES
@@ -962,14 +1004,14 @@ impl BootstrapManifestSignal {
     }
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 enum PreGameSignal {
     Hello(AuthSessionHelloSignal),
     Ticket(AuthTicketSignal),
     Manifest(BootstrapManifestSignal),
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 enum AuthSignalIngress {
     Accepted {
         source: SteamUserId,
@@ -982,14 +1024,14 @@ enum AuthSignalIngress {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 enum ManifestIngress {
     Apply,
     Stage,
     ExactDuplicate,
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 fn classify_manifest_ingress(
     accepted: Option<MatchManifest>,
     pending: Option<BootstrapManifestSignal>,
@@ -1019,7 +1061,7 @@ fn classify_manifest_ingress(
     }
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 impl PreGameSignal {
     fn sender(&self) -> SteamUserId {
         match self {
@@ -1030,7 +1072,7 @@ impl PreGameSignal {
     }
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 fn decode_pre_game_signal(bytes: &[u8]) -> Result<PreGameSignal, AuthSignalError> {
     match bytes.get(5).copied() {
         Some(AUTH_SIGNAL_KIND_HELLO) => {
@@ -1046,7 +1088,7 @@ fn decode_pre_game_signal(bytes: &[u8]) -> Result<PreGameSignal, AuthSignalError
     }
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 fn decode_bounded_auth_signal_batch<'a>(
     messages: impl IntoIterator<Item = (SteamUserId, &'a [u8])>,
 ) -> Vec<AuthSignalIngress> {
@@ -1113,20 +1155,20 @@ fn decode_bounded_auth_signal_batch<'a>(
     outcomes
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 struct EncodedPreGameSignal {
     bytes: [u8; MAX_AUTH_SIGNAL_BYTES],
     len: usize,
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 impl EncodedPreGameSignal {
     fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
 }
 
-#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 impl Drop for EncodedPreGameSignal {
     fn drop(&mut self) {
         zeroize_auth_signal_bytes(&mut self.bytes);
@@ -1141,6 +1183,7 @@ fn zeroize_auth_signal_bytes(bytes: &mut [u8]) {
     std::hint::black_box(bytes);
 }
 
+#[cfg(test)]
 fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, AuthSignalError> {
     let slice = bytes
         .get(offset..offset + 8)
@@ -1222,7 +1265,7 @@ impl NativeOnlineRuntime {
                 code: OnlineFailureCode::SteamUnavailable,
                 severity: OnlineFailureSeverity::Notice,
                 recovery: OnlineRecoveryAction::DisableOnline,
-                detail_code: reason as u16,
+                detail_code: reason.diagnostic_code(),
             }),
             #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
             inner: None,
@@ -1498,6 +1541,13 @@ fn unavailable_view(
         local_ready: false,
         all_members_ready: false,
         connected_remote_peers: 0,
+        secure_remote_peers: 0,
+        required_remote_peers: 0,
+        verified_remote_accounts: 0,
+        required_remote_accounts: 0,
+        steam_network_readiness: SteamNetworkReadiness::default(),
+        setup_stage: OnlineSetupStage::PreparingSteamNetwork,
+        start_blocker: Some(OnlineStartBlocker::PreparingSteamNetwork),
         network_quality: NetworkQualitySnapshot::default(),
         input_delay_calibration: InputDelayCalibrationSnapshot::default(),
         relay_status: SteamRelayStatus::default(),
@@ -1593,6 +1643,13 @@ fn project_view(
         local_ready: local_declaration.is_some_and(|declaration| declaration.ready),
         all_members_ready: status.all_members_ready,
         connected_remote_peers: status.connected_remote_peers,
+        secure_remote_peers: status.secure_remote_peers,
+        required_remote_peers: status.required_remote_peers,
+        verified_remote_accounts: status.verified_remote_accounts,
+        required_remote_accounts: status.required_remote_accounts,
+        steam_network_readiness: status.steam_network_readiness,
+        setup_stage: status.setup_stage,
+        start_blocker: status.start_blocker,
         network_quality: status.network_quality,
         input_delay_calibration: status.input_delay_calibration,
         relay_status: status.relay_status,
@@ -1617,31 +1674,68 @@ fn project_ticket_admission_result(
         Err(OnlineLobbyError::DuplicatePeerBinding | OnlineLobbyError::PeerIdentityMismatch) => {
             Err(AuthSignalError::InvalidIdentity.into())
         }
+        Err(OnlineLobbyError::Steam(SteamPlatformError::Backend(
+            crate::steam_platform::SteamBackendError::AuthSessionRejected(
+                crate::steam_platform::AuthSessionStartFailure::InvalidTicket
+                | crate::steam_platform::AuthSessionStartFailure::DuplicateRequest
+                | crate::steam_platform::AuthSessionStartFailure::InvalidVersion
+                | crate::steam_platform::AuthSessionStartFailure::GameMismatch,
+            ),
+        ))) => Err(AuthSignalError::InvalidEnvelope.into()),
         Err(error) => Err(error.into()),
     }
 }
 
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+fn auth_rejection_is_transient(failure: OnlineFailure) -> bool {
+    failure.severity == OnlineFailureSeverity::Recoverable
+        && failure.recovery == OnlineRecoveryAction::Retry
+        && matches!(
+            failure.code,
+            OnlineFailureCode::AuthenticationTimedOut
+                | OnlineFailureCode::SteamDisconnected
+                | OnlineFailureCode::SteamUnavailable
+                | OnlineFailureCode::ConnectionTimedOut
+        )
+}
+
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+const fn immediate_auth_error_is_transient(error: SteamPlatformError) -> bool {
+    matches!(
+        error,
+        SteamPlatformError::Backend(crate::steam_platform::SteamBackendError::NotLoggedOn)
+            | SteamPlatformError::Backend(
+                crate::steam_platform::SteamBackendError::AuthSessionRejected(
+                    crate::steam_platform::AuthSessionStartFailure::ExpiredTicket
+                )
+            )
+    )
+}
+
+#[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
 mod real {
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use std::sync::atomic::{AtomicBool, Ordering};
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use std::sync::{Arc, Mutex};
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use arrayvec::ArrayVec;
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use steamworks::networking_types::{NetConnectionEnd, NetworkingIdentity, SendFlags};
-
     use super::*;
-    use crate::steam_platform::{LobbyMember, MemberReadiness};
+    #[cfg(test)]
+    use crate::steam_platform::LobbyMember;
+    use crate::steam_platform::MemberReadiness;
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    use crate::steam_platform::{RealClientOwnershipGuard, RealSteamBackend};
+    use crate::steam_platform::RealSteamBackend;
 
     #[derive(Clone, Copy)]
     struct TicketExchange {
         lease: AuthTicketLease,
-        sent: bool,
+        sent_sequence: Option<u32>,
+        route: TicketRoute,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TicketRoute {
+        Direct,
+        ViaAuthority {
+            auth_epoch: AccountAuthEpoch,
+            ticket_id: u32,
+            authority: SteamUserId,
+        },
     }
 
     #[derive(Clone, Copy)]
@@ -1649,6 +1743,112 @@ mod real {
         user: SteamUserId,
         peer: AuthenticatedPeer,
         connection: Option<SteamConnectionId>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct RosterAuthParticipant {
+        user: SteamUserId,
+        prepare_accepted: bool,
+        incoming_validated: bool,
+        outgoing_accepted: bool,
+        process_complete: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct RoutedIncomingTicket {
+        sender: SteamUserId,
+        ticket_id: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum PendingSteamSetupRetryKind {
+        Direct,
+        ClosedControl,
+        RosterLease,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PendingSteamSetupRetry {
+        user: SteamUserId,
+        connection: Option<SteamConnectionId>,
+        kind: PendingSteamSetupRetryKind,
+        failure: OnlineFailure,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct RosterAuthTransaction {
+        epoch: AccountAuthEpoch,
+        roster_hash: u64,
+        member_count: u8,
+        participants: [Option<RosterAuthParticipant>; MAX_STEAM_LOBBY_MEMBERS],
+        prepared: bool,
+        local_complete_sent: bool,
+        globally_complete: bool,
+    }
+
+    impl RosterAuthTransaction {
+        fn participant(&self, user: SteamUserId) -> Option<&RosterAuthParticipant> {
+            self.participants
+                .iter()
+                .flatten()
+                .find(|participant| participant.user == user)
+        }
+
+        fn participant_mut(&mut self, user: SteamUserId) -> Option<&mut RosterAuthParticipant> {
+            self.participants
+                .iter_mut()
+                .flatten()
+                .find(|participant| participant.user == user)
+        }
+
+        fn local_process_complete(&self) -> bool {
+            self.participants
+                .iter()
+                .flatten()
+                .all(|participant| participant.incoming_validated && participant.outgoing_accepted)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ManifestParticipant {
+        user: SteamUserId,
+        connection: SteamConnectionId,
+        accepted: bool,
+        commit_accepted: bool,
+        activated: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ManifestTransactionStage {
+        Preparing,
+        Committing,
+        Activating,
+        Activated,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct RuntimeManifestTransaction {
+        id: ManifestTransactionId,
+        manifest_hash: crate::network_protocol::ManifestHash,
+        participants: [Option<ManifestParticipant>; MAX_STEAM_LOBBY_MEMBERS],
+        stage: ManifestTransactionStage,
+        activation_deadline_ms: Option<u64>,
+    }
+
+    impl RuntimeManifestTransaction {
+        fn participant(&self, user: SteamUserId) -> Option<&ManifestParticipant> {
+            self.participants
+                .iter()
+                .flatten()
+                .find(|participant| participant.user == user)
+        }
+
+        fn participant_mut(&mut self, user: SteamUserId) -> Option<&mut ManifestParticipant> {
+            self.participants
+                .iter_mut()
+                .flatten()
+                .find(|participant| participant.user == user)
+        }
     }
 
     fn clear_runtime_peer_transport(
@@ -1672,7 +1872,8 @@ mod real {
     /// A newly visible Steam lobby member may still be completing its local
     /// LobbyEnter transition. Waiting for its coherent member declaration
     /// proves that process has entered the lobby and published application
-    /// state before the other peer opens an ISteamNetworkingMessages session.
+    /// state before the other peer starts its quarantined control connection.
+    #[cfg(test)]
     fn member_can_open_auth_signal_session(member: &LobbyMember) -> bool {
         matches!(member.readiness, MemberReadiness::Declared { .. }) && member.loadout.is_some()
     }
@@ -1734,6 +1935,7 @@ mod real {
         }
     }
 
+    #[cfg(test)]
     #[derive(Clone, Copy)]
     struct SignalAdmissionPolicy {
         active_lobby: Option<SteamLobbyId>,
@@ -1741,6 +1943,7 @@ mod real {
         quarantined: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
     }
 
+    #[cfg(test)]
     impl Default for SignalAdmissionPolicy {
         fn default() -> Self {
             Self {
@@ -1751,6 +1954,7 @@ mod real {
         }
     }
 
+    #[cfg(test)]
     impl SignalAdmissionPolicy {
         fn contains_member(&self, user: SteamUserId) -> bool {
             self.active_lobby.is_some() && self.users.contains(&Some(user))
@@ -1785,6 +1989,7 @@ mod real {
         }
     }
 
+    #[cfg(test)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum SignalSessionRequestAction {
         Accept,
@@ -1792,6 +1997,7 @@ mod real {
         Reject,
     }
 
+    #[cfg(test)]
     fn classify_signal_session_request(
         policy: SignalAdmissionPolicy,
         user: Option<SteamUserId>,
@@ -1805,19 +2011,20 @@ mod real {
         if policy.contains_member(user) {
             SignalSessionRequestAction::Accept
         } else {
-            // Lobby membership and networking-message callbacks are delivered
-            // independently. Keep an unknown request unaccepted while the
-            // next roster refresh determines whether it is a valid member.
+            // Keep an unknown legacy request unaccepted while the next roster
+            // refresh determines whether it is a valid member.
             SignalSessionRequestAction::Defer
         }
     }
 
+    #[cfg(test)]
     #[derive(Clone, Copy)]
     struct PrimedSignalSessions {
         lobby: Option<SteamLobbyId>,
         users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
     }
 
+    #[cfg(test)]
     impl Default for PrimedSignalSessions {
         fn default() -> Self {
             Self {
@@ -1827,6 +2034,7 @@ mod real {
         }
     }
 
+    #[cfg(test)]
     impl PrimedSignalSessions {
         fn pending_for(
             &mut self,
@@ -1870,24 +2078,11 @@ mod real {
         }
     }
 
+    #[cfg(test)]
     #[derive(Clone, Copy)]
     pub(super) struct AuthSignalAdmission {
         active_lobby: Option<SteamLobbyId>,
         users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
-    }
-
-    pub(super) trait NativeAuthSignalPort {
-        fn refresh_policy(&self, admission: AuthSignalAdmission);
-        fn relay_status(&self) -> Option<SteamRelayStatus> {
-            None
-        }
-        fn peer_is_quarantined(&self, user: SteamUserId) -> Result<bool, AuthSignalError>;
-        fn quarantine_peer(&self, user: SteamUserId) -> Result<(), AuthSignalError>;
-        fn reset_session_isolation(&self) -> Result<(), AuthSignalError>;
-        fn quiesce_admission(&self) -> Result<(), AuthSignalError>;
-        fn send_ticket(&self, signal: AuthTicketSignal) -> Result<(), AuthSignalError>;
-        fn send_manifest(&self, signal: BootstrapManifestSignal) -> Result<(), AuthSignalError>;
-        fn receive(&self) -> Result<Vec<AuthSignalIngress>, AuthSignalError>;
     }
 
     pub(super) trait NativeTransportFactory<B: SteamBackend> {
@@ -1898,195 +2093,6 @@ mod real {
             config: SteamTransportConfig,
             now_ms: u64,
         ) -> Result<SteamTransport, SteamTransportError>;
-    }
-
-    /// `steamworks` 0.12.2 does not expose CloseSessionWithUser on its safe
-    /// `NetworkingMessages` wrapper. Keep this exact-pin compatibility shim
-    /// private and pass only a previously validated numeric Steam identity.
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn close_attributed_auth_signal_session(user: SteamUserId) {
-        let mut identity = steamworks::sys::SteamNetworkingIdentity {
-            m_eType: steamworks::sys::ESteamNetworkingIdentityType::
-                k_ESteamNetworkingIdentityType_Invalid,
-            m_cbSize: 0,
-            __bindgen_anon_1: steamworks::sys::SteamNetworkingIdentity__bindgen_ty_2 {
-                m_steamID64: 0,
-            },
-        };
-        // SAFETY: all functions come from the exact `steamworks`/Steamworks
-        // SDK pin used by the safe wrapper. `identity` is initialized with
-        // the SDK's invalid discriminant, then populated with a non-zero,
-        // validated Steam user before its pointer is passed to the client
-        // messages interface. A null interface is checked and never called.
-        unsafe {
-            steamworks::sys::SteamAPI_SteamNetworkingIdentity_Clear(&mut identity);
-            steamworks::sys::SteamAPI_SteamNetworkingIdentity_SetSteamID64(
-                &mut identity,
-                user.get(),
-            );
-            let messages = steamworks::sys::SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
-            if !messages.is_null() {
-                let _ = steamworks::sys::SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser(
-                    messages, &identity,
-                );
-            }
-        }
-    }
-
-    /// `steamworks` 0.12.2's `session_request_callback` convenience method
-    /// discards the returned callback handle internally, which unregisters the
-    /// callback immediately. Register the raw callback through `Client` so the
-    /// handle can be retained by [`SteamAuthSignalChannel`].
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    struct RetainedNetworkingMessagesSessionRequest {
-        remote: steamworks::sys::SteamNetworkingIdentity,
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    unsafe impl steamworks::Callback for RetainedNetworkingMessagesSessionRequest {
-        const ID: i32 = steamworks::sys::SteamNetworkingMessagesSessionRequest_t_k_iCallback as i32;
-
-        unsafe fn from_raw(raw: *mut c_void) -> Self {
-            // SAFETY: Steam invokes this callback ID with the matching packed
-            // SDK callback structure for the exact pinned binding.
-            let callback = unsafe {
-                raw.cast::<steamworks::sys::SteamNetworkingMessagesSessionRequest_t>()
-                    .read_unaligned()
-            };
-            Self {
-                remote: callback.m_identityRemote,
-            }
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn auth_signal_user_from_raw_identity(
-        identity: &mut steamworks::sys::SteamNetworkingIdentity,
-    ) -> Option<SteamUserId> {
-        // SAFETY: `identity` is the initialized value supplied by Steam's
-        // session-request callback and remains alive for this call.
-        let raw =
-            unsafe { steamworks::sys::SteamAPI_SteamNetworkingIdentity_GetSteamID64(identity) };
-        SteamUserId::new(raw).ok()
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn accept_raw_auth_signal_session(identity: &steamworks::sys::SteamNetworkingIdentity) -> bool {
-        // SAFETY: the interface comes from the initialized Steam client and is
-        // null-checked; `identity` is an SDK-initialized callback value.
-        unsafe {
-            let messages = steamworks::sys::SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
-            !messages.is_null()
-                && steamworks::sys::SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(
-                    messages, identity,
-                )
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn close_raw_auth_signal_session(identity: &steamworks::sys::SteamNetworkingIdentity) {
-        // SAFETY: the interface comes from the initialized Steam client and is
-        // null-checked; `identity` is an SDK-initialized callback value.
-        unsafe {
-            let messages = steamworks::sys::SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
-            if !messages.is_null() {
-                let _ = steamworks::sys::SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser(
-                    messages, identity,
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct AuthSignalSessionFailure {
-        source: SteamUserId,
-        error: AuthSignalError,
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn record_auth_signal_session_failure(
-        failed: &AtomicBool,
-        session_failures: &Mutex<ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS>>,
-        failure: AuthSignalSessionFailure,
-    ) {
-        let Ok(mut session_failures) = session_failures.lock() else {
-            failed.store(true, Ordering::Release);
-            return;
-        };
-        if let Some(existing) = session_failures
-            .iter_mut()
-            .find(|existing| existing.source == failure.source)
-        {
-            *existing = failure;
-            return;
-        }
-        if session_failures.try_push(failure).is_err() {
-            failed.store(true, Ordering::Release);
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn classify_auth_signal_session_failure(reason: Option<NetConnectionEnd>) -> AuthSignalError {
-        match reason {
-            Some(NetConnectionEnd::LocalOfflineMode) => AuthSignalError::SessionLocalOffline,
-            Some(
-                NetConnectionEnd::LocalManyRelayConnectivity
-                | NetConnectionEnd::LocalHostedServerPrimaryRelay
-                | NetConnectionEnd::LocalP2PICENoPublicAddresses
-                | NetConnectionEnd::MiscNoRelaySessionsToClient,
-            ) => AuthSignalError::SessionRelayUnavailable,
-            Some(NetConnectionEnd::LocalNetworkConfig) => {
-                AuthSignalError::SessionNetworkConfigUnavailable
-            }
-            Some(NetConnectionEnd::LocalRights) => AuthSignalError::SessionRightsDenied,
-            Some(NetConnectionEnd::RemoteTimeout | NetConnectionEnd::MiscTimeout) => {
-                AuthSignalError::SessionRemoteTimeout
-            }
-            Some(NetConnectionEnd::RemoteBadEncrypt | NetConnectionEnd::RemoteBadCert) => {
-                AuthSignalError::SessionCryptFailure
-            }
-            Some(NetConnectionEnd::RemoteBadProtocolVersion) => {
-                AuthSignalError::SessionProtocolMismatch
-            }
-            Some(NetConnectionEnd::MiscInternalError) => AuthSignalError::SessionInternalFailure,
-            Some(NetConnectionEnd::MiscSteamConnectivity) => {
-                AuthSignalError::SessionSteamConnectivity
-            }
-            Some(NetConnectionEnd::MiscP2PRendezvous) => AuthSignalError::SessionRendezvousFailed,
-            Some(
-                NetConnectionEnd::RemoteP2PICENoPublicAddresses
-                | NetConnectionEnd::MiscP2PNATFirewall,
-            ) => AuthSignalError::SessionNatFirewall,
-            Some(NetConnectionEnd::App(_) | NetConnectionEnd::MiscPeerSentNoConnection) => {
-                AuthSignalError::SessionPeerRejected
-            }
-            Some(
-                NetConnectionEnd::Invalid
-                | NetConnectionEnd::MiscGeneric
-                | NetConnectionEnd::Other(_),
-            )
-            | None => AuthSignalError::SessionUnknownFailure,
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    fn classify_auth_signal_session_failure_with_relay(
-        reason: Option<NetConnectionEnd>,
-        relay: SteamRelayStatus,
-    ) -> AuthSignalError {
-        let classified = classify_auth_signal_session_failure(reason);
-        if classified != AuthSignalError::SessionRendezvousFailed {
-            return classified;
-        }
-        if relay.network_config.is_terminal_failure() {
-            AuthSignalError::SessionNetworkConfigUnavailable
-        } else if relay.availability.is_terminal_failure() || relay.any_relay.is_terminal_failure()
-        {
-            AuthSignalError::SessionRelayUnavailable
-        } else {
-            classified
-        }
     }
 
     fn auth_signal_peer_failure(error: AuthSignalError) -> OnlineFailure {
@@ -2116,374 +2122,6 @@ mod real {
     }
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    pub(super) struct SteamAuthSignalChannel {
-        // Drop callback registrations before the state captured by them.
-        _callback_handles: Vec<steamworks::CallbackHandle>,
-        client: steamworks::Client,
-        messages: steamworks::networking_messages::NetworkingMessages,
-        relay_status: Mutex<SteamRelayStatus>,
-        policy: Arc<Mutex<SignalAdmissionPolicy>>,
-        primed: Mutex<PrimedSignalSessions>,
-        local_user: SteamUserId,
-        failed: Arc<AtomicBool>,
-        session_failures: Arc<Mutex<ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS>>>,
-        callback_owner_alive: Arc<AtomicBool>,
-        _ownership: Arc<RealClientOwnershipGuard>,
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    impl SteamAuthSignalChannel {
-        fn new(platform: &SteamPlatform<RealSteamBackend>) -> Self {
-            let (client, callback_owner_alive, ownership) =
-                platform.steam_transport_client_access();
-            let messages = client.networking_messages();
-            let policy = Arc::new(Mutex::new(SignalAdmissionPolicy::default()));
-            let failed = Arc::new(AtomicBool::new(false));
-            let session_failures = Arc::new(Mutex::new(ArrayVec::new()));
-            let mut callback_handles = Vec::with_capacity(2);
-
-            callback_handles.push(client.register_callback({
-                let policy = policy.clone();
-                let failed = failed.clone();
-                let session_failures = session_failures.clone();
-                move |mut request: RetainedNetworkingMessagesSessionRequest| {
-                    let user = auth_signal_user_from_raw_identity(&mut request.remote);
-                    let action = match policy.lock() {
-                        Ok(policy) => classify_signal_session_request(*policy, user),
-                        Err(_) => {
-                            failed.store(true, Ordering::Release);
-                            SignalSessionRequestAction::Reject
-                        }
-                    };
-                    match action {
-                        SignalSessionRequestAction::Accept => {
-                            if !accept_raw_auth_signal_session(&request.remote) {
-                                if let Some(source) = user {
-                                    record_auth_signal_session_failure(
-                                        &failed,
-                                        &session_failures,
-                                        AuthSignalSessionFailure {
-                                            source,
-                                            error: AuthSignalError::SessionAcceptanceFailed,
-                                        },
-                                    );
-                                } else {
-                                    failed.store(true, Ordering::Release);
-                                }
-                            }
-                        }
-                        SignalSessionRequestAction::Defer => {}
-                        SignalSessionRequestAction::Reject => {
-                            close_raw_auth_signal_session(&request.remote);
-                        }
-                    }
-                }
-            }));
-            callback_handles.push(client.register_callback({
-                let failed = failed.clone();
-                let session_failures = session_failures.clone();
-                let policy = policy.clone();
-                let relay_client = client.clone();
-                move |event: steamworks::networking_messages::NetworkingMessagesSessionFailed| {
-                    let error = classify_auth_signal_session_failure_with_relay(
-                        event.info.end_reason(),
-                        steam_client_relay_status(&relay_client),
-                    );
-                    let user = event
-                        .info
-                        .identity_remote()
-                        .and_then(|identity| identity.steam_id())
-                        .and_then(|id| SteamUserId::new(id.raw()).ok());
-                    let Some(user) = user else {
-                        failed.store(true, Ordering::Release);
-                        return;
-                    };
-                    let allowed = match policy.lock() {
-                        Ok(policy) => policy.allows(user),
-                        Err(_) => {
-                            failed.store(true, Ordering::Release);
-                            return;
-                        }
-                    };
-                    if !allowed {
-                        close_attributed_auth_signal_session(user);
-                        return;
-                    }
-                    record_auth_signal_session_failure(
-                        &failed,
-                        &session_failures,
-                        AuthSignalSessionFailure {
-                            source: user,
-                            error,
-                        },
-                    );
-                }
-            }));
-
-            Self {
-                _callback_handles: callback_handles,
-                relay_status: Mutex::new(steam_client_relay_status(&client)),
-                client,
-                messages,
-                policy,
-                primed: Mutex::new(PrimedSignalSessions::default()),
-                local_user: platform.local_user(),
-                failed,
-                session_failures,
-                callback_owner_alive,
-                _ownership: ownership,
-            }
-        }
-
-        fn apply_policy(&self, admission: AuthSignalAdmission) {
-            let mut next = SignalAdmissionPolicy {
-                active_lobby: admission.active_lobby,
-                users: admission.users,
-                quarantined: [None; MAX_STEAM_LOBBY_MEMBERS],
-            };
-            let (policy_snapshot, entered_lobby) = if let Ok(mut policy) = self.policy.lock() {
-                let entered_lobby =
-                    next.active_lobby.is_some() && policy.active_lobby != next.active_lobby;
-                policy.carry_quarantine_into(&mut next);
-                *policy = next;
-                (next, entered_lobby)
-            } else {
-                self.failed.store(true, Ordering::Release);
-                return;
-            };
-            if entered_lobby {
-                // A new lobby is also the recovery boundary for a relay setup
-                // attempt that failed while the process sat in the menu.
-                self.client.networking_utils().init_relay_network_access();
-            }
-            let current_relay = steam_client_relay_status(&self.client);
-            if let Ok(mut relay_status) = self.relay_status.lock() {
-                *relay_status = current_relay;
-            } else {
-                self.failed.store(true, Ordering::Release);
-                return;
-            }
-            let pending = if let Ok(mut primed) = self.primed.lock() {
-                primed.pending_for(policy_snapshot)
-            } else {
-                self.failed.store(true, Ordering::Release);
-                return;
-            };
-            let Some(lobby) = policy_snapshot.active_lobby else {
-                return;
-            };
-            for recipient in pending.into_iter().flatten() {
-                let hello = AuthSessionHelloSignal::new(lobby, self.local_user, recipient).encode();
-                if self.send_encoded(recipient, hello).is_err() {
-                    // Policy refresh runs every pump, so an unsent hello stays
-                    // pending and is retried without turning one transient SDK
-                    // send failure into a process-global fault.
-                    continue;
-                }
-                if let Ok(mut primed) = self.primed.lock() {
-                    primed.mark_sent(lobby, recipient);
-                } else {
-                    self.failed.store(true, Ordering::Release);
-                    return;
-                }
-            }
-        }
-
-        fn peer_is_quarantined(&self, user: SteamUserId) -> Result<bool, AuthSignalError> {
-            self.policy
-                .lock()
-                .map(|policy| policy.quarantined.contains(&Some(user)))
-                .map_err(|_| AuthSignalError::TransportFailed)
-        }
-
-        fn peer_is_member(&self, user: SteamUserId) -> Result<bool, AuthSignalError> {
-            self.policy
-                .lock()
-                .map(|policy| policy.contains_member(user))
-                .map_err(|_| AuthSignalError::TransportFailed)
-        }
-
-        fn peer_is_allowed(&self, user: SteamUserId) -> Result<bool, AuthSignalError> {
-            self.policy
-                .lock()
-                .map(|policy| policy.allows(user))
-                .map_err(|_| AuthSignalError::TransportFailed)
-        }
-
-        fn quarantine_peer(&self, user: SteamUserId) -> Result<(), AuthSignalError> {
-            self.policy
-                .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?
-                .quarantine(user);
-            close_attributed_auth_signal_session(user);
-            Ok(())
-        }
-
-        fn reset_session_isolation(&self) -> Result<(), AuthSignalError> {
-            self.policy
-                .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?
-                .clear_quarantine();
-            self.session_failures
-                .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?
-                .clear();
-            self.primed
-                .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?
-                .clear();
-            Ok(())
-        }
-
-        fn quiesce_admission(&self) -> Result<(), AuthSignalError> {
-            {
-                let mut policy = self
-                    .policy
-                    .lock()
-                    .map_err(|_| AuthSignalError::TransportFailed)?;
-                policy.active_lobby = None;
-                policy.users = [None; MAX_STEAM_LOBBY_MEMBERS];
-            }
-            self.primed
-                .lock()
-                .map_err(|_| AuthSignalError::TransportFailed)?
-                .clear();
-            Ok(())
-        }
-
-        fn send_ticket(&self, signal: AuthTicketSignal) -> Result<(), AuthSignalError> {
-            self.send_encoded(signal.recipient, signal.encode())
-        }
-
-        fn send_manifest(&self, signal: BootstrapManifestSignal) -> Result<(), AuthSignalError> {
-            self.send_encoded(signal.recipient, signal.encode()?)
-        }
-
-        fn send_encoded(
-            &self,
-            recipient: SteamUserId,
-            encoded: EncodedPreGameSignal,
-        ) -> Result<(), AuthSignalError> {
-            if !self.callback_owner_alive.load(Ordering::Acquire)
-                || self.failed.load(Ordering::Acquire)
-            {
-                return Err(AuthSignalError::TransportFailed);
-            }
-            if self.peer_is_quarantined(recipient)? {
-                return Ok(());
-            }
-            let identity =
-                NetworkingIdentity::new_steam_id(steamworks::SteamId::from_raw(recipient.get()));
-            self.messages
-                .send_message_to_user(
-                    identity,
-                    SendFlags::RELIABLE_NO_NAGLE | SendFlags::AUTO_RESTART_BROKEN_SESSION,
-                    encoded.as_slice(),
-                    AUTH_SIGNAL_CHANNEL,
-                )
-                .map_err(|_| AuthSignalError::TransportFailed)
-        }
-
-        fn receive(&self) -> Result<Vec<AuthSignalIngress>, AuthSignalError> {
-            if !self.callback_owner_alive.load(Ordering::Acquire)
-                || self.failed.swap(false, Ordering::AcqRel)
-            {
-                return Err(AuthSignalError::TransportFailed);
-            }
-            let session_failures: ArrayVec<AuthSignalSessionFailure, MAX_STEAM_LOBBY_MEMBERS> = {
-                let mut session_failures = self
-                    .session_failures
-                    .lock()
-                    .map_err(|_| AuthSignalError::TransportFailed)?;
-                session_failures.drain(..).collect()
-            };
-            let mut outcomes =
-                Vec::with_capacity(MAX_AUTH_SIGNALS_PER_PUMP + MAX_STEAM_LOBBY_MEMBERS);
-            for failure in session_failures {
-                if !self.peer_is_member(failure.source)? {
-                    // Membership is the first admission gate. A callback that
-                    // raced a terminal departure must not consume the bounded
-                    // quarantine for a user the refreshed policy already
-                    // rejects and whose attributable session can be closed.
-                    close_attributed_auth_signal_session(failure.source);
-                    continue;
-                }
-                self.quarantine_peer(failure.source)?;
-                outcomes.push(AuthSignalIngress::Rejected {
-                    source: failure.source,
-                    error: failure.error,
-                });
-            }
-            let messages = self
-                .messages
-                .receive_messages_on_channel(AUTH_SIGNAL_CHANNEL, MAX_AUTH_SIGNALS_PER_PUMP + 1);
-            let mut attributed = Vec::with_capacity(messages.len());
-            for message in &messages {
-                let source = message
-                    .identity_peer()
-                    .steam_id()
-                    .and_then(|id| SteamUserId::new(id.raw()).ok())
-                    .ok_or(AuthSignalError::InvalidIdentity)?;
-                if self.peer_is_allowed(source)? {
-                    attributed.push((source, message.data()));
-                } else if !self.peer_is_quarantined(source)? {
-                    // A stale session from outside the current roster is
-                    // attributable and closed, but it consumes no rejection
-                    // slot and cannot fault the active host.
-                    close_attributed_auth_signal_session(source);
-                }
-            }
-            let decoded = decode_bounded_auth_signal_batch(attributed);
-            for outcome in &decoded {
-                if let AuthSignalIngress::Rejected { source, .. } = outcome {
-                    self.quarantine_peer(*source)?;
-                }
-            }
-            outcomes.extend(decoded);
-            Ok(outcomes)
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    impl NativeAuthSignalPort for SteamAuthSignalChannel {
-        fn refresh_policy(&self, admission: AuthSignalAdmission) {
-            self.apply_policy(admission);
-        }
-
-        fn relay_status(&self) -> Option<SteamRelayStatus> {
-            self.relay_status.lock().ok().map(|status| *status)
-        }
-
-        fn peer_is_quarantined(&self, user: SteamUserId) -> Result<bool, AuthSignalError> {
-            SteamAuthSignalChannel::peer_is_quarantined(self, user)
-        }
-
-        fn quarantine_peer(&self, user: SteamUserId) -> Result<(), AuthSignalError> {
-            SteamAuthSignalChannel::quarantine_peer(self, user)
-        }
-
-        fn reset_session_isolation(&self) -> Result<(), AuthSignalError> {
-            SteamAuthSignalChannel::reset_session_isolation(self)
-        }
-
-        fn quiesce_admission(&self) -> Result<(), AuthSignalError> {
-            SteamAuthSignalChannel::quiesce_admission(self)
-        }
-
-        fn send_ticket(&self, signal: AuthTicketSignal) -> Result<(), AuthSignalError> {
-            SteamAuthSignalChannel::send_ticket(self, signal)
-        }
-
-        fn send_manifest(&self, signal: BootstrapManifestSignal) -> Result<(), AuthSignalError> {
-            SteamAuthSignalChannel::send_manifest(self, signal)
-        }
-
-        fn receive(&self) -> Result<Vec<AuthSignalIngress>, AuthSignalError> {
-            SteamAuthSignalChannel::receive(self)
-        }
-    }
-
-    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
     pub(super) struct RealNativeTransportFactory;
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
@@ -2499,17 +2137,15 @@ mod real {
         }
     }
 
-    pub(super) struct NativeOnlineCore<B, S, F>
+    pub(super) struct NativeOnlineCore<B, F>
     where
         B: SteamBackend,
-        S: NativeAuthSignalPort,
         F: NativeTransportFactory<B>,
     {
         // Rust drops fields in declaration order. Endpoint owners close before
-        // coordinator transports; signaling callbacks and coordinator-owned
-        // auth/transport state release before the Steam platform.
+        // coordinator transports and coordinator-owned auth/transport state
+        // release before the Steam platform.
         pub(super) endpoints: VecDeque<NativeOnlineEndpoint>,
-        signaling: S,
         pub(super) coordinator: OnlineLobbyCoordinator,
         platform: SteamPlatform<B>,
         transport_factory: F,
@@ -2518,18 +2154,28 @@ mod real {
         authenticated: [Option<AuthenticatedMapping>; MAX_STEAM_LOBBY_MEMBERS],
         reconnect_users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
         signal_rejected_users: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+        pending_steam_setup_retries: [Option<PendingSteamSetupRetry>; MAX_STEAM_LOBBY_MEMBERS],
+        deferred_control_setup_retry: Option<SteamUserId>,
         pub(super) committed_roster: Option<CommittedAuthenticatedRoster>,
         pub(super) events: VecDeque<OnlineLobbyEvent>,
         pending_manifest: Option<BootstrapManifestSignal>,
+        remote_ticket_sequences: [Option<(SteamUserId, u32)>; MAX_STEAM_LOBBY_MEMBERS],
+        local_ticket_accepted: [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS],
+        roster_auth: Option<RosterAuthTransaction>,
+        routed_incoming_tickets: [Option<RoutedIncomingTicket>; MAX_STEAM_LOBBY_MEMBERS],
+        next_account_auth_epoch: u64,
+        retired_account_auth_epoch: Option<AccountAuthEpoch>,
+        manifest_transaction: Option<RuntimeManifestTransaction>,
+        next_manifest_transaction_id: u64,
+        retired_manifest_transaction: Option<ManifestTransactionId>,
         pub(super) admission_quiesced: bool,
         last_now_ms: u64,
         pub(super) runtime_failure: Option<OnlineFailure>,
     }
 
-    impl<B, S, F> NativeOnlineCore<B, S, F>
+    impl<B, F> NativeOnlineCore<B, F>
     where
         B: SteamBackend,
-        S: NativeAuthSignalPort,
         F: NativeTransportFactory<B>,
     {
         pub(super) fn local_authenticated_user(&self) -> AuthenticatedUserId {
@@ -2566,7 +2212,6 @@ mod real {
 
         fn from_parts(
             platform: SteamPlatform<B>,
-            signaling: S,
             transport_factory: F,
             lobby_config: OnlineLobbyConfig,
             now_ms: u64,
@@ -2575,7 +2220,6 @@ mod real {
                 OnlineLobbyCoordinator::new(platform.local_user(), lobby_config, now_ms)?;
             Ok(Self {
                 endpoints: VecDeque::with_capacity(MAX_STEAM_LOBBY_MEMBERS),
-                signaling,
                 coordinator,
                 platform,
                 transport_factory,
@@ -2584,9 +2228,20 @@ mod real {
                 authenticated: [None; MAX_STEAM_LOBBY_MEMBERS],
                 reconnect_users: [None; MAX_STEAM_LOBBY_MEMBERS],
                 signal_rejected_users: [None; MAX_STEAM_LOBBY_MEMBERS],
+                pending_steam_setup_retries: [None; MAX_STEAM_LOBBY_MEMBERS],
+                deferred_control_setup_retry: None,
                 committed_roster: None,
                 events: VecDeque::with_capacity(MAX_NATIVE_ONLINE_EVENTS),
                 pending_manifest: None,
+                remote_ticket_sequences: [None; MAX_STEAM_LOBBY_MEMBERS],
+                local_ticket_accepted: [None; MAX_STEAM_LOBBY_MEMBERS],
+                roster_auth: None,
+                routed_incoming_tickets: [None; MAX_STEAM_LOBBY_MEMBERS],
+                next_account_auth_epoch: 1,
+                retired_account_auth_epoch: None,
+                manifest_transaction: None,
+                next_manifest_transaction_id: 1,
+                retired_manifest_transaction: None,
                 admission_quiesced: false,
                 last_now_ms: now_ms,
                 runtime_failure: None,
@@ -2594,16 +2249,12 @@ mod real {
         }
 
         pub(super) fn view_model(&self) -> NativeOnlineViewModel {
-            let mut view = project_view(
+            project_view(
                 NativeOnlineAvailability::Available,
                 self.coordinator.status(),
                 self.local_declaration,
                 self.runtime_failure,
-            );
-            if let Some(relay_status) = self.signaling.relay_status() {
-                view.relay_status = relay_status;
-            }
-            view
+            )
         }
 
         pub(super) fn execute(
@@ -2677,13 +2328,23 @@ mod real {
                     }
                     Ok(())
                 }
+                NativeOnlineCommand::RetrySteamSetup => self.retry_steam_setup(now_ms),
                 NativeOnlineCommand::CommitManifest {
                     options,
                     current_tick,
-                } => self
-                    .coordinator
-                    .commit_manifest(&mut self.platform, options, current_tick, now_ms)
-                    .map_err(Into::into),
+                } => {
+                    if self
+                        .roster_auth
+                        .as_ref()
+                        .is_none_or(|auth| !auth.globally_complete)
+                    {
+                        Err(OnlineLobbyError::PeersNotReady.into())
+                    } else {
+                        self.coordinator
+                            .commit_manifest(&mut self.platform, options, current_tick, now_ms)
+                            .map_err(Into::into)
+                    }
+                }
                 NativeOnlineCommand::AcceptManifest(config) => {
                     self.accept_manifest_and_freeze(config, now_ms)
                 }
@@ -2717,11 +2378,14 @@ mod real {
                 NativeOnlineCommand::QuiesceAdmission => {
                     self.coordinator.quiesce_admission(&mut self.platform)?;
                     self.admission_quiesced = true;
-                    self.signaling.quiesce_admission()?;
                     self.ticket_exchanges = [None; MAX_STEAM_LOBBY_MEMBERS];
                     self.reconnect_users = [None; MAX_STEAM_LOBBY_MEMBERS];
                     self.endpoints.clear();
                     self.pending_manifest = None;
+                    self.remote_ticket_sequences = [None; MAX_STEAM_LOBBY_MEMBERS];
+                    self.local_ticket_accepted = [None; MAX_STEAM_LOBBY_MEMBERS];
+                    self.retire_roster_auth_state();
+                    self.retire_manifest_transaction();
                     Ok(())
                 }
                 NativeOnlineCommand::MarkAuthorityTerminalDrained {
@@ -2769,7 +2433,7 @@ mod real {
                     Ok(())
                 }
             };
-            if result.is_ok() {
+            if result.is_ok() && self.pending_steam_setup_retries.iter().all(Option::is_none) {
                 self.runtime_failure = None;
             }
             result
@@ -2780,56 +2444,37 @@ mod real {
                 return Err(NativeOnlineRuntimeError::TimeRegression);
             }
             self.last_now_ms = now_ms;
-            if self.admission_quiesced {
-                self.signaling.quiesce_admission()?;
-            } else {
-                self.signaling.refresh_policy(self.auth_signal_admission());
+            // The AFCP activation barrier owns its bounded rollback while no
+            // endpoint is exposed. Enforce it before the coordinator's generic
+            // Loading timeout can turn the same instant into a terminal match
+            // failure.
+            self.enforce_activation_deadline(now_ms)?;
+            self.drain_coordinator_events(now_ms)?;
+            if let Err(error) = self.coordinator.pump(&mut self.platform, now_ms) {
+                #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+                self.persist_pregame_failure_traces();
+                return Err(error.into());
             }
-            self.coordinator.pump(&mut self.platform, now_ms)?;
-            if self.admission_quiesced {
-                self.signaling.quiesce_admission()?;
-            } else {
-                self.signaling.refresh_policy(self.auth_signal_admission());
+            // Retire coordinator-owned transactions before interpreting any
+            // frames that became stale at the same deadline. This makes a
+            // delayed Activate/Cancel batch benign regardless of pump order.
+            self.drain_coordinator_events(now_ms)?;
+            if self.coordinator.steam_backend_reconnect_pending() {
+                // Keep pumping the installed transport in the coordinator so
+                // established gameplay endpoints remain usable, but do not
+                // advance any new ticket, auth, or manifest capability until
+                // Steam reports a coherent backend recovery.
+                return Ok(());
             }
+            self.drain_control_ingress(now_ms)?;
             self.drain_coordinator_events(now_ms)?;
             if !self.admission_quiesced {
                 self.install_requested_transport(now_ms)?;
                 self.reconcile_ticket_exchanges()?;
+                self.flush_ready_tickets()?;
+                self.reconcile_roster_authentication()?;
             }
             self.drain_coordinator_events(now_ms)?;
-            if !self.admission_quiesced {
-                self.try_apply_pending_manifest(now_ms)?;
-            }
-            for ingress in self.signaling.receive()? {
-                if self.admission_quiesced {
-                    continue;
-                }
-                match ingress {
-                    AuthSignalIngress::Rejected { source, error } => {
-                        self.isolate_signal_peer(source, error)?;
-                    }
-                    AuthSignalIngress::Accepted { source, signal } => {
-                        let result = match signal {
-                            PreGameSignal::Hello(signal) => {
-                                self.consume_session_hello(source, signal)
-                            }
-                            PreGameSignal::Ticket(signal) => self
-                                .consume_ticket_signal(source, signal, now_ms)
-                                .map(|_| ()),
-                            PreGameSignal::Manifest(signal) => {
-                                self.consume_manifest_signal(source, signal, now_ms)
-                            }
-                        };
-                        match result {
-                            Ok(()) => {}
-                            Err(NativeOnlineRuntimeError::Signal(error)) => {
-                                self.isolate_signal_peer(source, error)?;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-            }
             if !self.admission_quiesced {
                 self.try_apply_pending_manifest(now_ms)?;
             }
@@ -2837,39 +2482,240 @@ mod real {
             Ok(())
         }
 
-        fn auth_signal_admission(&self) -> AuthSignalAdmission {
-            let mut admission = AuthSignalAdmission {
-                active_lobby: None,
-                users: [None; MAX_STEAM_LOBBY_MEMBERS],
-            };
-            let SteamPlatformState::InLobby(lobby) = self.platform.state() else {
-                return admission;
-            };
-            admission.active_lobby = Some(lobby);
-            let local = self.platform.local_user();
-            for member in self.platform.roster().iter().flatten() {
-                if member.user == local || !member_can_open_auth_signal_session(member) {
+        fn drain_control_ingress(&mut self, now_ms: u64) -> Result<(), NativeOnlineRuntimeError> {
+            let mut drained = 0_usize;
+            let mut per_user = [None; MAX_STEAM_LOBBY_MEMBERS];
+            while drained < MAX_AUTH_SIGNALS_PER_PUMP {
+                let Some(ingress) = self.coordinator.poll_control() else {
+                    break;
+                };
+                drained += 1;
+                let source = ingress.user;
+                let token = ingress.token;
+                let user_count = if let Some((_, count)) = per_user
+                    .iter_mut()
+                    .flatten()
+                    .find(|(user, _)| *user == source)
+                {
+                    *count += 1;
+                    *count
+                } else {
+                    let slot = per_user
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                    *slot = Some((source, 1_usize));
+                    1
+                };
+                if user_count > MAX_AUTH_SIGNALS_PER_USER_PER_PUMP {
+                    self.coordinator.reject_control_ingress(token)?;
+                    self.isolate_signal_peer(source, AuthSignalError::ReceiveBudgetExceeded)?;
                     continue;
                 }
-                if let Some(slot) = admission.users.iter_mut().find(|slot| slot.is_none()) {
-                    *slot = Some(member.user);
+                let result = match ingress.message {
+                    SteamControlMessage::LinkHello { .. } => Ok(()),
+                    SteamControlMessage::AuthTicket(ticket) => {
+                        let identity = ticket.identity;
+                        let signal = AuthTicketSignal::new(
+                            identity.lobby,
+                            identity.sender,
+                            identity.recipient,
+                            ticket.sender_peer_id,
+                            ticket.purpose,
+                            ticket.owner_revision,
+                            ticket.sender_revision,
+                            ticket.match_id,
+                            ticket.ticket(),
+                        )?;
+                        if self.consume_ticket_signal(source, signal, now_ms)? {
+                            self.remember_remote_ticket_sequence(source, ingress.sequence)?;
+                        }
+                        Ok(())
+                    }
+                    SteamControlMessage::AuthAccepted {
+                        identity,
+                        ticket_sequence,
+                    } => self.consume_auth_accepted(source, identity, ticket_sequence),
+                    SteamControlMessage::RosterPrepare {
+                        identity,
+                        auth_epoch,
+                        roster_hash,
+                        member_count,
+                    } => self.consume_roster_prepare(
+                        source,
+                        ingress.connection,
+                        identity,
+                        auth_epoch,
+                        roster_hash,
+                        member_count,
+                    ),
+                    SteamControlMessage::RosterAccepted {
+                        identity,
+                        auth_epoch,
+                        roster_hash,
+                        member_count,
+                    } => self.consume_roster_accepted(
+                        source,
+                        ingress.connection,
+                        identity,
+                        auth_epoch,
+                        roster_hash,
+                        member_count,
+                    ),
+                    SteamControlMessage::RoutedAuthTicket {
+                        identity,
+                        auth_epoch,
+                        ticket_id,
+                        ticket,
+                    } => self.consume_routed_auth_ticket(
+                        source, identity, auth_epoch, ticket_id, ticket, now_ms,
+                    ),
+                    SteamControlMessage::RoutedAuthAccepted {
+                        identity,
+                        auth_epoch,
+                        ticket_id,
+                        ticket_sender,
+                        ticket_recipient,
+                    } => self.consume_routed_auth_accepted(
+                        source,
+                        identity,
+                        auth_epoch,
+                        ticket_id,
+                        ticket_sender,
+                        ticket_recipient,
+                    ),
+                    SteamControlMessage::RosterAuthComplete {
+                        identity,
+                        auth_epoch,
+                        roster_hash,
+                    } => {
+                        self.consume_roster_auth_complete(source, identity, auth_epoch, roster_hash)
+                    }
+                    SteamControlMessage::ManifestPrepare {
+                        identity,
+                        transaction,
+                        manifest,
+                    } => self.consume_manifest_prepare(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest,
+                        now_ms,
+                    ),
+                    SteamControlMessage::ManifestAccepted {
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    } => self.consume_manifest_accepted(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest_hash,
+                        now_ms,
+                    ),
+                    SteamControlMessage::ManifestCommit {
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    } => self.consume_manifest_commit(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest_hash,
+                        now_ms,
+                    ),
+                    SteamControlMessage::ManifestCommitAccepted {
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    } => self.consume_manifest_commit_accepted(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest_hash,
+                        now_ms,
+                    ),
+                    SteamControlMessage::GameplayActivate {
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    } => self.consume_gameplay_activate(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    ),
+                    SteamControlMessage::GameplayActivated {
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    } => self.consume_gameplay_activated(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        manifest_hash,
+                    ),
+                    SteamControlMessage::Abort {
+                        identity,
+                        transaction,
+                        code: reason_code,
+                        permanent,
+                    } => self.consume_setup_abort(
+                        source,
+                        identity,
+                        transaction,
+                        reason_code,
+                        permanent,
+                        now_ms,
+                    ),
+                    SteamControlMessage::SetupCancel {
+                        identity,
+                        transaction,
+                        code,
+                    } => self.consume_setup_cancel(
+                        source,
+                        ingress.connection,
+                        identity,
+                        transaction,
+                        code,
+                        now_ms,
+                    ),
+                };
+                match result {
+                    Ok(()) => {
+                        self.coordinator.accept_control_ingress(token)?;
+                        if self.deferred_control_setup_retry == Some(source) {
+                            let generation = self
+                                .coordinator
+                                .control_connection_for_user(source)
+                                .ok_or(OnlineLobbyError::MissingPeerBinding(source))?;
+                            self.coordinator.retry_control_setup(
+                                &mut self.platform,
+                                source,
+                                generation,
+                                now_ms,
+                            )?;
+                            self.deferred_control_setup_retry = None;
+                            break;
+                        }
+                    }
+                    Err(NativeOnlineRuntimeError::Signal(error)) => {
+                        self.coordinator.reject_control_ingress(token)?;
+                        self.isolate_signal_peer(source, error)?;
+                    }
+                    Err(error) => {
+                        self.coordinator.reject_control_ingress(token)?;
+                        return Err(error);
+                    }
                 }
             }
-            for lease in self
-                .coordinator
-                .authorized_auth_signal_leases()
-                .iter()
-                .flatten()
-                .copied()
-            {
-                if lease.user == local || admission.users.contains(&Some(lease.user)) {
-                    continue;
-                }
-                if let Some(slot) = admission.users.iter_mut().find(|slot| slot.is_none()) {
-                    *slot = Some(lease.user);
-                }
-            }
-            admission
+            Ok(())
         }
 
         fn isolate_signal_peer(
@@ -2877,13 +2723,17 @@ mod real {
             user: SteamUserId,
             error: AuthSignalError,
         ) -> Result<(), NativeOnlineRuntimeError> {
-            self.signaling.quarantine_peer(user)?;
             if self.is_signal_rejected_user(user) {
                 return Ok(());
             }
             let connection = self.coordinator.active_connection_for_user(user);
-            self.coordinator
-                .isolate_peer_authentication(&mut self.platform, user)?;
+            self.coordinator.isolate_peer_authentication_with_reason(
+                &mut self.platform,
+                user,
+                SteamTransportCloseReason::MalformedControlTraffic,
+            )?;
+            #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+            self.persist_pregame_failure_traces();
             self.mark_signal_rejected_user(user)?;
             self.clear_peer_handoffs(user);
             self.push_event(OnlineLobbyEvent::PeerAuthenticationRejected {
@@ -2893,10 +2743,257 @@ mod real {
             })
         }
 
+        fn record_pending_steam_setup_retry(
+            &mut self,
+            user: SteamUserId,
+            connection: Option<SteamConnectionId>,
+            kind: PendingSteamSetupRetryKind,
+            failure: OnlineFailure,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if !auth_rejection_is_transient(failure) {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            if let Some(slot) = self.pending_steam_setup_retries.iter_mut().find(|slot| {
+                slot.is_some_and(|existing| {
+                    existing.user == user
+                        && existing.connection == connection
+                        && existing.kind == kind
+                })
+            }) {
+                *slot = Some(PendingSteamSetupRetry {
+                    user,
+                    connection,
+                    kind,
+                    failure,
+                });
+            } else {
+                let slot = self
+                    .pending_steam_setup_retries
+                    .iter_mut()
+                    .find(|slot| slot.is_none())
+                    .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                *slot = Some(PendingSteamSetupRetry {
+                    user,
+                    connection,
+                    kind,
+                    failure,
+                });
+            }
+            self.runtime_failure = self
+                .pending_steam_setup_retries
+                .iter()
+                .flatten()
+                .next()
+                .map(|pending| pending.failure);
+            Ok(())
+        }
+
+        fn clear_pending_steam_setup_retries_for_user(&mut self, user: SteamUserId) {
+            for slot in &mut self.pending_steam_setup_retries {
+                if slot.is_some_and(|pending| pending.user == user) {
+                    *slot = None;
+                }
+            }
+            self.runtime_failure = self
+                .pending_steam_setup_retries
+                .iter()
+                .flatten()
+                .next()
+                .map(|pending| pending.failure);
+        }
+
+        fn clear_pending_steam_setup_retry(
+            &mut self,
+            user: SteamUserId,
+            kind: PendingSteamSetupRetryKind,
+        ) {
+            for slot in &mut self.pending_steam_setup_retries {
+                if slot.is_some_and(|pending| pending.user == user && pending.kind == kind) {
+                    *slot = None;
+                }
+            }
+            self.runtime_failure = self
+                .pending_steam_setup_retries
+                .iter()
+                .flatten()
+                .next()
+                .map(|pending| pending.failure);
+        }
+
+        fn clear_pending_roster_setup_retries(&mut self) {
+            for slot in &mut self.pending_steam_setup_retries {
+                if slot
+                    .is_some_and(|pending| pending.kind == PendingSteamSetupRetryKind::RosterLease)
+                {
+                    *slot = None;
+                }
+            }
+            self.runtime_failure = self
+                .pending_steam_setup_retries
+                .iter()
+                .flatten()
+                .next()
+                .map(|pending| pending.failure);
+        }
+
+        fn retry_steam_setup(&mut self, now_ms: u64) -> Result<(), NativeOnlineRuntimeError> {
+            let Some((pending_index, pending)) = self
+                .pending_steam_setup_retries
+                .iter()
+                .enumerate()
+                .find_map(|(index, pending)| pending.map(|pending| (index, pending)))
+            else {
+                if self.runtime_failure.is_some_and(|failure| {
+                    failure.code == OnlineFailureCode::SteamUnavailable
+                        && failure.severity == OnlineFailureSeverity::Recoverable
+                        && failure.recovery == OnlineRecoveryAction::Retry
+                }) {
+                    self.coordinator
+                        .retry_steam_network_initialization(now_ms)?;
+                    self.runtime_failure = None;
+                    return Ok(());
+                }
+                return Err(OnlineLobbyError::InvalidState.into());
+            };
+            let lobby = self
+                .coordinator
+                .status()
+                .lobby
+                .ok_or(NativeOnlineRuntimeError::Lobby(
+                    OnlineLobbyError::InvalidState,
+                ))?;
+            match pending.kind {
+                PendingSteamSetupRetryKind::RosterLease => {
+                    // Steam validation callbacks are not generation-tagged.
+                    // The first timeout retains the exact native session and
+                    // Retry extends only that lease rather than starting a
+                    // second BeginAuthSession.
+                    if self
+                        .platform
+                        .roster_authentication_awaits_retry(lobby, pending.user)
+                    {
+                        self.platform.extend_roster_authentication_deadline(
+                            lobby,
+                            pending.user,
+                            now_ms,
+                        )?;
+                    } else {
+                        // An immediate ExpiredTicket/NotLoggedOn-like result
+                        // never created a native lease. Retire this routed
+                        // exchange so the originating client can issue a fresh
+                        // recipient-bound, one-use ticket.
+                        let status = self.coordinator.status();
+                        let owner = status.owner.ok_or(AuthSignalError::InvalidIdentity)?;
+                        let local = self.platform.local_user();
+                        if status.role == Some(OnlineLobbyRole::Client) {
+                            let identity = SteamControlIdentity::new(lobby, local, owner)
+                                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                            self.coordinator.queue_control_for_user(
+                                owner,
+                                SteamControlMessage::Abort {
+                                    identity,
+                                    transaction: None,
+                                    code: AUTH_RETRY_ROSTER_ABORT_CODE,
+                                    permanent: false,
+                                },
+                            )?;
+                        }
+                        self.retire_roster_auth_state();
+                    }
+                }
+                PendingSteamSetupRetryKind::Direct => {
+                    let status = self.coordinator.status();
+                    if status.role == Some(OnlineLobbyRole::ListenAuthority) {
+                        if let Some(roster) = self.roster_auth {
+                            for participant in roster.participants.iter().flatten() {
+                                let roster_identity = SteamControlIdentity::new(
+                                    lobby,
+                                    self.platform.local_user(),
+                                    participant.user,
+                                )
+                                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                                self.coordinator.queue_control_for_user(
+                                    participant.user,
+                                    SteamControlMessage::Abort {
+                                        identity: roster_identity,
+                                        transaction: None,
+                                        code: AUTH_RETRY_ROSTER_ABORT_CODE,
+                                        permanent: false,
+                                    },
+                                )?;
+                            }
+                        }
+                        let identity = SteamControlIdentity::new(
+                            lobby,
+                            self.platform.local_user(),
+                            pending.user,
+                        )
+                        .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                        self.coordinator.queue_control_for_user(
+                            pending.user,
+                            SteamControlMessage::Abort {
+                                identity,
+                                transaction: None,
+                                code: AUTH_RETRY_DIRECT_ABORT_CODE,
+                                permanent: false,
+                            },
+                        )?;
+                        // The authority keeps this quarantined socket alive
+                        // until the client consumes Abort and originates the
+                        // replacement. This preserves star topology and gives
+                        // the reliable retry instruction a delivery window.
+                        self.clear_peer_handoffs(pending.user);
+                    } else {
+                        let identity = SteamControlIdentity::new(
+                            lobby,
+                            self.platform.local_user(),
+                            pending.user,
+                        )
+                        .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                        self.coordinator.queue_control_for_user(
+                            pending.user,
+                            SteamControlMessage::Abort {
+                                identity,
+                                transaction: None,
+                                code: AUTH_RETRY_DIRECT_ABORT_CODE,
+                                permanent: false,
+                            },
+                        )?;
+                    }
+                }
+                PendingSteamSetupRetryKind::ClosedControl => {
+                    let generation = pending.connection.ok_or(OnlineLobbyError::InvalidState)?;
+                    if !self
+                        .coordinator
+                        .control_connection_for_user(pending.user)
+                        .is_some_and(|active| active != generation)
+                    {
+                        self.coordinator.retry_control_setup(
+                            &mut self.platform,
+                            pending.user,
+                            generation,
+                            now_ms,
+                        )?;
+                    }
+                }
+            }
+            self.pending_steam_setup_retries[pending_index] = None;
+            self.runtime_failure = self
+                .pending_steam_setup_retries
+                .iter()
+                .flatten()
+                .next()
+                .map(|pending| pending.failure);
+            Ok(())
+        }
+
         fn install_requested_transport(
             &mut self,
             now_ms: u64,
         ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.coordinator.retiring_transport_count() != 0 {
+                return Ok(());
+            }
             let Some(session) = self.coordinator.take_transport_request() else {
                 return Ok(());
             };
@@ -2906,13 +3003,14 @@ mod real {
                 self.coordinator.config().transport,
                 now_ms,
             )?;
-            self.coordinator.install_transport(transport, now_ms)?;
+            self.coordinator
+                .install_control_transport(transport, now_ms)?;
             Ok(())
         }
 
         fn drain_coordinator_events(
             &mut self,
-            now_ms: u64,
+            _now_ms: u64,
         ) -> Result<(), NativeOnlineRuntimeError> {
             let mut drained = 0;
             while let Some(event) = self.coordinator.poll_event() {
@@ -2922,6 +3020,39 @@ mod real {
                 }
                 match event {
                     OnlineLobbyEvent::TransportRequested(_) => {}
+                    OnlineLobbyEvent::SteamBackendReconnectRecovered { paused_ms } => {
+                        if let Some(transaction) = self.manifest_transaction.as_mut()
+                            && transaction.stage == ManifestTransactionStage::Activating
+                            && let Some(deadline_ms) = transaction.activation_deadline_ms.as_mut()
+                        {
+                            *deadline_ms = deadline_ms
+                                .checked_add(paused_ms)
+                                .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                        }
+                        self.push_event(event)?;
+                    }
+                    OnlineLobbyEvent::ControlRetrying { user, .. } => {
+                        #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+                        self.persist_pregame_failure_traces();
+                        self.clear_peer_handoffs(user);
+                        self.push_event(event)?;
+                    }
+                    OnlineLobbyEvent::ControlReady { user, .. } => {
+                        let ready_handle = self
+                            .ticket_exchanges
+                            .iter()
+                            .flatten()
+                            .find(|entry| {
+                                entry.lease.remote_user == user
+                                    && entry.sent_sequence.is_none()
+                                    && self.coordinator.auth_ticket_is_ready(entry.lease)
+                            })
+                            .map(|exchange| exchange.lease.handle);
+                        if let Some(handle) = ready_handle {
+                            self.send_ready_ticket(handle, user)?;
+                        }
+                        self.push_event(event)?;
+                    }
                     OnlineLobbyEvent::AuthTicketReady {
                         handle,
                         remote_user,
@@ -2942,25 +3073,82 @@ mod real {
                     } => {
                         if !self.admission_quiesced {
                             self.install_authenticated_mapping(user, peer_id, reconnect)?;
+                            if self.coordinator.uses_control_bootstrap() {
+                                self.send_auth_accepted(user)?;
+                                self.try_finalize_control_secure(user)?;
+                            }
                             if reconnect {
                                 self.clear_reconnect_user(user);
                             }
+                            self.mark_roster_incoming_validated(user)?;
                             self.push_event(event)?;
                         }
                     }
                     OnlineLobbyEvent::PeerAuthenticationRejected {
-                        user, connection, ..
+                        user,
+                        connection,
+                        failure,
                     } => {
-                        // A platform authentication revocation is persistent for
-                        // the member's current lobby lifetime. Quarantine it
-                        // before clearing the exchange so reconciliation cannot
-                        // issue a fresh ticket later in this pump.
+                        #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+                        if !auth_rejection_is_transient(failure) {
+                            // Coordinator isolation finalizes and drains the
+                            // exact attributed connection before publishing
+                            // this event. Persist it before any runtime-level
+                            // handoff cleanup can discard that evidence.
+                            self.persist_pregame_failure_traces();
+                        }
                         if self.authentication_rejection_is_current(user, connection) {
-                            self.signaling.quarantine_peer(user)?;
-                            self.mark_signal_rejected_user(user)?;
-                            self.clear_peer_handoffs(user);
+                            if auth_rejection_is_transient(failure) {
+                                self.record_pending_steam_setup_retry(
+                                    user,
+                                    connection,
+                                    PendingSteamSetupRetryKind::Direct,
+                                    failure,
+                                )?;
+                            } else {
+                                // Invalid identity/ticket/version/game/license,
+                                // ban, reuse, and malformed protocol outcomes
+                                // remain isolated for this lobby lifetime.
+                                self.mark_signal_rejected_user(user)?;
+                                self.clear_peer_handoffs(user);
+                            }
                         }
                         self.push_event(event)?;
+                    }
+                    OnlineLobbyEvent::RosterPeerAuthenticated { user } => {
+                        // A validation callback may arrive after the retained
+                        // lease's first timeout but before the player presses
+                        // Retry. Approval supersedes only that roster-lease
+                        // failure; leaving it queued would let a stale Retry
+                        // retire the newly validated proof.
+                        self.clear_pending_steam_setup_retry(
+                            user,
+                            PendingSteamSetupRetryKind::RosterLease,
+                        );
+                        self.mark_roster_incoming_validated(user)?;
+                        if let Some(ticket) = self
+                            .routed_incoming_tickets
+                            .iter()
+                            .flatten()
+                            .find(|ticket| ticket.sender == user)
+                            .copied()
+                        {
+                            self.send_routed_auth_accepted(ticket)?;
+                        }
+                        self.push_event(event)?;
+                    }
+                    OnlineLobbyEvent::RosterPeerAuthenticationRejected { user, failure } => {
+                        if auth_rejection_is_transient(failure) {
+                            self.record_pending_steam_setup_retry(
+                                user,
+                                None,
+                                PendingSteamSetupRetryKind::RosterLease,
+                                failure,
+                            )?;
+                            self.push_event(event)?;
+                        } else {
+                            self.report_permanent_roster_auth_rejection(user, failure)?;
+                        }
                     }
                     OnlineLobbyEvent::EndpointReady {
                         connection,
@@ -2993,12 +3181,42 @@ mod real {
                         connection,
                         user,
                         reconnect_allowed,
+                        pregame_setup_retry,
                         ..
                     } => {
-                        self.remove_ticket_exchange(user);
-                        self.clear_active_peer_transport(user, connection);
                         if reconnect_allowed {
+                            self.remove_ticket_exchange(user);
+                            self.clear_active_peer_transport(user, connection);
                             self.mark_reconnect_user(user)?;
+                        } else if pregame_setup_retry
+                            && self.coordinator.uses_control_bootstrap()
+                            && self
+                                .platform
+                                .roster()
+                                .iter()
+                                .flatten()
+                                .any(|member| member.user == user)
+                        {
+                            // This exact pre-game generation exhausted its one
+                            // automatic socket retry. Retire every per-peer auth
+                            // artifact before exposing a generation-bound Retry;
+                            // the lobby and unrelated authority-star links stay.
+                            self.clear_peer_handoffs(user);
+                            self.record_pending_steam_setup_retry(
+                                user,
+                                Some(connection),
+                                PendingSteamSetupRetryKind::ClosedControl,
+                                OnlineFailure {
+                                    code: OnlineFailureCode::ConnectionTimedOut,
+                                    severity: OnlineFailureSeverity::Recoverable,
+                                    recovery: OnlineRecoveryAction::Retry,
+                                    detail_code: SteamTransportCloseReason::ConnectTimedOut
+                                        .diagnostic_code(),
+                                },
+                            )?;
+                        } else {
+                            self.remove_ticket_exchange(user);
+                            self.clear_active_peer_transport(user, connection);
                         }
                         self.push_event(event)?;
                     }
@@ -3008,14 +3226,25 @@ mod real {
                     }
                     OnlineLobbyEvent::ManifestCommitted(_) => {
                         self.committed_roster = Some(self.freeze_authenticated_roster()?);
-                        self.send_committed_manifest()?;
-                        let local_config = self
-                            .coordinator
-                            .match_config()
-                            .cloned()
-                            .ok_or(AuthSignalError::InvalidEnvelope)?;
-                        self.coordinator
-                            .accept_manifest(&self.platform, local_config, now_ms)?;
+                        self.send_manifest_prepare()?;
+                        self.push_event(event)?;
+                    }
+                    OnlineLobbyEvent::ManifestAborted { reason_code } => {
+                        #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+                        self.persist_pregame_failure_traces();
+                        if self.coordinator.status().role == Some(OnlineLobbyRole::ListenAuthority)
+                            && let Some(transaction) = self.manifest_transaction
+                        {
+                            self.send_manifest_rollback_best_effort(transaction, reason_code);
+                        }
+                        // Notification is deliberately best-effort. A failed
+                        // or replaced frozen generation must never strand the
+                        // local transaction or block the Lobby rollback that
+                        // the coordinator has already completed.
+                        self.committed_roster = None;
+                        self.pending_manifest = None;
+                        self.retire_manifest_transaction();
+                        self.endpoints.clear();
                         self.push_event(event)?;
                     }
                     OnlineLobbyEvent::DropGameplayEndpoints => {
@@ -3029,6 +3258,8 @@ mod real {
                         self.push_event(event)?;
                     }
                     OnlineLobbyEvent::Failure(failure) => {
+                        #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+                        self.persist_pregame_failure_traces();
                         self.runtime_failure = Some(failure);
                         self.push_event(event)?;
                     }
@@ -3036,6 +3267,28 @@ mod real {
                 }
             }
             Ok(())
+        }
+
+        #[cfg(all(feature = "steam-net", not(target_arch = "wasm32"), not(test)))]
+        fn persist_pregame_failure_traces(&mut self) {
+            let root = resolve_diagnostics_root();
+            let archive = AuthorityDiagnosticsArchive::new(root.path);
+            self.persist_pregame_failure_traces_to(&archive);
+        }
+
+        /// Shared production/test persistence seam. It consumes only bounded,
+        /// identity-free transport diagnostics; callers never receive ticket,
+        /// payload, persona, address, or Steam identity data.
+        #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
+        fn persist_pregame_failure_traces_to(&mut self, archive: &AuthorityDiagnosticsArchive) {
+            while let Some(trace) = self.coordinator.take_completed_peer_trace() {
+                let Ok(trace) = SteamPregameTraceDiagnostic::from_transport(&trace) else {
+                    continue;
+                };
+                if trace.is_pregame_failure() {
+                    let _ = archive.save_steam_pregame_trace(&trace);
+                }
+            }
         }
 
         fn push_event(&mut self, event: OnlineLobbyEvent) -> Result<(), NativeOnlineRuntimeError> {
@@ -3060,10 +3313,8 @@ mod real {
                         if member.user == local {
                             continue;
                         }
-                        let complete = matches!(
-                            member.readiness,
-                            MemberReadiness::Declared { ready: true, .. }
-                        ) && member.loadout.is_some();
+                        let complete = matches!(member.readiness, MemberReadiness::Declared { .. })
+                            && member.loadout.is_some();
                         let reconnect = self.is_reconnect_user(member.user);
                         let epoch_ready = member.loadout.is_some_and(|loadout| {
                             self.coordinator
@@ -3097,10 +3348,8 @@ mod real {
                     } else {
                         None
                     };
-                    let local_ready = self
-                        .local_declaration
-                        .is_some_and(|declaration| declaration.ready);
-                    let initial_epoch_ready = local_ready
+                    let local_coherent = self.local_declaration.is_some();
+                    let initial_epoch_ready = local_coherent
                         && self
                             .platform
                             .roster()
@@ -3108,13 +3357,13 @@ mod real {
                             .flatten()
                             .find(|member| member.user == owner)
                             .is_some_and(|member| {
-                                matches!(
-                                    member.readiness,
-                                    MemberReadiness::Declared { ready: true, .. }
-                                ) && member.loadout.is_some_and(|loadout| {
-                                    self.coordinator
-                                        .initial_authentication_allowed(owner, loadout.revision())
-                                })
+                                matches!(member.readiness, MemberReadiness::Declared { .. })
+                                    && member.loadout.is_some_and(|loadout| {
+                                        self.coordinator.initial_authentication_allowed(
+                                            owner,
+                                            loadout.revision(),
+                                        )
+                                    })
                             });
                     if let Some(purpose) = purpose
                         && (purpose == AdmissionPurpose::Reconnect || initial_epoch_ready)
@@ -3126,7 +3375,7 @@ mod real {
                 None => {}
             }
             for (user, purpose) in targets[..target_count].iter().flatten().copied() {
-                if self.is_signal_rejected_user(user) || self.signaling.peer_is_quarantined(user)? {
+                if self.is_signal_rejected_user(user) {
                     continue;
                 }
                 if self.ticket_exchanges.iter().flatten().any(|record| {
@@ -3143,7 +3392,11 @@ mod real {
                     .iter_mut()
                     .find(|slot| slot.is_none())
                     .ok_or(NativeOnlineRuntimeError::Capacity)?;
-                *slot = Some(TicketExchange { lease, sent: false });
+                *slot = Some(TicketExchange {
+                    lease,
+                    sent_sequence: None,
+                    route: TicketRoute::Direct,
+                });
             }
             Ok(())
         }
@@ -3163,8 +3416,18 @@ mod real {
             let mut exchange = self.ticket_exchanges[index].ok_or(
                 NativeOnlineRuntimeError::Signal(AuthSignalError::InvalidEnvelope),
             )?;
-            if exchange.lease.remote_user != remote_user || exchange.sent {
+            if exchange.lease.remote_user != remote_user || exchange.sent_sequence.is_some() {
                 return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            let physical_recipient = match exchange.route {
+                TicketRoute::Direct => remote_user,
+                TicketRoute::ViaAuthority { authority, .. } => authority,
+            };
+            if !self
+                .coordinator
+                .control_is_ready_for_user(physical_recipient)
+            {
+                return Ok(());
             }
             let ticket = self
                 .coordinator
@@ -3200,12 +3463,63 @@ mod real {
             );
             zeroize_auth_signal_bytes(&mut ticket_bytes);
             let signal = signal?;
-            self.signaling.send_ticket(signal)?;
-            exchange.sent = true;
+            let payload = SteamAuthTicketPayload::new(
+                SteamControlIdentity::new(scope.lobby, sender.user, remote_user)
+                    .map_err(|_| AuthSignalError::InvalidEnvelope)?,
+                sender.peer_id,
+                scope.purpose,
+                scope.owner_revision,
+                sender.revision,
+                scope.match_id,
+                signal.ticket(),
+            )
+            .map_err(|_| AuthSignalError::InvalidEnvelope)?;
+            let message = match exchange.route {
+                TicketRoute::Direct => SteamControlMessage::AuthTicket(payload),
+                TicketRoute::ViaAuthority {
+                    auth_epoch,
+                    ticket_id,
+                    authority,
+                } => SteamControlMessage::RoutedAuthTicket {
+                    identity: SteamControlIdentity::new(scope.lobby, sender.user, authority)
+                        .map_err(|_| AuthSignalError::InvalidEnvelope)?,
+                    auth_epoch,
+                    ticket_id,
+                    ticket: payload,
+                },
+            };
+            let sequence = self
+                .coordinator
+                .queue_control_for_user(physical_recipient, message)?;
+            exchange.sent_sequence = Some(sequence);
             self.ticket_exchanges[index] = Some(exchange);
             Ok(())
         }
 
+        fn flush_ready_tickets(&mut self) -> Result<(), NativeOnlineRuntimeError> {
+            let mut ready = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let mut count = 0_usize;
+            for exchange in self.ticket_exchanges.iter().flatten() {
+                if exchange.sent_sequence.is_none()
+                    && self.coordinator.auth_ticket_is_ready(exchange.lease)
+                    && self
+                        .coordinator
+                        .control_is_ready_for_user(match exchange.route {
+                            TicketRoute::Direct => exchange.lease.remote_user,
+                            TicketRoute::ViaAuthority { authority, .. } => authority,
+                        })
+                {
+                    ready[count] = Some((exchange.lease.handle, exchange.lease.remote_user));
+                    count += 1;
+                }
+            }
+            for (handle, user) in ready[..count].iter().flatten().copied() {
+                self.send_ready_ticket(handle, user)?;
+            }
+            Ok(())
+        }
+
+        #[cfg(test)]
         fn consume_session_hello(
             &self,
             source: SteamUserId,
@@ -3281,20 +3595,1077 @@ mod real {
             if !purpose_allowed {
                 return Err(AuthSignalError::UnexpectedPurpose.into());
             }
-            project_ticket_admission_result(self.coordinator.begin_peer_authentication(
+            match self.coordinator.begin_peer_authentication(
                 &mut self.platform,
                 source,
                 signal.sender_peer_id,
                 signal.ticket(),
                 signal.purpose,
                 now_ms,
-            ))?;
+            ) {
+                Ok(()) => {}
+                Err(OnlineLobbyError::Steam(error)) if immediate_auth_error_is_transient(error) => {
+                    self.record_pending_steam_setup_retry(
+                        source,
+                        self.coordinator.active_connection_for_user(source),
+                        PendingSteamSetupRetryKind::Direct,
+                        OnlineFailure::from_steam(error),
+                    )?;
+                    return Ok(false);
+                }
+                Err(error) => project_ticket_admission_result(Err(error))?,
+            }
             Ok(true)
         }
 
-        fn send_committed_manifest(&self) -> Result<(), NativeOnlineRuntimeError> {
+        fn remember_remote_ticket_sequence(
+            &mut self,
+            user: SteamUserId,
+            sequence: u32,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if let Some((_, existing)) = self
+                .remote_ticket_sequences
+                .iter()
+                .flatten()
+                .find(|(candidate, _)| *candidate == user)
+            {
+                return if *existing == sequence {
+                    Ok(())
+                } else {
+                    Err(AuthSignalError::InvalidEnvelope.into())
+                };
+            }
+            let slot = self
+                .remote_ticket_sequences
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(NativeOnlineRuntimeError::Capacity)?;
+            *slot = Some((user, sequence));
+            Ok(())
+        }
+
+        fn send_auth_accepted(
+            &mut self,
+            user: SteamUserId,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let ticket_sequence = self
+                .remote_ticket_sequences
+                .iter()
+                .flatten()
+                .find(|(candidate, _)| *candidate == user)
+                .map(|(_, sequence)| *sequence)
+                .ok_or(AuthSignalError::InvalidEnvelope)?;
+            let lobby = self
+                .coordinator
+                .status()
+                .lobby
+                .ok_or(AuthSignalError::WrongLobby)?;
+            let identity = SteamControlIdentity::new(lobby, self.platform.local_user(), user)
+                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                user,
+                SteamControlMessage::AuthAccepted {
+                    identity,
+                    ticket_sequence,
+                },
+            )?;
+            Ok(())
+        }
+
+        fn consume_auth_accepted(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            ticket_sequence: u32,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+            {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            let valid = self.ticket_exchanges.iter().flatten().any(|exchange| {
+                exchange.lease.remote_user == source
+                    && exchange.sent_sequence == Some(ticket_sequence)
+            });
+            if !valid {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            if !self.local_ticket_accepted.contains(&Some(source)) {
+                let slot = self
+                    .local_ticket_accepted
+                    .iter_mut()
+                    .find(|slot| slot.is_none())
+                    .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                *slot = Some(source);
+            }
+            self.try_finalize_control_secure(source)
+        }
+
+        fn try_finalize_control_secure(
+            &mut self,
+            user: SteamUserId,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let remote_validated = self
+                .remote_ticket_sequences
+                .iter()
+                .flatten()
+                .any(|(candidate, _)| *candidate == user)
+                && self
+                    .authenticated
+                    .iter()
+                    .flatten()
+                    .any(|mapping| mapping.user == user);
+            if remote_validated && self.local_ticket_accepted.contains(&Some(user)) {
+                self.coordinator.finalize_control_secure(user)?;
+                self.clear_pending_steam_setup_retry(
+                    user,
+                    PendingSteamSetupRetryKind::ClosedControl,
+                );
+            }
+            Ok(())
+        }
+
+        fn current_account_roster_identity(
+            &self,
+        ) -> Result<
+            (u64, u8, [Option<SteamUserId>; MAX_STEAM_LOBBY_MEMBERS]),
+            NativeOnlineRuntimeError,
+        > {
+            let lobby = self
+                .coordinator
+                .status()
+                .lobby
+                .ok_or(AuthSignalError::WrongLobby)?;
+            let mut users = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let mut count = 0_usize;
+            for member in self.platform.roster().iter().flatten() {
+                if !matches!(member.readiness, MemberReadiness::Declared { .. })
+                    || member.loadout.is_none()
+                {
+                    return Err(OnlineLobbyError::ManifestDeclarationsPending.into());
+                }
+                users[count] = Some(member.user);
+                count += 1;
+            }
+            if !(2..=MAX_STEAM_LOBBY_MEMBERS).contains(&count) {
+                return Err(NativeOnlineRuntimeError::InvalidAuthenticatedRoster);
+            }
+            users[..count]
+                .sort_unstable_by_key(|user| user.expect("packed Steam roster identity").get());
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            for byte in lobby.get().to_le_bytes().into_iter().chain([count as u8]) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            for user in users[..count].iter().flatten() {
+                for byte in user.get().to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            Ok((hash, count as u8, users))
+        }
+
+        fn routed_ticket_id(
+            &self,
+            sender: SteamUserId,
+            recipient: SteamUserId,
+        ) -> Result<u32, NativeOnlineRuntimeError> {
+            let (_, count, users) = self.current_account_roster_identity()?;
+            let sender_index = users[..usize::from(count)]
+                .iter()
+                .position(|user| *user == Some(sender))
+                .ok_or(AuthSignalError::InvalidIdentity)?;
+            let recipient_index = users[..usize::from(count)]
+                .iter()
+                .position(|user| *user == Some(recipient))
+                .ok_or(AuthSignalError::InvalidIdentity)?;
+            if sender == recipient {
+                return Err(AuthSignalError::InvalidIdentity.into());
+            }
+            Ok(((sender_index as u32 + 1) << 16) | (recipient_index as u32 + 1))
+        }
+
+        fn roster_auth_abort_transaction(
+            epoch: AccountAuthEpoch,
+        ) -> Result<ManifestTransactionId, NativeOnlineRuntimeError> {
+            ManifestTransactionId::new(epoch.get())
+                .map_err(|_| AuthSignalError::InvalidEnvelope.into())
+        }
+
+        fn roster_auth_abort_epoch(
+            transaction: Option<ManifestTransactionId>,
+        ) -> Result<AccountAuthEpoch, NativeOnlineRuntimeError> {
+            let transaction = transaction.ok_or(AuthSignalError::InvalidEnvelope)?;
+            AccountAuthEpoch::new(transaction.get())
+                .map_err(|_| AuthSignalError::InvalidEnvelope.into())
+        }
+
+        fn permanent_roster_auth_abort_code(
+            &self,
+            rejected_user: SteamUserId,
+        ) -> Result<u16, NativeOnlineRuntimeError> {
+            let (_, member_count, users) = self.current_account_roster_identity()?;
+            let ordinal = users[..usize::from(member_count)]
+                .iter()
+                .position(|user| *user == Some(rejected_user))
+                .ok_or(AuthSignalError::InvalidIdentity)?;
+            AUTH_REJECT_ROSTER_ABORT_CODE_BASE
+                .checked_add(
+                    u16::try_from(ordinal + 1).map_err(|_| NativeOnlineRuntimeError::Capacity)?,
+                )
+                .ok_or(NativeOnlineRuntimeError::Capacity)
+        }
+
+        fn permanent_roster_auth_abort_user(
+            &self,
+            reason_code: u16,
+        ) -> Result<SteamUserId, NativeOnlineRuntimeError> {
+            let ordinal = reason_code
+                .checked_sub(AUTH_REJECT_ROSTER_ABORT_CODE_BASE)
+                .filter(|ordinal| *ordinal != 0)
+                .ok_or(AuthSignalError::UnexpectedPurpose)?;
+            let (_, member_count, users) = self.current_account_roster_identity()?;
+            if ordinal > u16::from(member_count) {
+                return Err(AuthSignalError::InvalidIdentity.into());
+            }
+            users[usize::from(ordinal - 1)].ok_or(AuthSignalError::InvalidIdentity.into())
+        }
+
+        fn propagated_permanent_roster_auth_failure(reason_code: u16) -> OnlineFailure {
+            OnlineFailure {
+                code: OnlineFailureCode::AuthenticationFailed,
+                severity: OnlineFailureSeverity::Fatal,
+                recovery: OnlineRecoveryAction::ReturnToMenu,
+                detail_code: reason_code,
+            }
+        }
+
+        /// Reports a permanent client-to-client ticket verdict over the only
+        /// authenticated physical route: the client-to-authority control
+        /// socket. The authority will validate the roster epoch and fan the
+        /// bounded rejection out to every participant before retiring it.
+        fn report_permanent_roster_auth_rejection(
+            &mut self,
+            rejected_user: SteamUserId,
+            failure: OnlineFailure,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            let active = self.roster_auth.ok_or(AuthSignalError::UnexpectedPurpose)?;
+            let owner = status.owner.ok_or(AuthSignalError::InvalidIdentity)?;
+            let local = self.platform.local_user();
+            if status.phase != OnlineLobbyPhase::Lobby
+                || status.role != Some(OnlineLobbyRole::Client)
+                || owner == local
+                || rejected_user == local
+                || rejected_user == owner
+                || active.participant(rejected_user).is_none()
+            {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            let identity = SteamControlIdentity::new(
+                status.lobby.ok_or(AuthSignalError::WrongLobby)?,
+                local,
+                owner,
+            )
+            .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            let reason_code = self.permanent_roster_auth_abort_code(rejected_user)?;
+            self.coordinator.queue_control_for_user(
+                owner,
+                SteamControlMessage::Abort {
+                    identity,
+                    transaction: Some(Self::roster_auth_abort_transaction(active.epoch)?),
+                    code: reason_code,
+                    permanent: true,
+                },
+            )?;
+            self.apply_permanent_roster_auth_rejection(rejected_user, failure)
+        }
+
+        fn apply_permanent_roster_auth_rejection(
+            &mut self,
+            rejected_user: SteamUserId,
+            failure: OnlineFailure,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let newly_rejected = !self.is_signal_rejected_user(rejected_user);
+            self.mark_signal_rejected_user(rejected_user)?;
+            self.coordinator
+                .revoke_remote_account_verification(rejected_user);
+            self.retire_roster_auth_state();
+            if newly_rejected {
+                self.push_event(OnlineLobbyEvent::RosterPeerAuthenticationRejected {
+                    user: rejected_user,
+                    failure,
+                })?;
+                self.push_event(OnlineLobbyEvent::Failure(failure))?;
+            }
+            Ok(())
+        }
+
+        fn reconcile_roster_authentication(&mut self) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if status.phase != OnlineLobbyPhase::Lobby || status.role.is_none() {
+                return Ok(());
+            }
+            let Ok((roster_hash, member_count, users)) = self.current_account_roster_identity()
+            else {
+                return Ok(());
+            };
+            if let Some(active) = self.roster_auth
+                && (active.roster_hash != roster_hash || active.member_count != member_count)
+            {
+                self.retire_roster_auth_state();
+            }
+            if self.roster_auth.is_none()
+                && status.role == Some(OnlineLobbyRole::ListenAuthority)
+                && status.secure_remote_peers == status.required_remote_peers
+                && self.signal_rejected_users.iter().all(Option::is_none)
+            {
+                let epoch = AccountAuthEpoch::new(self.next_account_auth_epoch)
+                    .map_err(|_| AuthSignalError::InvalidEnvelope)?;
+                self.next_account_auth_epoch = self
+                    .next_account_auth_epoch
+                    .checked_add(1)
+                    .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                let local = self.platform.local_user();
+                let lobby = status.lobby.ok_or(AuthSignalError::WrongLobby)?;
+                let mut participants = [None; MAX_STEAM_LOBBY_MEMBERS];
+                let mut participant_count = 0_usize;
+                for user in users[..usize::from(member_count)].iter().flatten().copied() {
+                    if user == local {
+                        continue;
+                    }
+                    let direct_validated = self.coordinator.remote_account_is_verified(user)
+                        && self.local_ticket_accepted.contains(&Some(user));
+                    participants[participant_count] = Some(RosterAuthParticipant {
+                        user,
+                        prepare_accepted: false,
+                        incoming_validated: direct_validated,
+                        outgoing_accepted: direct_validated,
+                        process_complete: false,
+                    });
+                    participant_count += 1;
+                }
+                self.roster_auth = Some(RosterAuthTransaction {
+                    epoch,
+                    roster_hash,
+                    member_count,
+                    participants,
+                    prepared: true,
+                    local_complete_sent: true,
+                    globally_complete: false,
+                });
+                for participant in participants.iter().flatten() {
+                    let identity = SteamControlIdentity::new(lobby, local, participant.user)
+                        .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        participant.user,
+                        SteamControlMessage::RosterPrepare {
+                            identity,
+                            auth_epoch: epoch,
+                            roster_hash,
+                            member_count,
+                        },
+                    )?;
+                }
+            }
+
+            let Some(active_snapshot) = self.roster_auth else {
+                return Ok(());
+            };
+            let local = self.platform.local_user();
+            let owner = status.owner.ok_or(AuthSignalError::InvalidIdentity)?;
+            if status.role == Some(OnlineLobbyRole::Client) && active_snapshot.prepared {
+                for participant in active_snapshot.participants.iter().flatten() {
+                    if participant.user == owner
+                        || self.ticket_exchanges.iter().flatten().any(|exchange| {
+                            exchange.lease.remote_user == participant.user
+                                && matches!(
+                                    exchange.route,
+                                    TicketRoute::ViaAuthority { auth_epoch, .. }
+                                        if auth_epoch == active_snapshot.epoch
+                                )
+                        })
+                    {
+                        continue;
+                    }
+                    let ticket_id = self.routed_ticket_id(local, participant.user)?;
+                    let lease = self.coordinator.issue_auth_ticket(
+                        &mut self.platform,
+                        participant.user,
+                        AdmissionPurpose::Initial,
+                    )?;
+                    let slot = self
+                        .ticket_exchanges
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                    *slot = Some(TicketExchange {
+                        lease,
+                        sent_sequence: None,
+                        route: TicketRoute::ViaAuthority {
+                            auth_epoch: active_snapshot.epoch,
+                            ticket_id,
+                            authority: owner,
+                        },
+                    });
+                }
+            }
+
+            let participant_users = active_snapshot.participants;
+            for participant in participant_users.iter().flatten() {
+                if self
+                    .platform
+                    .roster_authentication_is_validated(participant.user)
+                {
+                    self.mark_roster_incoming_validated(participant.user)?;
+                }
+            }
+            if status.role == Some(OnlineLobbyRole::Client) {
+                let should_send = self.roster_auth.as_ref().is_some_and(|active| {
+                    active.local_process_complete() && !active.local_complete_sent
+                });
+                if should_send {
+                    let active = self.roster_auth.expect("roster auth remains active");
+                    let identity = SteamControlIdentity::new(
+                        status.lobby.ok_or(AuthSignalError::WrongLobby)?,
+                        local,
+                        owner,
+                    )
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        owner,
+                        SteamControlMessage::RosterAuthComplete {
+                            identity,
+                            auth_epoch: active.epoch,
+                            roster_hash: active.roster_hash,
+                        },
+                    )?;
+                    self.roster_auth
+                        .as_mut()
+                        .expect("roster auth remains active")
+                        .local_complete_sent = true;
+                }
+            } else {
+                self.try_finish_authority_roster_auth()?;
+            }
+            Ok(())
+        }
+
+        fn consume_roster_prepare(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            auth_epoch: AccountAuthEpoch,
+            roster_hash: u64,
+            member_count: u8,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_account_auth_epoch == Some(auth_epoch) {
+                return Ok(());
+            }
+            let (expected_hash, expected_count, users) = self.current_account_roster_identity()?;
+            if status.role != Some(OnlineLobbyRole::Client)
+                || status.owner != Some(source)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || self.coordinator.active_connection_for_user(source) != Some(connection)
+                || roster_hash != expected_hash
+                || member_count != expected_count
+                || status.secure_remote_peers != status.required_remote_peers
+            {
+                return Err(AuthSignalError::InvalidIdentity.into());
+            }
+            if let Some(active) = self.roster_auth {
+                return if active.epoch == auth_epoch
+                    && active.roster_hash == roster_hash
+                    && active.member_count == member_count
+                {
+                    Ok(())
+                } else {
+                    Err(AuthSignalError::InvalidEnvelope.into())
+                };
+            }
+            let local = self.platform.local_user();
+            let mut participants = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let mut count = 0_usize;
+            for user in users[..usize::from(member_count)].iter().flatten().copied() {
+                if user == local {
+                    continue;
+                }
+                let direct = user == source
+                    && self.coordinator.remote_account_is_verified(user)
+                    && self.local_ticket_accepted.contains(&Some(user));
+                participants[count] = Some(RosterAuthParticipant {
+                    user,
+                    prepare_accepted: user == source,
+                    incoming_validated: direct,
+                    outgoing_accepted: direct,
+                    process_complete: false,
+                });
+                count += 1;
+            }
+            self.roster_auth = Some(RosterAuthTransaction {
+                epoch: auth_epoch,
+                roster_hash,
+                member_count,
+                participants,
+                prepared: true,
+                local_complete_sent: false,
+                globally_complete: false,
+            });
+            let accepted_identity = SteamControlIdentity::new(identity.lobby, local, source)
+                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                source,
+                SteamControlMessage::RosterAccepted {
+                    identity: accepted_identity,
+                    auth_epoch,
+                    roster_hash,
+                    member_count,
+                },
+            )?;
+            Ok(())
+        }
+
+        fn consume_roster_accepted(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            auth_epoch: AccountAuthEpoch,
+            roster_hash: u64,
+            member_count: u8,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.retired_account_auth_epoch == Some(auth_epoch) {
+                return Ok(());
+            }
+            let status = self.coordinator.status();
+            let active = self
+                .roster_auth
+                .as_mut()
+                .ok_or(AuthSignalError::InvalidEnvelope)?;
+            if status.role != Some(OnlineLobbyRole::ListenAuthority)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.epoch != auth_epoch
+                || active.roster_hash != roster_hash
+                || active.member_count != member_count
+                || self.coordinator.active_connection_for_user(source) != Some(connection)
+            {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            active
+                .participant_mut(source)
+                .ok_or(AuthSignalError::InvalidIdentity)?
+                .prepare_accepted = true;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_routed_auth_ticket(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            auth_epoch: AccountAuthEpoch,
+            ticket_id: u32,
+            ticket: SteamAuthTicketPayload,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.retired_account_auth_epoch == Some(auth_epoch) {
+                return Ok(());
+            }
+            let status = self.coordinator.status();
+            let active = self
+                .roster_auth
+                .as_ref()
+                .ok_or(AuthSignalError::InvalidEnvelope)?;
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.epoch != auth_epoch
+                || ticket.identity.lobby != identity.lobby
+                || ticket.purpose != AdmissionPurpose::Initial
+                || ticket.match_id.is_some()
+                || ticket_id
+                    != self.routed_ticket_id(ticket.identity.sender, ticket.identity.recipient)?
+            {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => {
+                    if ticket.identity.sender != source
+                        || ticket.identity.recipient == self.platform.local_user()
+                        || active
+                            .participant(source)
+                            .is_none_or(|participant| !participant.prepare_accepted)
+                        || active.participant(ticket.identity.recipient).is_none()
+                    {
+                        return Err(AuthSignalError::InvalidIdentity.into());
+                    }
+                    let recipient = ticket.identity.recipient;
+                    let forward_identity = SteamControlIdentity::new(
+                        identity.lobby,
+                        self.platform.local_user(),
+                        recipient,
+                    )
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        recipient,
+                        SteamControlMessage::RoutedAuthTicket {
+                            identity: forward_identity,
+                            auth_epoch,
+                            ticket_id,
+                            ticket,
+                        },
+                    )?;
+                }
+                Some(OnlineLobbyRole::Client) => {
+                    if status.owner != Some(source)
+                        || ticket.identity.recipient != self.platform.local_user()
+                        || ticket.identity.sender == source
+                        || active.participant(ticket.identity.sender).is_none()
+                    {
+                        return Err(AuthSignalError::InvalidIdentity.into());
+                    }
+                    let logical_sender = ticket.identity.sender;
+                    if let Some(existing) = self
+                        .routed_incoming_tickets
+                        .iter()
+                        .flatten()
+                        .find(|record| record.sender == logical_sender)
+                    {
+                        if existing.ticket_id != ticket_id {
+                            return Err(AuthSignalError::InvalidEnvelope.into());
+                        }
+                        return Ok(());
+                    }
+                    let slot = self
+                        .routed_incoming_tickets
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                    *slot = Some(RoutedIncomingTicket {
+                        sender: logical_sender,
+                        ticket_id,
+                    });
+                    if let Err(error) = self.platform.begin_roster_authentication(
+                        identity.lobby,
+                        logical_sender,
+                        ticket.ticket(),
+                        now_ms,
+                    ) {
+                        let failure = OnlineFailure::from_steam(error);
+                        if immediate_auth_error_is_transient(error) {
+                            // No native session exists after an immediate
+                            // failure, so this route must receive a fresh
+                            // recipient-bound one-use ticket on Retry.
+                            self.record_pending_steam_setup_retry(
+                                logical_sender,
+                                None,
+                                PendingSteamSetupRetryKind::RosterLease,
+                                failure,
+                            )?;
+                            self.push_event(OnlineLobbyEvent::RosterPeerAuthenticationRejected {
+                                user: logical_sender,
+                                failure,
+                            })?;
+                        } else {
+                            self.report_permanent_roster_auth_rejection(logical_sender, failure)?;
+                        }
+                    }
+                }
+                None => return Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_routed_auth_accepted(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            auth_epoch: AccountAuthEpoch,
+            ticket_id: u32,
+            ticket_sender: SteamUserId,
+            ticket_recipient: SteamUserId,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.retired_account_auth_epoch == Some(auth_epoch) {
+                return Ok(());
+            }
+            let status = self.coordinator.status();
+            let active = self
+                .roster_auth
+                .as_ref()
+                .ok_or(AuthSignalError::InvalidEnvelope)?;
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.epoch != auth_epoch
+                || ticket_id != self.routed_ticket_id(ticket_sender, ticket_recipient)?
+            {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => {
+                    if source != ticket_recipient
+                        || active.participant(ticket_sender).is_none()
+                        || active.participant(ticket_recipient).is_none()
+                    {
+                        return Err(AuthSignalError::InvalidIdentity.into());
+                    }
+                    let forward_identity = SteamControlIdentity::new(
+                        identity.lobby,
+                        self.platform.local_user(),
+                        ticket_sender,
+                    )
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        ticket_sender,
+                        SteamControlMessage::RoutedAuthAccepted {
+                            identity: forward_identity,
+                            auth_epoch,
+                            ticket_id,
+                            ticket_sender,
+                            ticket_recipient,
+                        },
+                    )?;
+                }
+                Some(OnlineLobbyRole::Client) => {
+                    if status.owner != Some(source) || ticket_sender != self.platform.local_user() {
+                        return Err(AuthSignalError::InvalidIdentity.into());
+                    }
+                    let valid = self.ticket_exchanges.iter().flatten().any(|exchange| {
+                        exchange.lease.remote_user == ticket_recipient
+                            && matches!(
+                                exchange.route,
+                                TicketRoute::ViaAuthority {
+                                    auth_epoch: epoch,
+                                    ticket_id: id,
+                                    ..
+                                } if epoch == auth_epoch && id == ticket_id
+                            )
+                    });
+                    if !valid {
+                        return Err(AuthSignalError::InvalidEnvelope.into());
+                    }
+                    self.roster_auth
+                        .as_mut()
+                        .and_then(|active| active.participant_mut(ticket_recipient))
+                        .ok_or(AuthSignalError::InvalidIdentity)?
+                        .outgoing_accepted = true;
+                }
+                None => return Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+            Ok(())
+        }
+
+        fn send_routed_auth_accepted(
+            &mut self,
+            ticket: RoutedIncomingTicket,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            let owner = status.owner.ok_or(AuthSignalError::InvalidIdentity)?;
+            let active = self.roster_auth.ok_or(AuthSignalError::InvalidEnvelope)?;
+            let local = self.platform.local_user();
+            let identity = SteamControlIdentity::new(
+                status.lobby.ok_or(AuthSignalError::WrongLobby)?,
+                local,
+                owner,
+            )
+            .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                owner,
+                SteamControlMessage::RoutedAuthAccepted {
+                    identity,
+                    auth_epoch: active.epoch,
+                    ticket_id: ticket.ticket_id,
+                    ticket_sender: ticket.sender,
+                    ticket_recipient: local,
+                },
+            )?;
+            Ok(())
+        }
+
+        fn mark_roster_incoming_validated(
+            &mut self,
+            user: SteamUserId,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if let Some(active) = self.roster_auth.as_mut()
+                && let Some(participant) = active.participant_mut(user)
+            {
+                participant.incoming_validated = true;
+                self.coordinator.record_remote_account_verified(user)?;
+            }
+            Ok(())
+        }
+
+        fn consume_roster_auth_complete(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            auth_epoch: AccountAuthEpoch,
+            roster_hash: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_account_auth_epoch == Some(auth_epoch) {
+                return Ok(());
+            }
+            let active = self
+                .roster_auth
+                .as_mut()
+                .ok_or(AuthSignalError::InvalidEnvelope)?;
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.epoch != auth_epoch
+                || active.roster_hash != roster_hash
+            {
+                return Err(AuthSignalError::InvalidEnvelope.into());
+            }
+            match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => {
+                    let participant = active
+                        .participant_mut(source)
+                        .ok_or(AuthSignalError::InvalidIdentity)?;
+                    if !participant.prepare_accepted {
+                        return Err(AuthSignalError::UnexpectedPurpose.into());
+                    }
+                    participant.process_complete = true;
+                    self.try_finish_authority_roster_auth()?;
+                }
+                Some(OnlineLobbyRole::Client) if status.owner == Some(source) => {
+                    if !active.local_process_complete() || !active.local_complete_sent {
+                        return Err(AuthSignalError::UnexpectedPurpose.into());
+                    }
+                    active.globally_complete = true;
+                }
+                _ => return Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+            Ok(())
+        }
+
+        fn try_finish_authority_roster_auth(&mut self) -> Result<(), NativeOnlineRuntimeError> {
             let status = self.coordinator.status();
             if status.role != Some(OnlineLobbyRole::ListenAuthority) {
+                return Ok(());
+            }
+            let Some(active) = self.roster_auth.as_mut() else {
+                return Ok(());
+            };
+            if active.globally_complete
+                || !active
+                    .participants
+                    .iter()
+                    .flatten()
+                    .all(|participant| participant.process_complete)
+            {
+                return Ok(());
+            }
+            active.globally_complete = true;
+            let snapshot = *active;
+            let lobby = status.lobby.ok_or(AuthSignalError::WrongLobby)?;
+            let local = self.platform.local_user();
+            for participant in snapshot.participants.iter().flatten() {
+                let identity = SteamControlIdentity::new(lobby, local, participant.user)
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                self.coordinator.queue_control_for_user(
+                    participant.user,
+                    SteamControlMessage::RosterAuthComplete {
+                        identity,
+                        auth_epoch: snapshot.epoch,
+                        roster_hash: snapshot.roster_hash,
+                    },
+                )?;
+            }
+            Ok(())
+        }
+
+        fn retire_roster_auth_state(&mut self) {
+            if let Some(active) = self.roster_auth.take() {
+                self.retired_account_auth_epoch = Some(active.epoch);
+            }
+            let routed_incoming_users = self
+                .routed_incoming_tickets
+                .map(|ticket| ticket.map(|ticket| ticket.sender));
+            self.routed_incoming_tickets = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let routed_handles: Vec<_> = self
+                .ticket_exchanges
+                .iter()
+                .flatten()
+                .filter(|exchange| matches!(exchange.route, TicketRoute::ViaAuthority { .. }))
+                .map(|exchange| exchange.lease.handle)
+                .collect();
+            for handle in routed_handles {
+                let _ = self
+                    .coordinator
+                    .cancel_auth_ticket(&mut self.platform, handle);
+            }
+            self.ticket_exchanges
+                .iter_mut()
+                .filter(|exchange| {
+                    exchange.is_some_and(|exchange| {
+                        matches!(exchange.route, TicketRoute::ViaAuthority { .. })
+                    })
+                })
+                .for_each(|exchange| *exchange = None);
+            // Only routed sessions belong to this roster transaction. Direct
+            // authority-star validation remains valid and must not be revoked
+            // when one participant asks to rerun the routed exchange.
+            for user in routed_incoming_users.iter().flatten().copied() {
+                let _ = self.platform.end_roster_authentication(user);
+                self.coordinator.revoke_remote_account_verification(user);
+            }
+            self.clear_pending_roster_setup_retries();
+        }
+
+        fn retire_manifest_transaction(&mut self) {
+            if let Some(active) = self.manifest_transaction.take() {
+                self.retired_manifest_transaction = Some(active.id);
+            }
+        }
+
+        fn send_manifest_rollback_best_effort(
+            &mut self,
+            transaction: RuntimeManifestTransaction,
+            reason_code: u16,
+        ) {
+            let status = self.coordinator.status();
+            if status.role != Some(OnlineLobbyRole::ListenAuthority) {
+                return;
+            }
+            let Some(lobby) = status.lobby else {
+                return;
+            };
+            let local = self.platform.local_user();
+            for participant in transaction.participants.iter().flatten() {
+                if self
+                    .coordinator
+                    .active_connection_for_user(participant.user)
+                    != Some(participant.connection)
+                {
+                    continue;
+                }
+                let Ok(identity) = SteamControlIdentity::new(lobby, local, participant.user) else {
+                    continue;
+                };
+                let message = match transaction.stage {
+                    ManifestTransactionStage::Preparing | ManifestTransactionStage::Committing => {
+                        SteamControlMessage::Abort {
+                            identity,
+                            transaction: Some(transaction.id),
+                            code: reason_code,
+                            permanent: false,
+                        }
+                    }
+                    ManifestTransactionStage::Activating => SteamControlMessage::SetupCancel {
+                        identity,
+                        transaction: transaction.id,
+                        code: reason_code,
+                    },
+                    // Once the authority has received every activation receipt
+                    // and begun the final release, rollback is no longer safe.
+                    // Reliable control retransmission or ordinary terminal
+                    // gameplay handling owns that irrevocable boundary.
+                    ManifestTransactionStage::Activated => continue,
+                };
+                let _ = self
+                    .coordinator
+                    .queue_control_for_user(participant.user, message);
+            }
+        }
+
+        fn frozen_manifest_connections(
+            transaction: RuntimeManifestTransaction,
+        ) -> [Option<(SteamUserId, SteamConnectionId)>; MAX_STEAM_LOBBY_MEMBERS] {
+            std::array::from_fn(|index| {
+                transaction.participants[index]
+                    .map(|participant| (participant.user, participant.connection))
+            })
+        }
+
+        fn cancel_active_manifest_setup(
+            &mut self,
+            transaction: RuntimeManifestTransaction,
+            reason_code: u16,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if transaction.stage != ManifestTransactionStage::Activating
+                || !self.endpoints.is_empty()
+            {
+                return Err(OnlineLobbyError::InvalidState.into());
+            }
+            let status = self.coordinator.status();
+            if status.role != Some(OnlineLobbyRole::ListenAuthority) {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            self.send_manifest_rollback_best_effort(transaction, reason_code);
+
+            self.rollback_manifest_setup(transaction, reason_code, now_ms)
+        }
+
+        fn rollback_manifest_setup(
+            &mut self,
+            transaction: RuntimeManifestTransaction,
+            reason_code: u16,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if transaction.stage == ManifestTransactionStage::Activated
+                || !self.endpoints.is_empty()
+            {
+                return Err(OnlineLobbyError::InvalidState.into());
+            }
+            let participants = Self::frozen_manifest_connections(transaction);
+            self.retire_manifest_transaction();
+            self.committed_roster = None;
+            self.pending_manifest = None;
+            self.endpoints.clear();
+            self.coordinator.cancel_committed_setup_exact(
+                &mut self.platform,
+                participants,
+                reason_code,
+                now_ms,
+            )?;
+            Ok(())
+        }
+
+        fn enforce_activation_deadline(
+            &mut self,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            if self.coordinator.steam_backend_reconnect_pending() {
+                return Ok(());
+            }
+            let Some(transaction) = self.manifest_transaction else {
+                return Ok(());
+            };
+            if transaction.stage != ManifestTransactionStage::Activating
+                || transaction
+                    .activation_deadline_ms
+                    .is_none_or(|deadline_ms| now_ms < deadline_ms)
+            {
+                return Ok(());
+            }
+            self.cancel_active_manifest_setup(
+                transaction,
+                OnlineLobbyPhase::Loading.diagnostic_code(),
+                now_ms,
+            )
+        }
+
+        fn send_manifest_prepare(&mut self) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if status.role != Some(OnlineLobbyRole::ListenAuthority)
+                || self
+                    .roster_auth
+                    .as_ref()
+                    .is_none_or(|auth| !auth.globally_complete)
+            {
                 return Err(AuthSignalError::UnexpectedManifestSender.into());
             }
             let lobby = status.lobby.ok_or(AuthSignalError::WrongLobby)?;
@@ -3304,29 +4675,797 @@ mod real {
                 .match_config()
                 .ok_or(AuthSignalError::InvalidEnvelope)?
                 .manifest;
+            let transaction = ManifestTransactionId::new(self.next_manifest_transaction_id)
+                .map_err(|_| AuthSignalError::InvalidEnvelope)?;
+            self.next_manifest_transaction_id = self
+                .next_manifest_transaction_id
+                .checked_add(1)
+                .ok_or(NativeOnlineRuntimeError::Capacity)?;
+            let mut participants = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let mut count = 0_usize;
             for member in self.platform.roster().iter().flatten() {
                 if member.user == local {
                     continue;
                 }
-                if self.is_signal_rejected_user(member.user)
-                    || self.signaling.peer_is_quarantined(member.user)?
-                {
-                    continue;
-                }
-                if !self
-                    .authenticated
-                    .iter()
-                    .flatten()
-                    .any(|mapping| mapping.user == member.user)
-                {
-                    return Err(NativeOnlineRuntimeError::InvalidAuthenticatedRoster);
-                }
-                let signal = BootstrapManifestSignal::new(lobby, local, member.user, manifest)?;
-                self.signaling.send_manifest(signal)?;
+                let connection = self
+                    .coordinator
+                    .active_connection_for_user(member.user)
+                    .ok_or(NativeOnlineRuntimeError::InvalidAuthenticatedRoster)?;
+                participants[count] = Some(ManifestParticipant {
+                    user: member.user,
+                    connection,
+                    accepted: false,
+                    commit_accepted: false,
+                    activated: false,
+                });
+                count += 1;
+            }
+            if count != usize::from(status.required_remote_peers) {
+                return Err(NativeOnlineRuntimeError::InvalidAuthenticatedRoster);
+            }
+            self.manifest_transaction = Some(RuntimeManifestTransaction {
+                id: transaction,
+                manifest_hash: manifest.manifest_hash,
+                participants,
+                stage: ManifestTransactionStage::Preparing,
+                activation_deadline_ms: None,
+            });
+            for participant in participants.iter().flatten() {
+                self.coordinator
+                    .begin_control_manifest_agreement(participant.user)?;
+                let identity = SteamControlIdentity::new(lobby, local, participant.user)
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                self.coordinator.queue_control_for_user(
+                    participant.user,
+                    SteamControlMessage::ManifestPrepare {
+                        identity,
+                        transaction,
+                        manifest,
+                    },
+                )?;
             }
             Ok(())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn consume_manifest_prepare(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest: MatchManifest,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            if status.role != Some(OnlineLobbyRole::Client)
+                || status.owner != Some(source)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || self.coordinator.active_connection_for_user(source) != Some(connection)
+                || self
+                    .roster_auth
+                    .as_ref()
+                    .is_none_or(|auth| !auth.globally_complete)
+            {
+                return Err(AuthSignalError::UnexpectedManifestSender.into());
+            }
+            if let Some(active) = self.manifest_transaction {
+                return if active.id == transaction && active.manifest_hash == manifest.manifest_hash
+                {
+                    Ok(())
+                } else {
+                    Err(AuthSignalError::ConflictingManifest.into())
+                };
+            }
+            self.coordinator.enter_control_manifest_agreement(now_ms)?;
+            self.coordinator.begin_control_manifest_agreement(source)?;
+            let config = headless_config_from_manifest(manifest)
+                .map_err(|_| AuthSignalError::InvalidEnvelope)?;
+            self.coordinator
+                .prepare_remote_manifest(&self.platform, config, now_ms)?;
+            self.committed_roster = Some(self.freeze_authenticated_roster()?);
+            let mut participants = [None; MAX_STEAM_LOBBY_MEMBERS];
+            participants[0] = Some(ManifestParticipant {
+                user: source,
+                connection,
+                accepted: true,
+                commit_accepted: false,
+                activated: false,
+            });
+            self.manifest_transaction = Some(RuntimeManifestTransaction {
+                id: transaction,
+                manifest_hash: manifest.manifest_hash,
+                participants,
+                stage: ManifestTransactionStage::Preparing,
+                activation_deadline_ms: None,
+            });
+            let accepted_identity =
+                SteamControlIdentity::new(identity.lobby, self.platform.local_user(), source)
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                source,
+                SteamControlMessage::ManifestAccepted {
+                    identity: accepted_identity,
+                    transaction,
+                    manifest_hash: manifest.manifest_hash,
+                },
+            )?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_manifest_accepted(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest_hash: crate::network_protocol::ManifestHash,
+            _now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let active = self
+                .manifest_transaction
+                .as_mut()
+                .ok_or(AuthSignalError::ConflictingManifest)?;
+            if status.role != Some(OnlineLobbyRole::ListenAuthority)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.id != transaction
+                || active.manifest_hash != manifest_hash
+                || active.stage != ManifestTransactionStage::Preparing
+                || active
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::ConflictingManifest.into());
+            }
+            active
+                .participant_mut(source)
+                .expect("validated participant exists")
+                .accepted = true;
+            if active
+                .participants
+                .iter()
+                .flatten()
+                .all(|participant| participant.accepted)
+            {
+                let participants = active.participants;
+                active.stage = ManifestTransactionStage::Committing;
+                let local = self.platform.local_user();
+                for participant in participants.iter().flatten() {
+                    let commit_identity =
+                        SteamControlIdentity::new(identity.lobby, local, participant.user)
+                            .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        participant.user,
+                        SteamControlMessage::ManifestCommit {
+                            identity: commit_identity,
+                            transaction,
+                            manifest_hash,
+                        },
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_manifest_commit(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest_hash: crate::network_protocol::ManifestHash,
+            _now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let active = self
+                .manifest_transaction
+                .as_mut()
+                .ok_or(AuthSignalError::ConflictingManifest)?;
+            if status.role != Some(OnlineLobbyRole::Client)
+                || status.owner != Some(source)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.id != transaction
+                || active.manifest_hash != manifest_hash
+                || active
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::ConflictingManifest.into());
+            }
+            if active.stage == ManifestTransactionStage::Preparing {
+                active.stage = ManifestTransactionStage::Committing;
+            } else if active.stage != ManifestTransactionStage::Committing {
+                return Ok(());
+            }
+            let accepted_identity =
+                SteamControlIdentity::new(identity.lobby, self.platform.local_user(), source)
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                source,
+                SteamControlMessage::ManifestCommitAccepted {
+                    identity: accepted_identity,
+                    transaction,
+                    manifest_hash,
+                },
+            )?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_manifest_commit_accepted(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest_hash: crate::network_protocol::ManifestHash,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            let activation_timeout_ms = self.coordinator.config().timeouts.manifest_agreement_ms;
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let active = self
+                .manifest_transaction
+                .as_mut()
+                .ok_or(AuthSignalError::ConflictingManifest)?;
+            if status.role != Some(OnlineLobbyRole::ListenAuthority)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.id != transaction
+                || active.manifest_hash != manifest_hash
+                || active.stage != ManifestTransactionStage::Committing
+                || active
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::ConflictingManifest.into());
+            }
+            active
+                .participant_mut(source)
+                .expect("validated participant exists")
+                .commit_accepted = true;
+            if active
+                .participants
+                .iter()
+                .flatten()
+                .all(|participant| participant.commit_accepted)
+            {
+                let participants = active.participants;
+                active.stage = ManifestTransactionStage::Activating;
+                active.activation_deadline_ms = Some(now_ms.saturating_add(activation_timeout_ms));
+                self.coordinator.commit_prepared_manifest(now_ms)?;
+                for participant in participants.iter().flatten() {
+                    self.coordinator
+                        .arm_control_gameplay_receive(participant.user)?;
+                    let activate_identity = SteamControlIdentity::new(
+                        identity.lobby,
+                        self.platform.local_user(),
+                        participant.user,
+                    )
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                    self.coordinator.queue_control_for_user(
+                        participant.user,
+                        SteamControlMessage::GameplayActivate {
+                            identity: activate_identity,
+                            transaction,
+                            manifest_hash,
+                        },
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_gameplay_activate(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest_hash: crate::network_protocol::ManifestHash,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let active = self
+                .manifest_transaction
+                .as_mut()
+                .ok_or(AuthSignalError::ConflictingManifest)?;
+            if status.role != Some(OnlineLobbyRole::Client)
+                || status.owner != Some(source)
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.id != transaction
+                || active.manifest_hash != manifest_hash
+                || active
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::ConflictingManifest.into());
+            }
+            match active.stage {
+                ManifestTransactionStage::Committing => {
+                    self.coordinator
+                        .commit_prepared_manifest(self.last_now_ms)?;
+                    self.coordinator.arm_control_gameplay_receive(source)?;
+                    active.stage = ManifestTransactionStage::Activating;
+                    // After sending the receipt, the client cannot know
+                    // whether the authority crossed the all-receipts barrier.
+                    // It therefore waits for the reliable final release and
+                    // never attempts a unilateral rollback.
+                    active.activation_deadline_ms = None;
+                }
+                ManifestTransactionStage::Activating => {}
+                ManifestTransactionStage::Activated => return Ok(()),
+                ManifestTransactionStage::Preparing => {
+                    return Err(AuthSignalError::ConflictingManifest.into());
+                }
+            }
+            let activated_identity =
+                SteamControlIdentity::new(identity.lobby, self.platform.local_user(), source)
+                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+            self.coordinator.queue_control_for_user(
+                source,
+                SteamControlMessage::GameplayActivated {
+                    identity: activated_identity,
+                    transaction,
+                    manifest_hash,
+                },
+            )?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn consume_gameplay_activated(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            manifest_hash: crate::network_protocol::ManifestHash,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let snapshot = self
+                .manifest_transaction
+                .as_ref()
+                .copied()
+                .ok_or(AuthSignalError::ConflictingManifest)?;
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || snapshot.id != transaction
+                || snapshot.manifest_hash != manifest_hash
+                || snapshot
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::ConflictingManifest.into());
+            }
+
+            match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => {
+                    if snapshot.stage == ManifestTransactionStage::Activated {
+                        return Ok(());
+                    }
+                    if snapshot.stage != ManifestTransactionStage::Activating {
+                        return Err(AuthSignalError::ConflictingManifest.into());
+                    }
+                    let active = self
+                        .manifest_transaction
+                        .as_mut()
+                        .expect("validated manifest transaction remains active");
+                    active
+                        .participant_mut(source)
+                        .expect("validated participant exists")
+                        .activated = true;
+                    if !active
+                        .participants
+                        .iter()
+                        .flatten()
+                        .all(|participant| participant.activated)
+                    {
+                        return Ok(());
+                    }
+
+                    let participants = active.participants;
+                    let local = self.platform.local_user();
+                    let mut release_users = [None; MAX_STEAM_LOBBY_MEMBERS];
+                    for participant in participants.iter().flatten() {
+                        if self
+                            .coordinator
+                            .active_connection_for_user(participant.user)
+                            != Some(participant.connection)
+                        {
+                            return Err(AuthSignalError::ConflictingManifest.into());
+                        }
+                        let slot = release_users
+                            .iter_mut()
+                            .find(|slot| slot.is_none())
+                            .ok_or(NativeOnlineRuntimeError::Capacity)?;
+                        *slot = Some(participant.user);
+                    }
+                    if !self.coordinator.can_queue_control_for_users(release_users) {
+                        return Err(NativeOnlineRuntimeError::Capacity);
+                    }
+
+                    // Cross the irrevocable barrier before the first release
+                    // can enter a reliable outbox. Any failure beyond this
+                    // point must take normal terminal handling and can never
+                    // race an activation timeout into SetupCancel.
+                    let active = self
+                        .manifest_transaction
+                        .as_mut()
+                        .expect("manifest transaction remains active through release");
+                    active.stage = ManifestTransactionStage::Activated;
+                    active.activation_deadline_ms = None;
+                    for participant in participants.iter().flatten() {
+                        let release_identity =
+                            SteamControlIdentity::new(identity.lobby, local, participant.user)
+                                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                        self.coordinator.queue_control_for_user(
+                            participant.user,
+                            SteamControlMessage::GameplayActivated {
+                                identity: release_identity,
+                                transaction,
+                                manifest_hash,
+                            },
+                        )?;
+                    }
+                    for participant in participants.iter().flatten() {
+                        self.coordinator
+                            .promote_control_connection(participant.user)?;
+                    }
+                }
+                Some(OnlineLobbyRole::Client) => {
+                    if status.owner != Some(source) {
+                        return Err(AuthSignalError::UnexpectedManifestSender.into());
+                    }
+                    if snapshot.stage == ManifestTransactionStage::Activated {
+                        return Ok(());
+                    }
+                    if snapshot.stage != ManifestTransactionStage::Activating {
+                        return Err(AuthSignalError::ConflictingManifest.into());
+                    }
+                    self.coordinator.promote_control_connection(source)?;
+                    let active = self
+                        .manifest_transaction
+                        .as_mut()
+                        .expect("manifest transaction remains active through release");
+                    active.stage = ManifestTransactionStage::Activated;
+                    active.activation_deadline_ms = None;
+                }
+                None => return Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+            Ok(())
+        }
+
+        fn consume_setup_abort(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            transaction: Option<ManifestTransactionId>,
+            reason_code: u16,
+            permanent: bool,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if permanent
+                && reason_code > AUTH_REJECT_ROSTER_ABORT_CODE_BASE
+                && reason_code
+                    <= AUTH_REJECT_ROSTER_ABORT_CODE_BASE + MAX_STEAM_LOBBY_MEMBERS as u16
+            {
+                return self.consume_permanent_roster_auth_abort(
+                    source,
+                    identity,
+                    transaction,
+                    reason_code,
+                );
+            }
+            if transaction.is_none()
+                && !permanent
+                && status.lobby == Some(identity.lobby)
+                && identity.sender == source
+                && identity.recipient == self.platform.local_user()
+                && matches!(
+                    status.phase,
+                    OnlineLobbyPhase::Lobby
+                        | OnlineLobbyPhase::Connecting
+                        | OnlineLobbyPhase::Authenticating
+                )
+            {
+                match (status.role, reason_code) {
+                    (Some(OnlineLobbyRole::Client), AUTH_RETRY_DIRECT_ABORT_CODE)
+                        if status.owner == Some(source) =>
+                    {
+                        self.clear_peer_handoffs(source);
+                        self.clear_pending_steam_setup_retries_for_user(source);
+                        // The ingress ACK must be accepted before this exact
+                        // physical generation is retired. The drain loop
+                        // performs the targeted replacement immediately after
+                        // accepting this frame.
+                        self.deferred_control_setup_retry = Some(source);
+                        return Ok(());
+                    }
+                    (Some(OnlineLobbyRole::ListenAuthority), AUTH_RETRY_DIRECT_ABORT_CODE)
+                        if self
+                            .platform
+                            .roster()
+                            .iter()
+                            .flatten()
+                            .any(|member| member.user == source) =>
+                    {
+                        if let Some(roster) = self.roster_auth {
+                            for participant in roster.participants.iter().flatten() {
+                                let roster_identity = SteamControlIdentity::new(
+                                    identity.lobby,
+                                    self.platform.local_user(),
+                                    participant.user,
+                                )
+                                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                                self.coordinator.queue_control_for_user(
+                                    participant.user,
+                                    SteamControlMessage::Abort {
+                                        identity: roster_identity,
+                                        transaction: None,
+                                        code: AUTH_RETRY_ROSTER_ABORT_CODE,
+                                        permanent: false,
+                                    },
+                                )?;
+                            }
+                        }
+                        let response_identity = SteamControlIdentity::new(
+                            identity.lobby,
+                            self.platform.local_user(),
+                            source,
+                        )
+                        .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                        self.coordinator.queue_control_for_user(
+                            source,
+                            SteamControlMessage::Abort {
+                                identity: response_identity,
+                                transaction: None,
+                                code: AUTH_RETRY_DIRECT_ABORT_CODE,
+                                permanent: false,
+                            },
+                        )?;
+                        self.clear_peer_handoffs(source);
+                        return Ok(());
+                    }
+                    (Some(OnlineLobbyRole::Client), AUTH_RETRY_ROSTER_ABORT_CODE)
+                        if status.owner == Some(source) =>
+                    {
+                        self.retire_roster_auth_state();
+                        return Ok(());
+                    }
+                    (Some(OnlineLobbyRole::ListenAuthority), AUTH_RETRY_ROSTER_ABORT_CODE)
+                        if self
+                            .roster_auth
+                            .as_ref()
+                            .is_some_and(|active| active.participant(source).is_some()) =>
+                    {
+                        let local = self.platform.local_user();
+                        let users: Vec<_> = self
+                            .roster_auth
+                            .expect("validated roster transaction exists")
+                            .participants
+                            .iter()
+                            .flatten()
+                            .map(|participant| participant.user)
+                            .collect();
+                        for user in users {
+                            let abort_identity =
+                                SteamControlIdentity::new(identity.lobby, local, user)
+                                    .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                            self.coordinator.queue_control_for_user(
+                                user,
+                                SteamControlMessage::Abort {
+                                    identity: abort_identity,
+                                    transaction: None,
+                                    code: AUTH_RETRY_ROSTER_ABORT_CODE,
+                                    permanent: false,
+                                },
+                            )?;
+                        }
+                        self.retire_roster_auth_state();
+                        return Ok(());
+                    }
+                    _ => return Err(AuthSignalError::UnexpectedPurpose.into()),
+                }
+            }
+            if transaction.is_some_and(|id| self.retired_manifest_transaction == Some(id)) {
+                return Ok(());
+            }
+            if permanent
+                || identity.lobby != status.lobby.unwrap_or(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || status.role != Some(OnlineLobbyRole::Client)
+                || status.owner != Some(source)
+                || transaction != self.manifest_transaction.as_ref().map(|active| active.id)
+            {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            self.retire_manifest_transaction();
+            self.coordinator
+                .abort_manifest_agreement(&mut self.platform, reason_code, now_ms)?;
+            Ok(())
+        }
+
+        fn consume_permanent_roster_auth_abort(
+            &mut self,
+            source: SteamUserId,
+            identity: SteamControlIdentity,
+            transaction: Option<ManifestTransactionId>,
+            reason_code: u16,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if status.phase != OnlineLobbyPhase::Lobby
+                || status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+            {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            let epoch = Self::roster_auth_abort_epoch(transaction)?;
+            let source_is_valid = match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => self
+                    .platform
+                    .roster()
+                    .iter()
+                    .flatten()
+                    .any(|member| member.user == source),
+                Some(OnlineLobbyRole::Client) => status.owner == Some(source),
+                None => false,
+            };
+            if !source_is_valid {
+                return Err(AuthSignalError::InvalidIdentity.into());
+            }
+
+            // The exact epoch was already retired locally. ACK this delayed
+            // reliable frame without decoding its roster ordinal against a
+            // potentially newer membership snapshot.
+            if self.retired_account_auth_epoch == Some(epoch)
+                && self
+                    .roster_auth
+                    .as_ref()
+                    .is_none_or(|active| active.epoch != epoch)
+            {
+                return Ok(());
+            }
+
+            let rejected_user = self.permanent_roster_auth_abort_user(reason_code)?;
+            let local = self.platform.local_user();
+
+            match status.role {
+                Some(OnlineLobbyRole::ListenAuthority) => {
+                    let active = self.roster_auth.ok_or(AuthSignalError::UnexpectedPurpose)?;
+                    if active.epoch != epoch {
+                        return Err(AuthSignalError::InvalidEnvelope.into());
+                    }
+                    // A routed ticket recipient reports a different routed
+                    // sender. The listen owner validates that both accounts
+                    // belong to this exact epoch, then fans the verdict out on
+                    // every authority-star control socket.
+                    if source == rejected_user
+                        || active.participant(source).is_none()
+                        || active.participant(rejected_user).is_none()
+                    {
+                        return Err(AuthSignalError::InvalidIdentity.into());
+                    }
+                    let transaction = Self::roster_auth_abort_transaction(epoch)?;
+                    let lobby = status.lobby.ok_or(AuthSignalError::WrongLobby)?;
+                    for participant in active.participants.iter().flatten() {
+                        let abort_identity =
+                            SteamControlIdentity::new(lobby, local, participant.user)
+                                .map_err(|_| AuthSignalError::InvalidIdentity)?;
+                        self.coordinator.queue_control_for_user(
+                            participant.user,
+                            SteamControlMessage::Abort {
+                                identity: abort_identity,
+                                transaction: Some(transaction),
+                                code: reason_code,
+                                permanent: true,
+                            },
+                        )?;
+                    }
+                }
+                Some(OnlineLobbyRole::Client) => {
+                    // The authority can fan this verdict to a client before
+                    // its earlier RosterPrepare reaches the front of the same
+                    // socket's ordered stream on another process. The secure
+                    // authority identity plus current canonical roster are
+                    // sufficient to retire that epoch; delayed prepare/ticket
+                    // frames are then semantically ACKed as known-stale.
+                    if let Some(active) = self.roster_auth {
+                        if active.epoch != epoch {
+                            return Err(AuthSignalError::InvalidEnvelope.into());
+                        }
+                        if rejected_user != local && active.participant(rejected_user).is_none() {
+                            return Err(AuthSignalError::InvalidIdentity.into());
+                        }
+                    } else {
+                        self.retired_account_auth_epoch = Some(epoch);
+                    }
+                }
+                None => return Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+
+            self.apply_permanent_roster_auth_rejection(
+                rejected_user,
+                Self::propagated_permanent_roster_auth_failure(reason_code),
+            )
+        }
+
+        fn consume_setup_cancel(
+            &mut self,
+            source: SteamUserId,
+            connection: SteamConnectionId,
+            identity: SteamControlIdentity,
+            transaction: ManifestTransactionId,
+            reason_code: u16,
+            now_ms: u64,
+        ) -> Result<(), NativeOnlineRuntimeError> {
+            let status = self.coordinator.status();
+            if self.retired_manifest_transaction == Some(transaction) {
+                return Ok(());
+            }
+            let active = self
+                .manifest_transaction
+                .as_ref()
+                .copied()
+                .ok_or(AuthSignalError::UnexpectedPurpose)?;
+            if status.lobby != Some(identity.lobby)
+                || identity.sender != source
+                || identity.recipient != self.platform.local_user()
+                || active.id != transaction
+                || active
+                    .participant(source)
+                    .is_none_or(|participant| participant.connection != connection)
+            {
+                return Err(AuthSignalError::UnexpectedPurpose.into());
+            }
+            if active.stage == ManifestTransactionStage::Activated {
+                // The final release is irrevocable. A cancel sent just before
+                // the sender learned that the barrier completed is stale, not
+                // malformed, and is safely ACKed without rolling gameplay back.
+                return Ok(());
+            }
+            match status.role {
+                Some(OnlineLobbyRole::Client) if status.owner == Some(source) => {
+                    self.rollback_manifest_setup(active, reason_code, now_ms)
+                }
+                _ => Err(AuthSignalError::UnexpectedPurpose.into()),
+            }
+        }
+
+        #[cfg(test)]
         fn consume_manifest_signal(
             &mut self,
             source: SteamUserId,
@@ -3515,14 +5654,22 @@ mod real {
             &self,
         ) -> Result<CommittedAuthenticatedRoster, NativeOnlineRuntimeError> {
             let mut roster = CommittedAuthenticatedRoster::default();
-            for member in self.platform.roster().iter().flatten() {
-                let mapping = self
-                    .authenticated
-                    .iter()
-                    .flatten()
-                    .find(|mapping| mapping.user == member.user)
-                    .ok_or(NativeOnlineRuntimeError::InvalidAuthenticatedRoster)?;
-                roster.push(mapping.peer)?;
+            let mut peers = [None; MAX_STEAM_LOBBY_MEMBERS];
+            let mut peer_count = 0_usize;
+            for declaration in self.coordinator.roster_members() {
+                peers[peer_count] = Some(AuthenticatedPeer {
+                    peer_id: declaration.peer_id,
+                    user_id: declaration.authenticated_user,
+                });
+                peer_count += 1;
+            }
+            peers[..peer_count].sort_unstable_by_key(|peer| {
+                peer.expect("canonical roster prefix is packed")
+                    .peer_id
+                    .get()
+            });
+            for peer in peers[..peer_count].iter().flatten().copied() {
+                roster.push(peer)?;
             }
             if roster.len() != self.platform.roster_len() {
                 return Err(NativeOnlineRuntimeError::InvalidAuthenticatedRoster);
@@ -3557,7 +5704,22 @@ mod real {
         }
 
         fn clear_peer_handoffs(&mut self, user: SteamUserId) {
+            if self
+                .roster_auth
+                .as_ref()
+                .is_some_and(|active| active.participant(user).is_some())
+            {
+                self.retire_roster_auth_state();
+            }
+            if self
+                .manifest_transaction
+                .as_ref()
+                .is_some_and(|active| active.participant(user).is_some())
+            {
+                self.retire_manifest_transaction();
+            }
             self.remove_ticket_exchange(user);
+            self.clear_pending_steam_setup_retries_for_user(user);
             self.clear_reconnect_user(user);
             for slot in &mut self.authenticated {
                 if slot.is_some_and(|mapping| mapping.user == user) {
@@ -3571,6 +5733,16 @@ mod real {
                 .is_some_and(|manifest| manifest.sender == user)
             {
                 self.pending_manifest = None;
+            }
+            for slot in &mut self.remote_ticket_sequences {
+                if slot.is_some_and(|(candidate, _)| candidate == user) {
+                    *slot = None;
+                }
+            }
+            for slot in &mut self.local_ticket_accepted {
+                if *slot == Some(user) {
+                    *slot = None;
+                }
             }
         }
 
@@ -3661,17 +5833,22 @@ mod real {
         }
 
         fn reset_signal_isolation(&mut self) -> Result<(), NativeOnlineRuntimeError> {
-            self.signaling.reset_session_isolation()?;
             self.signal_rejected_users = [None; MAX_STEAM_LOBBY_MEMBERS];
             Ok(())
         }
 
         fn reset_match_handoff(&mut self) {
+            self.retire_roster_auth_state();
+            self.retire_manifest_transaction();
             self.ticket_exchanges = [None; MAX_STEAM_LOBBY_MEMBERS];
             self.reconnect_users = [None; MAX_STEAM_LOBBY_MEMBERS];
             self.committed_roster = None;
             self.endpoints.clear();
             self.pending_manifest = None;
+            self.remote_ticket_sequences = [None; MAX_STEAM_LOBBY_MEMBERS];
+            self.local_ticket_accepted = [None; MAX_STEAM_LOBBY_MEMBERS];
+            self.pending_steam_setup_retries = [None; MAX_STEAM_LOBBY_MEMBERS];
+            self.deferred_control_setup_retry = None;
             self.runtime_failure = None;
         }
 
@@ -3686,10 +5863,10 @@ mod real {
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
     pub(super) type RealNativeOnlineRuntime =
-        NativeOnlineCore<RealSteamBackend, SteamAuthSignalChannel, RealNativeTransportFactory>;
+        NativeOnlineCore<RealSteamBackend, RealNativeTransportFactory>;
 
     #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-    impl NativeOnlineCore<RealSteamBackend, SteamAuthSignalChannel, RealNativeTransportFactory> {
+    impl NativeOnlineCore<RealSteamBackend, RealNativeTransportFactory> {
         pub(super) fn initialize(
             release: NativeSteamReleaseConfig,
             lobby_config: OnlineLobbyConfig,
@@ -3699,14 +5876,7 @@ mod real {
                 release.steam_client_config(),
                 now_ms,
             )?;
-            let signaling = SteamAuthSignalChannel::new(&platform);
-            Self::from_parts(
-                platform,
-                signaling,
-                RealNativeTransportFactory,
-                lobby_config,
-                now_ms,
-            )
+            Self::from_parts(platform, RealNativeTransportFactory, lobby_config, now_ms)
         }
     }
 
@@ -3716,7 +5886,10 @@ mod real {
         use std::rc::Rc;
 
         use super::*;
-        use crate::steam_platform::{AuthenticatedSteamPeer, FakeSteamBackend, FakeSteamControl};
+        use crate::steam_platform::{
+            AuthenticatedSteamPeer, FakeAuthOutcome, FakeSteamAuthAuthority, FakeSteamBackend,
+            FakeSteamControl, LicenseStatus,
+        };
         use crate::steam_transport::FakeSteamTransportNetwork;
 
         const MAX_FAKE_AUTH_ENDPOINT_GENERATIONS: usize = MAX_STEAM_LOBBY_MEMBERS * 2;
@@ -3842,7 +6015,7 @@ mod real {
             }
         }
 
-        impl NativeAuthSignalPort for FakeAuthSignalEndpoint {
+        impl FakeAuthSignalEndpoint {
             fn refresh_policy(&self, admission: AuthSignalAdmission) {
                 let mut next = SignalAdmissionPolicy {
                     active_lobby: admission.active_lobby,
@@ -3947,12 +6120,12 @@ mod real {
             }
         }
 
-        type FakeNativeOnlineCore =
-            NativeOnlineCore<FakeSteamBackend, FakeAuthSignalEndpoint, FakeNativeTransportFactory>;
+        type FakeNativeOnlineCore = NativeOnlineCore<FakeSteamBackend, FakeNativeTransportFactory>;
 
         struct FakeNativeCorePair {
             host: FakeNativeOnlineCore,
             client: FakeNativeOnlineCore,
+            network: FakeSteamTransportNetwork,
             host_control: FakeSteamControl,
             client_control: FakeSteamControl,
             lobby: SteamLobbyId,
@@ -3970,10 +6143,15 @@ mod real {
                 let client_user = SteamUserId::new(76_002).unwrap();
                 let host_member = test_member(host_user, PeerId::new(601).unwrap(), 0, 0);
                 let client_member = test_member(client_user, PeerId::new(602).unwrap(), 1, 1);
-                let bus = FakeAuthSignalBus::new();
                 let network = FakeSteamTransportNetwork::new(64).unwrap();
-                let (host_backend, host_control) = FakeSteamBackend::new(app_id, host_user);
-                let (client_backend, client_control) = FakeSteamBackend::new(app_id, client_user);
+                let auth_authority = FakeSteamAuthAuthority::new();
+                let (host_backend, host_control) = FakeSteamBackend::new_with_auth_authority(
+                    app_id,
+                    host_user,
+                    auth_authority.clone(),
+                );
+                let (client_backend, client_control) =
+                    FakeSteamBackend::new_with_auth_authority(app_id, client_user, auth_authority);
                 let host_platform =
                     SteamPlatform::new(SteamClientConfig::production(app_id), host_backend, 0)
                         .unwrap();
@@ -3986,7 +6164,6 @@ mod real {
                 };
                 let mut host = NativeOnlineCore::from_parts(
                     host_platform,
-                    bus.register(host_user).unwrap(),
                     FakeNativeTransportFactory {
                         network: network.clone(),
                     },
@@ -3996,8 +6173,9 @@ mod real {
                 .unwrap();
                 let mut client = NativeOnlineCore::from_parts(
                     client_platform,
-                    bus.register(client_user).unwrap(),
-                    FakeNativeTransportFactory { network },
+                    FakeNativeTransportFactory {
+                        network: network.clone(),
+                    },
                     lobby_config,
                     0,
                 )
@@ -4045,6 +6223,7 @@ mod real {
                 let pair = Self {
                     host,
                     client,
+                    network,
                     host_control,
                     client_control,
                     lobby,
@@ -4104,19 +6283,43 @@ mod real {
                 }
                 assert!(
                     predicate(self),
-                    "two-core fixture did not converge: host={:?}, client={:?}",
+                    "two-core fixture did not converge: host={:?}, client={:?}, host_connection={:?}, client_connection={:?}, host_tickets={}, client_tickets={}, host_rejected={:?}, client_rejected={:?}, host_last_disconnect={:?}, client_last_disconnect={:?}, host_platform_roster={:?}, client_platform_roster={:?}",
                     self.host.coordinator.status(),
-                    self.client.coordinator.status()
+                    self.client.coordinator.status(),
+                    self.host
+                        .coordinator
+                        .control_connection_for_user(self.client_user),
+                    self.client
+                        .coordinator
+                        .control_connection_for_user(self.host_user),
+                    self.host.ticket_exchanges.iter().flatten().count(),
+                    self.client.ticket_exchanges.iter().flatten().count(),
+                    self.host.signal_rejected_users,
+                    self.client.signal_rejected_users,
+                    self.host
+                        .events
+                        .iter()
+                        .rev()
+                        .find(|event| matches!(event, OnlineLobbyEvent::PeerDisconnected { .. })),
+                    self.client
+                        .events
+                        .iter()
+                        .rev()
+                        .find(|event| matches!(event, OnlineLobbyEvent::PeerDisconnected { .. })),
+                    self.host.platform.roster(),
+                    self.client.platform.roster(),
                 );
             }
 
             fn pump_until_authenticated_endpoints(&mut self) {
                 self.pump_until(80, |pair| {
-                    pair.host.endpoints.len() == 1
-                        && pair.client.endpoints.len() == 1
-                        && pair.host.authenticated.iter().flatten().count() == 2
+                    pair.host.authenticated.iter().flatten().count() == 2
                         && pair.client.authenticated.iter().flatten().count() == 2
+                        && pair.host.coordinator.status().secure_remote_peers == 1
+                        && pair.client.coordinator.status().secure_remote_peers == 1
                 });
+                assert!(self.host.endpoints.is_empty());
+                assert!(self.client.endpoints.is_empty());
             }
 
             fn ready_and_commit(&mut self, match_id: crate::network_protocol::MatchId) {
@@ -4150,8 +6353,8 @@ mod real {
                         && pair.client.coordinator.status().all_members_ready
                         && pair.host.coordinator.status().connected_remote_peers == 1
                         && pair.client.coordinator.status().connected_remote_peers == 1
-                        && pair.host.endpoints.len() == 1
-                        && pair.client.endpoints.len() == 1
+                        && pair.host.coordinator.status().secure_remote_peers == 1
+                        && pair.client.coordinator.status().secure_remote_peers == 1
                         && pair.host.coordinator.status().input_delay_calibration.state
                             == crate::network_quality::InputDelayCalibrationState::Ready
                 });
@@ -4182,6 +6385,8 @@ mod real {
                         && pair.client.committed_roster.is_some()
                         && pair.host.coordinator.status().phase == OnlineLobbyPhase::Loading
                         && pair.client.coordinator.status().phase == OnlineLobbyPhase::Loading
+                        && pair.host.endpoints.len() == 1
+                        && pair.client.endpoints.len() == 1
                 });
             }
 
@@ -4255,8 +6460,8 @@ mod real {
                 let second_match_id =
                     crate::network_protocol::MatchId::new(*b"two-core-match02").unwrap();
                 self.pump_until_authenticated_endpoints();
-                let first_connection = self.host.endpoints.front().unwrap().admitted.connection;
                 self.ready_and_commit(first_match_id);
+                let first_connection = self.host.endpoints.front().unwrap().admitted.connection;
                 self.finish_confirmed_match();
 
                 self.now_ms += 1;
@@ -4376,6 +6581,254 @@ mod real {
                 );
             }
         }
+
+        const FOUR_CORE_PEER_COUNT: usize = MAX_STEAM_LOBBY_MEMBERS;
+        const FOUR_CORE_HOST: usize = 0;
+
+        struct FakeNativeCoreQuartet {
+            cores: [FakeNativeOnlineCore; FOUR_CORE_PEER_COUNT],
+            controls: [FakeSteamControl; FOUR_CORE_PEER_COUNT],
+            network: FakeSteamTransportNetwork,
+            lobby: SteamLobbyId,
+            users: [SteamUserId; FOUR_CORE_PEER_COUNT],
+            members: [OnlineRosterMember; FOUR_CORE_PEER_COUNT],
+            now_ms: u64,
+        }
+
+        impl FakeNativeCoreQuartet {
+            fn new() -> Self {
+                let app_id = SteamAppId::new(12_346).unwrap();
+                let users = [
+                    SteamUserId::new(77_001).unwrap(),
+                    SteamUserId::new(77_002).unwrap(),
+                    SteamUserId::new(77_003).unwrap(),
+                    SteamUserId::new(77_004).unwrap(),
+                ];
+                let mut members = [
+                    test_member(users[0], PeerId::new(701).unwrap(), 0, 0),
+                    test_member(users[1], PeerId::new(702).unwrap(), 1, 1),
+                    test_member(users[2], PeerId::new(703).unwrap(), 2, 0),
+                    test_member(users[3], PeerId::new(704).unwrap(), 3, 1),
+                ];
+                for member in &mut members {
+                    member.ready = false;
+                }
+
+                let network = FakeSteamTransportNetwork::new(128).unwrap();
+                let auth_authority = FakeSteamAuthAuthority::new();
+                let (host_backend, host_control) = FakeSteamBackend::new_with_auth_authority(
+                    app_id,
+                    users[0],
+                    auth_authority.clone(),
+                );
+                let (first_backend, first_control) = FakeSteamBackend::new_with_auth_authority(
+                    app_id,
+                    users[1],
+                    auth_authority.clone(),
+                );
+                let (second_backend, second_control) = FakeSteamBackend::new_with_auth_authority(
+                    app_id,
+                    users[2],
+                    auth_authority.clone(),
+                );
+                let (third_backend, third_control) =
+                    FakeSteamBackend::new_with_auth_authority(app_id, users[3], auth_authority);
+                let make_platform = |backend| {
+                    SteamPlatform::new(SteamClientConfig::production(app_id), backend, 0).unwrap()
+                };
+                let lobby_config = OnlineLobbyConfig {
+                    quality_sample_interval_ms: 1,
+                    ..OnlineLobbyConfig::default()
+                };
+                let make_core = |backend| {
+                    NativeOnlineCore::from_parts(
+                        make_platform(backend),
+                        FakeNativeTransportFactory {
+                            network: network.clone(),
+                        },
+                        lobby_config,
+                        0,
+                    )
+                    .unwrap()
+                };
+                let mut cores = [
+                    make_core(host_backend),
+                    make_core(first_backend),
+                    make_core(second_backend),
+                    make_core(third_backend),
+                ];
+                let controls = [host_control, first_control, second_control, third_control];
+
+                cores[FOUR_CORE_HOST]
+                    .execute(
+                        NativeOnlineCommand::Create(NativeOnlineCreateRequest {
+                            visibility: NativeOnlineVisibility::Private,
+                            maximum_steam_peers: FOUR_CORE_PEER_COUNT as u8,
+                            region: RegionCode::new("test-region").unwrap(),
+                            rules: DefinitionId::new(1).unwrap(),
+                            arena: DefinitionId::new(0).unwrap(),
+                            seat_capacity: FOUR_CORE_PEER_COUNT as u8,
+                            local_declaration: members[FOUR_CORE_HOST],
+                        }),
+                        0,
+                    )
+                    .unwrap();
+                cores[FOUR_CORE_HOST].pump(1).unwrap();
+                let lobby = cores[FOUR_CORE_HOST].coordinator.status().lobby.unwrap();
+
+                for control in &controls[1..] {
+                    controls[FOUR_CORE_HOST]
+                        .mirror_lobby_shell_to(control, lobby)
+                        .unwrap();
+                }
+                for index in 1..FOUR_CORE_PEER_COUNT {
+                    cores[index]
+                        .execute(
+                            NativeOnlineCommand::Join {
+                                intent: LobbyJoinIntent {
+                                    lobby,
+                                    origin: crate::steam_platform::JoinOrigin::LaunchCommand,
+                                    expires_at_ms: 20_000,
+                                },
+                                local_declaration: members[index],
+                            },
+                            1,
+                        )
+                        .unwrap();
+                }
+
+                let mut quartet = Self {
+                    cores,
+                    controls,
+                    network,
+                    lobby,
+                    users,
+                    members,
+                    now_ms: 1,
+                };
+                // The fake clients own independent lobby replicas. Mirror each
+                // declaration only from its owning process, just as Steam would
+                // distribute member metadata to every lobby member.
+                quartet.mirror();
+                quartet.pump_until(80, |quartet| {
+                    quartet.cores.iter().all(|core| {
+                        core.coordinator.status().phase == OnlineLobbyPhase::Lobby
+                            && core.platform.roster_len() == FOUR_CORE_PEER_COUNT
+                    })
+                });
+                quartet
+            }
+
+            fn mirror(&self) {
+                for target in 1..FOUR_CORE_PEER_COUNT {
+                    self.controls[FOUR_CORE_HOST]
+                        .mirror_lobby_owner_state_to(&self.controls[target], self.lobby)
+                        .unwrap();
+                }
+                for source in 0..FOUR_CORE_PEER_COUNT {
+                    for target in 0..FOUR_CORE_PEER_COUNT {
+                        if source == target {
+                            continue;
+                        }
+                        self.controls[source]
+                            .mirror_lobby_member_to(
+                                &self.controls[target],
+                                self.lobby,
+                                self.users[source],
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+
+            fn pump_once(&mut self) {
+                self.now_ms += 1;
+                self.mirror();
+                let first = self.now_ms as usize % FOUR_CORE_PEER_COUNT;
+                for offset in 0..FOUR_CORE_PEER_COUNT {
+                    let index = (first + offset) % FOUR_CORE_PEER_COUNT;
+                    if let Err(error) = self.cores[index].pump(self.now_ms) {
+                        let statuses = self
+                            .cores
+                            .iter()
+                            .map(|core| core.coordinator.status())
+                            .collect::<Vec<_>>();
+                        panic!(
+                            "four-core pump {index} at {} failed: {error:?}; statuses={statuses:?}",
+                            self.now_ms
+                        );
+                    }
+                    self.mirror();
+                }
+            }
+
+            fn stage_unstarted_routed_ticket(&mut self) -> (usize, SteamUserId) {
+                for _ in 0..160 {
+                    self.now_ms += 1;
+                    self.mirror();
+                    let first = self.now_ms as usize % FOUR_CORE_PEER_COUNT;
+                    for offset in 0..FOUR_CORE_PEER_COUNT {
+                        let index = (first + offset) % FOUR_CORE_PEER_COUNT;
+                        self.cores[index].pump(self.now_ms).unwrap_or_else(|error| {
+                            panic!(
+                                "four-core staging pump {index} at {} failed: {error:?}",
+                                self.now_ms
+                            )
+                        });
+                        self.mirror();
+                        if self.cores.iter().all(|core| core.roster_auth.is_some())
+                            && let Some((client, rejected_user)) = (1..FOUR_CORE_PEER_COUNT)
+                                .find_map(|client| {
+                                    self.cores[client]
+                                        .ticket_exchanges
+                                        .iter()
+                                        .flatten()
+                                        .find(|exchange| {
+                                            matches!(
+                                                exchange.route,
+                                                TicketRoute::ViaAuthority { .. }
+                                            ) && exchange.sent_sequence.is_none()
+                                        })
+                                        .map(|exchange| (client, exchange.lease.remote_user))
+                                })
+                        {
+                            return (client, rejected_user);
+                        }
+                    }
+                }
+                panic!("four-core fixture did not expose an unstarted routed ticket");
+            }
+
+            fn pump_until(&mut self, limit: usize, predicate: impl Fn(&Self) -> bool) {
+                for _ in 0..limit {
+                    if predicate(self) {
+                        return;
+                    }
+                    self.pump_once();
+                }
+                let statuses = self
+                    .cores
+                    .iter()
+                    .map(|core| core.coordinator.status())
+                    .collect::<Vec<_>>();
+                let ticket_counts = self
+                    .cores
+                    .iter()
+                    .map(|core| core.ticket_exchanges.iter().flatten().count())
+                    .collect::<Vec<_>>();
+                let authentication_counts = self
+                    .cores
+                    .iter()
+                    .map(|core| core.authenticated.iter().flatten().count())
+                    .collect::<Vec<_>>();
+                assert!(
+                    predicate(self),
+                    "four-core fixture did not converge: statuses={statuses:?}, tickets={ticket_counts:?}, authenticated={authentication_counts:?}"
+                );
+            }
+        }
+
+        include!("native_online_app_core_fixture_tests.in.rs");
 
         fn test_member(
             user: SteamUserId,
@@ -4568,26 +7021,707 @@ mod real {
                 pair.client.coordinator.status().role,
                 Some(OnlineLobbyRole::Client)
             );
-            let host_endpoint = pair.host.endpoints.front().unwrap();
-            let client_endpoint = pair.client.endpoints.front().unwrap();
-            assert_eq!(host_endpoint.peer_id, pair.client_member.peer_id);
-            assert_eq!(client_endpoint.peer_id, pair.host_member.peer_id);
-            assert_eq!(host_endpoint.admitted.remote_user, pair.client_user);
-            assert_eq!(client_endpoint.admitted.remote_user, pair.host_user);
+            assert!(pair.host.endpoints.is_empty());
+            assert!(pair.client.endpoints.is_empty());
+            let host_connection = pair
+                .host
+                .coordinator
+                .control_connection_for_user(pair.client_user)
+                .unwrap();
+            let client_connection = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
             assert_eq!(
-                host_endpoint.admitted.connection, client_endpoint.admitted.connection,
-                "the two independent cores bind opposite ends of one fake physical generation"
+                host_connection, client_connection,
+                "the two independent cores quarantine opposite ends of one physical generation"
             );
-            assert!(!host_endpoint.reconnect);
-            assert!(!client_endpoint.reconnect);
+            assert_eq!(pair.host.coordinator.status().secure_remote_peers, 1);
+            assert_eq!(pair.client.coordinator.status().secure_remote_peers, 1);
+        }
+
+        #[test]
+        fn transient_setup_failure_retries_with_fresh_tickets_and_same_lobby() {
+            let mut pair = FakeNativeCorePair::new();
+            pair.pump_until(40, |pair| {
+                pair.host.ticket_exchanges.iter().flatten().count() == 1
+                    && pair.client.ticket_exchanges.iter().flatten().count() == 1
+            });
+            let first_connection = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
+            let first_host_ticket = pair.host.ticket_exchanges[0].unwrap().lease.handle;
+            let first_client_ticket = pair.client.ticket_exchanges[0].unwrap().lease.handle;
+
+            pair.network
+                .disconnect_locally(first_connection, pair.client_user)
+                .unwrap();
+            pair.pump_once();
+            assert_eq!(pair.host.coordinator.status().lobby, Some(pair.lobby));
+            assert_eq!(pair.client.coordinator.status().lobby, Some(pair.lobby));
+            assert!(pair.host_control.cancelled_ticket(first_host_ticket));
+            assert!(pair.client_control.cancelled_ticket(first_client_ticket));
+
+            pair.now_ms += crate::steam_transport::CONTROL_RETRY_DELAY_MS;
+            pair.pump_until_authenticated_endpoints();
+            let replacement = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
+            assert_ne!(replacement, first_connection);
+            assert_ne!(
+                pair.host.ticket_exchanges[0].unwrap().lease.handle,
+                first_host_ticket
+            );
+            assert_ne!(
+                pair.client.ticket_exchanges[0].unwrap().lease.handle,
+                first_client_ticket
+            );
+        }
+
+        #[test]
+        fn exhausted_pregame_socket_retry_resecures_the_exact_peer_in_place() {
+            let mut pair = FakeNativeCorePair::new();
+            pair.pump_until_authenticated_endpoints();
+            let first_connection = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
+
+            // Consume the generation's one automatic retry, then fail that
+            // replacement as well so both cores must expose a manual Retry.
+            pair.network
+                .disconnect_locally(first_connection, pair.client_user)
+                .unwrap();
+            pair.pump_once();
+            pair.now_ms += crate::steam_transport::CONTROL_RETRY_DELAY_MS;
+            pair.pump_until_authenticated_endpoints();
+            let exhausted_connection = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
+            assert_ne!(exhausted_connection, first_connection);
+            let exhausted_host_ticket = pair.host.ticket_exchanges[0].unwrap().lease.handle;
+            let exhausted_client_ticket = pair.client.ticket_exchanges[0].unwrap().lease.handle;
+
+            pair.network
+                .disconnect_locally(exhausted_connection, pair.client_user)
+                .unwrap();
+            pair.pump_until(20, |pair| {
+                [
+                    (&pair.host, pair.client_user),
+                    (&pair.client, pair.host_user),
+                ]
+                .into_iter()
+                .all(|(core, user)| {
+                    core.pending_steam_setup_retries
+                        .iter()
+                        .flatten()
+                        .any(|pending| {
+                            pending.user == user
+                                && pending.connection == Some(exhausted_connection)
+                                && pending.kind == PendingSteamSetupRetryKind::ClosedControl
+                        })
+                })
+            });
+
+            for core in [&pair.host, &pair.client] {
+                let view = core.view_model();
+                assert_eq!(view.screen, NativeOnlineScreen::Error);
+                assert!(view.failure.is_some_and(|failure| {
+                    failure.code == OnlineFailureCode::ConnectionTimedOut
+                        && failure.severity == OnlineFailureSeverity::Recoverable
+                        && failure.recovery == OnlineRecoveryAction::Retry
+                }));
+                assert_eq!(core.coordinator.status().lobby, Some(pair.lobby));
+            }
+            assert_eq!(pair.network.resource_counts().links, 0);
+            assert!(pair.host_control.cancelled_ticket(exhausted_host_ticket));
+            assert!(
+                pair.client_control
+                    .cancelled_ticket(exhausted_client_ticket)
+            );
+
+            // Only the client must press Retry: it is the sole connection
+            // originator. The authority keeps the attributed error/passive
+            // wait until that inbound generation authenticates successfully.
+            pair.host_control
+                .set_automatic_auth_callbacks(false)
+                .unwrap();
+            pair.client_control
+                .set_automatic_auth_callbacks(false)
+                .unwrap();
+            pair.client
+                .execute(NativeOnlineCommand::RetrySteamSetup, pair.now_ms)
+                .unwrap();
+            assert_eq!(pair.client.view_model().screen, NativeOnlineScreen::Lobby);
+            assert_eq!(pair.host.view_model().screen, NativeOnlineScreen::Error);
+            assert_eq!(pair.network.resource_counts().links, 0);
+
+            pair.now_ms += crate::steam_transport::CONTROL_RETRY_DELAY_MS;
+            pair.pump_until(40, |pair| {
+                pair.host_control.pending_auth_validation_count() != 0
+                    && pair.client_control.pending_auth_validation_count() != 0
+                    && pair
+                        .host
+                        .coordinator
+                        .control_connection_for_user(pair.client_user)
+                        .is_some_and(|connection| connection != exhausted_connection)
+                    && pair
+                        .client
+                        .coordinator
+                        .control_connection_for_user(pair.host_user)
+                        .is_some_and(|connection| connection != exhausted_connection)
+                    && pair.host.coordinator.status().secure_remote_peers == 0
+                    && pair.client.coordinator.status().secure_remote_peers == 0
+            });
+            let in_flight_connection = pair
+                .host
+                .coordinator
+                .control_connection_for_user(pair.client_user)
+                .unwrap();
+
+            // A user can press the authority's still-visible Retry while the
+            // client-originated replacement is already authenticating. That
+            // stale action clears only the old error; it cannot reject or
+            // replace the newer exact generation.
+            pair.host
+                .execute(NativeOnlineCommand::RetrySteamSetup, pair.now_ms)
+                .unwrap();
+            assert_eq!(pair.host.runtime_failure, None);
             assert_eq!(
-                host_endpoint.admitted.admission.purpose,
-                AdmissionPurpose::Initial
+                pair.host
+                    .coordinator
+                    .control_connection_for_user(pair.client_user),
+                Some(in_flight_connection)
+            );
+            pair.host_control
+                .release_auth_validation(pair.client_user)
+                .unwrap();
+            pair.client_control
+                .release_auth_validation(pair.host_user)
+                .unwrap();
+            pair.host_control
+                .set_automatic_auth_callbacks(true)
+                .unwrap();
+            pair.client_control
+                .set_automatic_auth_callbacks(true)
+                .unwrap();
+            pair.pump_until_authenticated_endpoints();
+            let recovered_connection = pair
+                .client
+                .coordinator
+                .control_connection_for_user(pair.host_user)
+                .unwrap();
+            assert_eq!(recovered_connection, in_flight_connection);
+            assert_ne!(recovered_connection, exhausted_connection);
+            assert_eq!(
+                pair.host
+                    .coordinator
+                    .control_connection_for_user(pair.client_user),
+                Some(recovered_connection)
+            );
+            assert_eq!(pair.host.runtime_failure, None);
+            assert_eq!(pair.client.runtime_failure, None);
+            assert_ne!(
+                pair.host.ticket_exchanges[0].unwrap().lease.handle,
+                exhausted_host_ticket
+            );
+            assert_ne!(
+                pair.client.ticket_exchanges[0].unwrap().lease.handle,
+                exhausted_client_ticket
+            );
+            assert_eq!(pair.network.resource_counts().links, 1);
+        }
+
+        #[test]
+        fn transient_auth_rejection_stays_retryable_without_signal_isolation() {
+            let mut transient = FakeNativeCorePair::new();
+            transient
+                .host_control
+                .set_auth_outcome(
+                    transient.client_user,
+                    FakeAuthOutcome {
+                        license_owner_user: transient.client_user,
+                        validation: Err(
+                            crate::steam_platform::AuthValidationFailure::UserNotConnected,
+                        ),
+                        license: LicenseStatus::HasLicense,
+                    },
+                )
+                .unwrap();
+            transient.pump_until(80, |pair| {
+                pair.host
+                    .pending_steam_setup_retries
+                    .iter()
+                    .flatten()
+                    .any(|pending| pending.user == pair.client_user)
+            });
+            assert!(
+                transient
+                    .host
+                    .signal_rejected_users
+                    .iter()
+                    .all(Option::is_none)
             );
             assert_eq!(
-                client_endpoint.admitted.admission.purpose,
-                AdmissionPurpose::Initial
+                transient.host.coordinator.status().lobby,
+                Some(transient.lobby)
             );
+            assert_eq!(transient.network.resource_counts().links, 1);
+        }
+
+        #[test]
+        fn four_peer_auth_retry_replaces_only_failed_star_link() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            let failed_index = 2_usize;
+            quartet.controls[FOUR_CORE_HOST]
+                .set_automatic_auth_callbacks(false)
+                .unwrap();
+            quartet.controls[FOUR_CORE_HOST]
+                .set_auth_outcome(
+                    quartet.users[failed_index],
+                    FakeAuthOutcome {
+                        license_owner_user: quartet.users[failed_index],
+                        validation: Err(
+                            crate::steam_platform::AuthValidationFailure::VacCheckTimedOut,
+                        ),
+                        license: LicenseStatus::HasLicense,
+                    },
+                )
+                .unwrap();
+            quartet.pump_until(160, |quartet| {
+                quartet.controls[FOUR_CORE_HOST].pending_auth_validation_count() == 3
+            });
+            for index in [1_usize, 3_usize] {
+                quartet.controls[FOUR_CORE_HOST]
+                    .release_auth_validation(quartet.users[index])
+                    .unwrap();
+            }
+            quartet.controls[FOUR_CORE_HOST]
+                .release_auth_validation(quartet.users[failed_index])
+                .unwrap();
+            quartet.pump_until(240, |quartet| {
+                quartet.cores[FOUR_CORE_HOST]
+                    .pending_steam_setup_retries
+                    .iter()
+                    .flatten()
+                    .any(|pending| pending.user == quartet.users[failed_index])
+                    && [1_usize, 3_usize].into_iter().all(|index| {
+                        quartet.cores[FOUR_CORE_HOST]
+                            .coordinator
+                            .status()
+                            .secure_remote_peers
+                            >= 2
+                            && quartet.cores[index]
+                                .coordinator
+                                .status()
+                                .secure_remote_peers
+                                == 1
+                    })
+            });
+            let healthy_connections = [1_usize, 3_usize].map(|index| {
+                quartet.cores[FOUR_CORE_HOST]
+                    .coordinator
+                    .control_connection_for_user(quartet.users[index])
+                    .unwrap()
+            });
+            let failed_connection = quartet.cores[FOUR_CORE_HOST]
+                .coordinator
+                .control_connection_for_user(quartet.users[failed_index])
+                .unwrap();
+            quartet.controls[FOUR_CORE_HOST]
+                .set_auth_outcome(
+                    quartet.users[failed_index],
+                    FakeAuthOutcome::accepted(quartet.users[failed_index]),
+                )
+                .unwrap();
+            quartet.controls[FOUR_CORE_HOST]
+                .set_automatic_auth_callbacks(true)
+                .unwrap();
+            quartet.cores[FOUR_CORE_HOST]
+                .execute(NativeOnlineCommand::RetrySteamSetup, quartet.now_ms)
+                .unwrap();
+            quartet.pump_until(800, |quartet| {
+                quartet.cores.iter().enumerate().all(|(index, core)| {
+                    let required = if index == FOUR_CORE_HOST { 3 } else { 1 };
+                    core.coordinator.status().secure_remote_peers == required
+                })
+            });
+
+            assert_eq!(quartet.network.resource_counts().links, 3);
+            for (ordinal, index) in [1_usize, 3_usize].into_iter().enumerate() {
+                assert_eq!(
+                    quartet.cores[FOUR_CORE_HOST]
+                        .coordinator
+                        .control_connection_for_user(quartet.users[index]),
+                    Some(healthy_connections[ordinal])
+                );
+            }
+            assert_ne!(
+                quartet.cores[FOUR_CORE_HOST]
+                    .coordinator
+                    .control_connection_for_user(quartet.users[failed_index]),
+                Some(failed_connection)
+            );
+            assert_eq!(
+                quartet.cores[FOUR_CORE_HOST].coordinator.status().lobby,
+                Some(quartet.lobby)
+            );
+            assert!(
+                quartet
+                    .cores
+                    .iter()
+                    .all(|core| core.signal_rejected_users.iter().all(Option::is_none))
+            );
+        }
+
+        #[test]
+        fn roster_timeout_retry_extends_the_retained_native_session() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            let retrying_client = 1_usize;
+            quartet.pump_until(160, |quartet| {
+                quartet.cores[retrying_client]
+                    .coordinator
+                    .status()
+                    .secure_remote_peers
+                    == 1
+            });
+            quartet.controls[retrying_client]
+                .set_automatic_auth_callbacks(false)
+                .unwrap();
+            quartet.pump_until(160, |quartet| {
+                quartet.cores[retrying_client]
+                    .platform
+                    .active_roster_authentication_count()
+                    == 2
+                    && quartet.controls[retrying_client].pending_auth_validation_count() == 2
+            });
+
+            // Validate one routed peer normally and retain exactly one native
+            // callback-pending session for the manual timeout extension.
+            quartet.controls[retrying_client]
+                .release_auth_validation(quartet.users[3])
+                .unwrap();
+            quartet.pump_once();
+            assert_eq!(
+                quartet.cores[retrying_client]
+                    .platform
+                    .active_roster_authentication_count(),
+                2
+            );
+            assert_eq!(
+                quartet.controls[retrying_client].active_auth_session_count(),
+                3,
+                "one direct authority session plus two routed roster sessions remain active"
+            );
+
+            quartet.now_ms += crate::steam_platform::DEFAULT_AUTH_INTENT_TTL_MS;
+            quartet.cores[retrying_client].pump(quartet.now_ms).unwrap();
+            assert!(
+                quartet.cores[retrying_client]
+                    .pending_steam_setup_retries
+                    .iter()
+                    .flatten()
+                    .any(|pending| {
+                        pending.user == quartet.users[2]
+                            && pending.kind == PendingSteamSetupRetryKind::RosterLease
+                    })
+            );
+            assert!(
+                quartet.cores[retrying_client]
+                    .signal_rejected_users
+                    .iter()
+                    .all(Option::is_none)
+            );
+            let sessions_before_retry =
+                quartet.controls[retrying_client].active_auth_session_count();
+
+            quartet.cores[retrying_client]
+                .execute(NativeOnlineCommand::RetrySteamSetup, quartet.now_ms + 1)
+                .unwrap();
+            assert_eq!(
+                quartet.controls[retrying_client].active_auth_session_count(),
+                sessions_before_retry,
+                "manual retry must extend the retained lease, not BeginAuthSession twice"
+            );
+            quartet.controls[retrying_client]
+                .release_auth_validation(quartet.users[2])
+                .unwrap();
+            quartet.now_ms += 1;
+            quartet.pump_until(240, |quartet| {
+                quartet.cores.iter().all(|core| {
+                    core.coordinator.status().verified_remote_accounts == 3
+                        && core.coordinator.status().required_remote_accounts == 3
+                })
+            });
+        }
+
+        #[test]
+        fn roster_callback_after_timeout_supersedes_retry_before_user_action() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            let client = 1_usize;
+            let late_user = quartet.users[2];
+            quartet.pump_until(160, |quartet| {
+                quartet.cores[client]
+                    .coordinator
+                    .status()
+                    .secure_remote_peers
+                    == 1
+            });
+            quartet.controls[client]
+                .set_automatic_auth_callbacks(false)
+                .unwrap();
+            quartet.pump_until(160, |quartet| {
+                quartet.cores[client]
+                    .platform
+                    .active_roster_authentication_count()
+                    == 2
+                    && quartet.controls[client].pending_auth_validation_count() == 2
+            });
+
+            quartet.controls[client]
+                .release_auth_validation(quartet.users[3])
+                .unwrap();
+            quartet.pump_once();
+            quartet.now_ms += crate::steam_platform::DEFAULT_AUTH_INTENT_TTL_MS;
+            quartet.cores[client].pump(quartet.now_ms).unwrap();
+            assert!(
+                quartet.cores[client]
+                    .pending_steam_setup_retries
+                    .iter()
+                    .flatten()
+                    .any(|pending| {
+                        pending.user == late_user
+                            && pending.kind == PendingSteamSetupRetryKind::RosterLease
+                    })
+            );
+
+            let sessions_before_callback = quartet.controls[client].active_auth_session_count();
+            quartet.controls[client]
+                .release_auth_validation(late_user)
+                .unwrap();
+            quartet.pump_until(240, |quartet| {
+                quartet.cores[client]
+                    .platform
+                    .roster_authentication_is_validated(late_user)
+                    && quartet.cores[client]
+                        .pending_steam_setup_retries
+                        .iter()
+                        .flatten()
+                        .all(|pending| {
+                            pending.user != late_user
+                                || pending.kind != PendingSteamSetupRetryKind::RosterLease
+                        })
+            });
+
+            assert_eq!(quartet.cores[client].runtime_failure, None);
+            assert_eq!(
+                quartet.controls[client].active_auth_session_count(),
+                sessions_before_callback,
+                "late approval must retain the validated native session"
+            );
+            assert!(
+                quartet.cores[client]
+                    .execute(NativeOnlineCommand::RetrySteamSetup, quartet.now_ms + 1)
+                    .is_err(),
+                "the superseded retry must no longer be actionable"
+            );
+            assert!(
+                quartet.cores[client]
+                    .platform
+                    .roster_authentication_is_validated(late_user),
+                "a stale Retry command must not retire the newly approved proof"
+            );
+            quartet.pump_until(240, |quartet| {
+                quartet.cores.iter().all(|core| {
+                    core.coordinator.status().verified_remote_accounts == 3
+                        && core.coordinator.status().required_remote_accounts == 3
+                })
+            });
+        }
+
+        fn assert_permanent_routed_rejection_aborts_full_roster(
+            quartet: &mut FakeNativeCoreQuartet,
+            rejected_user: SteamUserId,
+        ) {
+            quartet.pump_until(400, |quartet| {
+                quartet.cores.iter().all(|core| {
+                    core.signal_rejected_users.contains(&Some(rejected_user))
+                        && core.roster_auth.is_none()
+                        && core.platform.active_roster_authentication_count() == 0
+                        && core.ticket_exchanges.iter().flatten().all(|exchange| {
+                            !matches!(exchange.route, TicketRoute::ViaAuthority { .. })
+                        })
+                }) && (1..FOUR_CORE_PEER_COUNT).all(|index| {
+                    quartet.cores[FOUR_CORE_HOST]
+                        .coordinator
+                        .control_outbox_is_empty(quartet.users[index])
+                        && quartet.cores[index]
+                            .coordinator
+                            .control_outbox_is_empty(quartet.users[FOUR_CORE_HOST])
+                })
+            });
+
+            let retired_epoch = quartet.cores[FOUR_CORE_HOST]
+                .retired_account_auth_epoch
+                .expect("authority retires the rejected roster-auth epoch");
+            for core in &quartet.cores {
+                assert_eq!(core.coordinator.status().phase, OnlineLobbyPhase::Lobby);
+                assert_eq!(core.coordinator.status().lobby, Some(quartet.lobby));
+                assert_eq!(core.retired_account_auth_epoch, Some(retired_epoch));
+                assert!(core.manifest_transaction.is_none());
+                assert!(core.committed_roster.is_none());
+                assert!(core.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        OnlineLobbyEvent::RosterPeerAuthenticationRejected { user, .. }
+                            if *user == rejected_user
+                    )
+                }));
+                assert!(core.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        OnlineLobbyEvent::Failure(OnlineFailure {
+                            code: OnlineFailureCode::AuthenticationFailed,
+                            ..
+                        })
+                    )
+                }));
+            }
+            assert_eq!(quartet.network.resource_counts().links, 3);
+
+            // The permanent roster verdict is a lobby-lifetime latch, not a
+            // transient retry. Pump well past the delivery point to prove the
+            // authority cannot silently start a new epoch and split peers
+            // between old and new account views.
+            for _ in 0..64 {
+                quartet.pump_once();
+            }
+            assert!(quartet.cores.iter().all(|core| {
+                core.coordinator.status().phase == OnlineLobbyPhase::Lobby
+                    && core.roster_auth.is_none()
+                    && core.retired_account_auth_epoch == Some(retired_epoch)
+                    && core.signal_rejected_users.contains(&Some(rejected_user))
+            }));
+        }
+
+        #[test]
+        fn four_core_immediate_invalid_routed_ticket_aborts_every_roster_participant() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            let (rejecting_client, rejected_user) = quartet.stage_unstarted_routed_ticket();
+            quartet.controls[rejecting_client]
+                .set_auth_session_start_failure(
+                    rejected_user,
+                    crate::steam_platform::AuthSessionStartFailure::InvalidTicket,
+                )
+                .unwrap();
+
+            assert_permanent_routed_rejection_aborts_full_roster(&mut quartet, rejected_user);
+        }
+
+        #[test]
+        fn four_core_async_invalid_routed_ticket_aborts_every_roster_participant() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            let (rejecting_client, rejected_user) = quartet.stage_unstarted_routed_ticket();
+            quartet.controls[rejecting_client]
+                .set_auth_outcome(
+                    rejected_user,
+                    FakeAuthOutcome {
+                        license_owner_user: rejected_user,
+                        validation: Err(
+                            crate::steam_platform::AuthValidationFailure::TicketInvalid,
+                        ),
+                        license: LicenseStatus::HasLicense,
+                    },
+                )
+                .unwrap();
+
+            assert_permanent_routed_rejection_aborts_full_roster(&mut quartet, rejected_user);
+        }
+
+        #[test]
+        fn transient_close_during_manifest_retires_the_frozen_generation_unconditionally() {
+            let mut pair = FakeNativeCorePair::new();
+            pair.pump_until_authenticated_endpoints();
+            pair.host
+                .execute(NativeOnlineCommand::SetReady(true), pair.now_ms)
+                .unwrap();
+            pair.client
+                .execute(NativeOnlineCommand::SetReady(true), pair.now_ms)
+                .unwrap();
+            pair.mirror();
+            pair.pump_until(80, |pair| {
+                pair.host.coordinator.status().all_members_ready
+                    && pair.client.coordinator.status().all_members_ready
+                    && pair.host.coordinator.status().input_delay_calibration.state
+                        == crate::network_quality::InputDelayCalibrationState::Ready
+            });
+
+            let connection = pair
+                .host
+                .coordinator
+                .control_connection_for_user(pair.client_user)
+                .unwrap();
+            let calibration = pair.host.coordinator.status().input_delay_calibration;
+            let mut options = OnlineManifestOptions::casual_listen(
+                crate::network_protocol::MatchId::new(*b"manifest-close01").unwrap(),
+                pair.host_member.peer_id,
+                DefinitionId::new(0).unwrap(),
+                DefinitionId::new(1).unwrap(),
+                0xAFC0_7603,
+                SimTick(240),
+            );
+            options.input_delay_ticks = calibration.selected_input_delay_ticks.unwrap();
+            options.rollback_limit_ticks = crate::network_protocol::MAX_NORMAL_ROLLBACK_TICKS;
+            pair.host
+                .execute(
+                    NativeOnlineCommand::CommitManifest {
+                        options,
+                        current_tick: SimTick(120),
+                    },
+                    pair.now_ms,
+                )
+                .unwrap();
+
+            // Consume the coordinator's commit locally, freezing the exact
+            // generation, but do not yet give the peer a chance to consume the
+            // Prepare frame.
+            pair.now_ms += 1;
+            pair.mirror();
+            pair.host.pump(pair.now_ms).unwrap();
+            let transaction = pair
+                .host
+                .manifest_transaction
+                .expect("authority froze a manifest transaction");
+            assert_eq!(transaction.stage, ManifestTransactionStage::Preparing);
+
+            // A local early failure schedules a replacement and removes the
+            // frozen connection from the active mapping before ManifestAborted
+            // is drained. Best-effort Abort delivery must not turn that normal
+            // rollback into a pump failure.
+            pair.network
+                .disconnect_locally(connection, pair.host_user)
+                .unwrap();
+            pair.now_ms += 1;
+            pair.host.pump(pair.now_ms).unwrap();
+
+            assert_eq!(
+                pair.host.coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+            assert!(pair.host.coordinator.match_config().is_none());
+            assert!(pair.host.committed_roster.is_none());
+            assert!(pair.host.manifest_transaction.is_none());
+            assert_eq!(pair.host.retired_manifest_transaction, Some(transaction.id));
+            assert!(pair.host.endpoints.is_empty());
+            assert!(pair.host.signal_rejected_users.iter().all(Option::is_none));
         }
 
         #[test]
@@ -4638,6 +7772,606 @@ mod real {
                     },
                 ]
             );
+        }
+
+        #[test]
+        fn four_native_cores_authenticate_full_roster_and_activate_star_manifest() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            quartet.pump_until(400, |quartet| {
+                quartet.cores.iter().enumerate().all(|(index, core)| {
+                    let status = core.coordinator.status();
+                    let required_direct = if index == FOUR_CORE_HOST { 3 } else { 1 };
+                    status.connected_remote_peers == required_direct
+                        && status.secure_remote_peers == required_direct
+                        && status.required_remote_peers == required_direct
+                        && status.verified_remote_accounts == 3
+                        && status.required_remote_accounts == 3
+                })
+            });
+
+            assert_eq!(quartet.network.resource_counts().links, 3);
+            assert!(quartet.cores.iter().all(|core| core.endpoints.is_empty()));
+            assert_eq!(
+                quartet.cores[FOUR_CORE_HOST]
+                    .authenticated
+                    .iter()
+                    .flatten()
+                    .count(),
+                FOUR_CORE_PEER_COUNT
+            );
+            for index in 1..FOUR_CORE_PEER_COUNT {
+                let client = &quartet.cores[index];
+                assert_eq!(
+                    client.authenticated.iter().flatten().count(),
+                    2,
+                    "routed account proofs must not invent client-to-client socket bindings"
+                );
+                assert!(
+                    client
+                        .coordinator
+                        .control_connection_for_user(quartet.users[FOUR_CORE_HOST])
+                        .is_some()
+                );
+                for remote_client in 1..FOUR_CORE_PEER_COUNT {
+                    if remote_client != index {
+                        assert_eq!(
+                            client
+                                .coordinator
+                                .control_connection_for_user(quartet.users[remote_client]),
+                            None
+                        );
+                    }
+                }
+            }
+
+            // Exercise declaration propagation independently of socket setup:
+            // middle client, authority, last client, then first client.
+            for (ready_ordinal, index) in [2, 0, 3, 1].into_iter().enumerate() {
+                quartet.cores[index]
+                    .execute(NativeOnlineCommand::SetReady(true), quartet.now_ms)
+                    .unwrap();
+                quartet.pump_once();
+                if ready_ordinal + 1 < FOUR_CORE_PEER_COUNT {
+                    assert!(
+                        quartet
+                            .cores
+                            .iter()
+                            .any(|core| !core.coordinator.status().all_members_ready)
+                    );
+                }
+            }
+            quartet.pump_until(120, |quartet| {
+                quartet
+                    .cores
+                    .iter()
+                    .all(|core| core.coordinator.status().all_members_ready)
+                    && quartet.cores[FOUR_CORE_HOST]
+                        .coordinator
+                        .status()
+                        .input_delay_calibration
+                        .state
+                        == crate::network_quality::InputDelayCalibrationState::Ready
+            });
+
+            let calibration = quartet.cores[FOUR_CORE_HOST]
+                .coordinator
+                .status()
+                .input_delay_calibration;
+            let match_id = crate::network_protocol::MatchId::new(*b"four-core-match1").unwrap();
+            let mut options = OnlineManifestOptions::casual_listen(
+                match_id,
+                quartet.members[FOUR_CORE_HOST].peer_id,
+                DefinitionId::new(0).unwrap(),
+                DefinitionId::new(1).unwrap(),
+                0xAFC0_7701,
+                SimTick(240),
+            );
+            options.input_delay_ticks = calibration.selected_input_delay_ticks.unwrap();
+            options.rollback_limit_ticks = crate::network_protocol::MAX_NORMAL_ROLLBACK_TICKS;
+            quartet.cores[FOUR_CORE_HOST]
+                .execute(
+                    NativeOnlineCommand::CommitManifest {
+                        options,
+                        current_tick: SimTick(120),
+                    },
+                    quartet.now_ms,
+                )
+                .unwrap();
+            quartet.pump_until(160, |quartet| {
+                quartet.cores.iter().enumerate().all(|(index, core)| {
+                    core.coordinator.match_config().is_some()
+                        && core.committed_roster.is_some()
+                        && core.coordinator.status().phase == OnlineLobbyPhase::Loading
+                        && core.endpoints.len() == if index == FOUR_CORE_HOST { 3 } else { 1 }
+                })
+            });
+
+            let committed = quartet.cores[FOUR_CORE_HOST].committed_roster.unwrap();
+            let manifest = quartet.cores[FOUR_CORE_HOST]
+                .coordinator
+                .match_config()
+                .unwrap()
+                .manifest;
+            let expected = quartet
+                .members
+                .iter()
+                .map(|member| AuthenticatedPeer {
+                    peer_id: member.peer_id,
+                    user_id: member.authenticated_user,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(committed.len(), FOUR_CORE_PEER_COUNT);
+            assert_eq!(committed.iter().collect::<Vec<_>>(), expected);
+            for core in &quartet.cores {
+                assert_eq!(core.committed_roster, Some(committed));
+                assert_eq!(core.coordinator.match_config().unwrap().manifest, manifest);
+            }
+            assert_eq!(manifest.match_id, match_id);
+
+            let mut host_remotes = quartet.cores[FOUR_CORE_HOST]
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.admitted.remote_user)
+                .collect::<Vec<_>>();
+            host_remotes.sort_unstable_by_key(|user| user.get());
+            assert_eq!(host_remotes, quartet.users[1..].to_vec());
+            for index in 1..FOUR_CORE_PEER_COUNT {
+                assert_eq!(
+                    quartet.cores[index]
+                        .endpoints
+                        .front()
+                        .unwrap()
+                        .admitted
+                        .remote_user,
+                    quartet.users[FOUR_CORE_HOST]
+                );
+            }
+            assert!(quartet.cores.iter().all(|core| {
+                core.manifest_transaction.is_some_and(|transaction| {
+                    transaction.stage == ManifestTransactionStage::Activated
+                        && transaction.activation_deadline_ms.is_none()
+                })
+            }));
+        }
+
+        #[test]
+        fn four_core_partial_activation_times_out_via_scoped_setup_cancel_before_release() {
+            let mut quartet = FakeNativeCoreQuartet::new();
+            quartet.pump_until(400, |quartet| {
+                quartet.cores.iter().enumerate().all(|(index, core)| {
+                    let status = core.coordinator.status();
+                    let required_direct = if index == FOUR_CORE_HOST { 3 } else { 1 };
+                    status.secure_remote_peers == required_direct
+                        && status.verified_remote_accounts == 3
+                })
+            });
+            for core in &mut quartet.cores {
+                core.execute(NativeOnlineCommand::SetReady(true), quartet.now_ms)
+                    .unwrap();
+            }
+            quartet.mirror();
+            quartet.pump_until(120, |quartet| {
+                quartet
+                    .cores
+                    .iter()
+                    .all(|core| core.coordinator.status().all_members_ready)
+                    && quartet.cores[FOUR_CORE_HOST]
+                        .coordinator
+                        .status()
+                        .input_delay_calibration
+                        .state
+                        == crate::network_quality::InputDelayCalibrationState::Ready
+            });
+
+            let calibration = quartet.cores[FOUR_CORE_HOST]
+                .coordinator
+                .status()
+                .input_delay_calibration;
+            let mut options = OnlineManifestOptions::casual_listen(
+                crate::network_protocol::MatchId::new(*b"partial-activate").unwrap(),
+                quartet.members[FOUR_CORE_HOST].peer_id,
+                DefinitionId::new(0).unwrap(),
+                DefinitionId::new(1).unwrap(),
+                0xAFC0_7702,
+                SimTick(240),
+            );
+            options.input_delay_ticks = calibration.selected_input_delay_ticks.unwrap();
+            options.rollback_limit_ticks = crate::network_protocol::MAX_NORMAL_ROLLBACK_TICKS;
+            quartet.cores[FOUR_CORE_HOST]
+                .execute(
+                    NativeOnlineCommand::CommitManifest {
+                        options,
+                        current_tick: SimTick(120),
+                    },
+                    quartet.now_ms,
+                )
+                .unwrap();
+            quartet.pump_until(80, |quartet| {
+                quartet.cores[FOUR_CORE_HOST]
+                    .manifest_transaction
+                    .is_some_and(|transaction| {
+                        transaction.stage == ManifestTransactionStage::Activating
+                    })
+            });
+            assert!(quartet.cores.iter().all(|core| core.endpoints.is_empty()));
+
+            // Send Activate to everyone, but allow only two clients to
+            // receive-arm and return their barrier receipts.
+            quartet.now_ms += 1;
+            quartet.mirror();
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            for index in [1_usize, 2_usize] {
+                quartet.cores[index].pump(quartet.now_ms).unwrap();
+                quartet.mirror();
+                assert_eq!(
+                    quartet.cores[index]
+                        .manifest_transaction
+                        .expect("client retained its transaction")
+                        .stage,
+                    ManifestTransactionStage::Activating
+                );
+                assert!(quartet.cores[index].endpoints.is_empty());
+            }
+            assert_eq!(
+                quartet.cores[3]
+                    .manifest_transaction
+                    .expect("delayed client retained the commit")
+                    .stage,
+                ManifestTransactionStage::Committing
+            );
+
+            quartet.now_ms += 1;
+            for index in [1_usize, 2_usize] {
+                quartet.cores[index].pump(quartet.now_ms).unwrap();
+            }
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            let partial = quartet.cores[FOUR_CORE_HOST]
+                .manifest_transaction
+                .expect("authority still waits for the final receipt");
+            assert_eq!(partial.stage, ManifestTransactionStage::Activating);
+            assert_eq!(
+                partial
+                    .participants
+                    .iter()
+                    .flatten()
+                    .filter(|participant| participant.activated)
+                    .count(),
+                2
+            );
+            assert!(quartet.cores.iter().all(|core| core.endpoints.is_empty()));
+
+            let original_deadline_ms = partial.activation_deadline_ms.unwrap();
+            quartet.controls[FOUR_CORE_HOST].emit_disconnect().unwrap();
+            quartet.now_ms += 1;
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            assert!(
+                quartet.cores[FOUR_CORE_HOST]
+                    .coordinator
+                    .steam_backend_reconnect_pending()
+            );
+            assert_eq!(
+                quartet.cores[FOUR_CORE_HOST]
+                    .coordinator
+                    .status()
+                    .start_blocker,
+                Some(crate::online_lobby::OnlineStartBlocker::PreparingSteamNetwork)
+            );
+
+            // The activation deadline occurs just before the 10-second Steam
+            // reconnect grace. It must remain frozen, not roll back an
+            // otherwise healthy secure star while Steam is reconnecting.
+            quartet.now_ms = original_deadline_ms;
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            assert!(
+                quartet.cores[FOUR_CORE_HOST]
+                    .manifest_transaction
+                    .is_some_and(
+                        |transaction| transaction.stage == ManifestTransactionStage::Activating
+                    )
+            );
+            assert!(quartet.cores[FOUR_CORE_HOST].endpoints.is_empty());
+
+            quartet.controls[FOUR_CORE_HOST].emit_connect().unwrap();
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            assert!(
+                !quartet.cores[FOUR_CORE_HOST]
+                    .coordinator
+                    .steam_backend_reconnect_pending()
+            );
+            let deadline_ms = quartet.cores[FOUR_CORE_HOST]
+                .manifest_transaction
+                .expect("activation transaction resumes after Steam reconnect")
+                .activation_deadline_ms
+                .expect("activation retains a bounded deadline");
+            assert!(deadline_ms > original_deadline_ms);
+
+            quartet.now_ms = deadline_ms;
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            assert_eq!(
+                quartet.cores[FOUR_CORE_HOST].coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+            assert!(quartet.cores[FOUR_CORE_HOST].manifest_transaction.is_none());
+            assert!(quartet.cores[FOUR_CORE_HOST].endpoints.is_empty());
+            for index in 1..FOUR_CORE_PEER_COUNT {
+                assert!(
+                    !quartet.cores[FOUR_CORE_HOST]
+                        .coordinator
+                        .control_outbox_is_empty(quartet.users[index]),
+                    "each still-live frozen participant receives a scoped SetupCancel"
+                );
+            }
+
+            // Flush SetupCancel after the local rollback. The two receive-armed
+            // clients return to Lobby without ever exposing an endpoint; the
+            // delayed client treats any earlier queued Activate as part of the
+            // same transaction and converges as well.
+            quartet.now_ms += 1;
+            quartet.cores[FOUR_CORE_HOST].pump(quartet.now_ms).unwrap();
+            for index in 1..FOUR_CORE_PEER_COUNT {
+                if let Err(error) = quartet.cores[index].pump(quartet.now_ms) {
+                    panic!(
+                        "client {index} failed to consume SetupCancel: {error:?}; phase={:?}, transaction={:?}, endpoints={}",
+                        quartet.cores[index].coordinator.status().phase,
+                        quartet.cores[index].manifest_transaction,
+                        quartet.cores[index].endpoints.len(),
+                    );
+                }
+            }
+            assert!(quartet.cores.iter().all(|core| {
+                core.coordinator.status().phase == OnlineLobbyPhase::Lobby
+                    && core.coordinator.match_config().is_none()
+                    && core.manifest_transaction.is_none()
+                    && core.endpoints.is_empty()
+            }));
+            assert_eq!(quartet.network.resource_counts().links, 3);
+        }
+
+        #[test]
+        fn manifest_timeout_aborts_both_sides_to_lobby_without_replacing_secure_socket() {
+            let mut pair = FakeNativeCorePair::new();
+            pair.pump_until_authenticated_endpoints();
+            pair.host
+                .execute(NativeOnlineCommand::SetReady(true), pair.now_ms)
+                .unwrap();
+            pair.client
+                .execute(NativeOnlineCommand::SetReady(true), pair.now_ms)
+                .unwrap();
+            pair.mirror();
+            pair.pump_until(80, |pair| {
+                pair.host.coordinator.status().all_members_ready
+                    && pair.client.coordinator.status().all_members_ready
+                    && pair.host.coordinator.status().input_delay_calibration.state
+                        == crate::network_quality::InputDelayCalibrationState::Ready
+            });
+            let connection = pair
+                .host
+                .coordinator
+                .control_connection_for_user(pair.client_user)
+                .unwrap();
+            let calibration = pair.host.coordinator.status().input_delay_calibration;
+            let mut options = OnlineManifestOptions::casual_listen(
+                crate::network_protocol::MatchId::new(*b"manifest-abort01").unwrap(),
+                pair.host_member.peer_id,
+                DefinitionId::new(0).unwrap(),
+                DefinitionId::new(1).unwrap(),
+                0xAFC0_7602,
+                SimTick(240),
+            );
+            options.input_delay_ticks = calibration.selected_input_delay_ticks.unwrap();
+            options.rollback_limit_ticks = crate::network_protocol::MAX_NORMAL_ROLLBACK_TICKS;
+            pair.host
+                .execute(
+                    NativeOnlineCommand::CommitManifest {
+                        options,
+                        current_tick: SimTick(120),
+                    },
+                    pair.now_ms,
+                )
+                .unwrap();
+
+            pair.now_ms += 1;
+            pair.mirror();
+            pair.host.pump(pair.now_ms).unwrap();
+            assert_eq!(
+                pair.host.coordinator.status().phase,
+                OnlineLobbyPhase::ManifestAgreement
+            );
+            let transaction = pair
+                .host
+                .manifest_transaction
+                .expect("authority opened an AFCP manifest transaction");
+            pair.now_ms += pair
+                .host
+                .coordinator
+                .config()
+                .timeouts
+                .manifest_agreement_ms;
+            pair.host.pump(pair.now_ms).unwrap();
+            assert_eq!(
+                pair.host.coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+
+            // Deliver Prepare only after the authority has already timed out.
+            // The subsequent scoped Abort must still converge the client
+            // without relying on authority-first application pump ordering.
+            pair.client.pump(pair.now_ms).unwrap();
+            assert_eq!(
+                pair.client.coordinator.status().phase,
+                OnlineLobbyPhase::ManifestAgreement
+            );
+            pair.now_ms += 1;
+            pair.client.pump(pair.now_ms).unwrap();
+            assert_eq!(
+                pair.client.coordinator.status().phase,
+                OnlineLobbyPhase::ManifestAgreement
+            );
+            pair.host.pump(pair.now_ms).unwrap();
+            pair.client.pump(pair.now_ms).unwrap();
+
+            assert_eq!(
+                pair.client.coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+            assert!(pair.host.coordinator.match_config().is_none());
+            assert!(pair.client.coordinator.match_config().is_none());
+            assert_eq!(pair.host.coordinator.status().secure_remote_peers, 1);
+            assert_eq!(pair.client.coordinator.status().secure_remote_peers, 1);
+            assert_eq!(
+                pair.host
+                    .coordinator
+                    .control_connection_for_user(pair.client_user),
+                Some(connection)
+            );
+            assert_eq!(
+                pair.client
+                    .coordinator
+                    .control_connection_for_user(pair.host_user),
+                Some(connection)
+            );
+
+            assert_eq!(pair.host.retired_manifest_transaction, Some(transaction.id));
+            assert_eq!(
+                pair.client.retired_manifest_transaction,
+                Some(transaction.id)
+            );
+
+            // Delayed frames from the retired transaction are semantically
+            // accepted and ACKed as known-stale. They must not isolate the peer,
+            // resurrect Loading, or replace the still-Secure physical link.
+            let client_to_host =
+                SteamControlIdentity::new(pair.lobby, pair.client_user, pair.host_user).unwrap();
+            let host_to_client =
+                SteamControlIdentity::new(pair.lobby, pair.host_user, pair.client_user).unwrap();
+            pair.client
+                .coordinator
+                .queue_control_for_user(
+                    pair.host_user,
+                    SteamControlMessage::ManifestCommitAccepted {
+                        identity: client_to_host,
+                        transaction: transaction.id,
+                        manifest_hash: transaction.manifest_hash,
+                    },
+                )
+                .unwrap();
+            pair.host
+                .coordinator
+                .queue_control_for_user(
+                    pair.client_user,
+                    SteamControlMessage::GameplayActivate {
+                        identity: host_to_client,
+                        transaction: transaction.id,
+                        manifest_hash: transaction.manifest_hash,
+                    },
+                )
+                .unwrap();
+            pair.client
+                .coordinator
+                .queue_control_for_user(
+                    pair.host_user,
+                    SteamControlMessage::GameplayActivated {
+                        identity: client_to_host,
+                        transaction: transaction.id,
+                        manifest_hash: transaction.manifest_hash,
+                    },
+                )
+                .unwrap();
+            pair.pump_until(20, |pair| {
+                pair.host
+                    .coordinator
+                    .control_outbox_is_empty(pair.client_user)
+                    && pair
+                        .client
+                        .coordinator
+                        .control_outbox_is_empty(pair.host_user)
+            });
+            assert_eq!(
+                pair.host.coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+            assert_eq!(
+                pair.client.coordinator.status().phase,
+                OnlineLobbyPhase::Lobby
+            );
+            assert!(pair.host.signal_rejected_users.iter().all(Option::is_none));
+            assert!(
+                pair.client
+                    .signal_rejected_users
+                    .iter()
+                    .all(Option::is_none)
+            );
+            assert_eq!(
+                pair.host
+                    .coordinator
+                    .control_connection_for_user(pair.client_user),
+                Some(connection)
+            );
+            assert_eq!(
+                pair.client
+                    .coordinator
+                    .control_connection_for_user(pair.host_user),
+                Some(connection)
+            );
+        }
+
+        #[test]
+        fn thousand_cycle_create_join_start_return_cleanup_soak_leaves_zero_resources() {
+            for _ in 0..1_000 {
+                let mut pair = FakeNativeCorePair::new();
+                let network = pair.network.clone();
+                let host_control = pair.host_control.clone();
+                let client_control = pair.client_control.clone();
+                pair.pump_until_authenticated_endpoints();
+                pair.ready_and_commit(
+                    crate::network_protocol::MatchId::new(*b"cleanup-soak-001").unwrap(),
+                );
+                pair.finish_confirmed_match();
+
+                pair.now_ms += 1;
+                pair.host
+                    .execute(NativeOnlineCommand::ReturnToLobby, pair.now_ms)
+                    .unwrap();
+                pair.client
+                    .execute(NativeOnlineCommand::ReturnToLobby, pair.now_ms)
+                    .unwrap();
+                pair.pump_until(80, |pair| {
+                    pair.host.coordinator.status().phase == OnlineLobbyPhase::Lobby
+                        && pair.client.coordinator.status().phase == OnlineLobbyPhase::Lobby
+                });
+
+                pair.now_ms += 1;
+                pair.client
+                    .execute(NativeOnlineCommand::LeaveOnline, pair.now_ms)
+                    .unwrap();
+                pair.host
+                    .execute(NativeOnlineCommand::LeaveOnline, pair.now_ms)
+                    .unwrap();
+                for _ in 0..400 {
+                    if pair.host.coordinator.retiring_transport_count() == 0
+                        && pair.client.coordinator.retiring_transport_count() == 0
+                    {
+                        break;
+                    }
+                    pair.now_ms += 1;
+                    pair.host.pump(pair.now_ms).unwrap();
+                    pair.client.pump(pair.now_ms).unwrap();
+                }
+                assert_eq!(pair.host.coordinator.retiring_transport_count(), 0);
+                assert_eq!(pair.client.coordinator.retiring_transport_count(), 0);
+                assert!(pair.host.endpoints.is_empty());
+                assert!(pair.client.endpoints.is_empty());
+                drop(pair);
+
+                assert_eq!(
+                    network.resource_counts(),
+                    crate::steam_transport::FakeSteamTransportResourceCounts::default()
+                );
+                assert_eq!(host_control.active_issued_ticket_count(), 0);
+                assert_eq!(client_control.active_issued_ticket_count(), 0);
+                assert_eq!(host_control.active_auth_session_count(), 0);
+                assert_eq!(client_control.active_auth_session_count(), 0);
+            }
         }
 
         #[test]
@@ -4764,60 +8498,6 @@ mod real {
             assert_eq!(primed.users, [None; MAX_STEAM_LOBBY_MEMBERS]);
         }
 
-        #[cfg(feature = "steam-net")]
-        #[test]
-        fn steam_session_end_reasons_keep_actionable_diagnostics() {
-            assert_eq!(
-                classify_auth_signal_session_failure(Some(NetConnectionEnd::LocalOfflineMode)),
-                AuthSignalError::SessionLocalOffline
-            );
-            assert_eq!(
-                classify_auth_signal_session_failure(Some(NetConnectionEnd::RemoteTimeout)),
-                AuthSignalError::SessionRemoteTimeout
-            );
-            assert_eq!(
-                classify_auth_signal_session_failure(Some(
-                    NetConnectionEnd::MiscPeerSentNoConnection,
-                )),
-                AuthSignalError::SessionPeerRejected
-            );
-            assert_eq!(
-                classify_auth_signal_session_failure(None),
-                AuthSignalError::SessionUnknownFailure
-            );
-
-            let failed_network_config = SteamRelayStatus {
-                network_config: crate::steam_transport::SteamRelayAvailability::Failed,
-                ..SteamRelayStatus::default()
-            };
-            assert_eq!(
-                classify_auth_signal_session_failure_with_relay(
-                    Some(NetConnectionEnd::MiscP2PRendezvous),
-                    failed_network_config,
-                ),
-                AuthSignalError::SessionNetworkConfigUnavailable
-            );
-
-            let failed_relay = SteamRelayStatus {
-                any_relay: crate::steam_transport::SteamRelayAvailability::CannotTry,
-                ..SteamRelayStatus::default()
-            };
-            assert_eq!(
-                classify_auth_signal_session_failure_with_relay(
-                    Some(NetConnectionEnd::MiscP2PRendezvous),
-                    failed_relay,
-                ),
-                AuthSignalError::SessionRelayUnavailable
-            );
-            assert_eq!(
-                classify_auth_signal_session_failure_with_relay(
-                    Some(NetConnectionEnd::MiscP2PRendezvous),
-                    SteamRelayStatus::default(),
-                ),
-                AuthSignalError::SessionRendezvousFailed
-            );
-        }
-
         #[test]
         fn signal_quarantine_is_peer_scoped_and_clears_at_session_boundary() {
             let lobby = SteamLobbyId::new(700).unwrap();
@@ -4935,7 +8615,8 @@ mod real {
                             match_id: None,
                         },
                     },
-                    sent: false,
+                    sent_sequence: None,
+                    route: TicketRoute::Direct,
                 }),
                 Some(TicketExchange {
                     lease: AuthTicketLease {
@@ -4957,7 +8638,8 @@ mod real {
                             ),
                         },
                     },
-                    sent: true,
+                    sent_sequence: Some(1),
+                    route: TicketRoute::Direct,
                 }),
                 None,
                 None,
@@ -5278,6 +8960,18 @@ mod tests {
             project_ticket_admission_result(Err(OnlineLobbyError::DuplicatePeerBinding)),
             Err(NativeOnlineRuntimeError::Signal(
                 AuthSignalError::InvalidIdentity
+            ))
+        ));
+        assert!(matches!(
+            project_ticket_admission_result(Err(OnlineLobbyError::Steam(
+                SteamPlatformError::Backend(
+                    crate::steam_platform::SteamBackendError::AuthSessionRejected(
+                        crate::steam_platform::AuthSessionStartFailure::InvalidTicket,
+                    ),
+                ),
+            ))),
+            Err(NativeOnlineRuntimeError::Signal(
+                AuthSignalError::InvalidEnvelope
             ))
         ));
     }
@@ -5761,8 +9455,15 @@ mod tests {
                 effective_joinable: true,
                 all_members_ready: true,
                 connected_remote_peers: 0,
+                secure_remote_peers: 0,
+                required_remote_peers: 0,
+                verified_remote_accounts: 0,
+                required_remote_accounts: 0,
                 transport_installed: false,
                 relay_status: SteamRelayStatus::default(),
+                steam_network_readiness: crate::steam_transport::SteamNetworkReadiness::default(),
+                setup_stage: crate::online_lobby::OnlineSetupStage::PreparingSteamNetwork,
+                start_blocker: None,
                 manifest_hash: None,
                 countdown_start_tick: None,
                 network_quality: NetworkQualitySnapshot::default(),
@@ -5807,8 +9508,15 @@ mod tests {
                 effective_joinable: false,
                 all_members_ready: true,
                 connected_remote_peers: 1,
+                secure_remote_peers: 1,
+                required_remote_peers: 1,
+                verified_remote_accounts: 1,
+                required_remote_accounts: 1,
                 transport_installed: false,
                 relay_status: SteamRelayStatus::default(),
+                steam_network_readiness: crate::steam_transport::SteamNetworkReadiness::default(),
+                setup_stage: crate::online_lobby::OnlineSetupStage::GameplayReady,
+                start_blocker: None,
                 manifest_hash: None,
                 countdown_start_tick: Some(SimTick(120)),
                 network_quality: NetworkQualitySnapshot::default(),

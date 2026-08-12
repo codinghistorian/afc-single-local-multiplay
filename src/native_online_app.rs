@@ -956,6 +956,26 @@ impl NativeOnlineApplication {
                 Ok(())
             }
             NativeOnlineUiAction::Retry => {
+                let view = runtime.view_model();
+                if self.active.is_none()
+                    && view.lobby.is_some()
+                    && view.screen == NativeOnlineScreen::Error
+                    && view.failure.is_some_and(|failure| {
+                        failure.recovery == OnlineRecoveryAction::Retry
+                            && matches!(
+                                failure.code,
+                                OnlineFailureCode::ConnectionTimedOut
+                                    | OnlineFailureCode::AuthenticationTimedOut
+                                    | OnlineFailureCode::SteamUnavailable
+                            )
+                    })
+                {
+                    runtime.execute_port(NativeOnlineCommand::RetrySteamSetup, now_ms)?;
+                    self.failure_override = None;
+                    self.reset_match_gates();
+                    self.request_online_focus = true;
+                    return Ok(());
+                }
                 if self.active_session_kind() == Some(NativeOnlineSessionKind::ListenOwner) {
                     return self.begin_listen_shutdown(
                         runtime,
@@ -1083,6 +1103,9 @@ impl NativeOnlineApplication {
         if view.screen != NativeOnlineScreen::Lobby
             || view.role != Some(OnlineLobbyRole::ListenAuthority)
             || !view.all_members_ready
+            || view.secure_remote_peers != view.required_remote_peers
+            || view.verified_remote_accounts != view.required_remote_accounts
+            || view.start_blocker.is_some()
             || view.input_delay_calibration.state != InputDelayCalibrationState::Ready
         {
             return Err(NativeOnlineApplicationError::InvalidAction);
@@ -2317,8 +2340,11 @@ mod tests {
         }
 
         fn set_screen(&mut self, screen: NativeOnlineScreen) {
+            let projected = view_for(screen);
             self.view.screen = screen;
-            self.view.actions = view_for(screen).actions;
+            self.view.actions = projected.actions;
+            self.view.setup_stage = projected.setup_stage;
+            self.view.start_blocker = projected.start_blocker;
         }
 
         fn begin_reconnect(&mut self) {
@@ -2393,6 +2419,11 @@ mod tests {
                 NativeOnlineCommand::SetReady(ready) => {
                     self.view.local_ready = ready;
                     RecordedCommand::SetReady(ready)
+                }
+                NativeOnlineCommand::RetrySteamSetup => {
+                    self.view.failure = None;
+                    self.set_screen(NativeOnlineScreen::Lobby);
+                    RecordedCommand::Other
                 }
                 NativeOnlineCommand::CommitManifest { options, .. } => {
                     self.committed_options = Some(options);
@@ -2484,6 +2515,7 @@ mod tests {
                     self.lifecycle.returns_to_lobby += 1;
                     self.config = None;
                     self.view.outcome = None;
+                    self.view.failure = None;
                     self.view.countdown_start_tick = None;
                     self.view.local_ready = true;
                     self.view.all_members_ready = true;
@@ -2592,6 +2624,21 @@ mod tests {
             local_ready: false,
             all_members_ready: false,
             connected_remote_peers: 0,
+            secure_remote_peers: 0,
+            required_remote_peers: 0,
+            verified_remote_accounts: 0,
+            required_remote_accounts: 0,
+            steam_network_readiness: crate::steam_transport::SteamNetworkReadiness::default(),
+            setup_stage: if in_lobby {
+                crate::online_lobby::OnlineSetupStage::Secure
+            } else {
+                crate::online_lobby::OnlineSetupStage::PreparingSteamNetwork
+            },
+            start_blocker: if in_lobby {
+                None
+            } else {
+                Some(crate::online_lobby::OnlineStartBlocker::PreparingSteamNetwork)
+            },
             network_quality: NetworkQualitySnapshot::default(),
             input_delay_calibration: InputDelayCalibrationSnapshot::default(),
             relay_status: crate::steam_transport::SteamRelayStatus::default(),
@@ -4274,6 +4321,7 @@ mod tests {
                 user: remote_user,
                 peer_id: remote_peer.peer_id,
                 reconnect_allowed: true,
+                pregame_setup_retry: false,
             });
         remote_runtime
             .events
@@ -4282,6 +4330,7 @@ mod tests {
                 user: host_user,
                 peer_id: host_peer.peer_id,
                 reconnect_allowed: true,
+                pregame_setup_retry: false,
             });
         remote_runtime.begin_reconnect();
         host_application.pump(&mut host_runtime, now_ms).unwrap();
@@ -4989,6 +5038,7 @@ mod tests {
                             user: SteamUserId::new(92_001).unwrap(),
                             peer_id: PeerId::new(51_001).unwrap(),
                             reconnect_allowed: true,
+                            pregame_setup_retry: false,
                         },
                         1,
                     )
@@ -5011,6 +5061,7 @@ mod tests {
                             user: SteamUserId::new(92_001).unwrap(),
                             peer_id: PeerId::new(51_001).unwrap(),
                             reconnect_allowed: false,
+                            pregame_setup_retry: false,
                         },
                         3,
                     )
@@ -5136,6 +5187,96 @@ mod tests {
         assert!(retry_application.request_online_focus);
         assert!(retry_application.release_render_world);
         assert_eq!(retry_runtime.lifecycle.leaves, 1);
+    }
+
+    #[test]
+    fn pregame_retry_preserves_lobby_membership_and_restarts_only_setup() {
+        let mut runtime = FakeRuntime::available();
+        let lobby = SteamLobbyId::new(60_099).unwrap();
+        runtime.view = view_for(NativeOnlineScreen::Error);
+        runtime.view.lobby = Some(lobby);
+        runtime.view.role = Some(OnlineLobbyRole::Client);
+        runtime.view.failure = Some(OnlineFailure {
+            code: OnlineFailureCode::ConnectionTimedOut,
+            severity: OnlineFailureSeverity::Recoverable,
+            recovery: OnlineRecoveryAction::Retry,
+            detail_code: 405,
+        });
+        let mut application = NativeOnlineApplication::default();
+        application
+            .dispatch(&mut runtime, NativeOnlineUiAction::Retry, 2)
+            .unwrap();
+
+        assert_eq!(runtime.view.lobby, Some(lobby));
+        assert_eq!(runtime.view.screen, NativeOnlineScreen::Lobby);
+        assert_eq!(runtime.lifecycle.returns_to_lobby, 0);
+        assert_eq!(runtime.lifecycle.leaves, 0);
+        assert!(application.request_online_focus);
+    }
+
+    #[test]
+    fn exhausted_pregame_socket_close_keeps_the_peer_scoped_retry_visible() {
+        let mut runtime = FakeRuntime::available();
+        runtime.view = view_for(NativeOnlineScreen::Error);
+        runtime.view.lobby = Some(SteamLobbyId::new(60_101).unwrap());
+        runtime.view.role = Some(OnlineLobbyRole::Client);
+        let failure = OnlineFailure {
+            code: OnlineFailureCode::ConnectionTimedOut,
+            severity: OnlineFailureSeverity::Recoverable,
+            recovery: OnlineRecoveryAction::Retry,
+            detail_code: 405,
+        };
+        runtime.view.failure = Some(failure);
+        let mut application = NativeOnlineApplication::default();
+
+        application
+            .handle_runtime_event(
+                &mut runtime,
+                OnlineLobbyEvent::PeerDisconnected {
+                    connection: SteamConnectionId::new(91).unwrap(),
+                    user: SteamUserId::new(60_102).unwrap(),
+                    peer_id: PeerId::new(60_103).unwrap(),
+                    reconnect_allowed: false,
+                    pregame_setup_retry: true,
+                },
+                2,
+            )
+            .unwrap();
+
+        assert!(application.failure_override.is_none());
+        let snapshot = application.ui_snapshot(&runtime, true);
+        assert_eq!(snapshot.screen, NativeOnlineScreen::Error);
+        assert_eq!(snapshot.failure, Some(failure));
+        assert!(native_online_action_available(
+            &snapshot,
+            NativeOnlineUiAction::Retry
+        ));
+    }
+
+    #[test]
+    fn steam_network_preparation_retry_uses_the_in_lobby_setup_command() {
+        let mut runtime = FakeRuntime::available();
+        let lobby = SteamLobbyId::new(60_100).unwrap();
+        runtime.view = view_for(NativeOnlineScreen::Error);
+        runtime.view.lobby = Some(lobby);
+        runtime.view.role = Some(OnlineLobbyRole::ListenAuthority);
+        runtime.view.failure = Some(OnlineFailure {
+            code: OnlineFailureCode::SteamUnavailable,
+            severity: OnlineFailureSeverity::Recoverable,
+            recovery: OnlineRecoveryAction::Retry,
+            detail_code: 0x0204,
+        });
+        let mut application = NativeOnlineApplication::default();
+
+        application
+            .dispatch(&mut runtime, NativeOnlineUiAction::Retry, 3)
+            .unwrap();
+
+        assert_eq!(runtime.view.lobby, Some(lobby));
+        assert_eq!(runtime.view.screen, NativeOnlineScreen::Lobby);
+        assert_eq!(runtime.lifecycle.returns_to_lobby, 0);
+        assert_eq!(runtime.lifecycle.leaves, 0);
+        assert!(application.request_online_focus);
     }
 
     #[test]
@@ -5537,6 +5678,14 @@ pub struct NativeOnlineUiSnapshot {
     pub local_seats: u8,
     pub local_ready: bool,
     pub all_members_ready: bool,
+    pub connected_remote_peers: u8,
+    pub secure_remote_peers: u8,
+    pub required_remote_peers: u8,
+    pub verified_remote_accounts: u8,
+    pub required_remote_accounts: u8,
+    pub steam_network_readiness: crate::steam_transport::SteamNetworkReadiness,
+    pub setup_stage: crate::online_lobby::OnlineSetupStage,
+    pub start_blocker: Option<crate::online_lobby::OnlineStartBlocker>,
     pub network_quality: NetworkQualitySnapshot,
     pub relay_status: SteamRelayStatus,
     pub input_delay_calibration: InputDelayCalibrationSnapshot,
@@ -5576,6 +5725,14 @@ impl Default for NativeOnlineUiSnapshot {
             local_seats: 1,
             local_ready: false,
             all_members_ready: false,
+            connected_remote_peers: 0,
+            secure_remote_peers: 0,
+            required_remote_peers: 0,
+            verified_remote_accounts: 0,
+            required_remote_accounts: 0,
+            steam_network_readiness: crate::steam_transport::SteamNetworkReadiness::default(),
+            setup_stage: crate::online_lobby::OnlineSetupStage::PreparingSteamNetwork,
+            start_blocker: Some(crate::online_lobby::OnlineStartBlocker::PreparingSteamNetwork),
             network_quality: NetworkQualitySnapshot::default(),
             relay_status: SteamRelayStatus::default(),
             input_delay_calibration: InputDelayCalibrationSnapshot::default(),
@@ -5659,6 +5816,14 @@ impl NativeOnlineApplication {
             local_seats: self.editor.seat_count,
             local_ready: native.local_ready,
             all_members_ready: native.all_members_ready,
+            connected_remote_peers: native.connected_remote_peers,
+            secure_remote_peers: native.secure_remote_peers,
+            required_remote_peers: native.required_remote_peers,
+            verified_remote_accounts: native.verified_remote_accounts,
+            required_remote_accounts: native.required_remote_accounts,
+            steam_network_readiness: native.steam_network_readiness,
+            setup_stage: native.setup_stage,
+            start_blocker: native.start_blocker,
             network_quality: native.network_quality,
             relay_status: native.relay_status,
             input_delay_calibration: native.input_delay_calibration,
@@ -6326,13 +6491,17 @@ fn native_online_details(snapshot: &NativeOnlineUiSnapshot) -> String {
                 String::new()
             };
             format!(
-                "Members: {}  |  Fighters: {}  |  Your couch seats: {}\nReady: {}  |  Everyone ready: {}  |  Network: {}{relay}\n{}\nSeat {}: {} / {} / {} / Team {}",
+                "Members: {}  |  Fighters: {}  |  Your couch seats: {}\nYour declaration: {}  |  Secure links: {}/{}  |  Verified accounts: {}/{}\nNetwork: {}{relay}\nSetup: {}\n{}\nSeat {}: {} / {} / {} / Team {}",
                 snapshot.lobby_members,
                 snapshot.total_seats,
                 snapshot.local_seats,
                 yes_no(snapshot.local_ready),
-                yes_no(snapshot.all_members_ready),
+                snapshot.secure_remote_peers,
+                snapshot.required_remote_peers,
+                snapshot.verified_remote_accounts,
+                snapshot.required_remote_accounts,
                 quality,
+                start_blocker_text(snapshot.start_blocker),
                 input_delay_calibration_text(snapshot.input_delay_calibration),
                 snapshot.selected_seat + 1,
                 character_label_for_definition(loadout.character),
@@ -6485,6 +6654,9 @@ fn native_online_action_available(
             snapshot.screen == NativeOnlineScreen::Lobby
                 && snapshot.role == Some(OnlineLobbyRole::ListenAuthority)
                 && snapshot.all_members_ready
+                && snapshot.secure_remote_peers == snapshot.required_remote_peers
+                && snapshot.verified_remote_accounts == snapshot.required_remote_accounts
+                && snapshot.start_blocker.is_none()
                 && snapshot.input_delay_calibration.state == InputDelayCalibrationState::Ready
         }
         NativeOnlineUiAction::Rematch => snapshot.actions.rematch,
@@ -6582,6 +6754,21 @@ fn input_delay_calibration_text(calibration: InputDelayCalibrationSnapshot) -> S
             "Input delay committed: {} ticks",
             calibration.selected_input_delay_ticks.unwrap_or_default(),
         ),
+    }
+}
+
+fn start_blocker_text(blocker: Option<crate::online_lobby::OnlineStartBlocker>) -> &'static str {
+    use crate::online_lobby::OnlineStartBlocker;
+
+    match blocker {
+        None => "Ready to start",
+        Some(OnlineStartBlocker::PreparingSteamNetwork) => "Preparing Steam network",
+        Some(OnlineStartBlocker::Connecting) => "Connecting",
+        Some(OnlineStartBlocker::ValidatingAccount) => "Validating account",
+        Some(OnlineStartBlocker::WaitingForDeclarations) => "Waiting for player declarations",
+        Some(OnlineStartBlocker::CalibratingQuality) => "Calibrating connection quality",
+        Some(OnlineStartBlocker::QualityRejected) => "Connection quality is not playable",
+        Some(OnlineStartBlocker::WaitingForManifest) => "Waiting for manifest agreement",
     }
 }
 
@@ -6881,6 +7068,7 @@ impl NativeOnlineApplication {
                 connection,
                 peer_id,
                 reconnect_allowed,
+                pregame_setup_retry,
                 ..
             } => {
                 if self.active_session_kind() == Some(NativeOnlineSessionKind::ListenOwner)
@@ -6901,7 +7089,8 @@ impl NativeOnlineApplication {
                             defer_once: true,
                         });
                 }
-                if !reconnect_allowed
+                if !pregame_setup_retry
+                    && !reconnect_allowed
                     && runtime.view_model().role == Some(OnlineLobbyRole::Client)
                     && self.authority_disconnect.is_none()
                 {
@@ -6959,11 +7148,18 @@ impl NativeOnlineApplication {
                 self.failure_override = None;
             }
             OnlineLobbyEvent::LobbyEntered { .. }
+            | OnlineLobbyEvent::SteamBackendReconnectStarted { .. }
+            | OnlineLobbyEvent::SteamBackendReconnectRecovered { .. }
             | OnlineLobbyEvent::TransportRequested(_)
+            | OnlineLobbyEvent::ControlRetrying { .. }
+            | OnlineLobbyEvent::ControlReady { .. }
             | OnlineLobbyEvent::AuthenticationRequired { .. }
             | OnlineLobbyEvent::AuthTicketReady { .. }
+            | OnlineLobbyEvent::RosterPeerAuthenticated { .. }
+            | OnlineLobbyEvent::RosterPeerAuthenticationRejected { .. }
             | OnlineLobbyEvent::EndpointReady { .. }
             | OnlineLobbyEvent::ManifestCommitted(_)
+            | OnlineLobbyEvent::ManifestAborted { .. }
             | OnlineLobbyEvent::MatchEnded(OnlineMatchOutcome::Confirmed)
             | OnlineLobbyEvent::RichPresenceUnavailable
             | OnlineLobbyEvent::StateChanged { .. } => {}

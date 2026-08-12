@@ -36,6 +36,9 @@ use crate::online_failure::{
 use crate::replay::{Replay, ReplayInputSource};
 use crate::replay_archive::{ReplayArchive, ReplayArchiveError, StoredReplay};
 use crate::snapshot::{CanonicalSnapshot, MAX_SNAPSHOT_BYTES, SnapshotError};
+use crate::steam_transport::{
+    STEAM_PEER_TRACE_EVENT_CAPACITY, SteamPeerSetupPhase, SteamPeerTrace, SteamRelayAvailability,
+};
 
 pub const DIAGNOSTICS_ROOT_ENV: &str = "AFC_DIAGNOSTICS_ROOT";
 pub const REPLAY_CHECKPOINT_INTERVAL_TICKS: u64 = 60;
@@ -46,15 +49,23 @@ pub const MAX_INCIDENT_FILES: usize = 8;
 pub const MAX_INCIDENT_TOTAL_BYTES: u64 = 16 * 1_024 * 1_024;
 pub const MAX_OPERATIONAL_BYTES: usize = 64 * 1_024;
 pub const MAX_OPERATIONAL_FILES: usize = 16;
-pub const MAX_OPERATIONAL_TOTAL_BYTES: u64 = 1 * 1_024 * 1_024;
+pub const MAX_OPERATIONAL_TOTAL_BYTES: u64 = 1_024 * 1_024;
+pub const MAX_STEAM_PREGAME_TRACE_BYTES: usize = 64 * 1_024;
+pub const MAX_STEAM_PREGAME_TRACE_FILES: usize = 16;
+pub const MAX_STEAM_PREGAME_TRACE_TOTAL_BYTES: u64 = 1_024 * 1_024;
 pub const MAX_DIAGNOSTIC_DIRECTORY_ENTRIES: usize = 128;
 pub const DIAGNOSTIC_CRITICAL_QUEUE_CAPACITY: usize = 4;
 pub const DIAGNOSTIC_PERIODIC_QUEUE_CAPACITY: usize = 1;
 
 const INCIDENT_SCHEMA_VERSION: u16 = 1;
 const OPERATIONAL_SCHEMA_VERSION: u16 = 1;
+// Version 2 assigns disjoint stable ranges to codec, close, lifecycle, and
+// transport-error results. Version 1 traces are rejected rather than silently
+// interpreting an ambiguous 4xx code in the wrong domain.
+const STEAM_PREGAME_TRACE_SCHEMA_VERSION: u16 = 2;
 const INCIDENT_EXTENSION: &str = "afci";
 const OPERATIONAL_EXTENSION: &str = "afco";
+const STEAM_PREGAME_TRACE_EXTENSION: &str = "afcs";
 const TEMP_CREATE_ATTEMPTS: u64 = 32;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -730,6 +741,113 @@ impl AuthorityIncidentBundle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamPregameTraceEventDiagnostic {
+    pub ordinal: u64,
+    pub connection_generation: u32,
+    pub phase: u8,
+    pub elapsed_ms: u64,
+    pub relay_availability: u8,
+    pub authentication_availability: u8,
+    pub result_code: u16,
+    pub native_end_reason: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamPregameTraceDiagnostic {
+    pub schema_version: u16,
+    pub events: Vec<SteamPregameTraceEventDiagnostic>,
+}
+
+impl SteamPregameTraceDiagnostic {
+    pub fn from_transport(trace: &SteamPeerTrace) -> Result<Self, DiagnosticsError> {
+        if trace.events.is_empty() || trace.events.len() > STEAM_PEER_TRACE_EVENT_CAPACITY {
+            return Err(DiagnosticsError::InvalidValue(
+                "Steam pre-game trace length",
+            ));
+        }
+        let events = trace
+            .events
+            .iter()
+            .map(|event| SteamPregameTraceEventDiagnostic {
+                ordinal: event.ordinal,
+                connection_generation: event.connection_generation,
+                phase: event.phase.diagnostic_code(),
+                elapsed_ms: event.elapsed_ms,
+                relay_availability: event.relay_availability.diagnostic_code(),
+                authentication_availability: event.authentication_availability.diagnostic_code(),
+                result_code: event.result_code,
+                native_end_reason: event.native_end_reason,
+            })
+            .collect();
+        let value = Self {
+            schema_version: STEAM_PREGAME_TRACE_SCHEMA_VERSION,
+            events,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, DiagnosticsError> {
+        self.validate()?;
+        let encoded = ron::ser::to_string(self)
+            .map_err(|_| DiagnosticsError::Codec("encode Steam pre-game trace"))?
+            .into_bytes();
+        enforce_size(
+            encoded.len(),
+            MAX_STEAM_PREGAME_TRACE_BYTES,
+            "Steam pre-game trace",
+        )?;
+        Ok(encoded)
+    }
+
+    pub fn is_pregame_failure(&self) -> bool {
+        self.events.last().is_some_and(|event| {
+            event.phase < SteamPeerSetupPhase::GameplayReady.diagnostic_code()
+                && event.result_code
+                    != crate::steam_transport::SteamTransportCloseReason::Requested
+                        .diagnostic_code()
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DiagnosticsError> {
+        enforce_size(
+            bytes.len(),
+            MAX_STEAM_PREGAME_TRACE_BYTES,
+            "Steam pre-game trace",
+        )?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| DiagnosticsError::Codec("decode Steam pre-game trace UTF-8"))?;
+        let value: Self = ron::from_str(text)
+            .map_err(|_| DiagnosticsError::Codec("decode Steam pre-game trace"))?;
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<(), DiagnosticsError> {
+        if self.schema_version != STEAM_PREGAME_TRACE_SCHEMA_VERSION
+            || self.events.is_empty()
+            || self.events.len() > STEAM_PEER_TRACE_EVENT_CAPACITY
+            || self.events.iter().any(|event| {
+                event.connection_generation == 0
+                    || !(1..=SteamPeerSetupPhase::GameplayReady.diagnostic_code())
+                        .contains(&event.phase)
+                    || event.relay_availability > SteamRelayAvailability::Retrying.diagnostic_code()
+                    || event.authentication_availability
+                        > SteamRelayAvailability::Retrying.diagnostic_code()
+            })
+            || self.events.windows(2).any(|events| {
+                events[0].ordinal >= events[1].ordinal
+                    || events[0].connection_generation != events[1].connection_generation
+                    || events[0].elapsed_ms > events[1].elapsed_ms
+            })
+        {
+            return Err(DiagnosticsError::InvalidValue("Steam pre-game trace"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum DiagnosticsError {
     Io {
@@ -878,6 +996,48 @@ impl AuthorityDiagnosticsArchive {
         AuthorityIncidentBundle::decode(&read_bounded(path, MAX_INCIDENT_BYTES, "incident")?)
     }
 
+    pub fn save_steam_pregame_trace(
+        &self,
+        trace: &SteamPregameTraceDiagnostic,
+    ) -> Result<StoredDiagnostic, DiagnosticsError> {
+        self.prepare_root()?;
+        let bytes = trace.encode()?;
+        let content_fingerprint = stable_diagnostic_fingerprint(&bytes);
+        let first = trace
+            .events
+            .first()
+            .ok_or(DiagnosticsError::InvalidValue("Steam pre-game trace"))?;
+        let last = trace
+            .events
+            .last()
+            .ok_or(DiagnosticsError::InvalidValue("Steam pre-game trace"))?;
+        let name = format!(
+            "steam-pregame-generation-{:010}-event-{:020}-result-{:04x}-content-{content_fingerprint:016x}.{STEAM_PREGAME_TRACE_EXTENSION}",
+            first.connection_generation, last.ordinal, last.result_code,
+        );
+        let stored = atomic_save(
+            &self.root.join("steam-pregame"),
+            &name,
+            STEAM_PREGAME_TRACE_EXTENSION,
+            &bytes,
+            MAX_STEAM_PREGAME_TRACE_FILES,
+            MAX_STEAM_PREGAME_TRACE_TOTAL_BYTES,
+        )?;
+        sync_directory(&self.root)?;
+        Ok(stored)
+    }
+
+    pub fn load_steam_pregame_trace(
+        &self,
+        path: &Path,
+    ) -> Result<SteamPregameTraceDiagnostic, DiagnosticsError> {
+        SteamPregameTraceDiagnostic::decode(&read_bounded(
+            path,
+            MAX_STEAM_PREGAME_TRACE_BYTES,
+            "Steam pre-game trace",
+        )?)
+    }
+
     pub fn save_operational(
         &self,
         snapshot: &AuthorityOperationalSnapshot,
@@ -916,6 +1076,19 @@ impl AuthorityDiagnosticsArchive {
             "operational snapshot",
         )?)
     }
+}
+
+/// Privacy-safe, deterministic filename discriminator over an already
+/// redacted diagnostic payload. This is not a security primitive; it prevents
+/// two failures with the same generation/ordinal/result shape from aliasing
+/// the same archive path while keeping identical saves idempotent.
+fn stable_diagnostic_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 enum DiagnosticsJob {
@@ -1603,6 +1776,96 @@ mod tests {
             AuthorityOperationalSnapshot::decode(&vec![0; MAX_OPERATIONAL_BYTES + 1]),
             Err(DiagnosticsError::FileTooLarge { .. })
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn steam_pregame_trace_round_trip_and_retention_are_privacy_safe_and_bounded() {
+        let root = temp_root("steam-pregame");
+        let archive = AuthorityDiagnosticsArchive::new(&root);
+        let collision_shape = SteamPregameTraceDiagnostic {
+            schema_version: STEAM_PREGAME_TRACE_SCHEMA_VERSION,
+            events: vec![
+                SteamPregameTraceEventDiagnostic {
+                    ordinal: 1,
+                    connection_generation: 1,
+                    phase: SteamPeerSetupPhase::Connecting.diagnostic_code(),
+                    elapsed_ms: 0,
+                    relay_availability: SteamRelayAvailability::Attempting.diagnostic_code(),
+                    authentication_availability: SteamRelayAvailability::Waiting.diagnostic_code(),
+                    result_code: 501,
+                    native_end_reason: 0,
+                },
+                SteamPregameTraceEventDiagnostic {
+                    ordinal: 2,
+                    connection_generation: 1,
+                    phase: SteamPeerSetupPhase::Authenticating.diagnostic_code(),
+                    elapsed_ms: 15_000,
+                    relay_availability: SteamRelayAvailability::Current.diagnostic_code(),
+                    authentication_availability: SteamRelayAvailability::Current.diagnostic_code(),
+                    result_code: crate::steam_transport::SteamTransportCloseReason::ConnectTimedOut
+                        .diagnostic_code(),
+                    native_end_reason: 5_003,
+                },
+            ],
+        };
+        let first_save = archive.save_steam_pregame_trace(&collision_shape).unwrap();
+        let duplicate_save = archive.save_steam_pregame_trace(&collision_shape).unwrap();
+        assert_eq!(first_save.path, duplicate_save.path);
+        assert_eq!(
+            duplicate_save.disposition,
+            DiagnosticSaveDisposition::AlreadyPresent
+        );
+        let mut distinct_trace = collision_shape.clone();
+        distinct_trace.events[1].elapsed_ms += 1;
+        let distinct_save = archive.save_steam_pregame_trace(&distinct_trace).unwrap();
+        assert_ne!(first_save.path, distinct_save.path);
+
+        for generation in 1..=MAX_STEAM_PREGAME_TRACE_FILES + 3 {
+            let trace = SteamPeerTrace {
+                events: vec![
+                    crate::steam_transport::SteamPeerTraceEvent {
+                        ordinal: 1,
+                        connection_generation: generation as u32,
+                        phase: SteamPeerSetupPhase::Connecting,
+                        elapsed_ms: 0,
+                        relay_availability: SteamRelayAvailability::Attempting,
+                        authentication_availability: SteamRelayAvailability::Waiting,
+                        result_code: 501,
+                        native_end_reason: 0,
+                    },
+                    crate::steam_transport::SteamPeerTraceEvent {
+                        ordinal: 2,
+                        connection_generation: generation as u32,
+                        phase: SteamPeerSetupPhase::Authenticating,
+                        elapsed_ms: 15_000,
+                        relay_availability: SteamRelayAvailability::Current,
+                        authentication_availability: SteamRelayAvailability::Current,
+                        result_code:
+                            crate::steam_transport::SteamTransportCloseReason::ConnectTimedOut
+                                .diagnostic_code(),
+                        native_end_reason: 5_003,
+                    },
+                ],
+            };
+            let diagnostic = SteamPregameTraceDiagnostic::from_transport(&trace).unwrap();
+            assert!(diagnostic.is_pregame_failure());
+            let stored = archive.save_steam_pregame_trace(&diagnostic).unwrap();
+            assert!(stored.encoded_bytes <= MAX_STEAM_PREGAME_TRACE_BYTES);
+            assert_eq!(
+                archive.load_steam_pregame_trace(&stored.path).unwrap(),
+                diagnostic
+            );
+        }
+        let retained = fs::read_dir(root.join("steam-pregame"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str())
+                    == Some(STEAM_PREGAME_TRACE_EXTENSION)
+            })
+            .count();
+        assert_eq!(retained, MAX_STEAM_PREGAME_TRACE_FILES);
         fs::remove_dir_all(root).unwrap();
     }
 

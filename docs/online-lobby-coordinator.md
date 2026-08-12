@@ -84,7 +84,10 @@ attach or for the local identity. Downstream cleanup must compare that value wit
 the currently attached generation before clearing a binding.
 
 The status also exposes sanitized Steam relay availability and the worst current
-peer-quality snapshot; it never exposes Steam's unbounded diagnostic strings.
+peer-quality snapshot; it never exposes Steam's unbounded diagnostic strings. An
+in-lobby Steam backend outage projects relay and authentication availability as
+`Retrying` during its bounded 10-second grace rather than destroying the lobby or
+presenting a competing manual action.
 `total_seats`, `seat_capacity`, and effective joinability come from the platform's
 coherent Steam-member projection, not the authenticated gameplay roster. This lets
 the UI disable an aggregate-capacity edit before authentication has finished and
@@ -199,6 +202,21 @@ as pending; the client has no authority to revoke another peer's authentication.
 
 ## Failure and recovery behavior
 
+- A Steam backend disconnect while already in the lobby retains the lobby,
+  ticket/session state, secure sockets, and established gameplay endpoints for a
+  10-second grace. New admission and setup advancement are frozen while the
+  transport continues pumping. Recovery revalidates local membership, immutable
+  metadata, and owner and extends setup/activation deadlines by the measured
+  pause; failed revalidation or expiry leaves the lobby safely.
+- A pre-game control link gets at most one eligible automatic replacement after
+  500 ms. If a client-originated link exhausts that attempt, the client alone
+  exposes Retry and originates the next generation. The listen authority waits
+  passively for that inbound generation, preserving the lobby and unrelated star
+  links, and clears its attributed error after authentication.
+- Peer-scoped malformed control and permanent Steam-auth rejection close with
+  distinct stable terminal reasons. Their bounded identity-free setup traces are
+  drained during isolation, before binding cleanup, so recovered retries and
+  hostile/rejected generations remain persistable without widening isolation.
 - A remote disconnect on a listen authority does not stop the match; it emits a
   reclaim event and preserves the immutable match contract.
 - A committed Steam-member departure closes every attributed pending/connected

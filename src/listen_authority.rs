@@ -2866,23 +2866,21 @@ mod tests {
         }
 
         let (replacement_client, replacement_authority) = InProcessEndpoint::pair(512).unwrap();
-        loop {
-            match harness.listen.authority.try_attach_reconnect(
-                user(2_022),
-                ReconnectClaim {
-                    match_id: harness.config.manifest.match_id,
-                    peer_id: peer(22),
-                    last_confirmed_tick: SimTick::ZERO,
-                },
-                replacement_authority,
-            ) {
-                ListenAuthoritySubmitOutcome::Queued => break,
-                ListenAuthoritySubmitOutcome::Full(_) => {
-                    panic!("replacement queue remained full after old detach")
-                }
-                ListenAuthoritySubmitOutcome::Disconnected(_) => {
-                    panic!("authority disconnected before replacement")
-                }
+        match harness.listen.authority.try_attach_reconnect(
+            user(2_022),
+            ReconnectClaim {
+                match_id: harness.config.manifest.match_id,
+                peer_id: peer(22),
+                last_confirmed_tick: SimTick::ZERO,
+            },
+            replacement_authority,
+        ) {
+            ListenAuthoritySubmitOutcome::Queued => {}
+            ListenAuthoritySubmitOutcome::Full(_) => {
+                panic!("replacement queue remained full after old detach")
+            }
+            ListenAuthoritySubmitOutcome::Disconnected(_) => {
+                panic!("authority disconnected before replacement")
             }
         }
         while harness

@@ -635,7 +635,7 @@ binding surfaces produce a short dismissible notice rather than a session
 failure. Overlay active/deactive callbacks are latest-value state: online
 simulation and networking continue while local combat input is neutralized.
 
-The Steam lobby contract uses schema 2 and separates desired admission
+The Steam lobby contract uses schema 4 and separates desired admission
 (`afc_admission`) from effective joinability (`afc_open`). Effective joinability is
 owner-controlled and true only while peer capacity remains, every current member
 has a coherent declaration, and the aggregate accepted seat count is below the
@@ -647,18 +647,75 @@ continuity, and resolve concurrent capacity pressure deterministically by lobby
 owner then Steam user ID. A bad declaration is peer-scoped; immutable lobby
 contract drift still fails the whole session closed.
 
-Pre-game Steam authentication signaling uses a versioned, exact-epoch envelope.
-Version 2 binds lobby, attributed sender and recipient, sender peer identity,
-non-zero sender/owner declaration revisions, admission purpose, and the current
-`MatchId` for reconnect. Manifest commit freezes immutable Steam-user/peer/revision
-leases. Those leases authorize same-match reconnect across transient roster
-callback gaps, while a fresh Initial exchange requires live coherent membership
-and a ready declaration. The ready gate preserves the Lobby editing window for
-the first match and every owner-authored between-match epoch; reconnect remains
-independent of readiness. Old revisions and old match IDs are benign stale
-messages; malformed or current-epoch identity mismatches are peer-scoped hostile
-input. Ticket bytes are move-only, redacted from diagnostics, and zeroized at
-every owned lifetime boundary.
+Pre-game Steam authentication uses AFCP version 2 on the same explicit
+Networking Sockets connections later promoted to gameplay. The physical topology
+remains an authority star: each client opens one connection to the lobby owner,
+the authority has one connection per client, and clients never open symmetric or
+client-to-client gameplay sockets. A fresh direct Initial exchange requires live
+coherent membership but not a Ready declaration; Ready/loadout edits do not
+replace an otherwise valid link.
+
+The star is not an account-authentication shortcut. After every direct
+authority/client link is `Secure`, `RosterPrepare` freezes one roster-auth epoch,
+member count, and canonical account-set hash. Every participant authenticates
+every other participant. Client-to-client one-use tickets remain logically bound
+to their issuer and intended recipient and travel as `RoutedAuthTicket` /
+`RoutedAuthAccepted` frames over the two star hops. The authority validates the
+outer hop and routing membership, treats the recipient-bound ticket bytes as
+opaque, and does not treat a forwarded ticket as its own admission.
+`RosterAccepted` and `RosterAuthComplete` close the epoch only after
+every recipient has validated its incoming tickets and every issuer has received
+application confirmation for its outgoing tickets.
+
+AFCP envelopes are bounded to one datagram and bind the lobby, exact physical
+connection generation, outer sender/recipient, sequence, and acknowledgement
+generation. A reliable send is not delivery: an inbound sequence and any
+piggyback acknowledgement take effect only after the application semantically
+accepts the decoded message. ACK generation and upper bounds are checked before
+the retained outbox changes, and `LinkHello` is physically sent before any
+standalone ACK. Same-generation duplicates are idempotent. Frames for a retired
+known transaction are still application-ACKed and ignored; removing them from an
+ordered outbox would create an ambiguous sequence gap. A replacement generation
+starts again with `LinkHello` and fresh one-use tickets.
+
+`ManifestPrepare` then freezes an immutable transaction ID, manifest hash, and
+the exact participant-to-connection-generation set. After every
+`ManifestAccepted`, the authority sends `ManifestCommit` and waits for every
+`ManifestCommitAccepted`. It then arms those exact sockets for receive-only AFCN
+buffering and sends `GameplayActivate`. Each client arms receive before replying
+`GameplayActivated`, but remains quarantined. After every receipt, the authority
+sends a reliable `GameplayActivated` final release back to each client and promotes
+its own endpoints; clients promote only when that release arrives. Abort,
+`SetupCancel`, or timeout before the all-receipts barrier rolls armed sockets back
+to `Secure` and discards buffered gameplay. Once final release begins the commit is
+irrevocable and reliable retransmission or normal match-terminal handling applies.
+Old revisions, roster-auth epochs,
+manifest transactions, generations, and match IDs are benign stale input;
+malformed or current-epoch identity mismatches are peer-scoped hostile input.
+Ticket bytes and encoded AFCP buffers are redacted from diagnostics and zeroized
+at every owned lifetime boundary.
+
+Start gating reports declarations, physical-link security, and account validation
+separately. `all_members_ready` means only that every coherent Steam member
+declaration has its Ready bit set; it does not imply network or authentication
+readiness. The authority requires `N-1` secure remote links and every client
+requires one, while every participant requires `N-1` verified remote accounts.
+Relay/certificate preparation and connection/authentication setup each have a
+15-second bound. A transient early socket failure gets one fresh generation after
+500 ms only when at least five seconds remain. If the client-originated link then
+exhausts its automatic retry, only that client exposes the actionable Retry and
+opens the replacement generation; the authority remains a passive inbound waiter
+and clears its attributed error when the replacement authenticates. Neither side
+leaves the Steam lobby or discards the invitation.
+
+A Steam-client backend disconnect while already in a lobby enters a separate
+10-second reconnect grace. AFC retains the lobby, authenticated capabilities,
+secure sockets, and any established gameplay endpoints, but blocks new admission,
+ticket/auth work, Ready edits, and manifest advancement. Setup and activation
+deadlines are paused by the observed outage duration. Recovery re-reads and
+validates membership, metadata, and owner before deferred bounded callbacks can
+advance setup; a missing local membership, incompatible contract, or grace expiry
+leaves the lobby safely.
 
 Lightyear 0.26.4 is pinned as a narrow native networking compatibility adapter for
 Bevy 0.18. AFC owns the wire codec, channel limits, input/history model,
@@ -789,7 +846,7 @@ Initial policy:
 - Before graceful listen shutdown, `QuiesceAdmission` raises a monotonic match
   fence: listener admission stops, pending inbound links are rejected, undelivered
   endpoint/auth events and transport requests are removed, tickets are cancelled,
-  and native authentication signaling is drained but ignored. Established
+  and AFCP control outboxes are cleared. Established
   endpoints remain send-capable for the bounded typed-terminal/ACK drain. No new
   capability may cross from the fenced runtime into a worker.
 - The lobby coordinator owns a fixed queue of at most four retiring transport

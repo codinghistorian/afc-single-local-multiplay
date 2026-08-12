@@ -1413,7 +1413,8 @@ mod tests {
         let before = stream.snapshot();
 
         assert!(stream.gen_range_u32(4..4).is_err());
-        assert!(stream.gen_range_u32(9..2).is_err());
+        let descending_start = std::hint::black_box(9);
+        assert!(stream.gen_range_u32(descending_start..2).is_err());
         assert_eq!(stream.snapshot(), before);
     }
 }

@@ -19,6 +19,7 @@ use crate::online_roster::{
     validate_member_declaration,
 };
 use crate::reconnect::AuthenticatedUserId;
+use crate::steam_control::STEAM_LOBBY_SCHEMA_VERSION;
 #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
 use crate::tick_input::RawInputButton;
 use crate::tick_input::{InputMask, QuantizedMovement};
@@ -32,6 +33,7 @@ pub const MAX_REGION_CODE_BYTES: usize = 16;
 pub const MAX_CONNECT_COMMAND_BYTES: usize = 96;
 pub const DEFAULT_JOIN_INTENT_TTL_MS: u64 = 30_000;
 pub const DEFAULT_AUTH_INTENT_TTL_MS: u64 = 15_000;
+pub const DEFAULT_STEAM_BACKEND_RECONNECT_GRACE_MS: u64 = 10_000;
 pub const MAX_STEAM_INPUT_CONTROLLERS: usize = MAX_LOCAL_SEATS as usize;
 
 #[cfg(any(test, all(feature = "steam-net", not(target_arch = "wasm32"))))]
@@ -58,7 +60,7 @@ const KEY_OPEN: &str = "afc_open";
 const MEMBER_KEY_READY: &str = "afc_ready";
 const MEMBER_KEY_SEATS: &str = "afc_local_seats";
 const MEMBER_KEY_LOADOUT: &str = "afc_loadout";
-const LOBBY_SCHEMA_VERSION: u16 = 2;
+const LOBBY_SCHEMA_VERSION: u16 = STEAM_LOBBY_SCHEMA_VERSION;
 
 /// A process-local Steam Input device identity. This value is used only to
 /// preserve controller-to-couch-ordinal assignment; it is never serialized or
@@ -365,6 +367,7 @@ pub struct SteamClientConfig {
     pub event_capacity: usize,
     pub join_intent_ttl_ms: u64,
     pub auth_intent_ttl_ms: u64,
+    pub backend_reconnect_grace_ms: u64,
 }
 
 impl SteamClientConfig {
@@ -376,6 +379,7 @@ impl SteamClientConfig {
             event_capacity: DEFAULT_STEAM_EVENT_CAPACITY,
             join_intent_ttl_ms: DEFAULT_JOIN_INTENT_TTL_MS,
             auth_intent_ttl_ms: DEFAULT_AUTH_INTENT_TTL_MS,
+            backend_reconnect_grace_ms: DEFAULT_STEAM_BACKEND_RECONNECT_GRACE_MS,
         }
     }
 
@@ -390,7 +394,10 @@ impl SteamClientConfig {
         if self.event_capacity == 0 || self.event_capacity > MAX_STEAM_EVENTS {
             return Err(SteamPlatformError::InvalidEventCapacity);
         }
-        if self.join_intent_ttl_ms == 0 || self.auth_intent_ttl_ms == 0 {
+        if self.join_intent_ttl_ms == 0
+            || self.auth_intent_ttl_ms == 0
+            || self.backend_reconnect_grace_ms == 0
+        {
             return Err(SteamPlatformError::InvalidTimeout);
         }
         if self.app_id.get() == SPACEWAR_APP_ID {
@@ -792,7 +799,21 @@ pub enum AuthValidationFailure {
     TicketCancelled,
     TicketAlreadyUsed,
     TicketInvalid,
+    TicketNetworkIdentityFailure,
     PublisherBan,
+}
+
+/// Immediate, ticket-specific failures returned by Steam's
+/// `BeginAuthSession`. These are kept distinct from asynchronous validation
+/// failures so callers can classify malformed, stale, and cross-game tickets
+/// without parsing backend diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthSessionStartFailure {
+    InvalidTicket,
+    DuplicateRequest,
+    InvalidVersion,
+    GameMismatch,
+    ExpiredTicket,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -820,6 +841,7 @@ pub enum SteamBackendError {
     InvalidData,
     CapacityExceeded,
     AuthenticationFailed,
+    AuthSessionRejected(AuthSessionStartFailure),
     CallbackQueueOverflow,
     IntegrityFailure,
     SteamInputInitializationFailed,
@@ -833,6 +855,15 @@ const fn is_recoverable_steam_input_startup_error(error: SteamBackendError) -> b
         SteamBackendError::SteamInputInitializationFailed
             | SteamBackendError::SteamInputManifestInvalid
             | SteamBackendError::SteamInputActionMissing
+    )
+}
+
+const fn is_transient_backend_reconnect_read_error(error: SteamPlatformError) -> bool {
+    matches!(
+        error,
+        SteamPlatformError::Backend(
+            SteamBackendError::NotLoggedOn | SteamBackendError::OperationFailed
+        )
     )
 }
 
@@ -936,6 +967,10 @@ pub enum SteamPlatformEvent {
         lobby: SteamLobbyId,
         reason: LobbyExitReason,
     },
+    BackendReconnectStarted {
+        deadline_at_ms: u64,
+    },
+    BackendReconnectRecovered,
     AuthorityLost {
         lobby: SteamLobbyId,
         previous_authority: SteamUserId,
@@ -954,6 +989,15 @@ pub enum SteamPlatformEvent {
         user: SteamUserId,
     },
     PeerAuthenticationRejected {
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+        reason: PeerAuthenticationRejection,
+    },
+    RosterPeerAuthenticated {
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+    },
+    RosterPeerAuthenticationRejected {
         lobby: SteamLobbyId,
         user: SteamUserId,
         reason: PeerAuthenticationRejection,
@@ -1005,6 +1049,7 @@ pub enum SteamBackendEvent {
         license_owner_user: SteamUserId,
         result: Result<(), AuthValidationFailure>,
     },
+    SteamConnected,
     SteamDisconnected,
     IntegrityFailure,
 }
@@ -1337,6 +1382,23 @@ struct PeerAdmissionRecord {
     status: AdmissionStatus,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RosterAuthenticationRecord {
+    lobby: SteamLobbyId,
+    user: SteamUserId,
+    expires_at_ms: u64,
+    deadline_extended: bool,
+    awaiting_retry: bool,
+    status: AdmissionStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BackendReconnectGrace {
+    started_at_ms: u64,
+    deadline_at_ms: u64,
+    recovery_requested: bool,
+}
+
 /// Steam platform service. This is intentionally not `Clone`: one instance owns
 /// the process's one client callback pump, active auth tickets, and auth sessions.
 pub struct SteamPlatform<B: SteamBackend> {
@@ -1347,9 +1409,12 @@ pub struct SteamPlatform<B: SteamBackend> {
     public_events: VecDeque<SteamPlatformEvent>,
     issued_tickets: [Option<IssuedTicketRecord>; MAX_STEAM_LOBBY_MEMBERS],
     admissions: [Option<PeerAdmissionRecord>; MAX_STEAM_LOBBY_MEMBERS],
+    roster_authentications: [Option<RosterAuthenticationRecord>; MAX_STEAM_LOBBY_MEMBERS],
     next_operation_id: u64,
     last_fault: Option<SteamPlatformError>,
     last_now_ms: u64,
+    backend_reconnect_grace: Option<BackendReconnectGrace>,
+    deferred_reconnect_events: VecDeque<SteamBackendEvent>,
 }
 
 impl<B: SteamBackend> SteamPlatform<B> {
@@ -1368,8 +1433,8 @@ impl<B: SteamBackend> SteamPlatform<B> {
         let local_user = backend.local_user()?;
         // Valve recommends starting this at application startup because relay
         // configuration and latency discovery normally take several seconds.
-        // In particular, pre-game ISteamNetworkingMessages traffic must not be
-        // the first operation that starts relay access.
+        // In particular, the pre-game control connection must not be the first
+        // operation that starts relay access.
         backend.initialize_relay_network_access();
         let launch_command = backend.launch_command_line()?;
         let mut platform = Self {
@@ -1380,9 +1445,14 @@ impl<B: SteamBackend> SteamPlatform<B> {
             public_events: VecDeque::with_capacity(config.event_capacity),
             issued_tickets: [None; MAX_STEAM_LOBBY_MEMBERS],
             admissions: [None; MAX_STEAM_LOBBY_MEMBERS],
+            roster_authentications: [None; MAX_STEAM_LOBBY_MEMBERS],
             next_operation_id: 1,
             last_fault: None,
             last_now_ms: now_ms,
+            backend_reconnect_grace: None,
+            deferred_reconnect_events: VecDeque::with_capacity(
+                MAX_STEAM_LOBBY_MEMBERS.saturating_mul(2),
+            ),
         };
         platform.queue_launch_intent(&launch_command, now_ms)?;
         Ok(platform)
@@ -1408,6 +1478,17 @@ impl<B: SteamBackend> SteamPlatform<B> {
 
     pub fn last_fault(&self) -> Option<SteamPlatformError> {
         self.last_fault
+    }
+
+    pub const fn backend_reconnect_deadline_ms(&self) -> Option<u64> {
+        match self.backend_reconnect_grace {
+            Some(grace) => Some(grace.deadline_at_ms),
+            None => None,
+        }
+    }
+
+    pub const fn backend_reconnect_pending(&self) -> bool {
+        self.backend_reconnect_grace.is_some()
     }
 
     pub fn poll_event(&mut self) -> Option<SteamPlatformEvent> {
@@ -1651,6 +1732,8 @@ impl<B: SteamBackend> SteamPlatform<B> {
 
     pub fn leave_lobby(&mut self) -> Result<(), SteamPlatformError> {
         let lobby = self.active_lobby_id()?;
+        self.backend_reconnect_grace = None;
+        self.deferred_reconnect_events.clear();
         self.teardown_lobby(lobby, true);
         self.state = InternalState::Idle;
         let queued = self.push_event(SteamPlatformEvent::LobbyLeft {
@@ -1668,6 +1751,9 @@ impl<B: SteamBackend> SteamPlatform<B> {
         ready: bool,
         local_seats: u8,
     ) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
         validate_local_seats(local_seats)?;
         self.revalidate_active_lobby_metadata()?;
         let (lobby, revision) = match &self.state {
@@ -1711,6 +1797,9 @@ impl<B: SteamBackend> SteamPlatform<B> {
         declaration: MemberLoadoutDeclaration,
         ready: bool,
     ) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
         let local_seats = declaration.seat_count();
         validate_local_seats(local_seats)?;
         self.revalidate_active_lobby_metadata()?;
@@ -1765,6 +1854,9 @@ impl<B: SteamBackend> SteamPlatform<B> {
     }
 
     pub fn set_accepting_peers(&mut self, accepting: bool) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
         let (lobby, owner) = match &self.state {
             InternalState::InLobby(active) => (active.id, active.authority_user),
             _ => return Err(SteamPlatformError::InvalidState),
@@ -1809,6 +1901,9 @@ impl<B: SteamBackend> SteamPlatform<B> {
         &mut self,
         remote_user: SteamUserId,
     ) -> Result<IssuedAuthTicket, SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
         self.active_lobby_id()?;
         if self
             .issued_tickets
@@ -1875,6 +1970,9 @@ impl<B: SteamBackend> SteamPlatform<B> {
         purpose: AdmissionPurpose,
         now_ms: u64,
     ) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
         if ticket.is_empty() {
             return Err(SteamPlatformError::AuthTicketEmpty);
         }
@@ -1922,6 +2020,17 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 Err(SteamPlatformError::InvalidState)
             };
         }
+        if self
+            .roster_authentications
+            .iter()
+            .flatten()
+            .any(|authentication| authentication.user == user)
+        {
+            // Steam permits only one BeginAuthSession per remote identity.
+            // A roster-only session must be explicitly retired before the
+            // same identity can be promoted into a direct admission.
+            return Err(SteamPlatformError::InvalidState);
+        }
         let slot = self
             .admissions
             .iter()
@@ -1937,6 +2046,179 @@ impl<B: SteamBackend> SteamPlatform<B> {
             expires_at_ms,
             status: AdmissionStatus::Waiting,
         });
+        Ok(())
+    }
+
+    /// Starts Steam ownership/account verification for a current lobby member
+    /// that does not own a direct authority-star socket on this process.
+    ///
+    /// Friends policy is intentionally not re-applied here: lobby admission
+    /// already enforced it, while a client must be able to authenticate every
+    /// declared participant in an admitted friends-only lobby. Direct peers
+    /// are reported through [`Self::roster_authentication_is_validated`] and
+    /// must not start a second native auth session.
+    pub fn begin_roster_authentication(
+        &mut self,
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+        ticket: &[u8],
+        now_ms: u64,
+    ) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_pending() {
+            return Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn));
+        }
+        if ticket.is_empty() {
+            return Err(SteamPlatformError::AuthTicketEmpty);
+        }
+        if ticket.len() > MAX_STEAM_AUTH_TICKET_BYTES {
+            return Err(SteamPlatformError::AuthTicketTooLarge);
+        }
+        self.advance_time(now_ms)?;
+        self.revalidate_active_lobby_metadata()?;
+        self.refresh_lobby_flags()?;
+        let active = match &self.state {
+            InternalState::InLobby(active) if active.id == lobby => active,
+            InternalState::InLobby(_) => return Err(SteamPlatformError::UnexpectedLobby),
+            _ => return Err(SteamPlatformError::InvalidState),
+        };
+        if user == self.local_user {
+            return Err(SteamPlatformError::InvalidState);
+        }
+        let member = active.roster[..active.roster_len]
+            .iter()
+            .flatten()
+            .find(|member| member.user == user)
+            .ok_or(SteamPlatformError::MemberNotInExpectedLobby)?;
+        if !matches!(member.readiness, MemberReadiness::Declared { .. }) {
+            return Err(SteamPlatformError::MemberMetadataPending);
+        }
+
+        if let Some(authentication) = self
+            .roster_authentications
+            .iter()
+            .flatten()
+            .find(|authentication| authentication.user == user)
+        {
+            return if authentication.lobby == lobby {
+                Ok(())
+            } else {
+                Err(SteamPlatformError::InvalidState)
+            };
+        }
+        if self
+            .admissions
+            .iter()
+            .flatten()
+            .any(|admission| admission.user == user)
+        {
+            // The direct session is the same Steam account proof and remains
+            // the callback owner. Callers can query it through the roster API.
+            return Ok(());
+        }
+
+        let slot = self
+            .roster_authentications
+            .iter()
+            .position(Option::is_none)
+            .ok_or(SteamPlatformError::AuthCapacityExceeded)?;
+        let expires_at_ms = deadline(now_ms, self.config.auth_intent_ttl_ms)?;
+        self.backend.begin_auth_session(user, ticket)?;
+        self.roster_authentications[slot] = Some(RosterAuthenticationRecord {
+            lobby,
+            user,
+            expires_at_ms,
+            deadline_extended: false,
+            awaiting_retry: false,
+            status: AdmissionStatus::Waiting,
+        });
+        Ok(())
+    }
+
+    /// Extends a still-pending roster validation lease exactly once without
+    /// invoking Steam's untagged `BeginAuthSession` API again. This avoids a
+    /// late callback from the first attempt authenticating a replacement
+    /// generation.
+    pub fn extend_roster_authentication_deadline(
+        &mut self,
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+        now_ms: u64,
+    ) -> Result<(), SteamPlatformError> {
+        self.advance_time(now_ms)?;
+        let authentication = self
+            .roster_authentications
+            .iter_mut()
+            .flatten()
+            .find(|authentication| authentication.user == user)
+            .ok_or(SteamPlatformError::InvalidState)?;
+        if authentication.lobby != lobby {
+            return Err(SteamPlatformError::UnexpectedLobby);
+        }
+        if authentication.status != AdmissionStatus::Waiting
+            || authentication.deadline_extended
+            || !authentication.awaiting_retry
+        {
+            return Err(SteamPlatformError::InvalidState);
+        }
+        authentication.expires_at_ms = deadline(now_ms, self.config.auth_intent_ttl_ms)?;
+        authentication.deadline_extended = true;
+        authentication.awaiting_retry = false;
+        Ok(())
+    }
+
+    /// Returns true only for the retained, callback-pending lease exposed by
+    /// the first roster authentication timeout.
+    pub fn roster_authentication_awaits_retry(
+        &self,
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+    ) -> bool {
+        self.roster_authentications
+            .iter()
+            .flatten()
+            .any(|authentication| {
+                authentication.lobby == lobby
+                    && authentication.user == user
+                    && authentication.status == AdmissionStatus::Waiting
+                    && authentication.awaiting_retry
+            })
+    }
+
+    /// Returns true only after Steam validated the member's ticket and app
+    /// ownership. An approved direct admission satisfies the same account
+    /// proof and is intentionally shared rather than duplicated.
+    pub fn roster_authentication_is_validated(&self, user: SteamUserId) -> bool {
+        self.admissions.iter().flatten().any(|admission| {
+            admission.user == user && matches!(admission.status, AdmissionStatus::Approved { .. })
+        }) || self
+            .roster_authentications
+            .iter()
+            .flatten()
+            .any(|authentication| {
+                authentication.user == user
+                    && matches!(authentication.status, AdmissionStatus::Approved { .. })
+            })
+    }
+
+    pub fn active_roster_authentication_count(&self) -> usize {
+        self.roster_authentications.iter().flatten().count()
+    }
+
+    pub fn end_roster_authentication(
+        &mut self,
+        user: SteamUserId,
+    ) -> Result<(), SteamPlatformError> {
+        let Some(slot) = self
+            .roster_authentications
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.user == user))
+        else {
+            // Uniform teardown may visit direct peers and already-retired
+            // roster leases. Neither case owns a roster-only native session.
+            return Ok(());
+        };
+        self.backend.end_auth_session(user);
+        self.roster_authentications[slot] = None;
         Ok(())
     }
 
@@ -2017,7 +2299,28 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 return self.fail_closed(error);
             }
         }
-        self.expire_auth_intents(now_ms)?;
+        let reconnect_expired = self
+            .backend_reconnect_grace
+            .is_some_and(|grace| now_ms >= grace.deadline_at_ms);
+        if reconnect_expired {
+            self.expire_backend_reconnect_grace()?;
+        } else if self
+            .backend_reconnect_grace
+            .is_some_and(|grace| grace.recovery_requested)
+        {
+            match self.recover_backend_connectivity() {
+                Ok(()) => {}
+                Err(error) if is_transient_backend_reconnect_read_error(error) => {
+                    // Steam's connected callback can precede hydration of its
+                    // lobby cache. Keep the same grace/capabilities and retry
+                    // the authoritative snapshot on a later pump.
+                }
+                Err(error) => return self.fail_closed(error),
+            }
+        }
+        if self.backend_reconnect_grace.is_none() {
+            self.expire_auth_intents(now_ms)?;
+        }
         Ok(())
     }
 
@@ -2065,6 +2368,22 @@ impl<B: SteamBackend> SteamPlatform<B> {
         event: SteamBackendEvent,
         now_ms: u64,
     ) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_grace.is_some()
+            && matches!(
+                event,
+                SteamBackendEvent::AuthTicketReady { .. }
+                    | SteamBackendEvent::AuthSessionValidated { .. }
+            )
+        {
+            let capacity = MAX_STEAM_LOBBY_MEMBERS.saturating_mul(2);
+            if self.deferred_reconnect_events.len() >= capacity {
+                return Err(SteamPlatformError::Backend(
+                    SteamBackendError::CallbackQueueOverflow,
+                ));
+            }
+            self.deferred_reconnect_events.push_back(event);
+            return Ok(());
+        }
         match event {
             SteamBackendEvent::LobbyCreated {
                 operation_id,
@@ -2148,16 +2467,32 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 license_owner_user,
                 result,
             } => self.handle_auth_validation(user, license_owner_user, result),
+            SteamBackendEvent::SteamConnected => {
+                if let Some(grace) = &mut self.backend_reconnect_grace {
+                    grace.recovery_requested = true;
+                }
+                Ok(())
+            }
             SteamBackendEvent::SteamDisconnected => {
-                self.backend.set_callback_lobby_scope(None);
                 match self.state.clone() {
-                    InternalState::InLobby(active) => {
-                        self.teardown_lobby(active.id, true);
-                        self.state = InternalState::Idle;
-                        self.push_event(SteamPlatformEvent::LobbyLeft {
-                            lobby: active.id,
-                            reason: LobbyExitReason::SteamDisconnected,
-                        })?;
+                    InternalState::InLobby(_) => {
+                        if self.backend_reconnect_grace.is_none() {
+                            let deadline_at_ms =
+                                deadline(now_ms, self.config.backend_reconnect_grace_ms)?;
+                            self.backend_reconnect_grace = Some(BackendReconnectGrace {
+                                started_at_ms: now_ms,
+                                deadline_at_ms,
+                                recovery_requested: false,
+                            });
+                            self.push_event(SteamPlatformEvent::BackendReconnectStarted {
+                                deadline_at_ms,
+                            })?;
+                        } else if let Some(grace) = &mut self.backend_reconnect_grace {
+                            // A later disconnected edge supersedes an earlier
+                            // connected observation without extending the
+                            // original bounded deadline.
+                            grace.recovery_requested = false;
+                        }
                     }
                     InternalState::Creating(pending) => {
                         self.backend.retire_lobby_operation(pending.operation_id);
@@ -2183,6 +2518,143 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 SteamBackendError::IntegrityFailure,
             )),
         }
+    }
+
+    fn recover_backend_connectivity(&mut self) -> Result<(), SteamPlatformError> {
+        let Some(grace) = self.backend_reconnect_grace else {
+            return Ok(());
+        };
+        if let Err(error) = self.reconcile_backend_after_reconnect() {
+            if matches!(
+                error,
+                SteamPlatformError::MemberNotInExpectedLobby
+                    | SteamPlatformError::MetadataMismatch
+                    | SteamPlatformError::UnexpectedLobby
+            ) {
+                let lobby = self.active_lobby_id()?;
+                let reason = if error == SteamPlatformError::MemberNotInExpectedLobby {
+                    LobbyExitReason::Removed
+                } else {
+                    LobbyExitReason::ValidationFailed
+                };
+                self.deferred_reconnect_events.clear();
+                self.teardown_lobby(lobby, true);
+                self.state = InternalState::Idle;
+                self.push_event(SteamPlatformEvent::LobbyLeft { lobby, reason })?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+        // The authoritative reread is the commit point. Until it succeeds,
+        // the grace and all retained capabilities remain owned by this state.
+        self.backend_reconnect_grace = None;
+        let paused_ms = self.last_now_ms.saturating_sub(grace.started_at_ms);
+        for admission in self.admissions.iter_mut().flatten() {
+            if admission.status == AdmissionStatus::Waiting {
+                admission.expires_at_ms = admission
+                    .expires_at_ms
+                    .checked_add(paused_ms)
+                    .ok_or(SteamPlatformError::InvalidTimeout)?;
+            }
+        }
+        for authentication in self.roster_authentications.iter_mut().flatten() {
+            if authentication.status == AdmissionStatus::Waiting && !authentication.awaiting_retry {
+                authentication.expires_at_ms = authentication
+                    .expires_at_ms
+                    .checked_add(paused_ms)
+                    .ok_or(SteamPlatformError::InvalidTimeout)?;
+            }
+        }
+        // Keep the retained lobby/auth/socket capabilities untouched. Steam
+        // callbacks are authoritative for subsequent membership changes; the
+        // recovery edge only re-opens new setup work after the coordinator has
+        // observed this event.
+        self.backend.initialize_relay_network_access();
+        self.push_event(SteamPlatformEvent::BackendReconnectRecovered)?;
+        while let Some(event) = self.deferred_reconnect_events.pop_front() {
+            self.handle_backend_event(event, self.last_now_ms)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_backend_after_reconnect(&mut self) -> Result<(), SteamPlatformError> {
+        let (lobby, previous_authority, previous_users) = match &self.state {
+            InternalState::InLobby(active) => {
+                let mut users = [None; MAX_STEAM_LOBBY_MEMBERS];
+                for (index, member) in active.roster[..active.roster_len]
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    users[index] = Some(member.user);
+                }
+                (active.id, active.authority_user, users)
+            }
+            _ => return Err(SteamPlatformError::InvalidState),
+        };
+        self.revalidate_active_lobby_metadata()?;
+        self.refresh_lobby_flags()?;
+        let updates = self.refresh_roster(None)?;
+        self.push_member_refresh_events(lobby, &updates)?;
+
+        let observed_authority = self.backend.lobby_owner(lobby)?;
+        let authority_present = self
+            .roster()
+            .iter()
+            .flatten()
+            .any(|member| member.user == observed_authority);
+        if !authority_present {
+            return Err(SteamPlatformError::MemberNotInExpectedLobby);
+        }
+        let current_users = match &self.state {
+            InternalState::InLobby(active) => active.roster,
+            _ => return Err(SteamPlatformError::InvalidState),
+        };
+        for departed in previous_users.iter().flatten().copied() {
+            if departed != self.local_user
+                && !current_users
+                    .iter()
+                    .flatten()
+                    .any(|member| member.user == departed)
+            {
+                self.cleanup_peer_authentication(departed);
+            }
+        }
+
+        if observed_authority != previous_authority {
+            if let InternalState::InLobby(active) = &mut self.state {
+                active.authority_user = observed_authority;
+            }
+            // Rebuild once more because capacity arbitration gives the owner
+            // first priority and therefore depends on the authoritative owner.
+            let owner_updates = self.refresh_roster(None)?;
+            self.push_member_refresh_events(lobby, &owner_updates)?;
+            self.push_event(SteamPlatformEvent::AuthorityLost {
+                lobby,
+                previous_authority,
+                successor: observed_authority,
+            })?;
+        } else {
+            self.push_event(SteamPlatformEvent::LobbyRosterChanged { lobby })?;
+        }
+        self.refresh_presence_or_warn()
+    }
+
+    fn expire_backend_reconnect_grace(&mut self) -> Result<(), SteamPlatformError> {
+        if self.backend_reconnect_grace.take().is_none() {
+            return Ok(());
+        }
+        self.deferred_reconnect_events.clear();
+        let InternalState::InLobby(active) = self.state.clone() else {
+            return Ok(());
+        };
+        self.backend.set_callback_lobby_scope(None);
+        self.teardown_lobby(active.id, true);
+        self.state = InternalState::Idle;
+        self.push_event(SteamPlatformEvent::LobbyLeft {
+            lobby: active.id,
+            reason: LobbyExitReason::SteamDisconnected,
+        })
     }
 
     fn handle_lobby_created(
@@ -2953,7 +3425,7 @@ impl<B: SteamBackend> SteamPlatform<B> {
             .iter()
             .position(|admission| admission.is_some_and(|entry| entry.user == user))
         else {
-            return Ok(());
+            return self.handle_roster_auth_validation(user, license_owner_user, result);
         };
         let lobby = self.admissions[slot].expect("slot was just found").lobby;
         let prior_status = self.admissions[slot].expect("slot was just found").status;
@@ -3005,6 +3477,75 @@ impl<B: SteamBackend> SteamPlatform<B> {
         }
     }
 
+    fn handle_roster_auth_validation(
+        &mut self,
+        user: SteamUserId,
+        license_owner_user: SteamUserId,
+        result: Result<(), AuthValidationFailure>,
+    ) -> Result<(), SteamPlatformError> {
+        let Some(slot) = self
+            .roster_authentications
+            .iter()
+            .position(|authentication| authentication.is_some_and(|entry| entry.user == user))
+        else {
+            return Ok(());
+        };
+        let authentication = self.roster_authentications[slot].expect("slot was just found");
+        let rejection = match result {
+            Err(error) => Some(PeerAuthenticationRejection::Validation(error)),
+            Ok(()) => match self.backend.license_status(user, self.config.app_id)? {
+                LicenseStatus::HasLicense => None,
+                LicenseStatus::DoesNotHaveLicense => {
+                    Some(PeerAuthenticationRejection::DoesNotHaveLicense)
+                }
+                LicenseStatus::NoAuthentication => {
+                    Some(PeerAuthenticationRejection::NoAuthentication)
+                }
+            },
+        };
+        if rejection.is_none() {
+            match authentication.status {
+                AdmissionStatus::Waiting => {
+                    if let Some(authentication) = &mut self.roster_authentications[slot] {
+                        authentication.status = AdmissionStatus::Approved {
+                            license_owner_user,
+                            consumed: false,
+                        };
+                    }
+                    self.push_event(SteamPlatformEvent::RosterPeerAuthenticated {
+                        lobby: authentication.lobby,
+                        user,
+                    })
+                }
+                AdmissionStatus::Approved {
+                    license_owner_user: prior_owner,
+                    ..
+                } if prior_owner == license_owner_user => Ok(()),
+                AdmissionStatus::Approved { .. } | AdmissionStatus::Rejected => Err(
+                    SteamPlatformError::Backend(SteamBackendError::IntegrityFailure),
+                ),
+            }
+        } else {
+            if authentication.status == AdmissionStatus::Rejected {
+                return Ok(());
+            }
+            let Some(reason) = rejection else {
+                return Err(SteamPlatformError::Backend(
+                    SteamBackendError::IntegrityFailure,
+                ));
+            };
+            self.backend.end_auth_session(user);
+            if let Some(authentication) = &mut self.roster_authentications[slot] {
+                authentication.status = AdmissionStatus::Rejected;
+            }
+            self.push_event(SteamPlatformEvent::RosterPeerAuthenticationRejected {
+                lobby: authentication.lobby,
+                user,
+                reason,
+            })
+        }
+    }
+
     fn expire_auth_intents(&mut self, now_ms: u64) -> Result<(), SteamPlatformError> {
         for index in 0..self.admissions.len() {
             let Some(admission) = self.admissions[index] else {
@@ -3028,10 +3569,39 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 })?;
             }
         }
+        for index in 0..self.roster_authentications.len() {
+            let Some(authentication) = self.roster_authentications[index] else {
+                continue;
+            };
+            // A validated roster lease is match/lobby scoped and survives a
+            // transient socket generation. Only a callback still pending at
+            // the bounded intent deadline expires here.
+            let expires = authentication.status == AdmissionStatus::Waiting;
+            if expires && !authentication.awaiting_retry && now_ms >= authentication.expires_at_ms {
+                if !authentication.deadline_extended {
+                    // Preserve the untagged native auth session through the
+                    // actionable first timeout. A user retry extends this
+                    // exact lease; starting a replacement would let a stale
+                    // callback authenticate the wrong generation.
+                    if let Some(authentication) = &mut self.roster_authentications[index] {
+                        authentication.awaiting_retry = true;
+                    }
+                } else {
+                    self.backend.end_auth_session(authentication.user);
+                    self.roster_authentications[index] = None;
+                }
+                self.push_event(SteamPlatformEvent::RosterPeerAuthenticationRejected {
+                    lobby: authentication.lobby,
+                    user: authentication.user,
+                    reason: PeerAuthenticationRejection::IntentExpired,
+                })?;
+            }
+        }
         Ok(())
     }
 
     fn cleanup_peer_authentication(&mut self, user: SteamUserId) {
+        let mut ended_session = false;
         if let Some(slot) = self
             .admissions
             .iter()
@@ -3039,6 +3609,17 @@ impl<B: SteamBackend> SteamPlatform<B> {
         {
             self.backend.end_auth_session(user);
             self.admissions[slot] = None;
+            ended_session = true;
+        }
+        if let Some(slot) = self
+            .roster_authentications
+            .iter()
+            .position(|authentication| authentication.is_some_and(|entry| entry.user == user))
+        {
+            if !ended_session {
+                self.backend.end_auth_session(user);
+            }
+            self.roster_authentications[slot] = None;
         }
         for index in 0..self.issued_tickets.len() {
             if self.issued_tickets[index].is_some_and(|ticket| ticket.remote_user == user) {
@@ -3061,9 +3642,16 @@ impl<B: SteamBackend> SteamPlatform<B> {
                 self.backend.end_auth_session(admission.user);
             }
         }
+        for index in 0..self.roster_authentications.len() {
+            if let Some(authentication) = self.roster_authentications[index].take() {
+                self.backend.end_auth_session(authentication.user);
+            }
+        }
     }
 
     fn teardown_lobby(&mut self, lobby: SteamLobbyId, call_leave: bool) {
+        self.backend_reconnect_grace = None;
+        self.deferred_reconnect_events.clear();
         self.cleanup_auth();
         self.backend.clear_rich_presence();
         self.backend.set_callback_lobby_scope(None);
@@ -3081,6 +3669,8 @@ impl<B: SteamBackend> SteamPlatform<B> {
     }
 
     fn fail_closed<T>(&mut self, error: SteamPlatformError) -> Result<T, SteamPlatformError> {
+        self.backend_reconnect_grace = None;
+        self.deferred_reconnect_events.clear();
         if let Ok(lobby) = self.active_lobby_id() {
             self.teardown_lobby(lobby, true);
         } else {
@@ -3605,6 +4195,192 @@ impl FakeAuthOutcome {
     }
 }
 
+const FAKE_AUTH_TICKET_MAGIC: [u8; 4] = *b"AFAT";
+const FAKE_AUTH_TICKET_VERSION: u8 = 1;
+const FAKE_AUTH_TICKET_BYTES: usize = 4 + 1 + 4 + 8 + 8 + 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FakeAuthTicketClaims {
+    app_id: SteamAppId,
+    issuer: SteamUserId,
+    recipient: SteamUserId,
+    nonce: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FakeAuthTicketAuthorityRecord {
+    claims: FakeAuthTicketClaims,
+    consumed: bool,
+}
+
+#[derive(Debug)]
+struct FakeSteamAuthAuthorityState {
+    next_nonce: u64,
+    tickets: BTreeMap<u64, FakeAuthTicketAuthorityRecord>,
+}
+
+/// Shared deterministic ticket authority for multi-process Steam fixtures.
+/// Backends created with the same authority issue recipient-bound, App-ID-
+/// bound, one-use tickets that another backend can verify without copying any
+/// native Steam state.
+#[derive(Clone, Debug)]
+pub struct FakeSteamAuthAuthority {
+    shared: Arc<Mutex<FakeSteamAuthAuthorityState>>,
+}
+
+impl FakeSteamAuthAuthority {
+    pub fn new() -> Self {
+        Self {
+            shared: Arc::new(Mutex::new(FakeSteamAuthAuthorityState {
+                next_nonce: 1,
+                tickets: BTreeMap::new(),
+            })),
+        }
+    }
+
+    fn issue(
+        &self,
+        app_id: SteamAppId,
+        issuer: SteamUserId,
+        recipient: SteamUserId,
+    ) -> Result<(u64, Vec<u8>), SteamBackendError> {
+        let mut authority = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        let nonce = authority.next_nonce;
+        authority.next_nonce = authority
+            .next_nonce
+            .checked_add(1)
+            .ok_or(SteamBackendError::CapacityExceeded)?;
+        if nonce == 0 || authority.tickets.contains_key(&nonce) {
+            return Err(SteamBackendError::IntegrityFailure);
+        }
+        let claims = FakeAuthTicketClaims {
+            app_id,
+            issuer,
+            recipient,
+            nonce,
+        };
+        authority.tickets.insert(
+            nonce,
+            FakeAuthTicketAuthorityRecord {
+                claims,
+                consumed: false,
+            },
+        );
+        Ok((nonce, encode_fake_auth_ticket(claims)))
+    }
+
+    fn cancel(&self, issuer: SteamUserId, nonce: u64) {
+        if let Ok(mut authority) = self.shared.lock()
+            && authority
+                .tickets
+                .get(&nonce)
+                .is_some_and(|record| record.claims.issuer == issuer)
+        {
+            authority.tickets.remove(&nonce);
+        }
+    }
+
+    pub fn active_ticket_count(&self) -> usize {
+        self.shared
+            .lock()
+            .map(|authority| authority.tickets.len())
+            .unwrap_or_default()
+    }
+
+    fn validate_and_consume(
+        &self,
+        expected_app_id: SteamAppId,
+        expected_issuer: SteamUserId,
+        expected_recipient: SteamUserId,
+        ticket: &[u8],
+    ) -> Result<(), AuthSessionStartFailure> {
+        let claims = decode_fake_auth_ticket(ticket)?;
+        if claims.app_id != expected_app_id {
+            return Err(AuthSessionStartFailure::GameMismatch);
+        }
+        if claims.issuer != expected_issuer || claims.recipient != expected_recipient {
+            return Err(AuthSessionStartFailure::InvalidTicket);
+        }
+        let mut authority = self
+            .shared
+            .lock()
+            .map_err(|_| AuthSessionStartFailure::InvalidTicket)?;
+        let record = authority
+            .tickets
+            .get_mut(&claims.nonce)
+            .ok_or(AuthSessionStartFailure::InvalidTicket)?;
+        if record.claims != claims {
+            return Err(AuthSessionStartFailure::InvalidTicket);
+        }
+        if record.consumed {
+            return Err(AuthSessionStartFailure::DuplicateRequest);
+        }
+        record.consumed = true;
+        Ok(())
+    }
+}
+
+impl Default for FakeSteamAuthAuthority {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn encode_fake_auth_ticket(claims: FakeAuthTicketClaims) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(FAKE_AUTH_TICKET_BYTES);
+    bytes.extend_from_slice(&FAKE_AUTH_TICKET_MAGIC);
+    bytes.push(FAKE_AUTH_TICKET_VERSION);
+    bytes.extend_from_slice(&claims.app_id.get().to_le_bytes());
+    bytes.extend_from_slice(&claims.issuer.get().to_le_bytes());
+    bytes.extend_from_slice(&claims.recipient.get().to_le_bytes());
+    bytes.extend_from_slice(&claims.nonce.to_le_bytes());
+    bytes
+}
+
+fn decode_fake_auth_ticket(ticket: &[u8]) -> Result<FakeAuthTicketClaims, AuthSessionStartFailure> {
+    if ticket.len() != FAKE_AUTH_TICKET_BYTES
+        || ticket[..4] != FAKE_AUTH_TICKET_MAGIC
+        || ticket[4] != FAKE_AUTH_TICKET_VERSION
+    {
+        return Err(AuthSessionStartFailure::InvalidTicket);
+    }
+    let app_id = SteamAppId::new(u32::from_le_bytes(
+        ticket[5..9]
+            .try_into()
+            .map_err(|_| AuthSessionStartFailure::InvalidTicket)?,
+    ))
+    .map_err(|_| AuthSessionStartFailure::InvalidTicket)?;
+    let issuer = SteamUserId::new(u64::from_le_bytes(
+        ticket[9..17]
+            .try_into()
+            .map_err(|_| AuthSessionStartFailure::InvalidTicket)?,
+    ))
+    .map_err(|_| AuthSessionStartFailure::InvalidTicket)?;
+    let recipient = SteamUserId::new(u64::from_le_bytes(
+        ticket[17..25]
+            .try_into()
+            .map_err(|_| AuthSessionStartFailure::InvalidTicket)?,
+    ))
+    .map_err(|_| AuthSessionStartFailure::InvalidTicket)?;
+    let nonce = u64::from_le_bytes(
+        ticket[25..33]
+            .try_into()
+            .map_err(|_| AuthSessionStartFailure::InvalidTicket)?,
+    );
+    if nonce == 0 {
+        return Err(AuthSessionStartFailure::InvalidTicket);
+    }
+    Ok(FakeAuthTicketClaims {
+        app_id,
+        issuer,
+        recipient,
+        nonce,
+    })
+}
+
 fn fake_seed_member_declaration(seats: u8) -> Result<MemberLoadoutDeclaration, SteamBackendError> {
     let mut encoded = format!("010100{seats:02x}");
     for index in 0..seats {
@@ -3623,6 +4399,12 @@ struct FakeLobby {
     member_data: BTreeMap<(SteamUserId, &'static str), String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FakeIssuedAuthTicketRecord {
+    remote_user: SteamUserId,
+    nonce: u64,
+}
+
 #[derive(Debug)]
 struct FakeSteamState {
     app_id: SteamAppId,
@@ -3637,11 +4419,16 @@ struct FakeSteamState {
     fail_lobby_data_read: Option<(SteamLobbyId, &'static str, u32)>,
     friends: BTreeSet<SteamUserId>,
     rich_presence: BTreeMap<&'static str, String>,
-    issued_tickets: BTreeMap<AuthTicketHandle, SteamUserId>,
+    auth_authority: FakeSteamAuthAuthority,
+    strict_auth_tickets: bool,
+    issued_tickets: BTreeMap<AuthTicketHandle, FakeIssuedAuthTicketRecord>,
     cancelled_tickets: BTreeSet<AuthTicketHandle>,
     active_auth_sessions: BTreeSet<SteamUserId>,
     ended_auth_sessions: BTreeSet<SteamUserId>,
     auth_outcomes: BTreeMap<SteamUserId, FakeAuthOutcome>,
+    auth_session_start_failures: BTreeMap<SteamUserId, AuthSessionStartFailure>,
+    automatic_auth_callbacks: bool,
+    pending_auth_validations: BTreeMap<SteamUserId, SteamBackendEvent>,
     overlay_enabled: bool,
     overlay_active: bool,
     overlay_enabled_query_count: u32,
@@ -3672,6 +4459,36 @@ pub struct FakeSteamControl {
 }
 
 impl FakeSteamControl {
+    pub fn active_issued_ticket_count(&self) -> usize {
+        self.shared
+            .lock()
+            .map(|state| state.issued_tickets.len())
+            .unwrap_or_default()
+    }
+
+    pub fn issued_ticket_recipient(&self, handle: AuthTicketHandle) -> Option<SteamUserId> {
+        self.shared.lock().ok().and_then(|state| {
+            state
+                .issued_tickets
+                .get(&handle)
+                .map(|ticket| ticket.remote_user)
+        })
+    }
+
+    pub fn active_auth_session_count(&self) -> usize {
+        self.shared
+            .lock()
+            .map(|state| state.active_auth_sessions.len())
+            .unwrap_or_default()
+    }
+
+    pub fn pending_auth_validation_count(&self) -> usize {
+        self.shared
+            .lock()
+            .map(|state| state.pending_auth_validations.len())
+            .unwrap_or_default()
+    }
+
     /// Copies one fake lobby into another independent fake backend. This is a
     /// test-only process-fabric seam: the source lock is released before the
     /// target lock is acquired, so two simulated Steam clients never share a
@@ -4181,6 +4998,50 @@ impl FakeSteamControl {
         Ok(())
     }
 
+    /// Injects a one-shot immediate `BeginAuthSession` failure for `user`.
+    pub fn set_auth_session_start_failure(
+        &self,
+        user: SteamUserId,
+        failure: AuthSessionStartFailure,
+    ) -> Result<(), SteamBackendError> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        if state.auth_session_start_failures.len() >= MAX_STEAM_LOBBY_MEMBERS
+            && !state.auth_session_start_failures.contains_key(&user)
+        {
+            return Err(SteamBackendError::CapacityExceeded);
+        }
+        state.auth_session_start_failures.insert(user, failure);
+        Ok(())
+    }
+
+    /// Controls whether successful fake `BeginAuthSession` calls immediately
+    /// queue their validation callback. When disabled, tests can release
+    /// callbacks in an explicit order with [`Self::release_auth_validation`].
+    pub fn set_automatic_auth_callbacks(&self, automatic: bool) -> Result<(), SteamBackendError> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        state.automatic_auth_callbacks = automatic;
+        Ok(())
+    }
+
+    pub fn release_auth_validation(&self, user: SteamUserId) -> Result<(), SteamBackendError> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        let event = state
+            .pending_auth_validations
+            .remove(&user)
+            .ok_or(SteamBackendError::InvalidData)?;
+        state.push_event(event);
+        Ok(())
+    }
+
     pub fn emit_join_request(
         &self,
         lobby: SteamLobbyId,
@@ -4251,6 +5112,34 @@ impl FakeSteamControl {
         Ok(())
     }
 
+    /// Mutates fake lobby membership without delivering a callback, modeling
+    /// callback loss while the Steam backend is disconnected. The reconnect
+    /// path must recover from the authoritative snapshot rather than its
+    /// retained cache.
+    pub fn remove_lobby_member_silently(
+        &self,
+        lobby: SteamLobbyId,
+        user: SteamUserId,
+    ) -> Result<(), SteamBackendError> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        let record = state
+            .lobbies
+            .get_mut(&lobby)
+            .ok_or(SteamBackendError::InvalidData)?;
+        record.members.retain(|member| *member != user);
+        record.member_data.retain(|(member, _), _| *member != user);
+        if record.members.is_empty() {
+            return Err(SteamBackendError::InvalidData);
+        }
+        if record.owner == user {
+            record.owner = record.members[0];
+        }
+        Ok(())
+    }
+
     pub fn emit_lobby_data_changed(&self, lobby: SteamLobbyId) -> Result<(), SteamBackendError> {
         self.emit(SteamBackendEvent::LobbyDataChanged {
             lobby,
@@ -4275,11 +5164,18 @@ impl FakeSteamControl {
         license_owner_user: SteamUserId,
         result: Result<(), AuthValidationFailure>,
     ) -> Result<(), SteamBackendError> {
-        self.emit(SteamBackendEvent::AuthSessionValidated {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| SteamBackendError::IntegrityFailure)?;
+        // An explicitly injected result supersedes a delayed automatic one.
+        state.pending_auth_validations.remove(&user);
+        state.push_event(SteamBackendEvent::AuthSessionValidated {
             user,
             license_owner_user,
             result,
-        })
+        });
+        Ok(())
     }
 
     pub fn set_queued_auth_ticket_result(
@@ -4377,6 +5273,10 @@ impl FakeSteamControl {
         self.emit(SteamBackendEvent::SteamDisconnected)
     }
 
+    pub fn emit_connect(&self) -> Result<(), SteamBackendError> {
+        self.emit(SteamBackendEvent::SteamConnected)
+    }
+
     pub fn cancelled_ticket(&self, handle: AuthTicketHandle) -> bool {
         self.shared
             .lock()
@@ -4435,6 +5335,26 @@ pub struct FakeSteamBackend {
 
 impl FakeSteamBackend {
     pub fn new(app_id: SteamAppId, local_user: SteamUserId) -> (Self, FakeSteamControl) {
+        Self::new_inner(app_id, local_user, FakeSteamAuthAuthority::new(), false)
+    }
+
+    /// Creates a high-fidelity fake client. Every backend participating in a
+    /// fixture must receive a clone of the same authority; tickets are then
+    /// checked for issuer, recipient, App ID, cancellation, and one-use replay.
+    pub fn new_with_auth_authority(
+        app_id: SteamAppId,
+        local_user: SteamUserId,
+        auth_authority: FakeSteamAuthAuthority,
+    ) -> (Self, FakeSteamControl) {
+        Self::new_inner(app_id, local_user, auth_authority, true)
+    }
+
+    fn new_inner(
+        app_id: SteamAppId,
+        local_user: SteamUserId,
+        auth_authority: FakeSteamAuthAuthority,
+        strict_auth_tickets: bool,
+    ) -> (Self, FakeSteamControl) {
         let shared = Arc::new(Mutex::new(FakeSteamState {
             app_id,
             local_user,
@@ -4448,11 +5368,16 @@ impl FakeSteamBackend {
             fail_lobby_data_read: None,
             friends: BTreeSet::new(),
             rich_presence: BTreeMap::new(),
+            auth_authority,
+            strict_auth_tickets,
             issued_tickets: BTreeMap::new(),
             cancelled_tickets: BTreeSet::new(),
             active_auth_sessions: BTreeSet::new(),
             ended_auth_sessions: BTreeSet::new(),
             auth_outcomes: BTreeMap::new(),
+            auth_session_start_failures: BTreeMap::new(),
+            automatic_auth_callbacks: true,
+            pending_auth_validations: BTreeMap::new(),
             overlay_enabled: false,
             overlay_active: false,
             overlay_enabled_query_count: 0,
@@ -4865,10 +5790,13 @@ impl SteamBackend for FakeSteamBackend {
             }
             let handle = AuthTicketHandle(state.next_ticket_handle);
             state.next_ticket_handle = state.next_ticket_handle.saturating_add(1);
-            state.issued_tickets.insert(handle, remote_user);
-            let mut bytes = Vec::with_capacity(16);
-            bytes.extend_from_slice(&state.local_user.get().to_le_bytes());
-            bytes.extend_from_slice(&remote_user.get().to_le_bytes());
+            let (nonce, bytes) =
+                state
+                    .auth_authority
+                    .issue(state.app_id, state.local_user, remote_user)?;
+            state
+                .issued_tickets
+                .insert(handle, FakeIssuedAuthTicketRecord { remote_user, nonce });
             state.push_event(SteamBackendEvent::AuthTicketReady {
                 handle,
                 success: true,
@@ -4879,7 +5807,9 @@ impl SteamBackend for FakeSteamBackend {
 
     fn cancel_auth_ticket(&mut self, handle: AuthTicketHandle) {
         let _ = self.with_state_mut(|state| {
-            state.issued_tickets.remove(&handle);
+            if let Some(ticket) = state.issued_tickets.remove(&handle) {
+                state.auth_authority.cancel(state.local_user, ticket.nonce);
+            }
             state.cancelled_tickets.insert(handle);
             Ok(())
         });
@@ -4888,24 +5818,42 @@ impl SteamBackend for FakeSteamBackend {
     fn begin_auth_session(
         &mut self,
         user: SteamUserId,
-        _ticket: &[u8],
+        ticket: &[u8],
     ) -> Result<(), SteamBackendError> {
         self.with_state_mut(|state| {
-            if state.active_auth_sessions.len() >= MAX_STEAM_LOBBY_MEMBERS
-                || !state.active_auth_sessions.insert(user)
-            {
-                return Err(SteamBackendError::AuthenticationFailed);
+            if let Some(failure) = state.auth_session_start_failures.remove(&user) {
+                return Err(SteamBackendError::AuthSessionRejected(failure));
             }
+            if state.active_auth_sessions.contains(&user) {
+                return Err(SteamBackendError::AuthSessionRejected(
+                    AuthSessionStartFailure::DuplicateRequest,
+                ));
+            }
+            if state.active_auth_sessions.len() >= MAX_STEAM_LOBBY_MEMBERS {
+                return Err(SteamBackendError::CapacityExceeded);
+            }
+            if state.strict_auth_tickets {
+                state
+                    .auth_authority
+                    .validate_and_consume(state.app_id, user, state.local_user, ticket)
+                    .map_err(SteamBackendError::AuthSessionRejected)?;
+            }
+            state.active_auth_sessions.insert(user);
             let outcome = state
                 .auth_outcomes
                 .get(&user)
                 .copied()
                 .unwrap_or_else(|| FakeAuthOutcome::accepted(user));
-            state.push_event(SteamBackendEvent::AuthSessionValidated {
+            let event = SteamBackendEvent::AuthSessionValidated {
                 user,
                 license_owner_user: outcome.license_owner_user,
                 result: outcome.validation,
-            });
+            };
+            if state.automatic_auth_callbacks {
+                state.push_event(event);
+            } else if state.pending_auth_validations.insert(user, event).is_some() {
+                return Err(SteamBackendError::IntegrityFailure);
+            }
             Ok(())
         })
     }
@@ -4913,6 +5861,7 @@ impl SteamBackend for FakeSteamBackend {
     fn end_auth_session(&mut self, user: SteamUserId) {
         let _ = self.with_state_mut(|state| {
             state.active_auth_sessions.remove(&user);
+            state.pending_auth_validations.remove(&user);
             state.ended_auth_sessions.insert(user);
             Ok(())
         });
@@ -4993,7 +5942,9 @@ mod real {
         operations: Vec<RealOperationCallback>,
         retired_operation_high_water: u64,
         integrity_failure: bool,
-        steam_disconnected: bool,
+        /// Last coalesced Steam-backend connectivity edge. `true` is a
+        /// recovery callback and `false` begins/refreshes the bounded grace.
+        steam_connectivity: Option<bool>,
         local_departure: Option<SteamBackendEvent>,
         peer_departures: [Option<SteamBackendEvent>; MAX_STEAM_LOBBY_MEMBERS],
         membership_cleanup_all: bool,
@@ -5014,7 +5965,7 @@ mod real {
                 operations: Vec::with_capacity(REAL_OPERATION_CALLBACK_CAPACITY),
                 retired_operation_high_water: 0,
                 integrity_failure: false,
-                steam_disconnected: false,
+                steam_connectivity: None,
                 local_departure: None,
                 peer_departures: std::array::from_fn(|_| None),
                 membership_cleanup_all: false,
@@ -5180,7 +6131,8 @@ mod real {
                     let _ = self.complete_operation(event);
                 }
                 SteamBackendEvent::IntegrityFailure => self.integrity_failure = true,
-                SteamBackendEvent::SteamDisconnected => self.steam_disconnected = true,
+                SteamBackendEvent::SteamConnected => self.steam_connectivity = Some(true),
+                SteamBackendEvent::SteamDisconnected => self.steam_connectivity = Some(false),
                 SteamBackendEvent::LobbyMembershipChanged {
                     lobby,
                     user,
@@ -5319,10 +6271,12 @@ mod real {
                 self.clear_non_operation_callbacks();
                 return Some(SteamBackendEvent::IntegrityFailure);
             }
-            if self.steam_disconnected {
-                self.steam_disconnected = false;
-                self.clear_non_operation_callbacks();
-                return Some(SteamBackendEvent::SteamDisconnected);
+            if let Some(connected) = self.steam_connectivity.take() {
+                return Some(if connected {
+                    SteamBackendEvent::SteamConnected
+                } else {
+                    SteamBackendEvent::SteamDisconnected
+                });
             }
             if let Some(event) = self.local_departure.take() {
                 return Some(event);
@@ -5391,7 +6345,7 @@ mod real {
                 .filter(|operation| operation.event.is_some())
                 .count()
                 + usize::from(self.integrity_failure)
-                + usize::from(self.steam_disconnected)
+                + usize::from(self.steam_connectivity.is_some())
                 + usize::from(self.local_departure.is_some())
                 + self.peer_departures.iter().flatten().count()
                 + usize::from(self.membership_cleanup_all)
@@ -5833,6 +6787,35 @@ mod real {
                 let mailbox = callback_mailbox.clone();
                 let integrity = callback_integrity_failure.clone();
                 callback_handles.push(client.register_callback(
+                    move |_event: steamworks::IpcFailure| {
+                        // IPC failure is process-global and has no trustworthy
+                        // peer identity. Force the platform's full fail-closed
+                        // reset instead of projecting a peer disconnect.
+                        enqueue_real_callback(
+                            &mailbox,
+                            &integrity,
+                            SteamBackendEvent::IntegrityFailure,
+                        );
+                    },
+                ));
+            }
+            {
+                let mailbox = callback_mailbox.clone();
+                let integrity = callback_integrity_failure.clone();
+                callback_handles.push(client.register_callback(
+                    move |_event: steamworks::SteamServersConnected| {
+                        enqueue_real_callback(
+                            &mailbox,
+                            &integrity,
+                            SteamBackendEvent::SteamConnected,
+                        );
+                    },
+                ));
+            }
+            {
+                let mailbox = callback_mailbox.clone();
+                let integrity = callback_integrity_failure.clone();
+                callback_handles.push(client.register_callback(
                     move |_event: steamworks::SteamServersDisconnected| {
                         enqueue_real_callback(
                             &mailbox,
@@ -5846,14 +6829,15 @@ mod real {
                 let mailbox = callback_mailbox.clone();
                 let integrity = callback_integrity_failure.clone();
                 callback_handles.push(client.register_callback(
-                    move |event: steamworks::SteamServerConnectFailure| {
-                        if !event.still_retrying {
-                            enqueue_real_callback(
-                                &mailbox,
-                                &integrity,
-                                SteamBackendEvent::SteamDisconnected,
-                            );
-                        }
+                    move |_event: steamworks::SteamServerConnectFailure| {
+                        // Steam may subsequently reconnect even after a
+                        // terminal attempt result. Both retrying and terminal
+                        // callbacks therefore enter the same bounded grace.
+                        enqueue_real_callback(
+                            &mailbox,
+                            &integrity,
+                            SteamBackendEvent::SteamDisconnected,
+                        );
                     },
                 ));
             }
@@ -6317,7 +7301,9 @@ mod real {
                 .client
                 .user()
                 .begin_authentication_session(steamworks::SteamId::from_raw(user.get()), ticket)
-                .map_err(|_| SteamBackendError::AuthenticationFailed);
+                .map_err(|error| {
+                    SteamBackendError::AuthSessionRejected(map_auth_session_start_error(error))
+                });
             if result.is_err() {
                 match self.callback_mailbox.lock() {
                     Ok(mut mailbox) => mailbox.abort_auth_session_start(user),
@@ -6739,9 +7725,26 @@ mod real {
             steamworks::AuthSessionValidateError::AuthTicketInvalid => {
                 AuthValidationFailure::TicketInvalid
             }
+            steamworks::AuthSessionValidateError::AuthTicketNetworkIdentityFailure => {
+                AuthValidationFailure::TicketNetworkIdentityFailure
+            }
             steamworks::AuthSessionValidateError::PublisherIssuedBan => {
                 AuthValidationFailure::PublisherBan
             }
+        }
+    }
+
+    pub(super) fn map_auth_session_start_error(
+        value: steamworks::AuthSessionError,
+    ) -> AuthSessionStartFailure {
+        match value {
+            steamworks::AuthSessionError::InvalidTicket => AuthSessionStartFailure::InvalidTicket,
+            steamworks::AuthSessionError::DuplicateRequest => {
+                AuthSessionStartFailure::DuplicateRequest
+            }
+            steamworks::AuthSessionError::InvalidVersion => AuthSessionStartFailure::InvalidVersion,
+            steamworks::AuthSessionError::GameMismatch => AuthSessionStartFailure::GameMismatch,
+            steamworks::AuthSessionError::ExpiredTicket => AuthSessionStartFailure::ExpiredTicket,
         }
     }
 
@@ -7063,6 +8066,290 @@ mod tests {
     }
 
     #[test]
+    fn shared_fake_auth_authority_enforces_ticket_claims_cancellation_and_one_use() {
+        let authority = FakeSteamAuthAuthority::new();
+        let issuer_user = user(81);
+        let recipient_user = user(82);
+        let outsider_user = user(83);
+        let (mut issuer, issuer_control) =
+            FakeSteamBackend::new_with_auth_authority(app_id(), issuer_user, authority.clone());
+        let (mut recipient, _) =
+            FakeSteamBackend::new_with_auth_authority(app_id(), recipient_user, authority.clone());
+        let (mut outsider, _) =
+            FakeSteamBackend::new_with_auth_authority(app_id(), outsider_user, authority.clone());
+
+        let first = issuer.issue_auth_ticket(recipient_user).unwrap();
+        assert_eq!(
+            issuer_control.issued_ticket_recipient(first.handle),
+            Some(recipient_user)
+        );
+        assert_eq!(authority.active_ticket_count(), 1);
+        let second_unique = issuer.issue_auth_ticket(outsider_user).unwrap();
+        assert_ne!(first.bytes, second_unique.bytes);
+        issuer.cancel_auth_ticket(second_unique.handle);
+        assert_eq!(
+            outsider.begin_auth_session(issuer_user, &first.bytes),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::InvalidTicket
+            ))
+        );
+        recipient
+            .begin_auth_session(issuer_user, &first.bytes)
+            .unwrap();
+        recipient.end_auth_session(issuer_user);
+        assert_eq!(
+            recipient.begin_auth_session(issuer_user, &first.bytes),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::DuplicateRequest
+            ))
+        );
+        issuer.cancel_auth_ticket(first.handle);
+        assert_eq!(authority.active_ticket_count(), 0);
+
+        let cancelled = issuer.issue_auth_ticket(recipient_user).unwrap();
+        issuer.cancel_auth_ticket(cancelled.handle);
+        assert_eq!(
+            recipient.begin_auth_session(issuer_user, &cancelled.bytes),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::InvalidTicket
+            ))
+        );
+
+        let wrong_issuer = issuer.issue_auth_ticket(recipient_user).unwrap();
+        assert_eq!(
+            recipient.begin_auth_session(outsider_user, &wrong_issuer.bytes),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::InvalidTicket
+            ))
+        );
+        issuer.cancel_auth_ticket(wrong_issuer.handle);
+    }
+
+    #[test]
+    fn strict_fake_auth_rejects_cross_app_ticket_and_controls_callback_order() {
+        let authority = FakeSteamAuthAuthority::new();
+        let issuer_user = user(84);
+        let recipient_user = user(85);
+        let (mut issuer, _) =
+            FakeSteamBackend::new_with_auth_authority(app_id(), issuer_user, authority.clone());
+        let (mut recipient, recipient_control) =
+            FakeSteamBackend::new_with_auth_authority(app_id(), recipient_user, authority.clone());
+        let other_app = SteamAppId::new(SPACEWAR_APP_ID + 1).unwrap();
+        let (mut wrong_app_recipient, _) =
+            FakeSteamBackend::new_with_auth_authority(other_app, recipient_user, authority);
+
+        let wrong_app_ticket = issuer.issue_auth_ticket(recipient_user).unwrap();
+        assert_eq!(
+            wrong_app_recipient.begin_auth_session(issuer_user, &wrong_app_ticket.bytes),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::GameMismatch
+            ))
+        );
+        issuer.cancel_auth_ticket(wrong_app_ticket.handle);
+
+        recipient_control
+            .set_automatic_auth_callbacks(false)
+            .unwrap();
+        let delayed = issuer.issue_auth_ticket(recipient_user).unwrap();
+        recipient
+            .begin_auth_session(issuer_user, &delayed.bytes)
+            .unwrap();
+        assert_eq!(recipient.poll_event(), None);
+        recipient_control
+            .release_auth_validation(issuer_user)
+            .unwrap();
+        assert!(matches!(
+            recipient.poll_event(),
+            Some(SteamBackendEvent::AuthSessionValidated {
+                user: callback_user,
+                result: Ok(()),
+                ..
+            }) if callback_user == issuer_user
+        ));
+        recipient.end_auth_session(issuer_user);
+        issuer.cancel_auth_ticket(delayed.handle);
+    }
+
+    #[test]
+    fn fake_auth_preserves_injected_immediate_start_failure() {
+        let remote = user(87);
+        let (mut backend, control) = FakeSteamBackend::new(app_id(), user(86));
+        control
+            .set_auth_session_start_failure(remote, AuthSessionStartFailure::ExpiredTicket)
+            .unwrap();
+        assert_eq!(
+            backend.begin_auth_session(remote, &[1, 2, 3]),
+            Err(SteamBackendError::AuthSessionRejected(
+                AuthSessionStartFailure::ExpiredTicket
+            ))
+        );
+        // The injection is one-shot so a retry can exercise the next native
+        // generation deterministically.
+        backend.begin_auth_session(remote, &[1, 2, 3]).unwrap();
+        backend.end_auth_session(remote);
+    }
+
+    #[test]
+    fn roster_authentication_validates_non_direct_member_and_cleans_up() {
+        let local = user(88);
+        let remote = user(89);
+        let (mut platform, control) = platform(local);
+        platform
+            .create_lobby(
+                LobbyCreateRequest {
+                    visibility: LobbyVisibility::FriendsOnly,
+                    maximum_peers: 4,
+                    local_seats: 1,
+                },
+                metadata(LobbyVisibility::FriendsOnly, 4),
+            )
+            .unwrap();
+        platform.pump(NOW_MS + 1).unwrap();
+        drain_events(&mut platform);
+        let SteamPlatformState::InLobby(active_lobby) = platform.state() else {
+            panic!("lobby missing")
+        };
+        control
+            .emit_membership_change(active_lobby, remote, LobbyMembershipChange::Entered)
+            .unwrap();
+        set_raw_member_declaration(
+            &control,
+            active_lobby,
+            remote,
+            MemberCommitMarker::Committed {
+                revision: 1,
+                ready: true,
+            },
+            member_declaration(1, 1),
+        );
+        platform.pump(NOW_MS + 2).unwrap();
+        drain_events(&mut platform);
+        control.set_automatic_auth_callbacks(false).unwrap();
+
+        // Roster verification deliberately does not require a direct friends
+        // relationship once both accounts are admitted lobby members.
+        platform
+            .begin_roster_authentication(active_lobby, remote, &[7, 7, 7], NOW_MS + 2)
+            .unwrap();
+        assert!(!platform.roster_authentication_is_validated(remote));
+        control.release_auth_validation(remote).unwrap();
+        platform.pump(NOW_MS + 3).unwrap();
+        assert!(platform.roster_authentication_is_validated(remote));
+        assert!(drain_events(&mut platform).contains(
+            &SteamPlatformEvent::RosterPeerAuthenticated {
+                lobby: active_lobby,
+                user: remote,
+            }
+        ));
+
+        platform.end_roster_authentication(remote).unwrap();
+        assert!(!platform.roster_authentication_is_validated(remote));
+        assert_eq!(control.active_auth_session_count(), 0);
+        assert!(control.ended_auth_session(remote));
+    }
+
+    #[test]
+    fn roster_authentication_deadline_extension_is_one_use_and_never_rebegins_session() {
+        let local = user(90);
+        let remote = user(91);
+        let (mut platform, control) = platform(local);
+        platform
+            .create_lobby(
+                LobbyCreateRequest {
+                    visibility: LobbyVisibility::Private,
+                    maximum_peers: 2,
+                    local_seats: 1,
+                },
+                metadata(LobbyVisibility::Private, 2),
+            )
+            .unwrap();
+        platform.pump(NOW_MS + 1).unwrap();
+        drain_events(&mut platform);
+        let SteamPlatformState::InLobby(active_lobby) = platform.state() else {
+            panic!("lobby missing")
+        };
+        control
+            .emit_membership_change(active_lobby, remote, LobbyMembershipChange::Entered)
+            .unwrap();
+        set_raw_member_declaration(
+            &control,
+            active_lobby,
+            remote,
+            MemberCommitMarker::Committed {
+                revision: 1,
+                ready: true,
+            },
+            member_declaration(1, 1),
+        );
+        platform.pump(NOW_MS + 2).unwrap();
+        drain_events(&mut platform);
+        control.set_automatic_auth_callbacks(false).unwrap();
+        platform
+            .begin_roster_authentication(active_lobby, remote, &[3, 2, 1], NOW_MS + 2)
+            .unwrap();
+        assert_eq!(platform.active_roster_authentication_count(), 1);
+        assert_eq!(control.active_auth_session_count(), 1);
+        assert!(!platform.roster_authentication_awaits_retry(active_lobby, remote));
+        assert_eq!(control.pending_auth_validation_count(), 1);
+
+        let first_deadline = NOW_MS + 2 + DEFAULT_AUTH_INTENT_TTL_MS;
+        platform.pump(first_deadline).unwrap();
+        assert_eq!(platform.active_roster_authentication_count(), 1);
+        assert_eq!(control.active_auth_session_count(), 1);
+        assert!(platform.roster_authentication_awaits_retry(active_lobby, remote));
+        assert!(drain_events(&mut platform).contains(
+            &SteamPlatformEvent::RosterPeerAuthenticationRejected {
+                lobby: active_lobby,
+                user: remote,
+                reason: PeerAuthenticationRejection::IntentExpired,
+            }
+        ));
+
+        let retry_at = first_deadline + 1;
+        platform
+            .extend_roster_authentication_deadline(active_lobby, remote, retry_at)
+            .unwrap();
+        assert!(!platform.roster_authentication_awaits_retry(active_lobby, remote));
+        assert_eq!(control.active_auth_session_count(), 1);
+        assert_eq!(
+            platform.extend_roster_authentication_deadline(active_lobby, remote, retry_at + 1,),
+            Err(SteamPlatformError::InvalidState)
+        );
+
+        // Retry did not create another Steam session. The original callback
+        // can still validate that exact lease during the extension.
+        assert_eq!(control.active_auth_session_count(), 1);
+        control.release_auth_validation(remote).unwrap();
+        platform.pump(retry_at + 1).unwrap();
+        assert!(platform.roster_authentication_is_validated(remote));
+
+        platform.end_roster_authentication(remote).unwrap();
+        platform
+            .begin_roster_authentication(active_lobby, remote, &[4, 5, 6], retry_at + 2)
+            .unwrap();
+        let second_attempt_deadline = retry_at + 2 + DEFAULT_AUTH_INTENT_TTL_MS;
+        platform.pump(second_attempt_deadline).unwrap();
+        platform
+            .extend_roster_authentication_deadline(
+                active_lobby,
+                remote,
+                second_attempt_deadline + 1,
+            )
+            .unwrap();
+        platform
+            .pump(second_attempt_deadline + 1 + DEFAULT_AUTH_INTENT_TTL_MS)
+            .unwrap();
+        assert_eq!(platform.active_roster_authentication_count(), 0);
+        assert_eq!(control.active_auth_session_count(), 0);
+        assert_eq!(control.pending_auth_validation_count(), 0);
+
+        platform.leave_lobby().unwrap();
+        assert_eq!(platform.active_roster_authentication_count(), 0);
+        assert_eq!(control.active_auth_session_count(), 0);
+        assert_eq!(control.pending_auth_validation_count(), 0);
+    }
+
+    #[test]
     fn platform_starts_relay_access_during_construction() {
         let (backend, control) = FakeSteamBackend::new(app_id(), user(89));
         assert_eq!(control.relay_initialization_count(), 0);
@@ -7088,6 +8375,7 @@ mod tests {
             SteamBackendError::AppIdMismatch,
             SteamBackendError::NotLoggedOn,
             SteamBackendError::AuthenticationFailed,
+            SteamBackendError::AuthSessionRejected(AuthSessionStartFailure::InvalidTicket),
             SteamBackendError::IntegrityFailure,
         ] {
             assert!(!is_recoverable_steam_input_startup_error(error));
@@ -7135,6 +8423,50 @@ mod tests {
                     result: Ok(()),
                 }
             );
+        }
+    }
+
+    #[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
+    #[test]
+    fn real_auth_mappings_preserve_identity_and_immediate_ticket_failures() {
+        let remote_raw = 76_561_198_000_000_011;
+        let translated = real::translate_auth_validation(steamworks::ValidateAuthTicketResponse {
+            steam_id: steamworks::SteamId::from_raw(remote_raw),
+            response: Err(steamworks::AuthSessionValidateError::AuthTicketNetworkIdentityFailure),
+            owner_steam_id: steamworks::SteamId::from_raw(remote_raw),
+        })
+        .unwrap();
+        assert!(matches!(
+            translated,
+            SteamBackendEvent::AuthSessionValidated {
+                result: Err(AuthValidationFailure::TicketNetworkIdentityFailure),
+                ..
+            }
+        ));
+
+        for (native, expected) in [
+            (
+                steamworks::AuthSessionError::InvalidTicket,
+                AuthSessionStartFailure::InvalidTicket,
+            ),
+            (
+                steamworks::AuthSessionError::DuplicateRequest,
+                AuthSessionStartFailure::DuplicateRequest,
+            ),
+            (
+                steamworks::AuthSessionError::InvalidVersion,
+                AuthSessionStartFailure::InvalidVersion,
+            ),
+            (
+                steamworks::AuthSessionError::GameMismatch,
+                AuthSessionStartFailure::GameMismatch,
+            ),
+            (
+                steamworks::AuthSessionError::ExpiredTicket,
+                AuthSessionStartFailure::ExpiredTicket,
+            ),
+        ] {
+            assert_eq!(real::map_auth_session_start_error(native), expected);
         }
     }
 
@@ -7614,6 +8946,180 @@ mod tests {
         assert_eq!(
             control.rich_presence("steam_player_group_size"),
             Some("1".into())
+        );
+    }
+
+    #[test]
+    fn backend_disconnect_grace_preserves_lobby_and_tickets_until_reconnect_or_expiry() {
+        let local = user(10_201);
+        let (mut platform, control) = platform(local);
+        platform
+            .create_lobby(
+                LobbyCreateRequest {
+                    visibility: LobbyVisibility::Private,
+                    maximum_peers: 4,
+                    local_seats: 1,
+                },
+                metadata(LobbyVisibility::Private, 4),
+            )
+            .unwrap();
+        platform.pump(NOW_MS + 1).unwrap();
+        let SteamPlatformState::InLobby(active_lobby) = platform.state() else {
+            panic!("lobby was not entered")
+        };
+        drain_events(&mut platform);
+
+        let retained = platform.issue_auth_ticket(user(10_202)).unwrap();
+        control.emit_disconnect().unwrap();
+        platform.pump(NOW_MS + 2).unwrap();
+        assert_eq!(platform.state(), SteamPlatformState::InLobby(active_lobby));
+        assert_eq!(
+            platform.backend_reconnect_deadline_ms(),
+            Some(NOW_MS + 2 + DEFAULT_STEAM_BACKEND_RECONNECT_GRACE_MS)
+        );
+        assert!(
+            drain_events(&mut platform)
+                .iter()
+                .any(|event| matches!(event, SteamPlatformEvent::BackendReconnectStarted { .. }))
+        );
+        assert_eq!(
+            platform.issue_auth_ticket(user(10_203)),
+            Err(SteamPlatformError::Backend(SteamBackendError::NotLoggedOn))
+        );
+
+        control.emit_connect().unwrap();
+        platform.pump(NOW_MS + 9_000).unwrap();
+        assert_eq!(platform.state(), SteamPlatformState::InLobby(active_lobby));
+        assert!(!platform.backend_reconnect_pending());
+        let recovered = drain_events(&mut platform);
+        assert!(
+            recovered
+                .iter()
+                .any(|event| matches!(event, SteamPlatformEvent::BackendReconnectRecovered))
+        );
+        assert!(
+            !recovered
+                .iter()
+                .any(|event| matches!(event, SteamPlatformEvent::LobbyLeft { .. }))
+        );
+        // The in-flight one-use capability survived the transient outage.
+        platform.cancel_auth_ticket(retained.handle).unwrap();
+
+        control.emit_disconnect().unwrap();
+        platform.pump(NOW_MS + 9_001).unwrap();
+        drain_events(&mut platform);
+        platform
+            .pump(NOW_MS + 9_001 + DEFAULT_STEAM_BACKEND_RECONNECT_GRACE_MS)
+            .unwrap();
+        assert_eq!(platform.state(), SteamPlatformState::Idle);
+        assert_eq!(
+            drain_events(&mut platform),
+            vec![SteamPlatformEvent::LobbyLeft {
+                lobby: active_lobby,
+                reason: LobbyExitReason::SteamDisconnected,
+            }]
+        );
+    }
+
+    #[test]
+    fn reconnect_rereads_membership_and_leaves_when_local_departure_callback_was_missed() {
+        let local = user(10_211);
+        let remote = user(10_212);
+        let (mut platform, control) = platform(local);
+        platform
+            .create_lobby(
+                LobbyCreateRequest {
+                    visibility: LobbyVisibility::Private,
+                    maximum_peers: 2,
+                    local_seats: 1,
+                },
+                metadata(LobbyVisibility::Private, 2),
+            )
+            .unwrap();
+        platform.pump(NOW_MS + 1).unwrap();
+        let SteamPlatformState::InLobby(active_lobby) = platform.state() else {
+            panic!("lobby was not entered")
+        };
+        drain_events(&mut platform);
+        control
+            .emit_membership_change(active_lobby, remote, LobbyMembershipChange::Entered)
+            .unwrap();
+        platform.pump(NOW_MS + 2).unwrap();
+        drain_events(&mut platform);
+
+        control.emit_disconnect().unwrap();
+        platform.pump(NOW_MS + 3).unwrap();
+        drain_events(&mut platform);
+        control
+            .remove_lobby_member_silently(active_lobby, local)
+            .unwrap();
+        control.emit_connect().unwrap();
+        platform.pump(NOW_MS + 4).unwrap();
+
+        assert_eq!(platform.state(), SteamPlatformState::Idle);
+        assert_eq!(
+            drain_events(&mut platform),
+            vec![SteamPlatformEvent::LobbyLeft {
+                lobby: active_lobby,
+                reason: LobbyExitReason::Removed,
+            }]
+        );
+    }
+
+    #[test]
+    fn reconnect_snapshot_read_failure_retries_without_consuming_grace() {
+        let local = user(10_221);
+        let (mut platform, control) = platform(local);
+        platform
+            .create_lobby(
+                LobbyCreateRequest {
+                    visibility: LobbyVisibility::Private,
+                    maximum_peers: 2,
+                    local_seats: 1,
+                },
+                metadata(LobbyVisibility::Private, 2),
+            )
+            .unwrap();
+        platform.pump(NOW_MS + 1).unwrap();
+        let SteamPlatformState::InLobby(active_lobby) = platform.state() else {
+            panic!("lobby was not entered")
+        };
+        drain_events(&mut platform);
+
+        control.emit_disconnect().unwrap();
+        platform.pump(NOW_MS + 2).unwrap();
+        let grace_deadline = platform
+            .backend_reconnect_deadline_ms()
+            .expect("disconnect installed reconnect grace");
+        drain_events(&mut platform);
+        // The callback says connected, but Steam's lobby cache produces one
+        // transient read error before it is hydrated again.
+        control
+            .fail_lobby_data_read_on_occurrence(active_lobby, KEY_SCHEMA, 1)
+            .unwrap();
+        control.emit_connect().unwrap();
+        platform.pump(NOW_MS + 3).unwrap();
+
+        assert_eq!(platform.state(), SteamPlatformState::InLobby(active_lobby));
+        assert_eq!(
+            platform.backend_reconnect_deadline_ms(),
+            Some(grace_deadline)
+        );
+        assert!(platform.backend_reconnect_pending());
+        assert!(!drain_events(&mut platform).iter().any(|event| matches!(
+            event,
+            SteamPlatformEvent::BackendReconnectRecovered | SteamPlatformEvent::LobbyLeft { .. }
+        )));
+
+        // No second callback is required: the pending connected observation
+        // retries on the next pump and commits only after a coherent reread.
+        platform.pump(NOW_MS + 4).unwrap();
+        assert_eq!(platform.state(), SteamPlatformState::InLobby(active_lobby));
+        assert!(!platform.backend_reconnect_pending());
+        assert!(
+            drain_events(&mut platform)
+                .iter()
+                .any(|event| matches!(event, SteamPlatformEvent::BackendReconnectRecovered))
         );
     }
 
@@ -8874,6 +10380,9 @@ mod tests {
                 NOW_MS + 2,
             )
             .unwrap();
+        platform.end_roster_authentication(remote).unwrap();
+        assert_eq!(control.active_auth_session_count(), 1);
+        assert!(!control.ended_auth_session(remote));
         // Reliable signaling can redeliver the exact ticket while validation
         // is pending. It must reuse the live auth session rather than invoking
         // BeginAuthSession twice or faulting the lobby.
@@ -9162,5 +10671,13 @@ mod tests {
             Some(SteamPlatformError::MetadataMismatch)
         );
         assert_eq!(platform.poll_event(), None);
+    }
+
+    #[cfg(feature = "steam-net")]
+    #[test]
+    fn vendored_ipc_failure_callback_keeps_valves_stable_callback_id() {
+        use steamworks::Callback;
+
+        assert_eq!(steamworks::IpcFailure::ID, 117);
     }
 }

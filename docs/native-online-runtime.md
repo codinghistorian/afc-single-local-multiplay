@@ -1,6 +1,6 @@
 # Native Online Runtime
 
-- Status: implemented player-facing native listen application; two-machine Steam validation pending
+- Status: implemented player-facing native listen application; physical Steam validation pending
 - Source: `src/native_online.rs`, `src/native_online_app.rs`
 - Feature: `steam-net`
 - Decision date: 2026-07-23
@@ -14,16 +14,14 @@ endpoints, starts the listen or remote worker, and projects its latest snapshot.
 The canonical simulation world never owns Steam or wall-clock state.
 
 Production orchestration is single-sourced in the internal
-`NativeOnlineCore<B, S, F>`. The Steam platform and lobby coordinator remain
-concrete (`SteamPlatform<B>` and `OnlineLobbyCoordinator`); only the
-non-generic authentication-signal port and transport factory are replaceable.
-The shipping specialization is
-`RealSteamBackend + SteamAuthSignalChannel + RealNativeTransportFactory`, while
-the public `NativeOnlineRuntime` API is unchanged. No thread-safety, cloning, or
-debug-printing capability is required of either seam, and ticket/manifest
-signals cross it by value. Field declaration order is intentional: gameplay
-endpoints drop before signaling and coordinator state, and all of those drop
-before the platform/callback owner.
+`NativeOnlineCore<B, F>`. The Steam platform and lobby coordinator remain
+concrete (`SteamPlatform<B>` and `OnlineLobbyCoordinator`); only the transport
+factory is replaceable. The shipping specialization is
+`RealSteamBackend + RealNativeTransportFactory`, while the public
+`NativeOnlineRuntime` API is unchanged. AFCP ticket and manifest frames travel
+on the quarantined socket owned by the coordinator; there is no separate
+authentication-message port. Field declaration order is intentional: gameplay
+endpoints and control state drop before the platform/callback owner.
 
 Without `steam-net`, the same public UI model compiles and reports
 `online.unavailable.steam_feature_disabled`. On Web it reports
@@ -103,10 +101,10 @@ screen/availability keys. It submits one typed `NativeOnlineCommand` through
 - `SetLocalDeclaration` and `SetReady` drive the lobby. Invite-overlay requests
   use a separate typed result seam so local overlay unavailability cannot be
   promoted into a fatal command/runtime failure.
-- A fresh `Initial` ticket exchange waits for the current declaration to be
-  ready. This preserves a deterministic Lobby editing/readiness window after
-  create/join and after an owner-authored rematch epoch. Same-match reconnect
-  tickets are not readiness-gated.
+- A fresh `Initial` ticket exchange waits for a complete, coherent current
+  declaration, but not for its Ready bit. Ready/loadout edits do not replace an
+  otherwise valid physical link. Same-match reconnect tickets are likewise not
+  readiness-gated.
 - `CommitManifest` is listen-owner-only. `AcceptManifest` remains available for
   explicit integrations, while the native owner automatically accepts its own
   committed config and clients automatically accept the validated cross-machine
@@ -122,8 +120,8 @@ screen/availability keys. It submits one typed `NativeOnlineCommand` through
   rendered. `Retry` remains reserved for failures explicitly classified as Retry
   and is not an alias for reconnect.
 - `QuiesceAdmission` is the first graceful-shutdown command. It atomically fences
-  transport construction, listener/pending admission, ticket exchange, native
-  authentication signals, reconnect markers, pending manifest handoff, and new
+  transport construction, listener/pending admission, ticket exchange, AFCP
+  control outboxes, reconnect markers, pending manifest handoff, and new
   endpoint delivery for the current match. It intentionally retains established
   worker-owned endpoints so typed terminals and their ACKs can drain.
 - `MarkAuthorityTerminalDrained` is the listen-side cleanup handoff. The
@@ -146,8 +144,11 @@ shutdown deadline; dropping the runtime is the emergency path.
 `admission_is_quiesced()` exposes the independent admission fence; shutdown must
 raise it before asking the authority worker to begin its drain.
 
-At manifest commit, `committed_authenticated_roster()` exposes a fixed-capacity,
-ticket-free `CommittedAuthenticatedRoster`. Listen authority startup is:
+The manifest transaction freezes a fixed-capacity, ticket-free
+`CommittedAuthenticatedRoster`. The application consumes it through
+`committed_authenticated_roster()` only atomically with the exact admitted
+endpoints after activation completes and the coordinator enters Loading. Listen
+authority startup is:
 
 ```text
 let peers = runtime.committed_authenticated_roster();
@@ -169,7 +170,7 @@ still fail closed and issue no runtime command.
 The restriction is enforced below the menu as well:
 
 1. create and entered-lobby metadata must be private/friends-only and listen;
-2. manifest options and bootstrap manifests must be listen and untrusted;
+2. manifest options and AFCP manifest proposals must be listen and untrusted;
 3. the frozen metadata contract must match authority, visibility, rules, arena,
    and seat capacity;
 4. the same contract and manifest are validated again before countdown.
@@ -200,78 +201,117 @@ needed by the Online entry, private/friends creation, invite/launch prompt,
 couch loadout lobby, quality indicator, loading/countdown, reconnect overlay,
 results/rematch, return, and error screens without depending on Bevy UI types.
 
-## Cross-machine pre-game signaling
+## Cross-machine pre-game control
 
-Authentication cannot use Steam lobby chat, and the gameplay transport cannot
-carry packets before authenticated admission. The runtime therefore owns a
-dedicated reliable `ISteamNetworkingMessages` channel for exactly three bounded
-pre-game messages:
+Pre-game setup and gameplay share one explicit Steam Networking Sockets P2P
+connection. The connection opens immediately after lobby entry—independently of
+Ready—and remains quarantined until authentication and manifest agreement finish.
+Clients connect only to the Steam-confirmed lobby owner; the authority accepts
+only current lobby members, preserving the authority-star topology.
 
-1. a non-secret, lobby-bound 32-byte session hello;
-2. Steam authentication ticket, at most 1024 bytes;
-3. owner-to-client canonical `StartMessage::Manifest` AFC wire packet.
+Lobby schema 4 uses the bounded AFCP version 2 control protocol. It carries
+`LinkHello`, the direct `AuthTicket` / `AuthAccepted` exchange, roster-auth
+messages, the manifest/activation transaction, and `Abort` / `SetupCancel`.
+Each envelope is at most 1,200 bytes and binds the lobby, outer-hop sender and
+recipient, physical connection generation, sequence, acknowledgement generation,
+and acknowledgement. Reliable submission is not application delivery: a
+piggyback acknowledgement and the inbound sequence are committed only when the
+runtime semantically accepts the decoded message through its ingress token.
+Invalid or future ACKs cannot mutate the outbox. Same-generation duplicates are
+idempotent, `LinkHello` precedes standalone ACK traffic, and a replacement
+generation receives fresh one-use tickets.
 
-Incoming message sessions are accepted only for Steam identities in the union of
-the current bounded lobby roster and coordinator-authorized committed peer
-leases. This lets an exact same-match reconnect survive callback-order gaps
-without opening admission to an arbitrary nonmember.
+The physical connection follows this monotonic security lifecycle:
 
-The symmetric session hello is sent only after the remote Steam member has a
-coherent readiness/loadout declaration. A process cannot author that declaration
-until its own lobby-enter transition completes, so a host-side membership callback
-cannot race ahead and open a message session that the joining client still has to
-reject. An earlier incoming request from a member whose declaration callback is
-still pending remains unaccepted; the later symmetric hello implicitly accepts it.
+```text
+Connecting -> ControlReady -> Authenticating -> Secure
+           -> ManifestAgreement -> GameplayReceiveArmed -> GameplayReady
+```
 
-Authentication tickets use envelope version 3 and a 62-byte fixed header:
-magic/version/kind/purpose, active lobby, actual Steam sender, recipient,
-sender `PeerId`, non-zero owner and sender declaration revisions, 16 `MatchId`
-bytes, and exact ticket length. Initial tickets require an all-zero `MatchId`;
-Reconnect tickets require the exact current non-zero `MatchId`. The sender Steam
-ID is still attributed independently by `ISteamNetworkingMessages`.
+`ControlReady` grants no seat or gameplay capability. Promotion to `Secure`
+requires both successful validation of the remote ticket and receipt of
+`AuthAccepted` for the local ticket. Ticket callback order is irrelevant: ready
+tickets remain retained until the matching physical connection is control-ready.
+Ticket buffers are redacted from `Debug` and explicitly zeroized.
 
-Ingress compares the envelope with immutable coordinator leases. A well-formed
-older revision or old/wrong-match reconnect is discarded as benign stale work,
-without authentication, quarantine, or a user-visible failure. A current-epoch
-wrong peer, malformed envelope, wrong recipient/lobby, or unattributed nonmember
-is isolated fail closed. First-match Initial authentication requires a live
-coherent roster entry. A post-result Initial may use the prior immutable
-Steam-user/peer lease plus a higher sender revision when its roster callback is
-late.
+The physical socket topology remains a star, but account authentication covers
+the full roster. Once direct authority/client links are secure, the authority
+sends `RosterPrepare` for one account-set hash and non-zero auth epoch. Clients
+authenticate every other client with recipient-bound one-use tickets carried as
+`RoutedAuthTicket` frames through the authority; receipts return as
+`RoutedAuthAccepted`. The authority validates each outer hop and forwards the
+secret-bearing payload only to its declared logical recipient. It never grants a
+seat from a forwarded ticket. `RosterAccepted` and `RosterAuthComplete` make the
+epoch globally complete only after all participants have validated all `N-1`
+remote accounts. Roster changes retire the epoch, end those auth sessions, cancel
+issued tickets, and require a new coherent epoch without replacing otherwise
+valid physical links.
 
-Tickets are issued automatically in both directions after complete member
-metadata exists. Issue freezes the exact sender, recipient, revision, purpose,
-owner epoch, lobby, and match scope. They are transmitted only after an
-`AuthTicketReady` callback still matches that complete lease; an inverted stale
-callback is cancelled silently, while a fresh lease may proceed. The secret bytes
-are moved once into the signal, consumed by `begin_peer_authentication`, redacted
-from every `Debug` implementation, and explicitly zeroized before owned buffers
-are released. The Steam handle remains available for cancellation; gameplay
-`SteamTransport` admission is unchanged and still waits for the platform
-validation callback and App ID ownership result. Reliable redelivery of an exact
-lobby/sender/peer/revision/epoch/purpose ticket reuses the pending or
-already-consumed authentication admission; it cannot create another Steam auth
-session, consume a second capability, or turn a valid replay into a host-global
-runtime failure.
+Start uses a transaction-bound multi-barrier agreement. `ManifestPrepare` freezes
+the manifest hash and exact participant-to-connection-generation set;
+`ManifestAccepted` cannot substitute a later socket. After every acceptance, the
+authority sends `ManifestCommit` and waits for every `ManifestCommitAccepted`.
+Only then does it commit locally, arm those exact sockets for hidden receive-only
+AFCN buffering, and send `GameplayActivate`. A client commits and arms before it
+replies `GameplayActivated`, but it does not expose an endpoint yet. After every
+activation receipt, the authority sends a reliable `GameplayActivated` final
+release to every client and promotes its own endpoints; each client promotes only
+after receiving that release. AFCN received before receive-arming is
+malformed; AFCN received while armed is buffered but cannot be exposed or sent.
+An `Abort`, `SetupCancel`, rejection, or the fixed 10-second authority activation
+deadline returns both sides to Lobby and rolls `ManifestAgreement` or
+`GameplayReceiveArmed` back to `Secure` before the final-release barrier; no
+uncommitted client worker is created. Final release is irrevocable and retained
+for reliable retransmission rather than being canceled after partial delivery.
+Known retired-transaction frames are semantically ACKed and ignored so reliable
+ordered sequences do not acquire gaps.
 
-After owner commit, the runtime sends the canonical manifest to every
-authenticated remote lobby member. A client requires the actual sender to be the
-current Steam-confirmed lobby owner for that between-match session, validates
-compatibility and the canonical manifest hash through the AFC codec, reconstructs
-`HeadlessMatchConfig`, and calls `accept_manifest`. Acceptance reconstructs the
-full canonical roster from the coherent Steam declaration snapshot, including
-third-party members the client does not authenticate directly, and requires exact
-manifest equality. A valid early arrival is staged until the gameplay endpoint
-reaches manifest agreement. A coherent snapshot that is still staging keeps the
-manifest pending and is retried after metadata callbacks; it is not quarantined as
-malicious traffic. Exact duplicates are idempotent; conflicting accepted or staged
-manifests and coherent roster mismatches fail closed. The later AFC gameplay
-handshake must repeat and exact-match this same manifest because the remote worker
-is spawned from the bootstrapped config.
+`NativeOnlineViewModel` separately reports declared readiness, connected and
+secure remote-link counts, required remote-link count, verified and required
+remote-account counts, relay/certificate readiness, setup stage, and the first
+Start blocker. Its `all_members_ready` input covers coherent Ready declarations
+only. Link requirements are role-aware: the listen authority needs
+`N-1`, each client needs one, and every participant needs `N-1` verified remote
+accounts. The lobby therefore shows actionable states such as “Preparing Steam
+network”, “Connecting”, “Validating account”, and “Waiting for manifest” instead
+of one opaque aggregate readiness line.
 
-This provisional channel is not a gameplay, snapshot, input, result, or chat data
-plane. Per-pump receive work is capped at 16 messages; overflow, malformed data,
-identity mismatch, and channel failure become sanitized fatal online failures.
+Relay access and Steam Networking Sockets authentication initialization begin
+together. Preparation and each connection/authentication setup are bounded to 15
+seconds. Entering Online may retry a terminal initialization failure. An early
+transient link failure gets one new generation after 500 ms only if at least five
+seconds remain. If a client-originated control link exhausts that automatic retry,
+only the client acts on the actionable Retry and opens the replacement generation;
+the authority keeps a passive attributed failure until the inbound replacement is
+secure. Lobby membership, the invitation, and unrelated star links remain intact.
+
+An in-lobby Steam backend disconnect instead starts a 10-second reconnect grace.
+The platform keeps the active lobby, issued tickets, authentication sessions,
+secure sockets, and established gameplay endpoints alive. The coordinator keeps
+the transport pumping but disables incoming admission and prevents new ticket,
+authentication, declaration, or manifest capability from advancing. It defers
+bounded auth/setup callbacks and pauses the active flow, network preparation,
+authentication-lease, and activation deadlines for exactly the outage duration.
+On reconnect it revalidates local membership, immutable lobby metadata, and the
+current owner before releasing deferred work. Missing membership, incompatible
+metadata, or grace expiry produces a safe lobby exit; the UI reports Steam network
+preparation as retrying during the grace rather than offering a competing manual
+Retry.
+
+Every physical generation keeps a 64-event privacy-safe trace containing only
+ordinal, generation, setup phase, elapsed milliseconds, bounded relay/auth
+availability, stable AFC result code, and the numeric native end reason. A
+pre-game failure is stored under the normal diagnostics root in a dedicated
+64 KiB-per-file, 16-file/1 MiB-total archive. These records have no fields for
+Steam IDs, addresses, persona names, ticket or payload bytes, or Valve's
+free-form diagnostic text. Peer isolation closes with an explicit stable terminal
+classification: malformed AFCP traffic is `413`, while permanent Steam
+ticket/account rejection is `415`; neither is mislabeled as a requested close.
+Isolation drains and persists the exact completed trace before runtime handoff
+cleanup. A failed generation retired by automatic `ControlRetrying` is also
+drained and persisted even when its replacement later succeeds. Filenames include
+a stable content fingerprint, so two distinct same-generation/result-shaped
+failures coexist while a byte-identical repeat remains idempotent.
 
 ## Player-facing application integration
 
@@ -345,35 +385,43 @@ Retry perform local worker/handoff cleanup even when best-effort native leave
 fails, so a broken platform backend cannot trap the user in an active local
 session.
 
-A separate production-orchestration fixture constructs two
-`NativeOnlineCore` instances with independent fake Steam backends. A minimal
+A production-orchestration fixture constructs independent `NativeOnlineCore`
+instances with independent fake Steam backends. A minimal
 mirror fabric propagates only owner lobby state and per-user membership and
 declarations, never a shared global backend or two simultaneously held backend
-locks. An exact-generation, source-attributed bounded fake auth bus connects the
-cores, and both transport factories use one shared
-`FakeSteamTransportNetwork`. Split tests prove create/join, bidirectional Steam
-auth, one shared physical connection generation, identical manifest/config and
-frozen authenticated roster, both client-first and owner-first rematch intent,
-revision 2 declarations, a new `MatchId`, a new physical connection, completed
-old-transport retirement, and immunity of the replacement mapping to an old
-generation terminal-cleanup handoff.
+locks. All ticket, roster-auth, manifest, and activation frames use AFCP over one
+shared `FakeSteamTransportNetwork`; no parallel authentication-message port is
+involved. Pair fixtures prove create/join, direct link authentication, semantic
+ACK, one shared physical connection generation, manifest abort, identical
+manifest/config/frozen roster, rematch orderings, a new `MatchId` and connection,
+completed retirement, and stale-generation immunity. The four-core fixture proves
+that four Steam accounts use three star links, every participant verifies the
+other three accounts through direct or routed recipient-bound tickets, Ready
+declarations may arrive in any order, and exact participant generations survive
+Prepare/Accepted, Commit/CommitAccepted, receive arming, and
+Activate/Activated before endpoint handoff.
 
-That core fixture ends at the existing application handoff
-(`NativeOnlineEndpoint` plus committed config/roster). The application lifecycle
-fixture exercises the real listen/remote workers above the same handoff using
-its scripted runtime port. Combining those two fixture owners into one test is
-additional end-to-end test composition, not a missing shipping call site; the
-real `NativeOnlineRuntime` remains intentionally specialized to the sole Steam
-client owner.
+One combined fixture implements the production `NativeOnlineRuntimePort` for
+two independent fake-Steam `NativeOnlineCore` owners, then drives both through
+`NativeOnlineApplication` into the real listen/remote workers. It covers
+application-authored create, invite join, client-first Ready, Start, AFCP
+manifest/activation, endpoint handoff, countdown/fighting, client/owner return,
+leave, and zero surviving socket/ticket/auth resources. It never assigns
+`all_members_ready`, committed config/roster, authenticated mappings, or admitted
+endpoints. The real `NativeOnlineRuntime` remains intentionally specialized to
+the sole Steam client owner; the test-only adapter crosses that privacy boundary
+without adding a second production owner.
 
 ## Remaining release gates
 
-Release acceptance still requires two licensed Steam accounts on separate
-machines to validate private/friends create and invite, launch join, the
-NetworkingMessages ticket/manifest exchange, SDR endpoint admission, couch
-seats, countdown, suspend/disconnect/reconnect, host loss/no-contest, rematch,
-return, and clean shutdown. App ID 480 is development-only and is not shipping
-evidence. Record those results against the exact sealed manifest and archive
+Release acceptance still requires licensed Steam accounts on separate machines
+to validate private/friends create and invite, launch join, direct and routed
+AFCP ticket exchange, full-roster account validation, immutable manifest and
+activation barriers, SDR endpoint admission, couch seats, countdown,
+suspend/disconnect/reconnect, host loss/no-contest, rematch, return, and clean
+shutdown. Include a 3–4-account run for the socket-star/routed-auth boundary.
+The App ID 480 physical matrix remains pending, development-only, and never
+shipping evidence. Record results against the exact sealed manifest and archive
 hashes in [Steam release acceptance](steam-release-acceptance.md).
 
 The separate `afc-dedicated` all-bot executable is deployment/test-only. Running

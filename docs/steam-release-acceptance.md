@@ -25,6 +25,7 @@ stage, verification, archive, and preview-only SteamPipe contract.
 | macOS archive / SHA-256 | |
 | Rust toolchain | |
 | Protocol / simulation / RNG / replay / snapshot versions | |
+| Steam lobby schema / AFCP control version (`4` / `2`) | |
 | Compatibility build ID | |
 | Gameplay-content hash | |
 | Exact cross-platform `release-identity.json` | |
@@ -50,8 +51,10 @@ repository-required commands `cargo test` and `cargo run`.
 | `cargo check` and `cargo test` | |
 | Normal-exit `cargo run` | |
 | `python3 scripts/release.py self-test -v` | |
+| `python3 scripts/validate_spacewar_acceptance.py self-test -v` | |
 | Clean committed source passes `python3 scripts/release.py audit-source` | |
 | `cargo check --locked --no-default-features --features native,steam-net` and matching `cargo test` | |
+| AFCP hostile-codec and Steam-transport tests pass with exact `native,steam-net` features | |
 | Every player binary was built with `AFC_BUILD_ID=<label> AFC_STEAM_APP_ID=<real> cargo build --locked --release --no-default-features --features shipping --bin ffc-prototype` | |
 | Windows, SteamRT4 Linux, and universal macOS pass `release.py stage`, `verify`, and `archive` | |
 | Re-extracted archives pass full verification and `compare-identities` reports one exact identity and source commit | |
@@ -96,7 +99,9 @@ candidates unless a reviewed pre-stage signing integration is added.
 
 Use two licensed accounts on separate machines for every required host/client
 pair. At least one run must place the peers behind different consumer NATs; at
-least one must use a restrictive firewall or hotspot path.
+least one must use a restrictive firewall or hotspot path. The full-roster row
+additionally requires four licensed accounts in four concurrent Steam client/game
+processes; record only the anonymous roles `A` through `D`.
 
 | Run | Host OS/device | Client OS/device | Network path | Controllers | Pass/fail |
 | --- | --- | --- | --- | --- | --- |
@@ -105,12 +110,72 @@ least one must use a restrictive firewall or hotspot path.
 | Windows ↔ Steam Deck | | | | | |
 | macOS ↔ Windows | | | | | |
 | Cross-region | | | | | |
+| Four-account authority star | | | | | |
 
 For each row, capture the Steam Networking Sockets connection status showing a
 relay/SDR route. A direct public-IP path is not SDR acceptance. Store only the
 route class, region, quality counters, and timestamps—not addresses.
 
 ## End-to-end scenarios
+
+**App ID 480 physical status: pending.** No 12/12 cold-start result or completed
+bidirectional 20-cycle record is accepted by this document yet.
+
+For the App ID 480 development gate, run the Mac-host/Windows-guest and
+Windows-host/Mac-guest directions with both host-ready-first and guest-ready-first.
+Run three cold starts for each combination: all 12/12 must reach countdown within
+30 seconds. Then complete 20 lobby/start/return cycles in each host direction with
+zero surviving tickets, auth sessions, connections, endpoints, transports, or
+workers. App ID 480 is smoke evidence only; release approval repeats the gate with
+AFC's real App ID or Steam Playtest.
+
+Record the physical campaign as one JSON object per line and validate it against
+the exact sealed inputs:
+
+```text
+python3 scripts/validate_spacewar_acceptance.py validate private-record.jsonl \
+  --source-tag spacewar-test-8 \
+  --source-commit <40-lowercase-hex> \
+  --compatibility-build-id <32-lowercase-hex> \
+  --gameplay-content-hash <64-lowercase-hex> \
+  --macos-archive-sha256 <64-lowercase-hex> \
+  --windows-archive-sha256 <64-lowercase-hex>
+```
+
+The validator requires exactly 52 records: the 12 unique
+host-direction/Ready-order/pass cold starts and cycles 1–20 for each host
+direction. Every cold start must report `countdown_reached` in 1–30,000 ms; every
+cycle must report `returned_to_lobby`. Host and guest tag, commit, compatibility
+build ID, and gameplay-content hash must equal each other and the command-line
+candidate. Each platform's archive SHA-256 must remain identical when that
+platform changes between host and guest roles. Both peers must report zero
+`tickets`, `auth_sessions`, `connections`, `endpoints`, `transports`, and
+`workers` after the record's teardown barrier.
+
+The JSONL schema accepts only those fixed enums, hashes, coordinates, elapsed
+milliseconds, results, and numeric cleanup counters. Unknown fields are rejected;
+do not add account or machine labels, Steam IDs, addresses, persona names, ticket
+or payload bytes, or native diagnostic text. The script validates supplied
+evidence but neither collects nor generates physical results. Keep the record
+private with the release artifacts, and keep this document's status **pending**
+until operators attach an actual passing record.
+
+Each record has `schema_version: 1`, `steam_app_id: 480`, `kind`,
+`host_platform`, `guest_platform`, `result`, `host_cleanup`, and `guest_cleanup`.
+For each of `host_` and `guest_`, add `source_tag`, `source_commit`,
+`compatibility_build_id`, `gameplay_content_hash`, and `archive_sha256`.
+`cold_start` additionally has `ready_order`, `pass_index`, and `countdown_ms`;
+`cycle` instead has `cycle_index`. Platforms are `macos` / `windows`, Ready order
+is `host_first` / `guest_first`, and cleanup objects contain exactly the six
+zero-valued counters listed above.
+
+The `spacewar-test-*` Windows workflow first runs tests and an all-target check
+with the exact `native,steam-net,spacewar-dev` feature identity. It then verifies
+that the tag, checkout, and recorded source commit agree, compares the built and
+staged executable identities, and uploads a ZIP with a SHA-256 sidecar. Do not
+create the next test tag until the local gates below pass; do not treat the
+artifact as accepted until the 12/12 cold-start matrix and both 20-cycle runs
+above are recorded.
 
 Run each scenario from a cold process start unless the row says otherwise.
 
@@ -122,8 +187,13 @@ Run each scenario from a cold process start unless the row says otherwise.
 | Invite launch | Closed client accepts invite and boots through the exact lobby intent. | |
 | Steam process bootstrap | Outside-Steam release launch requests relaunch and exits immediately; the replacement depot process reaches the title without custom AFC environment variables. | |
 | `+connect_lobby` | Launch parameter is consumed once and reaches the same join flow. | |
-| Lobby ownership and manifest | The current Steam-confirmed owner at between-match commit is authority; all peers agree on immutable manifest/content hash before loading. | |
-| Authentication and ownership | Licensed accounts admit; wrong App ID, license failure, revocation, and banned account produce sanitized typed failures. | |
+| Steam network preparation | Relay access and Networking Sockets authentication expose independent readiness and either complete within 15 seconds or retain the lobby with an actionable Retry; one eligible early transient link failure uses one fresh generation after 500 ms. If that client-originated link exhausts its automatic retry, only the client acts on Retry and opens the replacement while the authority waits passively; lobby membership, invitation, and unrelated links survive. | |
+| Steam backend reconnect grace | In an active lobby, a transient Steam-client disconnect retains the lobby, auth/socket capabilities, and established gameplay endpoints for up to 10 seconds while blocking new admission and setup advancement. Recovery revalidates membership, metadata, and owner and resumes with setup/activation deadlines extended by the measured pause; expiry or failed revalidation leaves safely. | |
+| Socket-star and full-roster authentication | Four accounts use exactly three authority-star sockets. The authority has three secure links, each client has one, and every participant verifies the other three accounts through direct or recipient-bound routed tickets before Start enables. | |
+| Lobby ownership and manifest | The current Steam-confirmed owner is authority. One immutable transaction retains the exact participants and connection generations through `ManifestPrepare` / `Accepted`, `ManifestCommit` / `CommitAccepted`, receive arming, and `GameplayActivate` / `Activated`; all peers agree on the manifest/content hash before endpoint handoff or Loading. | |
+| Authentication and ownership | Licensed accounts admit; wrong App ID, license failure, revocation, and banned account produce sanitized typed failures. Forwarded tickets authenticate only their logical recipient and never grant an authority-side seat or client-to-client socket mapping. | |
+| Ticket size boundary | Every issued candidate ticket is non-empty and at most 1024 bytes. An injected larger ticket fails with a sanitized bounded error; AFCP v2 performs no deferred ticket chunking. | |
+| AFCP ACK and stale transaction behavior | A reliable local send alone never advances setup. Application acceptance produces the ACK, invalid/future-generation ACKs do not retire the outbox, and delayed known-transaction frames are ACKed and ignored without restarting Loading. | |
 | Couch seats | One peer owns at least two seats; loadouts/teams/readiness agree on both machines. | |
 | Match lifecycle | Countdown, prediction, rollback corrections, result confirmation, rematch, and return-to-lobby agree. | |
 | Stable controller assignment | Four controllers retain P1–P4 assignment across enumeration reorder and reconnect. | |
@@ -131,7 +201,7 @@ Run each scenario from a cold process start unless the row says otherwise.
 | Network loss and reclaim | Disconnect, cable loss, suspend/resume, and same-account reclaim stay within grace and perform bounded resync. | |
 | Grace expiry | Neutral substitution becomes deterministic bot takeover; stale identity cannot reclaim. | |
 | Listen host loss | Remaining client receives no-contest and no progression, stays in the same Steam lobby with the transferred owner/role, and can start a fresh authority only after Return-to-Lobby; no mid-match migration is offered. | |
-| Malformed/abusive peer | Only the offending peer is isolated; authority and other peer remain bounded. | |
+| Malformed/abusive peer | Only the offending peer is isolated; authority and other peer remain bounded. The pre-game archive records a privacy-safe terminal `413` for malformed AFCP or `415` for permanent ticket/account rejection before cleanup, without identity or payload data. | |
 | Overlay unavailable | Invite/binding-panel request shows the sanitized four-second dismissible notice without entering Error or blocking callback/input pumping. | |
 | Clean teardown | Rematch and final process exit close tickets, sessions, endpoints, workers, and replay/diagnostic writers once. | |
 

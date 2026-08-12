@@ -1,6 +1,6 @@
 # Steam Platform Foundation
 
-- Status: **implemented and native-application wired; two-account release validation pending**
+- Status: **implemented and native-application wired; physical Steam validation pending**
 - Binding: `steamworks = 0.12.2` (exact optional pin)
 - Feature: `steam-net`
 - Source: `src/steam_platform.rs`
@@ -60,7 +60,7 @@ and four total local seats.
 
 | Scope | Key | Value |
 | --- | --- | --- |
-| Lobby | `afc_schema` | Decimal schema version (`2`) |
+| Lobby | `afc_schema` | Decimal schema version (`4`) |
 | Lobby | `afc_build` | 16-byte AFC build ID as 32 lowercase hex digits |
 | Lobby | `afc_protocol` | Non-zero decimal protocol version |
 | Lobby | `afc_sim` | Non-zero decimal simulation version |
@@ -164,6 +164,19 @@ this sequence for every transport peer:
 6. Consume the admission once and map the non-zero Steam ID to
    `AuthenticatedUserId`; only then may session code assign a `PeerId`/seats.
 
+That sequence first authenticates each direct authority/client socket. Schema 4
+also requires full-roster account authentication without changing the physical
+authority-star topology. `RosterPrepare` fixes a non-zero auth epoch and canonical
+account-set hash. Each client issues a separate one-use ticket for every other
+client, bound to that logical recipient. AFCP v2 carries it to the authority as a
+`RoutedAuthTicket`; the authority verifies the outer hop and membership and
+forwards the same logical issuer/recipient payload opaquely over the recipient's
+existing socket. Only that recipient calls `BeginAuthSession`. The matching
+`RoutedAuthAccepted` returns through the authority, and `RosterAuthComplete` is
+valid only after every participant has validated all `N-1` remote accounts.
+Forwarding never grants the authority an extra seat or an authentication mapping
+for a ticket addressed to another client.
+
 `m_OwnerSteamID` is retained as `license_owner_user`, not interpreted as the
 lobby authority. It names the account that owns the app license and may differ
 from the ticket provider when the game is borrowed through Steam Families. The
@@ -184,8 +197,11 @@ timeout, fault, and drop cancel/end every retained handle/session.
 
 The pinned wrapper allocates a 1024-byte ticket buffer. AFC rejects an empty or
 larger ticket instead of truncating or silently accepting it. Valve notes that
-unusually DLC-heavy applications can require a larger buffer; changing that limit
-requires a reviewed binding update and a boundary test.
+unusually DLC-heavy applications can require a larger buffer. AFCP v2 deliberately
+does not implement ticket chunking: chunking or a larger allocation remains
+deferred until a reviewed binding/protocol update adds hostile-boundary tests.
+Release evidence must therefore confirm that tickets issued for the candidate App
+ID remain within 1024 bytes.
 
 Ticket bytes are secret-bearing owned values. Neither backend-issued nor
 platform-issued tickets implement production cloning or byte-revealing `Debug`;
@@ -263,12 +279,36 @@ production service. `dedicated_hosted_sdr_support()` therefore returns
 from explicit App ID configuration and retains sole callback ownership.
 `drive_native_online_application` pumps it once per application frame.
 `OnlineLobbyCoordinator` drains the typed platform events, while the bounded
-NetworkingMessages bootstrap transmits tickets and the canonical manifest only
-after the matching platform gate. `NativeOnlineApplication` moves admitted
+AFCP control stream on the quarantined Networking Sockets connection transmits
+tickets and the schema-4/AFCP-v2 setup only after the matching platform gate.
+Direct links become secure first, then recipient-bound routed tickets establish
+full-roster account authentication. The immutable manifest transaction requires
+`ManifestAccepted`, `ManifestCommitAccepted`, and the final
+`GameplayActivate` / `GameplayActivated` barrier. Clients remain receive-armed
+after their receipt and promote only after the authority returns the reliable
+direction-aware `GameplayActivated` final release.
+`NativeOnlineApplication` moves admitted
 endpoints into `ListenOnlineMatch` or `RemoteOnlineClient` and forwards auth
 revocation/platform-ban events to the authority. The custom transport is created
 with `SteamTransport::from_steam_platform`; the stock Lightyear automatic Steam
 acceptance path is not used.
+
+Relay access and Networking Sockets authentication initialization start together
+and expose independent bounded readiness states. Online preparation and each
+connection/authentication setup have a 15-second deadline. Re-entering Online may
+retry terminal initialization failure; an early transient connection failure gets
+one replacement generation after 500 ms only while at least five seconds remain.
+Otherwise the lobby and invitation remain intact for an explicit peer-scoped
+Retry. When a client-originated physical link exhausts that automatic attempt,
+only the client opens the manual replacement; the authority waits for the inbound
+generation and clears its attributed failure after authentication.
+
+After lobby entry, a Steam backend disconnect starts a 10-second grace rather
+than tearing down immediately. Existing lobby, ticket/session, socket, and
+gameplay capabilities remain installed while new admission and setup advancement
+are frozen. Recovery revalidates membership, metadata, and owner and extends
+bounded setup/activation deadlines by the outage duration. Failed revalidation or
+grace expiry leaves the lobby safely.
 
 Automated fake-platform and fake-transport tests cover the guarded composition,
 but they cannot validate Valve's live services. The protected native candidate

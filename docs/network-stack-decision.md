@@ -41,12 +41,17 @@ lightyear = { version = "=0.26.4", default-features = false, optional = true, fe
 ```
 
 The native network feature enables the optional Lightyear dependency. A separate
-`steam-net` feature extends that native set with `lightyear/steam` and the exact
-optional `steamworks = 0.12.2` client binding used by the explicit
+`steam-net` feature extends that native set with the exact optional
+`steamworks = 0.12.2` client binding used by the explicit
 [Steam platform foundation](steam-platform-foundation.md) and
 [auth-gated gameplay adapter](steam-gameplay-transport.md). Steam support must not
 become a default feature, and neither Lightyear nor Steam dependencies may enter
 the browser build or the simulation crate.
+
+The production path deliberately does not enable Lightyear's `steam` feature or
+Steamworks `raw-bindings`. AFC uses the safe Steam Networking Sockets API for one
+explicit control/gameplay connection and keeps Lightyear pinned for the UDP and
+crossbeam adapters only.
 
 Do not enable these Lightyear features for the accepted integration:
 

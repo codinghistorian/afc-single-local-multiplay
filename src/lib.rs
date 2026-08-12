@@ -93,6 +93,7 @@ pub mod snapshot_ecs;
 mod specials;
 pub mod state_delta;
 pub mod state_sync;
+pub mod steam_control;
 pub mod steam_platform;
 pub mod steam_transport;
 mod styles;

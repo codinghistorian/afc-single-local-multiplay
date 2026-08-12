@@ -34,7 +34,7 @@ perf = ["dep:libc"]
 perf-alloc = ["perf"]
 trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
-steam-net = ["native-net", "lightyear/steam", "dep:steamworks"]
+steam-net = ["native-net", "dep:steamworks"]
 # Compile-time opt-in for private debug builds that use Valve's shared
 # Spacewar App ID. build.rs rejects this feature outside guarded App ID 480
 # development builds, so it cannot be carried into a shipping client.
@@ -88,7 +88,7 @@ lightyear = { version = "=0.26.4", default-features = false, optional = true, fe
     "netcode",
     "crossbeam",
 ] }
-steamworks = { version = "=0.12.2", optional = true, default-features = false, features = ["raw-bindings"] }
+steamworks = { version = "=0.12.2", optional = true, default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -98,6 +98,10 @@ wasm-bindgen = "0.2"
 # Bevy 0.18.1 forgets an owned render-pass diagnostic label every frame.
 # Keep this exact-version backport until the upstream guard is fixed.
 bevy_render = { path = "vendor/bevy_render" }
+# Steamworks 0.12.2 predates Valve's network-identity auth failure in its
+# safe callback enum even though the pinned SDK bindings already expose it.
+# Keep the dependency version pinned and carry the minimal safe-wrapper fix.
+steamworks = { path = "vendor/steamworks" }
 
 [profile.dev]
 opt-level = 1

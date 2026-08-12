@@ -85,13 +85,16 @@ writes into the repository or process working directory. Managed/test deployment
 may instead call `ListenOnlineMatch::spawn_with_diagnostics_root` with an explicit
 absolute path.
 
-The root contains `replays/`, `incidents/`, and `operational/`. On Unix, managed
-directories are mode `0700` and files are mode `0600`. Publication writes a unique
-temporary file, flushes it, hard-links it into its final protocol-ID filename
-without replacement, removes the temporary file, and fsyncs the directory. An
-identical pre-existing file is idempotent; the same identity with different bytes
-fails closed. Persistence errors increment numeric status counters and never
-change, clear, or replace a canonical result.
+The root contains `replays/`, `incidents/`, `operational/`, and
+`steam-pregame/`. On Unix, managed directories are mode `0700` and files are mode
+`0600`. Publication writes a unique temporary file, flushes it, hard-links it into
+its final protocol-ID filename without replacement, removes the temporary file,
+and fsyncs the directory. An identical pre-existing file is idempotent; the same
+identity with different bytes fails closed. Steam pre-game filenames additionally
+include a stable content fingerprint, so two distinct failures with the same
+connection-generation/event/result shape cannot overwrite or alias one another.
+Persistence errors increment numeric status counters and never change, clear, or
+replace a canonical result.
 
 The authority loop performs no filesystem I/O. It sends immutable jobs to a
 four-entry critical queue and a one-entry latest-periodic queue owned by
@@ -110,10 +113,22 @@ values:
 | Replay (`.afcr`) | 64 MiB | 32 | 512 MiB |
 | Fatal incident (`.afci`) | 2 MiB | 8 | 16 MiB |
 | Operational snapshot (`.afco`) | 64 KiB | 16 | 1 MiB |
+| Steam pre-game trace (`.afcs`) | 64 KiB | 16 | 1 MiB |
 
 Managed directory scans stop after 128 matching entries and report a bounded
 failure rather than scanning attacker-controlled storage without limit. The file
 that was just published is never selected for retention pruning.
+
+Each Steam physical connection generation retains at most 64 privacy-safe setup
+events: ordinal, connection generation, bounded setup phase, elapsed milliseconds,
+bounded relay/auth availability, a stable numeric AFC result, and the numeric
+native end reason. There are no identity, address, persona, ticket, payload, or
+Valve free-form diagnostic fields. Peer-scoped malformed AFCP isolation closes
+with stable result `413`; permanent ticket/account rejection closes with `415`.
+The coordinator drains and persists that trace during isolation before runtime
+handoff cleanup. It also drains a failed generation at `ControlRetrying`, so a
+successful replacement does not erase the recovered failure evidence. Requested
+cleanup is not classified or stored as a pre-game failure.
 
 ## Required external operations view
 
