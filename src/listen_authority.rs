@@ -2237,6 +2237,34 @@ mod tests {
         ))
     }
 
+    fn wait_for_queued_diagnostics(
+        authority: &ListenAuthorityWorker,
+        expected_replays: u64,
+        expected_incidents: u64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let diagnostics = authority.metrics.diagnostics.snapshot();
+            let persisted = diagnostics
+                .replays_persisted
+                .saturating_add(diagnostics.incidents_persisted)
+                .saturating_add(diagnostics.operational_snapshots_persisted);
+            if diagnostics.replays_persisted >= expected_replays
+                && diagnostics.incidents_persisted >= expected_incidents
+                && diagnostics.operational_snapshots_persisted >= 1
+                && persisted >= diagnostics.jobs_queued
+            {
+                assert_eq!(diagnostics.persistence_failures, 0);
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "queued diagnostics did not finish after the bounded authority join: {diagnostics:?}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn moving_input(seat: u8, movement_x: i8) -> RemoteLocalInputBatch {
         RemoteLocalInputBatch::new(&[RemoteLocalInputSample {
             seat: SeatId::new(seat).unwrap(),
@@ -2468,6 +2496,7 @@ mod tests {
         let canonical_result = harness.listen.authority.result().expect("authority result");
         let terminal = harness.listen.authority.shutdown().unwrap();
         assert_eq!(terminal.status.result, Some(canonical_result));
+        wait_for_queued_diagnostics(&harness.listen.authority, 1, 0);
 
         let replay_path = fs::read_dir(root.join("replays"))
             .unwrap()
@@ -2510,6 +2539,7 @@ mod tests {
             terminal.exit,
             ListenAuthorityExit::CommandChannelDisconnected
         );
+        wait_for_queued_diagnostics(&listen.authority, 0, 1);
         let incident_path = fs::read_dir(root.join("incidents"))
             .unwrap()
             .flatten()
