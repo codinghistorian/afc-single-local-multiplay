@@ -86,6 +86,13 @@ remains
 `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`,
 and BF001 tick 1 remains `cf49d1dde67d32a9`.
 
+The supplied menu-background and character-portrait integration replaces only
+the frame-driven 3D selector preview with a five-character 2D grid. The
+production-headless semantic fixture gate remains unchanged, along with the
+compiled gameplay digest and BF001 tick-1 hash above. Stable-ID relationships,
+canonical events, and all fixed-tick gameplay paths remain outside the selector
+presentation world.
+
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
 `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629`

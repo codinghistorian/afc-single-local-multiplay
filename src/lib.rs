@@ -506,7 +506,6 @@ pub fn build_app() -> App {
                 user_mode::sync_user_mode_menu_music,
                 user_mode::sync_user_mode_battle_music,
                 user_mode::sync_dev_mode_music,
-                user_mode::sync_user_mode_preview_scene,
                 game_state::sync_setup_character_scene_models,
                 game_state::tick_announcements,
             )
@@ -755,10 +754,12 @@ pub fn build_app() -> App {
                     ))]
                     map_editor::update_map_editor_ui.run_if(user_mode::gameplay_scene_loaded),
                     (
-                        user_mode::rotate_user_mode_preview,
                         user_mode::update_user_mode_selection_previews,
+                        user_mode::update_user_mode_character_select_background,
                         user_mode::update_user_mode_main_menu_backgrounds,
                         user_mode::update_user_mode_ui,
+                        user_mode::update_user_mode_character_select_cards,
+                        user_mode::update_user_mode_character_profile,
                         user_mode::update_user_mode_button_styles,
                         native_online_app::update_native_online_ui,
                         native_online_app::update_native_online_button_styles,
