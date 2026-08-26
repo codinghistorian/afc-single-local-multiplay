@@ -30,7 +30,7 @@ The identity column uses these terms:
 
 ## Audit result
 
-- All 52 production fixed systems are listed below.
+- All 57 production fixed systems are listed below.
 - No fixed gameplay system reads variable `Time::delta_secs()`, wall time, or
   render time. Gameplay lifetimes and windows use `TickTimer`, `ElapsedTicks`,
   `SimTick`, or integer tick counters.
@@ -54,7 +54,8 @@ The identity column uses these terms:
   traversal and tie-breaks are by `FighterId` where ordering can change results.
 - Every damaging or status-producing overlap is frozen into one bounded
   `ContactBuffer`. Dynamic sources use generation-checked `SimEntityId`; persistent
-  hazards use bounds-checked `(arena index, hazard index)` identity.
+  hazards use bounds-checked `(arena index, hazard index)` identity, and arena
+  devices use immutable `(arena index, device index)` identity.
 
 Simulation version 4 additionally fixes the authoritative vector-math boundary:
 
@@ -88,6 +89,15 @@ held-edge memory, and manual-unlock count. Floating-crosshair transforms,
 materials, opacity, smoothing, and pulse are presentation-only and cannot feed
 the simulation. Protocol 1 and replay schema 1 remain unchanged.
 
+Simulation version 7 retires shared specials at the authoritative input gate
+while keeping their legacy wire bit decodable. Simulation version 8 adds final
+Champion's Court/Split Causeway collision and two Split gates. Eligibility and
+interaction run in the Input phase, tie by `FighterId`, and emit a stable
+`ArenaDeviceToggled` fact; integer gate motion runs before fighter movement.
+Snapshot schema 4 owns the target/progress fields in an 80-byte bounded arena
+payload. Exact static tables and all 19 dynamic gate poses are fingerprinted;
+presentation prompts, mesh transforms, and audio cannot feed that state.
+
 Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 
 - `FighterStats::hud_flash` is written/decayed for HUD feedback but is never read
@@ -112,6 +122,7 @@ Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 | TickStart | `simulation::advance_sim_tick` | One integer `SimTick` advance | none | No query or commands | PASS |
 | TickStart | `sim_event::begin_sim_event_tick` | Uses current `SimTick` | none | Resets one bounded buffer | PASS |
 | TickStart | `arena::sync_active_arena_from_match_state` | No timer | none | Single resource copy | PASS |
+| TickStart | `arena::sync_split_causeway_door_state` | Match identity and phase only | stable authored identity | Resets one fixed two-device array when arena/match identity changes; no ECS traversal | PASS |
 | TickStart | `ecs_identity::reclaim_orphaned_sim_entities` | No timer | boundary | Scans `SimEntityKind::ALL` and deterministic pool slots; releases exact stable generation | PASS |
 | TickStart | `interpolation::begin_sim_pose_tick` | No timer | boundary | Per-fighter field-local update; query order cannot affect another fighter | PASS |
 | Match | `game_state::tick_hitstop` | Integer `remaining_ticks` saturating decrement | none | Single resource | PASS |
@@ -120,6 +131,8 @@ Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 | Input | `fighter::consume_local_player_input` | Tick-addressed `SimTick` drain | none | Per-seat frame is cached once, so duplicate seat reads do not depend on query order | PASS |
 | Input | `bot::bot_input` | All brain windows are `TickTimer`; choices are keyed by seed/fighter/tick | stable | Equal target distance breaks by `FighterId`; special/item sources sort by `SimEntityId`; bot mutations are fighter-local | FIXED |
 | Input | `fighter::apply_drunk_input_modifier` | No timer mutation | none | Per-fighter input inversion | PASS |
+| Input | `arena::update_split_causeway_door_eligibility` | No countdown | stable | Candidate pose/action is canonical; distance ties break by `FighterId`; result is a fixed authored-device array | FIXED |
+| Input | `arena::handle_split_causeway_door_inputs` | Current fixed tick only | stable | Requests are consumed and committed in `FighterId::ALL` order; event identity is stable arena/device indices | FIXED |
 | Action | `fighter::apply_aim_assist` | No timer | stable | Equal distance now breaks by target `FighterId`, independent of query order | FIXED |
 | Action | `items::handle_item_inputs` | Item lockouts/lifetimes are tick based | stable | Fighters traverse `FighterId::ALL`; exact-distance pickup breaks by item `SimEntityId`; lower fighter ID wins a contested same-tick claim | PASS |
 | Action | `specials::handle_special_inputs` | Cooldown/lifetime converted to ticks | stable | Fighters traverse `FighterId::ALL`; stable pool allocation fails closed on overflow | PASS |
@@ -131,6 +144,7 @@ Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 | Action | `combat::spawn_attack_hitboxes` | Timeline is integer milliseconds derived from `ElapsedTicks`; spawned lifetime is `TickTimer` | stable | Fighter/event traversal is canonical; authoritative spawns use stable pools; scene spawns are presentation only | PASS (mixed P) |
 | Action | `items::spawn_item_hitboxes` | Startup compares tick-derived elapsed; hitbox lifetime is `TickTimer` | stable | Fighters traverse `FighterId::ALL`; hitboxes allocate from the stable pool | PASS |
 | Movement | `fighter::apply_fighter_movement` | Gameplay timers tick exactly once; integration uses constant `SIM_DT_SECONDS` | stable | Fighter motion is field-local; surface overlap reduction is order-insensitive; dust/cues are presentation commands | PASS (mixed P) |
+| Movement | `arena::advance_split_causeway_doors` | One saturating integer progress step per fixed tick | stable authored identity | Two devices traverse by index; fighter overlap is an order-insensitive `any` predicate over canonical pose/state | FIXED |
 | Movement | `arena::update_arena_pipe_transits` | Dwell, cooldown, and transit use integer ticks | stable | State is fixed array indexed by fighter ID; exit occupancy is an order-insensitive snapshot predicate | PASS |
 | Movement | `fighter::separate_fighters` | No countdown | boundary | Snapshots sort by `FighterId`; pairs are canonical and correction reduction follows that pair order | FIXED |
 | Combat | `combat::begin_contact_collection` | No timer; starts one tick-addressed collection epoch | none | Clears logical length/outcomes of one preallocated bounded buffer; cumulative overflow diagnostics are retained | FIXED |
@@ -213,7 +227,9 @@ simulation version 4 preserves it while changing the deterministic math contract
 Simulation version 5 preserves both contact arbitration and the v4 math contract
 while changing only the versioned local aim/grab interpretation described above.
 Simulation version 6 preserves those rules while adding the stable-ID manual-aim
-contract described above.
+contract described above. Simulation version 7 preserves them while disabling
+shared-special requests, and simulation version 8 preserves them while adding
+the fixed-tick arena-device contract described above.
 
 Focused fixtures cover fighter trades/reaction/guard/grab permutations, reversed
 generic-special, Bee, Chick, Penguin, and item multi-target sources, cannon

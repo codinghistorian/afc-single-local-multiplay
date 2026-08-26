@@ -16,11 +16,11 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"AFCS";
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 3;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 4;
 pub const SNAPSHOT_QUANTIZATION_UNITS: u32 = 4_096;
 
 pub const DYNAMIC_PAYLOAD_BYTES: usize = 128;
-pub const ARENA_PAYLOAD_BYTES: usize = 64;
+pub const ARENA_PAYLOAD_BYTES: usize = 80;
 pub const MAX_POOL_CAPACITY: usize = 1_024;
 pub const MAX_TOTAL_POOL_SLOTS: usize = 4_096;
 pub const MAX_DYNAMIC_OBJECTS: usize = 2_048;
@@ -42,7 +42,7 @@ pub const SIM_ENTITY_KIND_COUNT: usize = SimEntityKind::ALL.len();
 /// and decoding never allocates or follows an attacker-controlled length.
 pub const FIGHTER_ROLLBACK_EXTENSION_BYTES: usize = 266;
 
-/// Stable schema-v3 discriminant counts. The ECS bridge must map the gameplay
+/// Stable schema-v3-and-later discriminant counts. The ECS bridge must map the gameplay
 /// enums explicitly rather than relying on Rust's unspecified enum layout.
 pub const FIGHTER_ACTION_CODE_COUNT: u16 = 36;
 pub const TECHNIQUE_CODE_COUNT: u16 = 95;

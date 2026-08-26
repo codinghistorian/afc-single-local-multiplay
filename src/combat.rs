@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use bevy::ecs::system::SystemParam;
+use bevy::ecs::system::{Command, SystemParam};
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
@@ -100,6 +100,41 @@ const ACTIVE_PENGUIN_SKILL_SNAPSHOT_CAPACITY: usize =
     SIM_ENTITY_POOL_CAPACITIES[SimEntityKind::PenguinSkill.code() as usize] as usize;
 const ACTIVE_CHICK_SKILL_SNAPSHOT_CAPACITY: usize =
     SIM_ENTITY_POOL_CAPACITIES[SimEntityKind::ChickSkill.code() as usize] as usize;
+
+// Bevy retains each system's type-erased command buffer after applying it, but
+// grows that buffer lazily when a later tick queues more work than any earlier
+// tick. Combat timelines are state-dependent, so relying on an arbitrary match
+// warmup to encounter their high-water mark would allow allocator work back
+// into an otherwise steady fixed step. Queue this inert command once per
+// command-producing combat system. The pinned Bevy command queue reserves for
+// the command's complete type-erased representation and retains that capacity
+// after application. 64 KiB is comfortably above the simultaneous command
+// payload bounded by the canonical entity-pool capacities.
+const CANONICAL_COMBAT_COMMAND_RESERVE_BYTES: usize = 64 * 1024;
+
+struct CanonicalCombatCommandReserve {
+    _padding: [u8; CANONICAL_COMBAT_COMMAND_RESERVE_BYTES],
+}
+
+impl Default for CanonicalCombatCommandReserve {
+    fn default() -> Self {
+        Self {
+            _padding: [0; CANONICAL_COMBAT_COMMAND_RESERVE_BYTES],
+        }
+    }
+}
+
+impl Command for CanonicalCombatCommandReserve {
+    fn apply(self, _world: &mut World) {}
+}
+
+fn reserve_canonical_combat_commands_once(commands: &mut Commands, reserved: &mut bool) {
+    if *reserved {
+        return;
+    }
+    commands.queue(CanonicalCombatCommandReserve::default());
+    *reserved = true;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FixedCollectionOverflow {
@@ -1557,6 +1592,7 @@ fn spawn_canonical_hitbox(
 
 pub fn spawn_attack_hitboxes(
     mut commands: Commands,
+    mut command_capacity_reserved: Local<bool>,
     mut identities: ResMut<SimulationIdentityAllocator>,
     mut skill_presentations: ParamSet<(
         BeePresentationEmitter,
@@ -1594,6 +1630,7 @@ pub fn spawn_attack_hitboxes(
         >,
     )>,
 ) {
+    reserve_canonical_combat_commands_once(&mut commands, &mut command_capacity_reserved);
     if hitstop.active() {
         return;
     }
@@ -3673,6 +3710,7 @@ fn refresh_hitbox_position(
 pub fn update_hitboxes(
     active_arena: Res<ActiveArena>,
     mut commands: Commands,
+    mut command_capacity_reserved: Local<bool>,
     mut identities: ResMut<SimulationIdentityAllocator>,
     mut presentation: CombatPresentationEmitter,
     hitstop: Res<Hitstop>,
@@ -3682,6 +3720,7 @@ pub fn update_hitboxes(
         (With<Fighter>, Without<Hitbox>),
     >,
 ) {
+    reserve_canonical_combat_commands_once(&mut commands, &mut command_capacity_reserved);
     if hitstop.active() {
         return;
     }

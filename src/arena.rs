@@ -23,8 +23,9 @@ use crate::arena_barriers::ArenaBarrierDefinition;
 use crate::arena_defs::{
     ActiveArena, ArenaBackgroundDefinition, ArenaDefinition, ArenaGroundShape,
     ArenaHazardDefinition, ArenaHazardKind, ArenaPipePairDefinition, ArenaVisualTheme,
-    CRANK_PIPE_VISUAL_SCALE, CRANK_YARD_ARENA_INDEX, PlatformDefinition,
-    TRAINING_GROUND_ARENA_INDEX, arena_definitions,
+    CHAMPIONS_COURT_ARENA_INDEX, CRANK_PIPE_VISUAL_SCALE, CRANK_YARD_ARENA_INDEX,
+    PlatformDefinition, SPLIT_CAUSEWAY_ARENA_INDEX, TRAINING_GROUND_ARENA_INDEX, arena_definitions,
+    arena_lighting_profile,
 };
 use crate::arena_prop_colliders::{
     LocalPropBarrier, PropBarrierBehavior, WorldPropBarrier, prop_collision_profile,
@@ -35,8 +36,8 @@ use crate::combat::{
     ImpactSource, NEUTRAL_IMPACT_OWNER_ID, can_receive_impact, impact_profile,
 };
 use crate::components::{
-    Fighter, FighterAction, FighterActionState, FighterInput, FighterMotor, FighterStats,
-    SimPosition,
+    ControlAction, Controller, Fighter, FighterAction, FighterActionState, FighterInput,
+    FighterMotor, FighterStats, LocalInputAssignment, PlayerKeyBindings, SimPosition,
 };
 #[cfg(test)]
 use crate::constants::ARENA_RADIUS;
@@ -48,6 +49,7 @@ use crate::contact_arbitration::{
     ContactBuffer, ContactFlags, ContactOutcomeKind, ContactPhase, ContactRecord, ContactSourceId,
     ContactSourceKind,
 };
+use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
 use crate::determinism::{
     DEFAULT_F32_QUANTIZATION, FighterId, SimEntityId, SimEntityKind, dequantize_f32, quantize_f32,
 };
@@ -57,11 +59,12 @@ use crate::ecs_identity::{
 };
 use crate::effects::{EffectAssets, spawn_burning_fighter_effect, spawn_machine_scratch};
 use crate::feel::CombatFeelTuning;
-use crate::game_state::{Hitstop, MatchState};
+use crate::game_state::{GameplayPauseOwners, Hitstop, MatchState};
 use crate::reactions::ReactionFamilyId;
 use crate::rollback::RollbackEventDiscard;
 use crate::sim_event::{
-    EventEmitError, MAX_SIM_EVENTS_PER_TICK, SIM_EVENT_HISTORY_TICKS, SimEventId,
+    EventEmitError, MAX_SIM_EVENTS_PER_TICK, SIM_EVENT_HISTORY_TICKS, SimEventId, SimEventKind,
+    SimEventSource, TickEventBuffer,
 };
 use crate::simulation::{
     ElapsedTicks, SIM_DT_SECONDS, SimTick, TickTimer, milliseconds_to_ticks_ceil,
@@ -71,6 +74,7 @@ use crate::snapshot::{
     ARENA_PAYLOAD_BYTES, ArenaRuntimeSnapshot, FighterPipeSnapshot, QuantizedVec3,
 };
 use crate::techniques::DamageElement;
+use crate::user_mode::LocalControllerReconnect;
 
 const ARENA_HAZARD_PULSE_DAMAGE: f32 = 7.0;
 const ARENA_HAZARD_PULSE_KNOCKBACK: f32 = 5.8;
@@ -100,7 +104,6 @@ const MINI_ARENA_ASSET_ROOT: &str = "arena/kenney_mini_arena";
 const ARENA_KIT_ASSET_ROOT: &str = "arena/kits";
 const MINI_ARENA_FLOOR_SPACING: f32 = 1.6;
 const MINI_ARENA_FLOOR_SCALE: f32 = 1.62;
-const CHAMPIONS_COURT_ARENA_INDEX: usize = 0;
 const VENT_SPIRAL_ARENA_INDEX: usize = 4;
 const POWDER_KEG_ARENA_INDEX: usize = 9;
 const CRANK_SAW_VISUAL_Y: f32 = ARENA_TOP_Y + 0.72;
@@ -114,6 +117,7 @@ const CHAMPIONS_COURT_RON_PATH: &str = "arts/champions_court.ron";
     not(feature = "shipping"),
     not(target_arch = "wasm32")
 ))]
+const SPLIT_CAUSEWAY_RON_PATH: &str = "assets/maps/split_causeway.ron";
 const TRAINING_GROUND_RON_PATH: &str = "assets/maps/training_ground.ron";
 #[cfg(not(all(
     feature = "dev-hot-reload",
@@ -126,15 +130,30 @@ const EMBEDDED_CHAMPIONS_COURT_RON: &str = include_str!("../arts/champions_court
     not(feature = "shipping"),
     not(target_arch = "wasm32")
 )))]
+const EMBEDDED_SPLIT_CAUSEWAY_RON: &str = include_str!("../assets/maps/split_causeway.ron");
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
 const EMBEDDED_TRAINING_GROUND_RON: &str = include_str!("../assets/maps/training_ground.ron");
 const CHAMPIONS_COURT_LIGHT_SCALE: f32 = 1_000.0;
-const CHAMPIONS_COURT_MAP_LIGHTS_ENABLED: bool = false;
 const PLATFORM_SIDE_COLLISION_MIN_TOP_Y: f32 = ARENA_TOP_Y + 0.08;
 const ARENA_GROUND_DEPTH_BIAS_BASE: f32 = -2_048.0;
 const ARENA_GROUND_DEPTH_BIAS_STEP: f32 = 128.0;
 const ARENA_PLATFORM_DEPTH_BIAS_BASE: f32 = -768.0;
 const ARENA_PLATFORM_DEPTH_BIAS_STEP: f32 = 64.0;
 const ARENA_PROP_SURFACE_CLEARANCE: f32 = 0.012;
+const SPLIT_CAUSEWAY_DOOR_COUNT: usize = 2;
+const SPLIT_CAUSEWAY_DOOR_SCALE: f32 = 1.12;
+const SPLIT_CAUSEWAY_DOOR_HINGE_Z: f32 = -0.56;
+const SPLIT_CAUSEWAY_DOOR_LENGTH: f32 = 1.12;
+const SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS: u8 = milliseconds_to_ticks_ceil(300) as u8;
+const SPLIT_CAUSEWAY_DOOR_INTERACTION_RADIUS: f32 = 1.60;
+const SPLIT_CAUSEWAY_DOOR_INTERACTION_HEIGHT: f32 = 1.25;
+const SPLIT_CAUSEWAY_DOOR_FACING_DOT: f32 = 0.60;
+const SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH: f32 = 168.0;
+const SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT: f32 = 36.0;
 pub(crate) const ARENA_PREVIEW_RENDER_LAYER: usize = 21;
 
 #[derive(Component)]
@@ -169,6 +188,135 @@ pub fn sync_active_arena_from_match_state(
     if active_arena.index() != state.arena_index {
         active_arena.select(state.arena_index);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SplitCausewayDoorGeometry {
+    cage_center: Vec2,
+    cage_yaw: f32,
+    hinge_x: f32,
+    open_angle: f32,
+}
+
+const SPLIT_CAUSEWAY_DOOR_GEOMETRY: [SplitCausewayDoorGeometry; SPLIT_CAUSEWAY_DOOR_COUNT] = [
+    SplitCausewayDoorGeometry {
+        cage_center: Vec2::new(-7.15, -1.45),
+        cage_yaw: 2.0 * PI / 180.0,
+        hinge_x: 0.78,
+        open_angle: -PI * 0.5,
+    },
+    SplitCausewayDoorGeometry {
+        cage_center: Vec2::new(7.15, -1.45),
+        cage_yaw: -2.0 * PI / 180.0,
+        hinge_x: -0.78,
+        open_angle: PI * 0.5,
+    },
+];
+
+// Frozen from the authored 18-tick smoothstep swing on the integration
+// reference toolchain. Canonical collision indexes these exact world-space
+// records and bases; presentation alone evaluates trigonometry at render time.
+const SPLIT_CAUSEWAY_DOOR_LEFT_X_BITS: [u32; 19] = [
+    0xc0c8dca2, 0xc0c92490, 0xc0c9f15d, 0xc0cb31f8, 0xc0ccd367, 0xc0cebfa0, 0xc0d0dd20, 0xc0d30fa1,
+    0xc0d539dd, 0xc0d74012, 0xc0d90acf, 0xc0da8976, 0xc0dbb3dd, 0xc0dc8ac3, 0xc0dd16f6, 0xc0dd674d,
+    0xc0dd8dbc, 0xc0dd9bd3, 0xc0dd9ed6,
+];
+const SPLIT_CAUSEWAY_DOOR_Z_BITS: [u32; 19] = [
+    0xbfbd80a4, 0xbfbd789c, 0xbfbd77d1, 0xbfbdb841, 0xbfbe85a4, 0xbfc02e20, 0xbfc2f45c, 0xbfc7038a,
+    0xbfcc66de, 0xbfd3055d, 0xbfdaa2ef, 0xbfe2e640, 0xbfeb624e, 0xbff3a17a, 0xbffb2ff4, 0xc000d1a7,
+    0xc0034f0d, 0xc004e7ae, 0xc005777a,
+];
+const SPLIT_CAUSEWAY_DOOR_LEFT_YAW_BITS: [u32; 19] = [
+    0x3d0efa35, 0x3cab3846, 0xbc9b555c, 0xbda6ce96, 0xbe273f8c, 0xbe85d216, 0xbebea2f3, 0xbefc6ab7,
+    0xbf1ec0e2, 0xbf402038, 0xbf617f8f, 0xbf810589, 0xbf90777b, 0xbf9eabb1, 0xbfab3845, 0xbfb5b34e,
+    0xbfbdb2e2, 0xbfc2cd19, 0xbfc49809,
+];
+const SPLIT_CAUSEWAY_DOOR_COS_BITS: [u32; 19] = [
+    0x3f7fd814, 0x3f7ff1b0, 0x3f7ff438, 0x3f7f26be, 0x3f7c97d1, 0x3f774e38, 0x3f6e7574, 0x3f6183ba,
+    0x3f50555d, 0x3f3b39ff, 0x3f22f141, 0x3f0897fb, 0x3edb1395, 0x3ea67b79, 0x3e6c9483, 0x3e1a4d5c,
+    0x3db5926e, 0x3d4843c2, 0x3d0ef2c6,
+];
+const SPLIT_CAUSEWAY_DOOR_LEFT_SIN_BITS: [u32; 19] = [
+    0x3d0ef2c6, 0x3cab3515, 0xbc9b52fa, 0xbda69f63, 0xbe268171, 0xbe844d5e, 0xbeba431c, 0xbef250bd,
+    0xbf14c5b0, 0xbf2e9772, 0xbf4572ba, 0xbf588380, 0xbf6761a6, 0xbf7216b1, 0xbf7912f3, 0xbf7d13b1,
+    0xbf7efded, 0xbf7fb19f, 0xbf7fd814,
+];
+const SPLIT_CAUSEWAY_DOOR_HALF_WIDTH_BITS: u32 = 0x3dce703c;
+const SPLIT_CAUSEWAY_DOOR_HALF_LENGTH_BITS: u32 = 0x3f20902e;
+const SPLIT_CAUSEWAY_DOOR_TOP_Y_BITS: u32 = 0x402f06f7;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SplitCausewayDoorRuntime {
+    target_open: bool,
+    progress_ticks: u8,
+}
+
+impl SplitCausewayDoorRuntime {
+    fn open_fraction(self) -> f32 {
+        f32::from(self.progress_ticks) / f32::from(SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS)
+    }
+}
+
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SplitCausewayDoorState {
+    arena_index: usize,
+    replay_seed: u64,
+    doors: [SplitCausewayDoorRuntime; SPLIT_CAUSEWAY_DOOR_COUNT],
+    // Recomputed from canonical fighter state every input tick. It is retained
+    // only so presentation can draw local prompts and never needs snapshot
+    // storage of its own.
+    eligible_fighters: [Option<FighterId>; SPLIT_CAUSEWAY_DOOR_COUNT],
+}
+
+impl Default for SplitCausewayDoorState {
+    fn default() -> Self {
+        Self {
+            arena_index: usize::MAX,
+            replay_seed: u64::MAX,
+            doors: [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT],
+            eligible_fighters: [None; SPLIT_CAUSEWAY_DOOR_COUNT],
+        }
+    }
+}
+
+impl SplitCausewayDoorState {
+    fn reset_closed(&mut self, arena_index: usize, replay_seed: u64) {
+        self.arena_index = arena_index;
+        self.replay_seed = replay_seed;
+        self.doors = [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT];
+        self.eligible_fighters = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    }
+
+    fn toggle_for_fighter(&mut self, fighter_id: FighterId) -> Option<(usize, bool)> {
+        let Some(door_index) = self
+            .eligible_fighters
+            .iter()
+            .position(|eligible| *eligible == Some(fighter_id))
+        else {
+            return None;
+        };
+        self.doors[door_index].target_open = !self.doors[door_index].target_open;
+        Some((door_index, self.doors[door_index].target_open))
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SplitCausewayDoorVisual {
+    index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitCausewayDoorPromptBinding {
+    Keyboard(KeyCode),
+    Gamepad(ControllerFamily),
+}
+
+#[derive(Component, Debug)]
+pub(crate) struct SplitCausewayDoorPrompt {
+    index: usize,
+    text_entity: Entity,
+    last_text_state: Option<(usize, SplitCausewayDoorPromptBinding, bool)>,
+    last_position: Option<Vec2>,
 }
 
 #[derive(Component)]
@@ -551,6 +699,8 @@ struct AuthoredArenaRon {
     // barrier table below instead of parsing f32/Euler data at runtime.
     #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
+    floor_material_regions: Vec<AuthoredFloorMaterialRegion>,
+    #[serde(default)]
     colliders: Vec<AuthoredCollider>,
 }
 
@@ -644,6 +794,8 @@ struct AuthoredPrimitive {
     kind: String,
     position: (f32, f32, f32),
     #[serde(default)]
+    rotation_x: f32,
+    #[serde(default)]
     rotation_y: f32,
     #[serde(default = "unit_tuple3")]
     scale: (f32, f32, f32),
@@ -678,6 +830,15 @@ struct AuthoredFloorPattern {
     columns: usize,
     gap: f32,
     bevel: f32,
+    #[serde(default)]
+    masked_to_gameplay: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredFloorMaterialRegion {
+    min: (f32, f32),
+    max: (f32, f32),
+    materials: Vec<String>,
 }
 
 #[derive(Default)]
@@ -692,11 +853,18 @@ struct AuthoredFloorMeshBuffers {
 #[allow(dead_code)]
 struct AuthoredCollider {
     id: String,
+    #[serde(default)]
+    kind: String,
     center: (f32, f32),
+    #[serde(default)]
     half_extents: (f32, f32),
+    #[serde(default)]
+    radius: f32,
     #[serde(default)]
     rotation_y: f32,
     top_y: f32,
+    #[serde(default)]
+    behavior: String,
 }
 
 #[derive(Resource)]
@@ -967,8 +1135,8 @@ impl PowderKegCannonState {
     }
 }
 
-const ARENA_ROLLBACK_PAYLOAD_VERSION: u8 = 1;
-const MAX_ROLLBACK_ARENA_HAZARDS: usize = 3;
+const ARENA_ROLLBACK_PAYLOAD_VERSION: u8 = 2;
+const MAX_ROLLBACK_ARENA_HAZARDS: usize = 4;
 const ARENA_DEVICE_CRANK_SAWS_STOPPED: u64 = 1 << 0;
 const PIPE_SNAPSHOT_TRANSIT: u8 = 1 << 0;
 const PIPE_SNAPSHOT_READY_CANDIDATE: u8 = 1 << 1;
@@ -977,7 +1145,11 @@ const ARENA_PAYLOAD_HEADER_BYTES: usize = 4;
 const ARENA_PAYLOAD_HAZARD_BYTES: usize =
     MAX_ROLLBACK_ARENA_HAZARDS * FIGHTER_COUNT * size_of::<u32>();
 const ARENA_PAYLOAD_LEVER_OFFSET: usize = ARENA_PAYLOAD_HEADER_BYTES + ARENA_PAYLOAD_HAZARD_BYTES;
-const ARENA_PAYLOAD_USED_BYTES: usize = ARENA_PAYLOAD_LEVER_OFFSET + size_of::<u32>();
+pub(crate) const ARENA_PAYLOAD_DOOR_FLAGS_OFFSET: usize =
+    ARENA_PAYLOAD_LEVER_OFFSET + size_of::<u32>();
+pub(crate) const ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET: usize = ARENA_PAYLOAD_DOOR_FLAGS_OFFSET + 1;
+const ARENA_PAYLOAD_USED_BYTES: usize =
+    ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET + SPLIT_CAUSEWAY_DOOR_COUNT;
 
 const _: () = assert!(ARENA_PAYLOAD_USED_BYTES <= ARENA_PAYLOAD_BYTES);
 
@@ -1000,6 +1172,8 @@ pub(crate) enum ArenaRuntimeSnapshotError {
     UnsupportedPayloadVersion(u8),
     NonCanonicalPayloadPadding,
     InvalidLogicalDeviceFlags(u64),
+    InvalidDoorFlags(u8),
+    InvalidDoorProgress(u8),
     InvalidPipeFlags(u8),
     InvalidPipeEndpoint(u16),
     InvalidPipePair,
@@ -1024,6 +1198,7 @@ pub(crate) struct ArenaRuntimeRestorePlan {
     hazard: ArenaHazardState,
     pipes: ArenaPipeState,
     cannon: PowderKegCannonState,
+    doors: SplitCausewayDoorState,
 }
 
 fn arena_resource<'a, T: Resource>(
@@ -1181,9 +1356,11 @@ pub(crate) fn capture_arena_runtime_snapshot(
     let hazard = arena_resource::<ArenaHazardState>(world, "ArenaHazardState")?;
     let pipes = arena_resource::<ArenaPipeState>(world, "ArenaPipeState")?;
     let cannon = arena_resource::<PowderKegCannonState>(world, "PowderKegCannonState")?;
+    let doors = arena_resource::<SplitCausewayDoorState>(world, "SplitCausewayDoorState")?;
     verify_arena_index("ArenaHazardState", arena_index, hazard.arena_index)?;
     verify_arena_index("ArenaPipeState", arena_index, pipes.arena_index)?;
     verify_arena_index("PowderKegCannonState", arena_index, cannon.arena_index)?;
+    verify_arena_index("SplitCausewayDoorState", arena_index, doors.arena_index)?;
 
     let hazard_count = hazard.hit_cooldowns.len();
     if hazard_count > MAX_ROLLBACK_ARENA_HAZARDS {
@@ -1211,6 +1388,14 @@ pub(crate) fn capture_arena_runtime_snapshot(
         ARENA_PAYLOAD_LEVER_OFFSET,
         hazard.crank_lever_toggle_cooldown.remaining(),
     );
+    let mut door_flags = 0_u8;
+    for (index, door) in doors.doors.iter().copied().enumerate() {
+        if door.target_open {
+            door_flags |= 1 << index;
+        }
+        payload[ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET + index] = door.progress_ticks;
+    }
+    payload[ARENA_PAYLOAD_DOOR_FLAGS_OFFSET] = door_flags;
     let elapsed = hazard.elapsed.get();
     Ok(ArenaRuntimeSnapshot {
         arena_ticks: u64::from(elapsed),
@@ -1270,6 +1455,21 @@ pub(crate) fn prepare_arena_runtime_restore(
             snapshot.logical_device_flags,
         ));
     }
+    let door_flags = snapshot.payload[ARENA_PAYLOAD_DOOR_FLAGS_OFFSET];
+    if door_flags & !((1 << SPLIT_CAUSEWAY_DOOR_COUNT) - 1) != 0 {
+        return Err(ArenaRuntimeSnapshotError::InvalidDoorFlags(door_flags));
+    }
+    let mut restored_doors = [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT];
+    for (index, door) in restored_doors.iter_mut().enumerate() {
+        let progress = snapshot.payload[ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET + index];
+        if progress > SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS {
+            return Err(ArenaRuntimeSnapshotError::InvalidDoorProgress(progress));
+        }
+        *door = SplitCausewayDoorRuntime {
+            target_open: door_flags & (1 << index) != 0,
+            progress_ticks: progress,
+        };
+    }
     if snapshot.arena_ticks != u64::from(snapshot.hazard_clock_ticks) {
         return Err(ArenaRuntimeSnapshotError::InconsistentArenaClock);
     }
@@ -1328,6 +1528,13 @@ pub(crate) fn prepare_arena_runtime_restore(
             fire_timer: TickTimer::from_ticks(snapshot.cannon_fire_cooldown_ticks),
             next_cannon: usize::from(snapshot.cannon_index),
         },
+        doors: SplitCausewayDoorState {
+            arena_index,
+            replay_seed: arena_resource::<SplitCausewayDoorState>(world, "SplitCausewayDoorState")?
+                .replay_seed,
+            doors: restored_doors,
+            eligible_fighters: [None; SPLIT_CAUSEWAY_DOOR_COUNT],
+        },
     })
 }
 
@@ -1335,6 +1542,7 @@ pub(crate) fn commit_arena_runtime_restore(world: &mut World, plan: ArenaRuntime
     world.insert_resource(plan.hazard);
     world.insert_resource(plan.pipes);
     world.insert_resource(plan.cannon);
+    world.insert_resource(plan.doors);
 }
 
 /// Installs the authoritative arena selection and its rollback-relevant runtime
@@ -1371,6 +1579,16 @@ pub fn bootstrap_canonical_arena_runtime(world: &mut World, arena_index: usize) 
     } else {
         world.insert_resource(PowderKegCannonState::new(selected_index));
     }
+    if let Some(mut state) = world.get_resource_mut::<SplitCausewayDoorState>() {
+        if state.arena_index != selected_index {
+            let replay_seed = state.replay_seed;
+            state.reset_closed(selected_index, replay_seed);
+        }
+    } else {
+        let mut state = SplitCausewayDoorState::default();
+        state.reset_closed(selected_index, 0);
+        world.insert_resource(state);
+    }
 
     selected
 }
@@ -1389,6 +1607,9 @@ pub fn setup_arena(
     commands.insert_resource(ArenaHazardState::new(arena_index, arena.hazards.len()));
     commands.insert_resource(ArenaPipeState::new(arena_index));
     commands.insert_resource(PowderKegCannonState::new(arena_index));
+    let mut doors = SplitCausewayDoorState::default();
+    doors.reset_closed(arena_index, 0);
+    commands.insert_resource(doors);
     commands.insert_resource(ArenaOrdnanceAssets {
         bomb_mesh: meshes.add(Sphere::new(0.34).mesh().uv(14, 8)),
         bomb_material: materials.add(StandardMaterial {
@@ -1408,7 +1629,7 @@ pub fn setup_arena(
         generation,
         arena,
     );
-    spawn_arena_lights(&mut commands);
+    spawn_arena_lights(&mut commands, arena_index);
 }
 
 pub fn sync_arena_visuals(
@@ -1441,6 +1662,364 @@ pub fn sync_arena_visuals(
         generation,
         active_arena.definition(),
     );
+}
+
+pub fn sync_split_causeway_door_state(
+    match_state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+) {
+    let arena_index = active_arena.index();
+    let match_changed =
+        doors.arena_index != arena_index || doors.replay_seed != match_state.replay_seed;
+    let has_runtime_state = doors
+        .doors
+        .iter()
+        .any(|door| door.target_open || door.progress_ticks != 0)
+        || doors.eligible_fighters.iter().any(Option::is_some);
+
+    if match_changed
+        || ((arena_index != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting())
+            && has_runtime_state)
+    {
+        doors.reset_closed(arena_index, match_state.replay_seed);
+    }
+}
+
+pub fn update_split_causeway_door_eligibility(
+    match_state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+    fighters: Query<(&Fighter, &FighterMotor, &FighterActionState, &SimPosition)>,
+) {
+    doors.eligible_fighters = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    if active_arena.index() != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting() {
+        return;
+    }
+
+    let mut best = [None; SPLIT_CAUSEWAY_DOOR_COUNT];
+    for (fighter, motor, action, position) in &fighters {
+        let Some(fighter_id) = FighterId::from_index(fighter.id) else {
+            continue;
+        };
+        if !match_state.fighter_can_participate(fighter.id)
+            || !matches!(
+                action.action,
+                FighterAction::Idle | FighterAction::Moving | FighterAction::Jumping
+            )
+        {
+            continue;
+        }
+
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            let Some(distance_squared) = split_causeway_door_candidate_distance_squared(
+                door_index,
+                position.translation,
+                motor.facing,
+                action.action,
+            ) else {
+                continue;
+            };
+
+            let candidate = (distance_squared, fighter_id);
+            if best[door_index].is_none_or(|current: (f32, FighterId)| {
+                candidate.0 < current.0 - f32::EPSILON
+                    || ((candidate.0 - current.0).abs() <= f32::EPSILON && candidate.1 < current.1)
+            }) {
+                best[door_index] = Some(candidate);
+            }
+        }
+    }
+
+    doors.eligible_fighters = best.map(|candidate| candidate.map(|(_, fighter)| fighter));
+}
+
+/// Consumes an eligible light press as an arena interaction in stable fighter
+/// order. The resulting event identifies the static arena/device pair; no
+/// Bevy entity or local controller identity enters the canonical timeline.
+pub fn handle_split_causeway_door_inputs(
+    active_arena: Res<ActiveArena>,
+    match_state: Res<MatchState>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+    mut events: ResMut<TickEventBuffer>,
+    mut fighters: Query<(&Fighter, &mut FighterInput)>,
+) {
+    if active_arena.index() != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting() {
+        return;
+    }
+
+    let mut requested = [false; FIGHTER_COUNT];
+    for (fighter, mut input) in &mut fighters {
+        let Some(fighter_id) = FighterId::from_index(fighter.id) else {
+            continue;
+        };
+        if !doors.eligible_fighters.contains(&Some(fighter_id))
+            || !input.light
+            || input.heavy_held
+            || input.grab
+        {
+            continue;
+        }
+        requested[fighter_id.index()] = true;
+        input.light = false;
+        input.raw_light_pressed = false;
+    }
+
+    for fighter in FighterId::ALL {
+        if !requested[fighter.index()] {
+            continue;
+        }
+        let Some((door_index, target_open)) = doors.toggle_for_fighter(fighter) else {
+            continue;
+        };
+        let _ = events.emit(
+            SimEventSource::Arena,
+            SimEventKind::ArenaDeviceToggled {
+                arena_index: SPLIT_CAUSEWAY_ARENA_INDEX as u16,
+                device_index: door_index as u16,
+                active: target_open,
+            },
+        );
+    }
+}
+
+fn split_causeway_door_candidate_distance_squared(
+    door_index: usize,
+    fighter_position: Vec3,
+    fighter_facing: Vec3,
+    action: FighterAction,
+) -> Option<f32> {
+    if !matches!(
+        action,
+        FighterAction::Idle | FighterAction::Moving | FighterAction::Jumping
+    ) || (fighter_position.y - ARENA_TOP_Y).abs() > SPLIT_CAUSEWAY_DOOR_INTERACTION_HEIGHT
+    {
+        return None;
+    }
+    let doorway = split_causeway_door_barrier(door_index, 0).center;
+    let to_door = doorway - Vec2::new(fighter_position.x, fighter_position.z);
+    let distance_squared = crate::canonical_math::vec2_length_squared(to_door);
+    let facing = crate::canonical_math::vec2_normalize_or_zero(Vec2::new(
+        fighter_facing.x,
+        fighter_facing.z,
+    ));
+    (distance_squared
+        <= SPLIT_CAUSEWAY_DOOR_INTERACTION_RADIUS * SPLIT_CAUSEWAY_DOOR_INTERACTION_RADIUS
+        && facing.dot(crate::canonical_math::vec2_normalize_or_zero(to_door))
+            >= SPLIT_CAUSEWAY_DOOR_FACING_DOT)
+        .then_some(distance_squared)
+}
+
+pub fn advance_split_causeway_doors(
+    match_state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
+    mut doors: ResMut<SplitCausewayDoorState>,
+    fighters: Query<(&Fighter, &FighterStats, &FighterActionState, &SimPosition)>,
+) {
+    if active_arena.index() != SPLIT_CAUSEWAY_ARENA_INDEX || !match_state.is_fighting() {
+        return;
+    }
+
+    for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+        let door = doors.doors[door_index];
+        let candidate = if door.target_open {
+            door.progress_ticks
+                .saturating_add(1)
+                .min(SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS)
+        } else {
+            door.progress_ticks.saturating_sub(1)
+        };
+        if candidate == door.progress_ticks {
+            continue;
+        }
+
+        let blocked = fighters.iter().any(|(fighter, stats, action, position)| {
+            match_state.fighter_can_participate(fighter.id)
+                && !matches!(
+                    action.action,
+                    FighterAction::RingOut | FighterAction::Respawning
+                )
+                && split_causeway_door_overlaps_fighter(
+                    door_index,
+                    candidate,
+                    position.translation,
+                    stats,
+                )
+        });
+        if !blocked {
+            doors.doors[door_index].progress_ticks = candidate;
+        }
+    }
+}
+
+fn split_causeway_door_overlaps_fighter(
+    door_index: usize,
+    progress_ticks: u8,
+    position: Vec3,
+    stats: &FighterStats,
+) -> bool {
+    resolve_split_causeway_door_side_collision(
+        door_index,
+        progress_ticks,
+        position,
+        FIGHTER_RADIUS * stats.item_size_multiplier(),
+    ) != position
+}
+
+pub fn sync_split_causeway_door_visuals(
+    doors: Res<SplitCausewayDoorState>,
+    mut visuals: Query<(&SplitCausewayDoorVisual, &mut Transform)>,
+) {
+    for (visual, mut transform) in &mut visuals {
+        let desired =
+            split_causeway_door_transform(visual.index, doors.doors[visual.index].open_fraction());
+        if *transform != desired {
+            *transform = desired;
+        }
+    }
+}
+
+pub fn update_split_causeway_door_prompts(
+    match_state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
+    doors: Res<SplitCausewayDoorState>,
+    bindings: Res<PlayerKeyBindings>,
+    reconnect: Res<LocalControllerReconnect>,
+    pause_owners: Option<Res<GameplayPauseOwners>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<ArenaCamera>>,
+    fighters: Query<(&Fighter, &Controller)>,
+    controller_metadata: Query<&ControllerDeviceInfo>,
+    mut prompts: Query<(&mut SplitCausewayDoorPrompt, &mut Node)>,
+    mut texts: Query<&mut Text>,
+) {
+    let input_blocked =
+        reconnect.blocks_gameplay() || pause_owners.is_some_and(|owners| owners.blocks_gameplay());
+    let camera = cameras.iter().next();
+
+    for (mut prompt, mut node) in &mut prompts {
+        let owner = doors.eligible_fighters[prompt.index];
+        let controller = owner.and_then(|owner| {
+            fighters.iter().find_map(|(fighter, controller)| {
+                (fighter.id == owner.index()).then_some(controller)
+            })
+        });
+        let binding = controller.and_then(|controller| {
+            split_causeway_door_prompt_binding(controller, &bindings, &controller_metadata)
+        });
+        let projected = camera.and_then(|(camera, camera_transform)| {
+            let position = camera
+                .world_to_viewport(
+                    camera_transform,
+                    split_causeway_doorway_anchor(prompt.index),
+                )
+                .ok()?;
+            let viewport = camera.logical_viewport_size()?;
+            (position.x >= 0.0
+                && position.y >= 0.0
+                && position.x <= viewport.x
+                && position.y <= viewport.y)
+                .then_some(position)
+        });
+        let visible = split_causeway_door_prompt_should_show(
+            active_arena.index(),
+            match_state.is_fighting(),
+            input_blocked,
+            owner.is_some(),
+            binding.is_some(),
+            projected.is_some(),
+        );
+
+        let display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        if !visible {
+            prompt.last_position = None;
+            continue;
+        }
+
+        let owner = owner.expect("visible door prompt has an owner");
+        let binding = binding.expect("visible door prompt has a binding");
+        let projected = projected.expect("visible door prompt has a projected position");
+        let desired_position = Vec2::new(
+            projected.x - SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH * 0.5,
+            projected.y - SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT - 10.0,
+        );
+        if prompt
+            .last_position
+            .is_none_or(|last| last.distance_squared(desired_position) > 0.0625)
+        {
+            node.left = Val::Px(desired_position.x);
+            node.top = Val::Px(desired_position.y);
+            prompt.last_position = Some(desired_position);
+        }
+
+        let target_open = doors.doors[prompt.index].target_open;
+        let text_state = (owner.index(), binding, target_open);
+        if prompt.last_text_state != Some(text_state) {
+            if let Ok(mut text) = texts.get_mut(prompt.text_entity) {
+                let verb = if target_open { "CLOSE" } else { "OPEN" };
+                **text = format!(
+                    "[{}] {verb} DOOR",
+                    split_causeway_door_prompt_binding_label(binding)
+                );
+            }
+            prompt.last_text_state = Some(text_state);
+        }
+    }
+}
+
+fn split_causeway_door_prompt_should_show(
+    arena_index: usize,
+    fighting: bool,
+    input_blocked: bool,
+    has_owner: bool,
+    has_binding: bool,
+    has_projection: bool,
+) -> bool {
+    arena_index == SPLIT_CAUSEWAY_ARENA_INDEX
+        && fighting
+        && !input_blocked
+        && has_owner
+        && has_binding
+        && has_projection
+}
+
+fn split_causeway_door_prompt_binding(
+    controller: &Controller,
+    bindings: &PlayerKeyBindings,
+    controller_metadata: &Query<&ControllerDeviceInfo>,
+) -> Option<SplitCausewayDoorPromptBinding> {
+    match controller.input {
+        LocalInputAssignment::Keyboard(player) => bindings
+            .key_for(player, ControlAction::Light)
+            .map(SplitCausewayDoorPromptBinding::Keyboard),
+        LocalInputAssignment::Gamepad(entity) => Some(SplitCausewayDoorPromptBinding::Gamepad(
+            controller_info(entity, controller_metadata)
+                .map(|info| info.family)
+                .unwrap_or_default(),
+        )),
+        LocalInputAssignment::Unassigned => None,
+    }
+}
+
+fn split_causeway_door_prompt_binding_label(binding: SplitCausewayDoorPromptBinding) -> String {
+    match binding {
+        SplitCausewayDoorPromptBinding::Keyboard(key) => {
+            let raw = format!("{key:?}");
+            raw.strip_prefix("Key")
+                .or_else(|| raw.strip_prefix("Digit"))
+                .unwrap_or(&raw)
+                .to_string()
+        }
+        SplitCausewayDoorPromptBinding::Gamepad(family) => {
+            family.face_button_label(GamepadButton::West).to_string()
+        }
+    }
 }
 
 fn spawn_arena_geometry(
@@ -1484,7 +2063,7 @@ fn spawn_arena_geometry(
 
     if matches!(
         arena_index,
-        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+        CHAMPIONS_COURT_ARENA_INDEX | SPLIT_CAUSEWAY_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
     ) {
         match spawn_authored_arena_map(commands, asset_server, meshes, materials, arena_index) {
             Ok(()) => {
@@ -1495,6 +2074,7 @@ fn spawn_arena_geometry(
                     arena_index,
                     arena.hazards,
                 );
+                spawn_campfire_props(commands, meshes, materials, arena.hazards);
                 return;
             }
             Err(error) => {
@@ -1960,11 +2540,8 @@ fn spawn_authored_arena_map(
         }
     }
 
-    spawn_authored_primitives(commands, meshes, materials, &map, arena_name);
-
-    if arena_index != CHAMPIONS_COURT_ARENA_INDEX || CHAMPIONS_COURT_MAP_LIGHTS_ENABLED {
-        spawn_authored_lights(commands, &map.lights, arena_name);
-    }
+    spawn_authored_primitives(commands, meshes, materials, &map, arena_index, arena_name);
+    spawn_authored_lights(commands, &map.lights, arena_name);
 
     Ok(())
 }
@@ -1972,6 +2549,7 @@ fn spawn_authored_arena_map(
 fn load_authored_arena_map(arena_index: usize) -> Result<AuthoredArenaRon, String> {
     match arena_index {
         CHAMPIONS_COURT_ARENA_INDEX => load_champions_court_map(),
+        SPLIT_CAUSEWAY_ARENA_INDEX => load_split_causeway_map(),
         TRAINING_GROUND_ARENA_INDEX => load_training_ground_map(),
         _ => Err(format!("arena {arena_index} has no authored scene")),
     }
@@ -1999,6 +2577,26 @@ fn load_champions_court_map_from_path(path: &Path) -> Result<AuthoredArenaRon, S
 fn load_champions_court_map_from_path(_path: &Path) -> Result<AuthoredArenaRon, String> {
     ron::from_str(EMBEDDED_CHAMPIONS_COURT_RON)
         .map_err(|error| format!("RON parse failed: {error}"))
+}
+
+#[cfg(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+))]
+fn load_split_causeway_map() -> Result<AuthoredArenaRon, String> {
+    let contents = fs::read_to_string(SPLIT_CAUSEWAY_RON_PATH)
+        .map_err(|error| format!("read failed: {error}"))?;
+    ron::from_str(&contents).map_err(|error| format!("RON parse failed: {error}"))
+}
+
+#[cfg(not(all(
+    feature = "dev-hot-reload",
+    not(feature = "shipping"),
+    not(target_arch = "wasm32")
+)))]
+fn load_split_causeway_map() -> Result<AuthoredArenaRon, String> {
+    ron::from_str(EMBEDDED_SPLIT_CAUSEWAY_RON).map_err(|error| format!("RON parse failed: {error}"))
 }
 
 #[cfg(all(
@@ -2184,6 +2782,7 @@ fn spawn_authored_primitives(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &AuthoredArenaRon,
+    arena_index: usize,
     arena_name: &str,
 ) {
     let material_handles = map
@@ -2204,7 +2803,14 @@ fn spawn_authored_primitives(
     let mut mesh_handles = HashMap::new();
     let mut ordinal = 0usize;
 
-    spawn_authored_floor_pattern(commands, meshes, map, &material_handles, arena_name);
+    spawn_authored_floor_pattern(
+        commands,
+        meshes,
+        map,
+        arena_index,
+        &material_handles,
+        arena_name,
+    );
     spawn_authored_floor_rows(
         commands,
         meshes,
@@ -2251,19 +2857,271 @@ fn spawn_authored_primitives(
             ordinal += 1;
         }
     }
+
+    if arena_index == SPLIT_CAUSEWAY_ARENA_INDEX {
+        spawn_split_causeway_doors(commands, meshes, &material_handles, &mut mesh_handles);
+    }
+}
+
+fn spawn_split_causeway_doors(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material_handles: &HashMap<String, Handle<StandardMaterial>>,
+    mesh_handles: &mut HashMap<String, Handle<Mesh>>,
+) {
+    let Some(wood_dark) = material_handles.get("wood_dark").cloned() else {
+        return;
+    };
+    let Some(wood_mid) = material_handles.get("wood_mid").cloned() else {
+        return;
+    };
+    let Some(wood_light) = material_handles.get("wood_light").cloned() else {
+        return;
+    };
+    let Some(rope) = material_handles.get("rope").cloned() else {
+        return;
+    };
+    let cuboid = authored_primitive_mesh(meshes, mesh_handles, "cuboid");
+    let cylinder = authored_primitive_mesh(meshes, mesh_handles, "cylinder");
+
+    for index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+        let root = commands
+            .spawn((
+                split_causeway_door_transform(index, 0.0),
+                SplitCausewayDoorVisual { index },
+                ArenaGeometry,
+                Name::new(format!("Split Causeway gate {}", index + 1)),
+            ))
+            .id();
+
+        let pieces = [
+            (
+                cuboid.clone(),
+                wood_dark.clone(),
+                Transform::from_xyz(0.0, 0.98, 0.08).with_scale(Vec3::new(0.20, 1.86, 0.20)),
+                "hinge stile",
+            ),
+            (
+                cuboid.clone(),
+                wood_mid.clone(),
+                Transform::from_xyz(0.0, 0.98, SPLIT_CAUSEWAY_DOOR_LENGTH - 0.08)
+                    .with_scale(Vec3::new(0.20, 1.86, 0.20)),
+                "latch stile",
+            ),
+            (
+                cuboid.clone(),
+                wood_mid.clone(),
+                Transform::from_xyz(0.0, 0.54, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_scale(Vec3::new(0.20, 0.22, SPLIT_CAUSEWAY_DOOR_LENGTH)),
+                "lower rail",
+            ),
+            (
+                cuboid.clone(),
+                wood_light.clone(),
+                Transform::from_xyz(0.0, 1.46, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_scale(Vec3::new(0.20, 0.22, SPLIT_CAUSEWAY_DOOR_LENGTH)),
+                "upper rail",
+            ),
+            (
+                cuboid.clone(),
+                wood_light.clone(),
+                Transform::from_xyz(0.0, 1.0, SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5)
+                    .with_rotation(Quat::from_rotation_x(-0.58))
+                    .with_scale(Vec3::new(0.15, 0.15, 1.30)),
+                "diagonal brace",
+            ),
+            (
+                cylinder.clone(),
+                rope.clone(),
+                Transform::from_xyz(0.0, 0.50, 0.08).with_scale(Vec3::new(0.28, 0.30, 0.28)),
+                "lower hinge",
+            ),
+            (
+                cylinder.clone(),
+                rope.clone(),
+                Transform::from_xyz(0.0, 1.50, 0.08).with_scale(Vec3::new(0.28, 0.30, 0.28)),
+                "upper hinge",
+            ),
+        ];
+
+        let mut children = Vec::with_capacity(pieces.len());
+        for (mesh, material, transform, piece_name) in pieces {
+            children.push(
+                commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        transform,
+                        Name::new(format!("Split Causeway gate {} {piece_name}", index + 1)),
+                    ))
+                    .id(),
+            );
+        }
+        commands.entity(root).insert_children(0, &children);
+
+        let text_entity = commands
+            .spawn((
+                Text::new("OPEN DOOR"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.98, 0.90, 0.70)),
+                TextLayout::new_with_justify(Justify::Center),
+                TextShadow::default(),
+                Pickable::IGNORE,
+            ))
+            .id();
+        let prompt = commands
+            .spawn((
+                SplitCausewayDoorPrompt {
+                    index,
+                    text_entity,
+                    last_text_state: None,
+                    last_position: None,
+                },
+                Node {
+                    display: Display::None,
+                    position_type: PositionType::Absolute,
+                    width: Val::Px(SPLIT_CAUSEWAY_DOOR_PROMPT_WIDTH),
+                    height: Val::Px(SPLIT_CAUSEWAY_DOOR_PROMPT_HEIGHT),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(7.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.035, 0.025, 0.018, 0.88)),
+                BorderColor::all(Color::srgb(0.78, 0.55, 0.27)),
+                GlobalZIndex(20),
+                Pickable::IGNORE,
+                ArenaGeometry,
+                Name::new(format!("Split Causeway gate {} prompt", index + 1)),
+            ))
+            .id();
+        commands.entity(prompt).insert_children(0, &[text_entity]);
+    }
+}
+
+fn split_causeway_door_eased_fraction(open_fraction: f32) -> f32 {
+    let fraction = open_fraction.clamp(0.0, 1.0);
+    fraction * fraction * (3.0 - 2.0 * fraction)
+}
+
+fn split_causeway_rotate_local(local: Vec2, yaw: f32) -> Vec2 {
+    let cos = yaw.cos();
+    let sin = yaw.sin();
+    Vec2::new(
+        cos * local.x + sin * local.y,
+        -sin * local.x + cos * local.y,
+    )
+}
+
+fn split_causeway_door_hinge(index: usize) -> Vec2 {
+    let geometry = SPLIT_CAUSEWAY_DOOR_GEOMETRY[index];
+    geometry.cage_center
+        + split_causeway_rotate_local(
+            Vec2::new(geometry.hinge_x, SPLIT_CAUSEWAY_DOOR_HINGE_Z) * SPLIT_CAUSEWAY_DOOR_SCALE,
+            geometry.cage_yaw,
+        )
+}
+
+fn split_causeway_door_yaw(index: usize, open_fraction: f32) -> f32 {
+    let geometry = SPLIT_CAUSEWAY_DOOR_GEOMETRY[index];
+    geometry.cage_yaw + geometry.open_angle * split_causeway_door_eased_fraction(open_fraction)
+}
+
+fn split_causeway_door_transform(index: usize, open_fraction: f32) -> Transform {
+    let hinge = split_causeway_door_hinge(index);
+    Transform::from_xyz(hinge.x, ARENA_TOP_Y, hinge.y)
+        .with_rotation(Quat::from_rotation_y(split_causeway_door_yaw(
+            index,
+            open_fraction,
+        )))
+        .with_scale(Vec3::splat(SPLIT_CAUSEWAY_DOOR_SCALE))
+}
+
+fn split_causeway_door_barrier(index: usize, progress_ticks: u8) -> ArenaBarrierDefinition {
+    assert!(index < SPLIT_CAUSEWAY_DOOR_COUNT);
+    let progress = usize::from(progress_ticks);
+    assert!(progress < SPLIT_CAUSEWAY_DOOR_LEFT_X_BITS.len());
+    let mirror_sign = if index == 0 { 0 } else { 0x8000_0000 };
+    ArenaBarrierDefinition::rectangle(
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_LEFT_X_BITS[progress] ^ mirror_sign),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_Z_BITS[progress]),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_HALF_WIDTH_BITS),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_HALF_LENGTH_BITS),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_LEFT_YAW_BITS[progress] ^ mirror_sign),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_TOP_Y_BITS),
+    )
+}
+
+fn split_causeway_door_basis(index: usize, progress_ticks: u8) -> (f32, f32) {
+    assert!(index < SPLIT_CAUSEWAY_DOOR_COUNT);
+    let progress = usize::from(progress_ticks);
+    assert!(progress < SPLIT_CAUSEWAY_DOOR_COS_BITS.len());
+    let mirror_sign = if index == 0 { 0 } else { 0x8000_0000 };
+    (
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_COS_BITS[progress]),
+        f32::from_bits(SPLIT_CAUSEWAY_DOOR_LEFT_SIN_BITS[progress] ^ mirror_sign),
+    )
+}
+
+fn resolve_split_causeway_door_side_collision(
+    index: usize,
+    progress_ticks: u8,
+    position: Vec3,
+    fighter_radius: f32,
+) -> Vec3 {
+    let barrier = split_causeway_door_barrier(index, progress_ticks);
+    if position.y >= barrier.top_y - crate::constants::LANDING_SNAP_TOLERANCE {
+        return position;
+    }
+    let (cos, sin) = split_causeway_door_basis(index, progress_ticks);
+    let offset = Vec2::new(position.x - barrier.center.x, position.z - barrier.center.y);
+    let local = Vec2::new(
+        cos * offset.x + sin * offset.y,
+        -sin * offset.x + cos * offset.y,
+    );
+    let expanded = barrier.half_extents + Vec2::splat(fighter_radius);
+    if local.x.abs() >= expanded.x || local.y.abs() >= expanded.y {
+        return position;
+    }
+
+    let push_x = expanded.x - local.x.abs();
+    let push_z = expanded.y - local.y.abs();
+    let sign = |value: f32| if value < 0.0 { -1.0 } else { 1.0 };
+    let resolved_local = if push_x < push_z {
+        Vec2::new(expanded.x * sign(local.x), local.y)
+    } else {
+        Vec2::new(local.x, expanded.y * sign(local.y))
+    };
+    let resolved = barrier.center
+        + Vec2::new(
+            cos * resolved_local.x - sin * resolved_local.y,
+            sin * resolved_local.x + cos * resolved_local.y,
+        );
+    Vec3::new(resolved.x, position.y, resolved.y)
+}
+
+fn split_causeway_doorway_anchor(index: usize) -> Vec3 {
+    let barrier = split_causeway_door_barrier(index, 0);
+    Vec3::new(barrier.center.x, ARENA_TOP_Y + 2.72, barrier.center.y)
 }
 
 fn spawn_authored_floor_pattern(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     map: &AuthoredArenaRon,
+    arena_index: usize,
     material_handles: &HashMap<String, Handle<StandardMaterial>>,
     arena_name: &str,
 ) {
     let Some(pattern) = &map.floor_pattern else {
         return;
     };
-    if pattern.rows == 0 || pattern.columns == 0 || map.floor_materials.is_empty() {
+    let floor_material_names = authored_floor_material_names(map);
+    if pattern.rows == 0 || pattern.columns == 0 || floor_material_names.is_empty() {
         warn!("{arena_name} floor pattern needs rows, columns, and materials");
         return;
     }
@@ -2281,8 +3139,39 @@ fn spawn_authored_floor_pattern(
     let unit_width = floor_width / pattern.columns as f32;
     let unit_depth = floor_depth / pattern.rows as f32;
     let gap = pattern.gap.clamp(0.0, unit_width.min(unit_depth) * 0.38);
+    let support_heights = (0..pattern.rows)
+        .flat_map(|row| {
+            (0..pattern.columns).map(move |column| {
+                if !pattern.masked_to_gameplay {
+                    return Some(ARENA_TOP_Y);
+                }
+                let x = -floor_width * 0.5 + (column as f32 + 0.5) * unit_width;
+                let z = -floor_depth * 0.5 + (row as f32 + 0.5) * unit_depth;
+                authored_floor_cell_support_height(
+                    arena_index,
+                    Vec2::new(x, z),
+                    Vec2::new(unit_width, unit_depth) * 0.5,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let material_region_indices = (0..pattern.rows)
+        .flat_map(|row| {
+            (0..pattern.columns).map(move |column| {
+                let x = -floor_width * 0.5 + (column as f32 + 0.5) * unit_width;
+                let z = -floor_depth * 0.5 + (row as f32 + 0.5) * unit_depth;
+                authored_floor_material_region_index(map, x, z)
+                    .unwrap_or(map.floor_material_regions.len())
+            })
+        })
+        .collect::<Vec<_>>();
     let mut occupied = vec![false; pattern.rows * pattern.columns];
-    let mut buffers = (0..map.floor_materials.len())
+    let material_indices = floor_material_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut buffers = (0..floor_material_names.len())
         .map(|_| AuthoredFloorMeshBuffers::default())
         .collect::<Vec<_>>();
 
@@ -2292,6 +3181,10 @@ fn spawn_authored_floor_pattern(
             if occupied[index] {
                 continue;
             }
+            let Some(support_height) = support_heights[index] else {
+                occupied[index] = true;
+                continue;
+            };
 
             let roll = authored_floor_hash(row, column, 0) % 100;
             let requested_span = match roll {
@@ -2309,6 +3202,10 @@ fn spawn_authored_floor_pattern(
                 row,
                 column,
                 requested_span,
+                &support_heights,
+                support_height,
+                &material_region_indices,
+                material_region_indices[index],
             );
             for occupied_row in row..row + span.1 {
                 for occupied_column in column..column + span.0 {
@@ -2320,10 +3217,24 @@ fn spawn_authored_floor_pattern(
             let depth = unit_depth * span.1 as f32 - gap;
             let x = -floor_width * 0.5 + (column as f32 + span.0 as f32 * 0.5) * unit_width;
             let z = -floor_depth * 0.5 + (row as f32 + span.1 as f32 * 0.5) * unit_depth;
-            let variant = authored_floor_hash(row, column, 1) % buffers.len();
+            let region_index = material_region_indices[index];
+            let material_choices = map
+                .floor_material_regions
+                .get(region_index)
+                .map(|region| region.materials.as_slice())
+                .filter(|materials| !materials.is_empty())
+                .unwrap_or(&map.floor_materials);
+            let material_name =
+                &material_choices[authored_floor_hash(row, column, 1) % material_choices.len()];
+            let Some(&variant) = material_indices.get(material_name.as_str()) else {
+                warn!(
+                    "{arena_name} floor region references unregistered material '{material_name}'"
+                );
+                continue;
+            };
             let height_step = (authored_floor_hash(row, column, 2) % 4) as f32;
             let height = 0.09 + height_step * 0.004;
-            let top_y = height_step * 0.0012;
+            let top_y = support_height - ARENA_TOP_Y + height_step * 0.0012;
             append_authored_floor_stone(
                 &mut buffers[variant],
                 Vec3::new(x, top_y, z),
@@ -2337,7 +3248,7 @@ fn spawn_authored_floor_pattern(
         if buffers.indices.is_empty() {
             continue;
         }
-        let material_name = &map.floor_materials[material_index];
+        let material_name = &floor_material_names[material_index];
         let Some(material) = material_handles.get(material_name) else {
             warn!("{arena_name} floor pattern references missing material '{material_name}'");
             continue;
@@ -2360,6 +3271,30 @@ fn spawn_authored_floor_pattern(
     }
 }
 
+fn authored_floor_material_names(map: &AuthoredArenaRon) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in map.floor_materials.iter().chain(
+        map.floor_material_regions
+            .iter()
+            .flat_map(|region| region.materials.iter()),
+    ) {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+fn authored_floor_material_region_index(map: &AuthoredArenaRon, x: f32, z: f32) -> Option<usize> {
+    map.floor_material_regions.iter().position(|region| {
+        !region.materials.is_empty()
+            && x >= region.min.0
+            && x <= region.max.0
+            && z >= region.min.1
+            && z <= region.max.1
+    })
+}
+
 fn authored_floor_hash(row: usize, column: usize, salt: usize) -> usize {
     let mut value = (row as u32).wrapping_mul(0x9E37_79B9)
         ^ (column as u32).wrapping_mul(0x85EB_CA6B)
@@ -2378,18 +3313,73 @@ fn authored_floor_available_span(
     row: usize,
     column: usize,
     requested: (usize, usize),
+    support_heights: &[Option<f32>],
+    target_height: f32,
+    material_region_indices: &[usize],
+    target_material_region: usize,
 ) -> (usize, usize) {
     for depth in (1..=requested.1.min(rows - row)).rev() {
         for width in (1..=requested.0.min(columns - column)).rev() {
             if (row..row + depth).all(|candidate_row| {
-                (column..column + width)
-                    .all(|candidate_column| !occupied[candidate_row * columns + candidate_column])
+                (column..column + width).all(|candidate_column| {
+                    let index = candidate_row * columns + candidate_column;
+                    !occupied[index]
+                        && material_region_indices[index] == target_material_region
+                        && support_heights[index]
+                            .is_some_and(|height| (height - target_height).abs() < 0.001)
+                })
             }) {
                 return (width, depth);
             }
         }
     }
     (1, 1)
+}
+
+fn authored_floor_cell_support_height(
+    arena_index: usize,
+    center: Vec2,
+    half_extents: Vec2,
+) -> Option<f32> {
+    let inset = half_extents * 0.82;
+    let samples = [
+        center,
+        center + Vec2::new(-inset.x, -inset.y),
+        center + Vec2::new(inset.x, -inset.y),
+        center + Vec2::new(-inset.x, inset.y),
+        center + Vec2::new(inset.x, inset.y),
+    ];
+    let mut support_height: Option<f32> = None;
+    for sample in samples {
+        let height = authored_walkable_height_at(arena_index, sample.x, sample.y)?;
+        if let Some(expected) = support_height
+            && (height - expected).abs() >= 0.001
+        {
+            return None;
+        }
+        support_height = Some(height);
+    }
+    support_height
+}
+
+fn authored_walkable_height_at(arena_index: usize, x: f32, z: f32) -> Option<f32> {
+    let arena = arena_definitions().get(arena_index)?;
+    let mut best = None;
+    for shape in arena.ground_shapes {
+        if let Some(height) = ground_shape_support(shape, x, z, 0.0).and_then(GroundSupport::height)
+        {
+            best = Some(best.map_or(height, |current: f32| current.max(height)));
+        }
+    }
+    for platform in arena.gameplay_platforms() {
+        if platform
+            .support_at(Vec2::new(x, z), 0.0)
+            .is_some_and(|support| support == crate::arena_barriers::BarrierSupport::Firm)
+        {
+            best = Some(best.map_or(platform.top_y, |current: f32| current.max(platform.top_y)));
+        }
+    }
+    best
 }
 
 fn append_authored_floor_stone(
@@ -2653,15 +3643,90 @@ fn authored_primitive_mesh(
         "cylinder" => meshes.add(Cylinder::new(0.5, 1.0)),
         "cone" => meshes.add(Cone::new(0.5, 1.0)),
         "sphere" => meshes.add(Sphere::new(0.5).mesh().uv(16, 8)),
+        "torus" => meshes.add(Torus::new(0.42, 0.08)),
+        "crown" => meshes.add(authored_crown_mesh()),
         _ => meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
     };
     mesh_handles.insert(kind.to_string(), mesh.clone());
     mesh
 }
 
+fn authored_crown_mesh() -> Mesh {
+    let outline = [
+        Vec2::new(-0.50, -0.42),
+        Vec2::new(0.50, -0.42),
+        Vec2::new(0.44, 0.14),
+        Vec2::new(0.24, -0.01),
+        Vec2::new(0.16, 0.46),
+        Vec2::new(0.0, 0.13),
+        Vec2::new(-0.16, 0.46),
+        Vec2::new(-0.24, -0.01),
+        Vec2::new(-0.44, 0.14),
+    ];
+    let half_depth = 0.11;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    for (z, normal, reverse) in [
+        (half_depth, Vec3::Z, false),
+        (-half_depth, Vec3::NEG_Z, true),
+    ] {
+        let center = positions.len() as u32;
+        positions.push([0.0, 0.0, z]);
+        normals.push(normal.to_array());
+        uvs.push([0.5, 0.5]);
+        for point in outline {
+            positions.push([point.x, point.y, z]);
+            normals.push(normal.to_array());
+            uvs.push([point.x + 0.5, point.y + 0.5]);
+        }
+        for index in 0..outline.len() as u32 {
+            let current = center + 1 + index;
+            let next = center + 1 + (index + 1) % outline.len() as u32;
+            if reverse {
+                indices.extend_from_slice(&[center, next, current]);
+            } else {
+                indices.extend_from_slice(&[center, current, next]);
+            }
+        }
+    }
+
+    for index in 0..outline.len() {
+        let next = (index + 1) % outline.len();
+        let edge = outline[next] - outline[index];
+        let normal = Vec3::new(edge.y, -edge.x, 0.0).normalize_or_zero();
+        let start = positions.len() as u32;
+        for point in [
+            Vec3::new(outline[index].x, outline[index].y, half_depth),
+            Vec3::new(outline[index].x, outline[index].y, -half_depth),
+            Vec3::new(outline[next].x, outline[next].y, -half_depth),
+            Vec3::new(outline[next].x, outline[next].y, half_depth),
+        ] {
+            positions.push(point.to_array());
+            normals.push(normal.to_array());
+        }
+        uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
 fn authored_primitive_transform(primitive: &AuthoredPrimitive) -> Transform {
     Transform::from_translation(champions_stage_position(primitive.position))
-        .with_rotation(champions_yaw(primitive.rotation_y))
+        .with_rotation(
+            champions_yaw(primitive.rotation_y)
+                * Quat::from_rotation_x(primitive.rotation_x.to_radians()),
+        )
         .with_scale(champions_scale(primitive.scale))
 }
 
@@ -2670,7 +3735,8 @@ fn authored_primitive_prefab_transform(
     primitive: &AuthoredPrimitive,
 ) -> Transform {
     let parent_rotation = champions_yaw(instance.rotation_y);
-    let child_rotation = champions_yaw(primitive.rotation_y);
+    let child_rotation = champions_yaw(primitive.rotation_y)
+        * Quat::from_rotation_x(primitive.rotation_x.to_radians());
     let parent_scale = champions_scale(instance.scale);
     let child_scale = champions_scale(primitive.scale);
     let parent_position = champions_raw_position(instance.position);
@@ -2949,7 +4015,7 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     // Authored RON scenes are rendered instead of their fallback prop lists.
     if matches!(
         arena_index,
-        CHAMPIONS_COURT_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
+        CHAMPIONS_COURT_ARENA_INDEX | SPLIT_CAUSEWAY_ARENA_INDEX | TRAINING_GROUND_ARENA_INDEX
     ) {
         &[]
     } else {
@@ -2957,10 +4023,10 @@ fn arena_asset_props_for_definition(arena: &ArenaDefinition) -> &'static [ArenaA
     }
 }
 
-// Frozen from the pre-C1 production RON/quaternion/Euler collision builder on the
-// reference toolchain documented in canonical_math. Presentation still consumes
-// the RON; canonical collision consumes only these final world-space records.
-const CHAMPIONS_COURT_COLLISION_BARRIERS: [WorldPropBarrier; 91] = [
+// Retained only as provenance for the pre-redesign arena. The active C1 fixture
+// below replaces it without changing historical exact-bit records.
+#[allow(dead_code)]
+const CHAMPIONS_COURT_COLLISION_BARRIERS_V3_LEGACY: [WorldPropBarrier; 91] = [
     WorldPropBarrier {
         definition: ArenaBarrierDefinition::rectangle(
             f32::from_bits(0x00000000),
@@ -3938,8 +5004,148 @@ const CHAMPIONS_COURT_COLLISION_BARRIERS: [WorldPropBarrier; 91] = [
     },
 ];
 
+const fn frozen_collision_barrier(words: [u32; 8]) -> WorldPropBarrier {
+    let definition = match words[0] {
+        0 => ArenaBarrierDefinition::circle(
+            f32::from_bits(words[2]),
+            f32::from_bits(words[3]),
+            f32::from_bits(words[5]),
+            f32::from_bits(words[4]),
+        ),
+        1 => ArenaBarrierDefinition::rectangle(
+            f32::from_bits(words[2]),
+            f32::from_bits(words[3]),
+            f32::from_bits(words[5]),
+            f32::from_bits(words[6]),
+            f32::from_bits(words[7]),
+            f32::from_bits(words[4]),
+        ),
+        _ => panic!("invalid frozen collision footprint"),
+    };
+    let behavior = match words[1] {
+        0 => PropBarrierBehavior::Solid,
+        1 => PropBarrierBehavior::OneWayTop,
+        2 => PropBarrierBehavior::SideOnly,
+        _ => panic!("invalid frozen collision behavior"),
+    };
+    WorldPropBarrier {
+        definition,
+        behavior,
+    }
+}
+
+// Frozen from the final C1 Crown Ring RON on the macOS/aarch64 reference
+// toolchain. Presentation consumes the RON; simulation consumes these records.
+const CHAMPIONS_COURT_COLLISION_BARRIERS: [WorldPropBarrier; 35] = [
+    frozen_collision_barrier([0, 0, 0xc0b4cccd, 0xc118cccd, 0x3fc7ef9e, 0x3e7d9556, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x40b4cccd, 0xc118cccd, 0x3fc7ef9e, 0x3e7d9556, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc0bccccd, 0xc0f80000, 0x3f9a8c16, 0x3e47ae15, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x40bccccd, 0xc0f80000, 0x3f9a8c16, 0x3e47ae15, 0, 0]),
+    frozen_collision_barrier([
+        1, 0, 0xc0d1999a, 0xc099999a, 0x3f3cc8de, 0x3e75104e, 0x3e8646f2, 0x3e97e9d7,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x40ce6666, 0x4094cccd, 0x3f3890d6, 0x3e6540cc, 0x3e7b3a69, 0xbe7a35dd,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0xc138cccd, 0x40980000, 0x3f41cac0, 0x3e8ccccd, 0x3e8ccccd, 0x3ee85696,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x4138cccd, 0xbff9999a, 0x3f41cac0, 0x3e8ccccd, 0x3e8ccccd, 0xbf0a8263,
+    ]),
+    frozen_collision_barrier([0, 1, 0, 0, 0x3f0ccccd, 0x3fe00000, 0, 0]),
+    frozen_collision_barrier([1, 0, 0, 0xc0b70a3d, 0x3fa28f5c, 0x401c28f6, 0x3eae147b, 0]),
+    frozen_collision_barrier([1, 0, 0, 0x40cae148, 0x3fa28f5c, 0x40128f5c, 0x3eae147b, 0]),
+    frozen_collision_barrier([
+        1, 0, 0xc0e5c28f, 0x3f0ccccd, 0x3fa28f5c, 0x3eae147b, 0x40170a3d, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x40e5c28f, 0x3f0ccccd, 0x3fa28f5c, 0x3eae147b, 0x40170a3d, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0xc1107ae1, 0x3fb33333, 0x3f90a3d7, 0x3e8f5c29, 0x4045c28f, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0xc12deb85, 0x3fb33333, 0x3f90a3d7, 0x3e8f5c29, 0x4045c28f, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0xc11f3333, 0xbfdd70a4, 0x3f90a3d7, 0x3f75c28f, 0x3e8f5c29, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0xc11f3333, 0x4090f5c3, 0x3f90a3d7, 0x3f75c28f, 0x3e8f5c29, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x41107ae1, 0x3fb33333, 0x3f90a3d7, 0x3e8f5c29, 0x4045c28f, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x412deb85, 0x3fb33333, 0x3f90a3d7, 0x3e8f5c29, 0x4045c28f, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x411f3333, 0xbfdd70a4, 0x3f90a3d7, 0x3f75c28f, 0x3e8f5c29, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x411f3333, 0x4090f5c3, 0x3f90a3d7, 0x3f75c28f, 0x3e8f5c29, 0,
+    ]),
+    frozen_collision_barrier([0, 0, 0xc0c5c28f, 0xc098f5c3, 0x3fd33334, 0x3f051eb8, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x40c5c28f, 0xc098f5c3, 0x3fd33334, 0x3f051eb8, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc0c66666, 0x40a00000, 0x3fd9999a, 0x3f0a3d71, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x40c66666, 0x40a00000, 0x3fd9999a, 0x3f0a3d71, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc08b3333, 0x412bae14, 0x40533333, 0x3f170a3d, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x408b3333, 0x412bae14, 0x40533333, 0x3f170a3d, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc0633333, 0xc11eb852, 0x40651eb9, 0x3f170a3d, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x40633333, 0xc11eb852, 0x40651eb9, 0x3f170a3d, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc13b851f, 0xc02e147b, 0x4039999a, 0x3f028f5c, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc13b851f, 0x40b70a3d, 0x4039999a, 0x3f028f5c, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x413b851f, 0xc02e147b, 0x4039999a, 0x3f028f5c, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x413b851f, 0x40b70a3d, 0x4039999a, 0x3f028f5c, 0, 0]),
+    frozen_collision_barrier([
+        1, 0, 0xbf733333, 0xc12147ae, 0x40300000, 0x3ed70a3d, 0x3eeb851f, 0,
+    ]),
+    frozen_collision_barrier([
+        1, 0, 0x3f733333, 0xc12147ae, 0x40300000, 0x3ed70a3d, 0x3eeb851f, 0,
+    ]),
+];
+
+// Frozen from the final Split Causeway RON. Gate leaves are deliberately
+// excluded: their 19 rollback-owned poses have a separate fixture above.
+const SPLIT_CAUSEWAY_COLLISION_BARRIERS: [WorldPropBarrier; 18] = [
+    frozen_collision_barrier([0, 2, 0xc10051ec, 0xc010a3d7, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0xc0c8f5c3, 0xc010a3d7, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0xc10051ec, 0xbf23d70a, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0xc0c8f5c3, 0xbf23d70a, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([
+        1, 2, 0xc0e5b22d, 0xc010624e, 0x4037ae15, 0x3f883127, 0x3e09374c, 0x3d0efa35,
+    ]),
+    frozen_collision_barrier([
+        1, 2, 0xc0e3e76d, 0xbf24dd2f, 0x4037ae15, 0x3f883127, 0x3e09374c, 0x3d0efa35,
+    ]),
+    frozen_collision_barrier([
+        1, 2, 0xc1005e35, 0xbfb5a1cb, 0x4037ae15, 0x3e09374c, 0x3f70e560, 0x3d0efa35,
+    ]),
+    frozen_collision_barrier([0, 2, 0x40c8f5c3, 0xc010a3d7, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0x410051ec, 0xc010a3d7, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0x40c8f5c3, 0xbf23d70a, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([0, 2, 0x410051ec, 0xbf23d70a, 0x4037ae15, 0x3e75c28f, 0, 0]),
+    frozen_collision_barrier([
+        1, 2, 0x40e5b22d, 0xc010624e, 0x4037ae15, 0x3f883127, 0x3e09374c, 0xbd0efa35,
+    ]),
+    frozen_collision_barrier([
+        1, 2, 0x40e3e76d, 0xbf24dd2f, 0x4037ae15, 0x3f883127, 0x3e09374c, 0xbd0efa35,
+    ]),
+    frozen_collision_barrier([
+        1, 2, 0x41005e35, 0xbfb5a1cb, 0x4037ae15, 0x3e09374c, 0x3f70e560, 0xbd0efa35,
+    ]),
+    frozen_collision_barrier([0, 0, 0xc100cccd, 0xc0980000, 0x40300000, 0x3ec28f5c, 0, 0]),
+    frozen_collision_barrier([0, 0, 0xc10e147b, 0x409b3333, 0x4019999a, 0x3eae147b, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x41000000, 0xc0980000, 0x3fcccccc, 0x3eeb851f, 0, 0]),
+    frozen_collision_barrier([0, 0, 0x4109eb85, 0x40a3d70a, 0x3fb47ae1, 0x3ec28f5c, 0, 0]),
+];
+
 #[cfg(test)]
-const CHAMPIONS_COURT_COLLISION_FNV1A64: u64 = 0x16273c63e5b838fc;
+const CHAMPIONS_COURT_COLLISION_FNV1A64: u64 = 0xc5499906dcd78474;
+
+#[cfg(test)]
+const SPLIT_CAUSEWAY_COLLISION_FNV1A64: u64 = 0x48cbea118f23e9bc;
 
 fn champions_court_collision_barriers() -> &'static [WorldPropBarrier] {
     &CHAMPIONS_COURT_COLLISION_BARRIERS
@@ -3995,8 +5201,89 @@ const TRAINING_GROUND_COLLISION_BARRIERS: [WorldPropBarrier; 4] = [
     },
 ];
 
+#[cfg(test)]
+fn build_authored_arena_collision_barriers(arena_index: usize) -> Vec<WorldPropBarrier> {
+    let contents = match arena_index {
+        CHAMPIONS_COURT_ARENA_INDEX => include_str!("../arts/champions_court.ron"),
+        SPLIT_CAUSEWAY_ARENA_INDEX => include_str!("../assets/maps/split_causeway.ron"),
+        TRAINING_GROUND_ARENA_INDEX => include_str!("../assets/maps/training_ground.ron"),
+        _ => return Vec::new(),
+    };
+    let map: AuthoredArenaRon =
+        ron::from_str(contents).expect("embedded authored arena RON should parse");
+    let mut barriers = Vec::new();
+
+    for object in &map.instances {
+        append_champions_object_barriers(
+            &map.assets,
+            object,
+            champions_object_transform(object),
+            &mut barriers,
+        );
+    }
+    for prefab_instance in &map.prefab_instances {
+        let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
+            continue;
+        };
+        for object in objects {
+            append_champions_object_barriers(
+                &map.assets,
+                object,
+                champions_prefab_object_transform(prefab_instance, object),
+                &mut barriers,
+            );
+        }
+    }
+    barriers.extend(map.colliders.iter().map(authored_collider_barrier));
+    barriers
+}
+
+fn split_causeway_collision_barriers() -> &'static [WorldPropBarrier] {
+    &SPLIT_CAUSEWAY_COLLISION_BARRIERS
+}
+
+fn authored_arena_collision_barriers(arena_index: usize) -> &'static [WorldPropBarrier] {
+    match arena_index {
+        CHAMPIONS_COURT_ARENA_INDEX => champions_court_collision_barriers(),
+        SPLIT_CAUSEWAY_ARENA_INDEX => split_causeway_collision_barriers(),
+        TRAINING_GROUND_ARENA_INDEX => training_ground_collision_barriers(),
+        _ => &[],
+    }
+}
+
 fn training_ground_collision_barriers() -> &'static [WorldPropBarrier] {
     &TRAINING_GROUND_COLLISION_BARRIERS
+}
+
+#[cfg(test)]
+fn authored_collider_barrier(collider: &AuthoredCollider) -> WorldPropBarrier {
+    debug_assert!(!collider.id.is_empty());
+    let top_y = ARENA_TOP_Y + collider.top_y;
+    let definition = if collider.kind == "circle" {
+        ArenaBarrierDefinition::circle(
+            collider.center.0,
+            collider.center.1,
+            collider.radius.max(0.01),
+            top_y,
+        )
+    } else {
+        ArenaBarrierDefinition::rectangle(
+            collider.center.0,
+            collider.center.1,
+            collider.half_extents.0,
+            collider.half_extents.1,
+            collider.rotation_y.to_radians(),
+            top_y,
+        )
+    };
+    WorldPropBarrier {
+        definition,
+        behavior: match collider.behavior.as_str() {
+            "one_way_top" => PropBarrierBehavior::OneWayTop,
+            "side_only" => PropBarrierBehavior::SideOnly,
+            _ => PropBarrierBehavior::Solid,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -4014,7 +5301,9 @@ fn append_champions_object_barriers(
         prop_collision_profile(asset)
             .iter()
             .copied()
-            .map(|barrier| barrier.to_world_scaled(transform.translation, yaw, transform.scale)),
+            .map(|barrier| {
+                barrier.to_world_scaled_reference(transform.translation, yaw, transform.scale)
+            }),
     );
 }
 
@@ -4053,14 +5342,17 @@ fn arena_collision_worlds() -> &'static [ArenaCollisionWorld] {
                     .copied()
                     .flat_map(ArenaAssetProp::collision_barriers)
                     .collect();
-                match arena_index {
-                    CHAMPIONS_COURT_ARENA_INDEX => {
-                        prop_barriers.extend(champions_court_collision_barriers().iter().copied());
-                    }
-                    TRAINING_GROUND_ARENA_INDEX => {
-                        prop_barriers.extend(training_ground_collision_barriers().iter().copied());
-                    }
-                    _ => {}
+                if matches!(
+                    arena_index,
+                    CHAMPIONS_COURT_ARENA_INDEX
+                        | SPLIT_CAUSEWAY_ARENA_INDEX
+                        | TRAINING_GROUND_ARENA_INDEX
+                ) {
+                    prop_barriers.extend(
+                        authored_arena_collision_barriers(arena_index)
+                            .iter()
+                            .copied(),
+                    );
                 }
                 ArenaCollisionWorld {
                     arena_index,
@@ -4521,25 +5813,28 @@ const POWDER_KEG_ASSET_PROPS: &[ArenaAssetProp] = &[
     },
 ];
 
-fn spawn_arena_lights(commands: &mut Commands) {
+fn spawn_arena_lights(commands: &mut Commands, arena_index: usize) {
+    let profile = arena_lighting_profile(arena_index);
     commands.spawn((
         DirectionalLight {
-            illuminance: 12_500.0,
+            illuminance: profile.directional_illuminance,
+            color: profile.directional_color,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(-5.0, 12.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(profile.directional_position).looking_at(Vec3::ZERO, Vec3::Y),
         ArenaGlobalDirectionalLight,
     ));
 
     commands.spawn((
         PointLight {
-            intensity: 1_100_000.0,
-            range: 36.0,
+            intensity: profile.point_intensity,
+            range: profile.point_range,
+            color: profile.point_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(0.0, 9.0, 4.5),
+        Transform::from_translation(profile.point_position),
         ArenaGlobalPointLight,
     ));
 }
@@ -4548,7 +5843,7 @@ pub fn sync_arena_lighting(
     scene: Res<ArenaScene>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut directional_lights: Query<
-        &mut DirectionalLight,
+        (&mut DirectionalLight, &mut Transform),
         (
             With<ArenaGlobalDirectionalLight>,
             Without<ArenaGlobalPointLight>,
@@ -4566,36 +5861,21 @@ pub fn sync_arena_lighting(
         return;
     }
 
-    let training = scene.index == TRAINING_GROUND_ARENA_INDEX;
-    if training {
-        ambient.color = Color::srgb(0.68, 0.64, 0.58);
-        ambient.brightness = 220.0;
-    } else {
-        ambient.color = Color::srgb(0.85, 0.78, 0.68);
-        ambient.brightness = 430.0;
-    }
+    let profile = arena_lighting_profile(scene.index);
+    ambient.color = profile.ambient_color;
+    ambient.brightness = profile.ambient_brightness;
 
-    for mut light in &mut directional_lights {
-        light.illuminance = if training { 8_000.0 } else { 12_500.0 };
-        light.color = if training {
-            Color::srgb(1.0, 0.96, 0.90)
-        } else {
-            Color::WHITE
-        };
+    for (mut light, mut transform) in &mut directional_lights {
+        light.illuminance = profile.directional_illuminance;
+        light.color = profile.directional_color;
+        *transform = Transform::from_translation(profile.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y);
     }
     for (mut light, mut transform) in &mut point_lights {
-        light.intensity = if training { 1_600_000.0 } else { 1_100_000.0 };
-        light.range = if training { 20.0 } else { 36.0 };
-        light.color = if training {
-            Color::srgb(1.0, 0.86, 0.70)
-        } else {
-            Color::WHITE
-        };
-        transform.translation = if training {
-            Vec3::new(0.0, 8.0, 4.0)
-        } else {
-            Vec3::new(0.0, 9.0, 4.5)
-        };
+        light.intensity = profile.point_intensity;
+        light.range = profile.point_range;
+        light.color = profile.point_color;
+        transform.translation = profile.point_position;
     }
 }
 
@@ -6193,11 +7473,6 @@ fn saw_knockback_direction(
     }
 }
 
-#[cfg(test)]
-pub fn ground_height_at(x: f32, z: f32) -> Option<f32> {
-    ground_height_at_with_radius(x, z, 0.0)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GroundSupport {
     Firm(f32),
@@ -6212,17 +7487,6 @@ impl GroundSupport {
             Self::Airborne => None,
         }
     }
-}
-
-#[cfg(test)]
-pub fn ground_height_at_with_radius(x: f32, z: f32, support_radius: f32) -> Option<f32> {
-    ground_support_at_with_radius(x, z, support_radius).height()
-}
-
-#[cfg(test)]
-pub fn ground_support_at_with_radius(x: f32, z: f32, support_radius: f32) -> GroundSupport {
-    let arena = &arena_definitions()[0];
-    ground_support_for_arena_with_radius(arena, x, z, support_radius)
 }
 
 pub fn ground_support_for_arena_with_radius(
@@ -6290,6 +7554,9 @@ pub fn ground_support_for_arena_with_radius(
     }
 
     for collider in arena_prop_barriers(arena) {
+        if collider.behavior == PropBarrierBehavior::SideOnly {
+            continue;
+        }
         let support = match collider.definition.support_at(Vec2::new(x, z), ledge_grace) {
             Some(crate::arena_barriers::BarrierSupport::Firm) => {
                 Some(GroundSupport::Firm(collider.definition.top_y))
@@ -6449,6 +7716,32 @@ pub(crate) fn resolve_platform_side_collision_for_arena(
             resolved,
             radius,
             crate::constants::LANDING_SNAP_TOLERANCE,
+        );
+    }
+    resolved
+}
+
+/// Resolves the immutable arena geometry and the two rollback-owned Split
+/// Causeway gates. Callers must pass the match-owned arena and door resources;
+/// no process-global selection or render transform can affect simulation.
+pub(crate) fn resolve_platform_side_collision_with_doors(
+    arena: &ArenaDefinition,
+    position: Vec3,
+    radius: f32,
+    doors: &SplitCausewayDoorState,
+) -> Vec3 {
+    let mut resolved = resolve_platform_side_collision_for_arena(arena, position, radius);
+    if doors.arena_index != SPLIT_CAUSEWAY_ARENA_INDEX
+        || arena.name != arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].name
+    {
+        return resolved;
+    }
+    for (door_index, door) in doors.doors.iter().copied().enumerate() {
+        resolved = resolve_split_causeway_door_side_collision(
+            door_index,
+            door.progress_ticks,
+            resolved,
+            radius,
         );
     }
     resolved
@@ -7717,24 +9010,45 @@ mod tests {
 
     #[test]
     fn radius_support_extends_platform_ground_query_slightly() {
-        let platform = arena_definitions()[0].platforms[0];
+        const TEST_PLATFORMS: &[PlatformDefinition] = &[PlatformDefinition::new(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            ARENA_TOP_Y + 0.4,
+        )];
+        let arena = ArenaDefinition {
+            name: "Training Ground",
+            spawn_points: [Vec3::ZERO; 4],
+            item_anchors: &[],
+            ground_shapes: &[],
+            platforms: TEST_PLATFORMS,
+            pipe_pair: None,
+            ringout_radius: 10.0,
+            ringout_y: -5.0,
+            camera_offset: Vec3::new(0.0, 10.0, 10.0),
+            hazards: &[],
+            background: arena_definitions()[TRAINING_GROUND_ARENA_INDEX].background,
+            visual_theme: ArenaVisualTheme::Training,
+        };
+        let platform = TEST_PLATFORMS[0];
         let x = platform.center.x + platform.half_extents.x + 0.08;
-        assert_eq!(ground_height_at(x, platform.center.y), None);
         assert_eq!(
-            ground_height_at_with_radius(x, platform.center.y, 0.4),
-            Some(platform.top_y)
+            ground_support_for_arena_with_radius(&arena, x, platform.center.y, 0.0),
+            GroundSupport::Airborne
         );
         assert_eq!(
-            ground_support_at_with_radius(x, platform.center.y, 0.4),
+            ground_support_for_arena_with_radius(&arena, x, platform.center.y, 0.4),
             GroundSupport::Grace(platform.top_y)
         );
         assert_eq!(
-            ground_height_at_with_radius(
+            ground_support_for_arena_with_radius(
+                &arena,
                 platform.center.x + platform.half_extents.x + 0.2,
                 platform.center.y,
                 0.4,
             ),
-            None
+            GroundSupport::Airborne
         );
     }
 
@@ -7867,6 +9181,7 @@ mod tests {
     #[test]
     fn raised_walkable_platforms_open_at_landing_height_across_arenas() {
         let platform_cases = [
+            (0, 4, "Crown Ring"),
             (1, 2, "Split Causeway"),
             (2, 0, "Sunstone Steps"),
             (3, 0, "Crank Yard"),
@@ -7903,7 +9218,7 @@ mod tests {
 
     #[test]
     fn floor_level_platforms_remain_free_of_side_barriers() {
-        for arena_index in [0, 5, 6, 7, 9] {
+        for arena_index in [5, 6, 7, 9] {
             let arena = &arena_definitions()[arena_index];
             let platform = &arena.platforms[0];
             let position = Vec3::new(
@@ -8221,6 +9536,19 @@ mod tests {
             fire_timer: TickTimer::from_ticks(29),
             next_cannon: 1,
         });
+        let mut doors = SplitCausewayDoorState::default();
+        doors.reset_closed(arena_index, 77);
+        doors.doors = [
+            SplitCausewayDoorRuntime {
+                target_open: true,
+                progress_ticks: 11,
+            },
+            SplitCausewayDoorRuntime {
+                target_open: false,
+                progress_ticks: 4,
+            },
+        ];
+        world.insert_resource(doors);
 
         let snapshot = capture_arena_runtime_snapshot(&world).unwrap();
         assert_eq!(snapshot.hazard_clock_ticks, 321);
@@ -8229,10 +9557,20 @@ mod tests {
             snapshot.logical_device_flags,
             ARENA_DEVICE_CRANK_SAWS_STOPPED
         );
+        assert_eq!(snapshot.payload[0], ARENA_ROLLBACK_PAYLOAD_VERSION);
+        assert_eq!(snapshot.payload[ARENA_PAYLOAD_DOOR_FLAGS_OFFSET], 0b01);
+        assert_eq!(
+            &snapshot.payload[ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET
+                ..ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET + SPLIT_CAUSEWAY_DOOR_COUNT],
+            &[11, 4]
+        );
 
         world.insert_resource(ArenaHazardState::new(arena_index, 0));
         world.insert_resource(ArenaPipeState::new(arena_index));
         world.insert_resource(PowderKegCannonState::new(arena_index));
+        let mut reset_doors = SplitCausewayDoorState::default();
+        reset_doors.reset_closed(arena_index, 77);
+        world.insert_resource(reset_doors);
         let plan = prepare_arena_runtime_restore(&world, &snapshot).unwrap();
         commit_arena_runtime_restore(&mut world, plan);
         assert_eq!(capture_arena_runtime_snapshot(&world).unwrap(), snapshot);
@@ -8250,6 +9588,9 @@ mod tests {
         ));
         world.insert_resource(ArenaPipeState::new(arena_index));
         world.insert_resource(PowderKegCannonState::new(arena_index));
+        let mut doors = SplitCausewayDoorState::default();
+        doors.reset_closed(arena_index, 0);
+        world.insert_resource(doors);
         let snapshot = capture_arena_runtime_snapshot(&world).unwrap();
 
         let mut padding = snapshot.clone();
@@ -8264,6 +9605,22 @@ mod tests {
         assert!(matches!(
             prepare_arena_runtime_restore(&world, &aggregate),
             Err(ArenaRuntimeSnapshotError::InconsistentHazardAggregate { fighter: 0, .. })
+        ));
+
+        let mut door_flags = snapshot.clone();
+        door_flags.payload[ARENA_PAYLOAD_DOOR_FLAGS_OFFSET] = 0x80;
+        assert!(matches!(
+            prepare_arena_runtime_restore(&world, &door_flags),
+            Err(ArenaRuntimeSnapshotError::InvalidDoorFlags(0x80))
+        ));
+
+        let mut door_progress = snapshot.clone();
+        door_progress.payload[ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET] =
+            SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS + 1;
+        assert!(matches!(
+            prepare_arena_runtime_restore(&world, &door_progress),
+            Err(ArenaRuntimeSnapshotError::InvalidDoorProgress(value))
+                if value == SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS + 1
         ));
 
         let mut pipe = snapshot;
@@ -8330,6 +9687,12 @@ mod tests {
             );
             assert!(normal.dot(to_camera) > 0.999, "{}", arena.name);
         }
+
+        let split_wallpaper = arena_background_wallpaper_size(
+            arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].background,
+        );
+        assert!(split_wallpaper.x >= 126.0);
+        assert!(split_wallpaper.y >= 84.0);
     }
 
     #[test]
@@ -8570,9 +9933,9 @@ mod tests {
             .filter(|barrier| barrier.behavior == PropBarrierBehavior::OneWayTop)
             .count();
 
-        assert_eq!(barriers.len(), 91);
-        assert_eq!((rectangle_count, circle_count), (78, 13));
-        assert_eq!((barriers.len() - one_way_count, one_way_count), (69, 22));
+        assert_eq!(barriers.len(), 35);
+        assert_eq!((rectangle_count, circle_count), (18, 17));
+        assert_eq!((barriers.len() - one_way_count, one_way_count), (34, 1));
         assert!(barriers.iter().any(|barrier| {
             barrier.definition.center.distance(Vec2::ZERO) < 0.01
                 && barrier.definition.top_y > ARENA_TOP_Y
@@ -8585,7 +9948,11 @@ mod tests {
     }
 
     fn champions_court_collision_words(barrier: &WorldPropBarrier) -> [u32; 8] {
-        let behavior = u32::from(barrier.behavior == PropBarrierBehavior::OneWayTop);
+        let behavior = match barrier.behavior {
+            PropBarrierBehavior::Solid => 0,
+            PropBarrierBehavior::OneWayTop => 1,
+            PropBarrierBehavior::SideOnly => 2,
+        };
         match barrier.definition.footprint {
             BarrierFootprint::Circle { radius } => [
                 0,
@@ -8616,7 +9983,7 @@ mod tests {
             .iter()
             .flat_map(champions_court_collision_words)
             .collect();
-        assert_eq!(words.len(), 91 * 8);
+        assert_eq!(words.len(), 35 * 8);
         assert_eq!(
             crate::canonical_math::fnv1a64_words(&words),
             CHAMPIONS_COURT_COLLISION_FNV1A64
@@ -8625,35 +9992,8 @@ mod tests {
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    fn champions_court_prebake_matches_every_v3_reference_record_bit() {
-        let map: AuthoredArenaRon = ron::from_str(include_str!("../arts/champions_court.ron"))
-            .expect("embedded Champion's Court RON should parse");
-        let mut reference = Vec::new();
-
-        for object in &map.instances {
-            let transform = Transform::from_xyz(
-                object.position.0,
-                ARENA_TOP_Y + object.position.1 + ARENA_PROP_SURFACE_CLEARANCE,
-                object.position.2,
-            )
-            .with_rotation(Quat::from_rotation_y(object.rotation_y.to_radians()))
-            .with_scale(Vec3::new(object.scale.0, object.scale.1, object.scale.2));
-            append_champions_object_barriers(&map.assets, object, transform, &mut reference);
-        }
-
-        for prefab_instance in &map.prefab_instances {
-            let Some(objects) = map.prefabs.get(&prefab_instance.prefab) else {
-                continue;
-            };
-            for object in objects {
-                append_champions_object_barriers(
-                    &map.assets,
-                    object,
-                    champions_prefab_object_transform(prefab_instance, object),
-                    &mut reference,
-                );
-            }
-        }
+    fn champions_court_prebake_matches_every_c1_reference_record_bit() {
+        let reference = build_authored_arena_collision_barriers(CHAMPIONS_COURT_ARENA_INDEX);
 
         assert_eq!(reference.len(), CHAMPIONS_COURT_COLLISION_BARRIERS.len());
         for (index, (actual, expected)) in CHAMPIONS_COURT_COLLISION_BARRIERS
@@ -8664,9 +10004,29 @@ mod tests {
             assert_eq!(
                 champions_court_collision_words(actual),
                 champions_court_collision_words(expected),
-                "Champion's Court barrier {index} changed from v3 reference"
+                "Champion's Court barrier {index} changed from C1 reference"
             );
         }
+    }
+
+    #[test]
+    fn split_causeway_prebake_matches_frozen_record_fingerprint() {
+        let words = split_causeway_collision_barriers()
+            .iter()
+            .flat_map(champions_court_collision_words)
+            .collect::<Vec<_>>();
+        assert_eq!(words.len(), 18 * 8);
+        assert_eq!(
+            crate::canonical_math::fnv1a64_words(&words),
+            SPLIT_CAUSEWAY_COLLISION_FNV1A64
+        );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn split_causeway_prebake_matches_every_reference_record_bit() {
+        let reference = build_authored_arena_collision_barriers(SPLIT_CAUSEWAY_ARENA_INDEX);
+        assert_eq!(reference.as_slice(), split_causeway_collision_barriers());
     }
 
     #[test]
@@ -8716,12 +10076,662 @@ mod tests {
 
     #[test]
     fn champions_court_authorship_parses() {
-        let map = load_champions_court_map().expect("champions court RON should parse");
-        assert_eq!(map.map.tile_size, 2.0);
-        assert!(map.assets.contains_key("floor"));
-        assert!(!map.floor_shapes.is_empty());
+        let map = load_authored_arena_map(CHAMPIONS_COURT_ARENA_INDEX)
+            .expect("champions court RON should parse");
+        assert_eq!(map.map.tile_size, 1.0);
+        assert_eq!(map.map.floor_width, 24.8);
+        assert_eq!(map.map.floor_depth, 22.4);
+        assert!(map.assets.contains_key("column"));
+        assert!(map.floor_shapes.is_empty());
         assert!(!map.instances.is_empty());
-        assert!(!map.prefab_instances.is_empty());
+        assert!(map.prefab_instances.is_empty());
+        assert!(map.materials.contains_key("gold"));
+
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("Crown Ring should use authored paving");
+        assert_eq!((floor_pattern.rows, floor_pattern.columns), (24, 26));
+        assert_eq!(floor_pattern.gap, 0.020);
+        assert_eq!(floor_pattern.bevel, 0.025);
+        assert!(floor_pattern.masked_to_gameplay);
+
+        assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "banner_tower")
+                .count(),
+            8
+        );
+        assert!(
+            map.primitives
+                .iter()
+                .any(|primitive| primitive.id == "center_crown"
+                    && primitive.kind == "crown"
+                    && (primitive.rotation_x + 90.0).abs() < 0.001)
+        );
+        assert!(map.lights.is_empty());
+        assert!(map.colliders.iter().any(|collider| {
+            collider.kind == "circle"
+                && collider.behavior == "one_way_top"
+                && collider.id == "center_medallion"
+        }));
+    }
+
+    #[test]
+    fn split_causeway_ron_parses_with_reference_scene_content() {
+        let map = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+        assert_eq!(map.map.tile_size, 1.0);
+        assert_eq!(map.map.floor_width, 19.0);
+        assert_eq!(map.map.floor_depth, 14.8);
+        assert!(map.assets.is_empty());
+        assert!(map.instances.is_empty());
+        assert!(map.floor_shapes.is_empty());
+        assert!(map.materials.contains_key("mint_0"));
+        assert!(map.materials.contains_key("peach_0"));
+        assert!(map.materials.contains_key("bridge_0"));
+        assert_eq!(map.floor_material_regions.len(), 7);
+
+        let floor_pattern = map
+            .floor_pattern
+            .as_ref()
+            .expect("Split Causeway should use authored low-poly paving");
+        assert_eq!((floor_pattern.rows, floor_pattern.columns), (16, 22));
+        assert_eq!(floor_pattern.gap, 0.025);
+        assert_eq!(floor_pattern.bevel, 0.035);
+        assert!(floor_pattern.masked_to_gameplay);
+
+        assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "lookout_cage")
+                .count(),
+            2
+        );
+        assert_eq!(
+            map.primitive_prefab_instances
+                .iter()
+                .filter(|instance| instance.prefab == "lookout_outer_rail")
+                .count(),
+            2
+        );
+        assert!(
+            map.primitive_prefabs["lookout_cage"]
+                .iter()
+                .all(|primitive| !primitive.id.starts_with("rail_left")
+                    && !primitive.id.starts_with("rail_right"))
+        );
+        assert_eq!(
+            map.primitives
+                .iter()
+                .filter(|primitive| primitive.id.starts_with("foundation_"))
+                .count(),
+            9
+        );
+        assert!(map.lights.is_empty());
+        assert_eq!(map.colliders.len(), 18);
+    }
+
+    #[test]
+    fn split_causeway_floor_regions_preserve_mint_peach_and_neutral_zones() {
+        let map = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+
+        for (point, family) in [
+            (Vec2::new(-5.35, 0.0), "mint_"),
+            (Vec2::new(5.35, 0.0), "peach_"),
+            (Vec2::new(0.0, -6.2), "peach_"),
+            (Vec2::new(0.0, -3.35), "bridge_"),
+            (Vec2::new(0.0, 0.0), "mint_"),
+            (Vec2::new(0.0, 3.15), "bridge_"),
+            (Vec2::new(0.0, 5.9), "peach_"),
+        ] {
+            let region_index = authored_floor_material_region_index(&map, point.x, point.y)
+                .expect("reference zone should have an explicit material region");
+            assert!(
+                map.floor_material_regions[region_index]
+                    .materials
+                    .iter()
+                    .all(|material| material.starts_with(family)),
+                "floor at {point:?} should use the {family} family"
+            );
+        }
+
+        let material_names = authored_floor_material_names(&map);
+        assert_eq!(material_names.len(), 9);
+        assert!(material_names.iter().any(|name| name == "mint_2"));
+        assert!(material_names.iter().any(|name| name == "peach_2"));
+        assert!(material_names.iter().any(|name| name == "bridge_2"));
+    }
+
+    #[test]
+    fn split_causeway_authored_barriers_cover_both_lookout_cages() {
+        let barriers = authored_arena_collision_barriers(SPLIT_CAUSEWAY_ARENA_INDEX);
+        assert_eq!(barriers.len(), 18);
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.definition.center.x < -6.0)
+                .count(),
+            9
+        );
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.definition.center.x > 6.0)
+                .count(),
+            9
+        );
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.behavior == PropBarrierBehavior::SideOnly)
+                .count(),
+            14
+        );
+        assert_eq!(
+            barriers
+                .iter()
+                .filter(|barrier| barrier.behavior == PropBarrierBehavior::Solid)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn split_causeway_side_only_rails_do_not_become_high_ground() {
+        let arena = &arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX];
+        let support = ground_support_for_arena_with_radius(arena, -7.15, -2.256, 0.0);
+
+        assert_eq!(support.height(), Some(ARENA_TOP_Y));
+    }
+
+    #[test]
+    fn split_causeway_closed_gates_block_and_open_gates_clear_the_doorways() {
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            let closed = split_causeway_door_barrier(door_index, 0);
+            let doorway = Vec3::new(closed.center.x, ARENA_TOP_Y, closed.center.y);
+
+            assert_ne!(
+                resolve_split_causeway_door_side_collision(door_index, 0, doorway, FIGHTER_RADIUS,),
+                doorway
+            );
+            assert_eq!(
+                resolve_split_causeway_door_side_collision(
+                    door_index,
+                    SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS,
+                    doorway,
+                    FIGHTER_RADIUS,
+                ),
+                doorway
+            );
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_visual_and_collider_share_the_hinge_transform() {
+        for door_index in 0..SPLIT_CAUSEWAY_DOOR_COUNT {
+            for progress_ticks in [0, 6, SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS] {
+                let open_fraction =
+                    f32::from(progress_ticks) / f32::from(SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS);
+                let transform = split_causeway_door_transform(door_index, open_fraction);
+                let visual_center = transform.transform_point(Vec3::new(
+                    0.0,
+                    0.0,
+                    SPLIT_CAUSEWAY_DOOR_LENGTH * 0.5,
+                ));
+                let barrier = split_causeway_door_barrier(door_index, progress_ticks);
+                assert!(
+                    Vec2::new(visual_center.x, visual_center.z).distance(barrier.center) < 0.000_1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_collision_fixture_is_frozen() {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for word in SPLIT_CAUSEWAY_DOOR_LEFT_X_BITS
+            .into_iter()
+            .chain(SPLIT_CAUSEWAY_DOOR_Z_BITS)
+            .chain(SPLIT_CAUSEWAY_DOOR_LEFT_YAW_BITS)
+            .chain(SPLIT_CAUSEWAY_DOOR_COS_BITS)
+            .chain(SPLIT_CAUSEWAY_DOOR_LEFT_SIN_BITS)
+            .chain([
+                SPLIT_CAUSEWAY_DOOR_HALF_WIDTH_BITS,
+                SPLIT_CAUSEWAY_DOOR_HALF_LENGTH_BITS,
+                SPLIT_CAUSEWAY_DOOR_TOP_Y_BITS,
+                u32::from(SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS),
+            ])
+        {
+            for byte in word.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        assert_eq!(hash, 0xcb28c0c31d638d57);
+    }
+
+    #[test]
+    fn split_causeway_gate_eligibility_requires_range_facing_and_free_action() {
+        let doorway = split_causeway_door_barrier(0, 0).center;
+        let eligible = Vec3::new(doorway.x + 1.0, ARENA_TOP_Y, doorway.y);
+
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::NEG_X,
+                FighterAction::Idle,
+            )
+            .is_some()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::X,
+                FighterAction::Idle,
+            )
+            .is_none()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible + Vec3::X * 1.0,
+                Vec3::NEG_X,
+                FighterAction::Idle,
+            )
+            .is_none()
+        );
+        assert!(
+            split_causeway_door_candidate_distance_squared(
+                0,
+                eligible,
+                Vec3::NEG_X,
+                FighterAction::LightAttack1,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn split_causeway_gates_toggle_independently() {
+        let mut doors = SplitCausewayDoorState::default();
+        doors.eligible_fighters = [Some(FighterId::ZERO), FighterId::new(1)];
+
+        assert_eq!(doors.toggle_for_fighter(FighterId::ZERO), Some((0, true)));
+        assert!(doors.doors[0].target_open);
+        assert!(!doors.doors[1].target_open);
+        assert_eq!(
+            doors.toggle_for_fighter(FighterId::new(1).unwrap()),
+            Some((1, true))
+        );
+        assert!(doors.doors[1].target_open);
+        assert_eq!(doors.toggle_for_fighter(FighterId::new(3).unwrap()), None);
+    }
+
+    #[test]
+    fn split_causeway_gate_inputs_emit_stable_canonical_events() {
+        let fighter_zero = FighterId::ZERO;
+        let fighter_one = FighterId::new(1).unwrap();
+        let mut match_state = MatchState::default();
+        match_state.set_active_slots([true, true, false, false]);
+        match_state.reset_for_new_match();
+        let mut doors = SplitCausewayDoorState::default();
+        doors.reset_closed(SPLIT_CAUSEWAY_ARENA_INDEX, match_state.replay_seed);
+        // Reverse the fighter-to-door relationship and ECS insertion order to
+        // prove canonical FighterId ordering owns event ordinals.
+        doors.eligible_fighters = [Some(fighter_one), Some(fighter_zero)];
+
+        let mut app = App::new();
+        app.insert_resource(ActiveArena::new(SPLIT_CAUSEWAY_ARENA_INDEX))
+            .insert_resource(match_state)
+            .insert_resource(doors)
+            .insert_resource(TickEventBuffer::new(SimTick(91)))
+            .add_systems(Update, handle_split_causeway_door_inputs);
+        let fighter_one_entity = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 1,
+                    name: "Gate fighter one",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    light: true,
+                    raw_light_pressed: true,
+                    ..default()
+                },
+            ))
+            .id();
+        let fighter_zero_entity = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "Gate fighter zero",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    light: true,
+                    raw_light_pressed: true,
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+
+        let events = app.world().resource::<TickEventBuffer>();
+        assert_eq!(events.len(), 2);
+        let emitted = events.iter().copied().collect::<Vec<_>>();
+        assert_eq!(
+            emitted[0],
+            crate::sim_event::SimEvent {
+                id: SimEventId {
+                    tick: SimTick(91),
+                    source: SimEventSource::Arena,
+                    ordinal: 0,
+                },
+                kind: SimEventKind::ArenaDeviceToggled {
+                    arena_index: SPLIT_CAUSEWAY_ARENA_INDEX as u16,
+                    device_index: 1,
+                    active: true,
+                },
+            }
+        );
+        assert_eq!(
+            emitted[1],
+            crate::sim_event::SimEvent {
+                id: SimEventId {
+                    tick: SimTick(91),
+                    source: SimEventSource::Arena,
+                    ordinal: 1,
+                },
+                kind: SimEventKind::ArenaDeviceToggled {
+                    arena_index: SPLIT_CAUSEWAY_ARENA_INDEX as u16,
+                    device_index: 0,
+                    active: true,
+                },
+            }
+        );
+        for entity in [fighter_zero_entity, fighter_one_entity] {
+            let input = app.world().get::<FighterInput>(entity).unwrap();
+            assert!(!input.light);
+            assert!(!input.raw_light_pressed);
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_sweep_stops_before_overlapping_a_fighter() {
+        let barrier = split_causeway_door_barrier(0, SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS / 2);
+        let stats = FighterStats::default();
+        let fighter_in_sweep = Vec3::new(barrier.center.x, ARENA_TOP_Y, barrier.center.y);
+        let fighter_clear = fighter_in_sweep + Vec3::X * 3.0;
+
+        assert!(split_causeway_door_overlaps_fighter(
+            0,
+            SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS / 2,
+            fighter_in_sweep,
+            &stats,
+        ));
+        assert!(!split_causeway_door_overlaps_fighter(
+            0,
+            SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS / 2,
+            fighter_clear,
+            &stats,
+        ));
+    }
+
+    #[test]
+    fn split_causeway_gate_motion_is_exactly_eighteen_fixed_ticks() {
+        let mut match_state = MatchState::default();
+        match_state.set_active_slots([false; FIGHTER_COUNT]);
+        match_state.reset_for_new_match();
+        let mut doors = SplitCausewayDoorState::default();
+        doors.reset_closed(SPLIT_CAUSEWAY_ARENA_INDEX, match_state.replay_seed);
+        doors.doors[0].target_open = true;
+
+        let mut app = App::new();
+        app.insert_resource(ActiveArena::new(SPLIT_CAUSEWAY_ARENA_INDEX))
+            .insert_resource(match_state)
+            .insert_resource(doors)
+            .add_systems(Update, advance_split_causeway_doors);
+
+        for expected in 1..=SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS {
+            app.update();
+            assert_eq!(
+                app.world().resource::<SplitCausewayDoorState>().doors[0].progress_ticks,
+                expected
+            );
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<SplitCausewayDoorState>().doors[0].progress_ticks,
+            SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS
+        );
+
+        app.world_mut()
+            .resource_mut::<SplitCausewayDoorState>()
+            .doors[0]
+            .target_open = false;
+        for expected in (0..SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS).rev() {
+            app.update();
+            assert_eq!(
+                app.world().resource::<SplitCausewayDoorState>().doors[0].progress_ticks,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn split_causeway_gates_reset_closed_for_a_new_match() {
+        let mut doors = SplitCausewayDoorState::default();
+        doors.eligible_fighters = [Some(FighterId::ZERO), FighterId::new(1)];
+        assert!(doors.toggle_for_fighter(FighterId::ZERO).is_some());
+        doors.doors[0].progress_ticks = 13;
+
+        doors.reset_closed(SPLIT_CAUSEWAY_ARENA_INDEX, 42);
+
+        assert_eq!(doors.arena_index, SPLIT_CAUSEWAY_ARENA_INDEX);
+        assert_eq!(doors.replay_seed, 42);
+        assert_eq!(
+            doors.doors,
+            [SplitCausewayDoorRuntime::default(); SPLIT_CAUSEWAY_DOOR_COUNT]
+        );
+        assert_eq!(doors.eligible_fighters, [None; SPLIT_CAUSEWAY_DOOR_COUNT]);
+    }
+
+    #[test]
+    fn split_causeway_gate_prompts_are_limited_to_eligible_gameplay() {
+        assert!(split_causeway_door_prompt_should_show(
+            SPLIT_CAUSEWAY_ARENA_INDEX,
+            true,
+            false,
+            true,
+            true,
+            true,
+        ));
+        for hidden in [
+            split_causeway_door_prompt_should_show(0, true, false, true, true, true),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                false,
+                false,
+                true,
+                true,
+                true,
+            ),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            split_causeway_door_prompt_should_show(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                true,
+                false,
+                false,
+                true,
+                true,
+            ),
+        ] {
+            assert!(!hidden);
+        }
+    }
+
+    #[test]
+    fn split_causeway_gate_prompt_labels_follow_keyboard_and_controller() {
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Keyboard(
+                KeyCode::KeyC
+            )),
+            "C"
+        );
+        assert_eq!(
+            split_causeway_door_prompt_binding_label(SplitCausewayDoorPromptBinding::Gamepad(
+                ControllerFamily::Xbox
+            )),
+            "X"
+        );
+    }
+
+    #[test]
+    fn crown_floor_pattern_masks_voids_and_separates_terrace_heights() {
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(3.0, 2.0),
+                Vec2::splat(0.2),
+            ),
+            Some(ARENA_TOP_Y)
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(-9.95, 1.4),
+                Vec2::splat(0.2),
+            ),
+            None
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(0.0, -8.85),
+                Vec2::splat(0.2),
+            ),
+            Some(ARENA_TOP_Y + 0.28)
+        );
+        assert_eq!(
+            authored_floor_cell_support_height(
+                CHAMPIONS_COURT_ARENA_INDEX,
+                Vec2::new(0.0, -6.5),
+                Vec2::splat(0.2),
+            ),
+            None,
+            "a single paving stone must not bridge the main court and first stair"
+        );
+    }
+
+    #[test]
+    fn authored_floor_foundations_are_recessed_below_every_paver_tier() {
+        let crown = load_authored_arena_map(CHAMPIONS_COURT_ARENA_INDEX)
+            .expect("Crown Ring RON should parse");
+        let mut crown_foundations = 0;
+        for primitive in &crown.primitives {
+            let support_y = match primitive.id.as_str() {
+                "foundation_step_1" => ARENA_TOP_Y + 0.07,
+                "foundation_step_2" => ARENA_TOP_Y + 0.14,
+                "foundation_step_3" => ARENA_TOP_Y + 0.21,
+                "foundation_step_4" | "foundation_dais" => ARENA_TOP_Y + 0.28,
+                id if id.starts_with("foundation_") => ARENA_TOP_Y,
+                _ => continue,
+            };
+            crown_foundations += 1;
+            let foundation_top = champions_stage_y(primitive.position.1) + primitive.scale.1 * 0.5;
+            assert!(
+                support_y - foundation_top >= 0.019,
+                "{} top {foundation_top} must stay below paver support {support_y}",
+                primitive.id
+            );
+        }
+        assert_eq!(crown_foundations, 15);
+
+        let training = load_authored_arena_map(TRAINING_GROUND_ARENA_INDEX)
+            .expect("Training Ground RON should parse");
+        let foundation = training
+            .primitives
+            .iter()
+            .find(|primitive| primitive.id == "floor_foundation")
+            .expect("Training Ground should have a floor foundation");
+        let foundation_top = champions_stage_y(foundation.position.1) + foundation.scale.1 * 0.5;
+        assert!(ARENA_TOP_Y - foundation_top >= 0.019);
+
+        let split = load_authored_arena_map(SPLIT_CAUSEWAY_ARENA_INDEX)
+            .expect("Split Causeway RON should parse");
+        let mut split_foundations = 0;
+        for primitive in &split.primitives {
+            if !primitive.id.starts_with("foundation_") {
+                continue;
+            }
+            split_foundations += 1;
+            let support_y = authored_walkable_height_at(
+                SPLIT_CAUSEWAY_ARENA_INDEX,
+                primitive.position.0,
+                primitive.position.2,
+            )
+            .expect("every Split Causeway foundation should have gameplay support");
+            let foundation_top = champions_stage_y(primitive.position.1) + primitive.scale.1 * 0.5;
+            assert!(
+                support_y - foundation_top >= 0.019,
+                "{} top {foundation_top} must stay below paver support {support_y}",
+                primitive.id
+            );
+        }
+        assert_eq!(split_foundations, 9);
+    }
+
+    #[test]
+    fn authored_circle_colliders_preserve_shape_and_one_way_behavior() {
+        let collider = AuthoredCollider {
+            id: "medallion".to_string(),
+            kind: "circle".to_string(),
+            center: (1.5, -2.5),
+            half_extents: (0.0, 0.0),
+            radius: 1.75,
+            rotation_y: 0.0,
+            top_y: 0.1,
+            behavior: "one_way_top".to_string(),
+        };
+
+        let barrier = authored_collider_barrier(&collider);
+        assert_eq!(barrier.behavior, PropBarrierBehavior::OneWayTop);
+        assert_eq!(barrier.definition.center, Vec2::new(1.5, -2.5));
+        assert_eq!(barrier.definition.top_y, ARENA_TOP_Y + 0.1);
+        assert!(matches!(
+            barrier.definition.footprint,
+            crate::arena_barriers::BarrierFootprint::Circle { radius }
+                if (radius - 1.75).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn authored_crown_mesh_is_closed_and_has_side_depth() {
+        let crown = authored_crown_mesh();
+        let positions = crown
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("crown should have positions");
+        let indices = crown.indices().expect("crown should be indexed");
+
+        assert_eq!(positions.len(), 56);
+        assert_eq!(indices.len(), 108);
     }
 
     #[cfg(not(all(
@@ -8734,8 +10744,8 @@ mod tests {
         let missing = std::env::temp_dir().join("afc-definitely-missing-champions-court.ron");
         let map = load_champions_court_map_from_path(&missing)
             .expect("the embedded Champions Court should parse without a loose file");
-        assert_eq!(map.map.tile_size, 2.0);
-        assert!(map.assets.contains_key("floor"));
+        assert_eq!(map.map.tile_size, 1.0);
+        assert!(map.assets.contains_key("column"));
         assert!(!map.instances.is_empty());
     }
 

@@ -43,8 +43,6 @@ use crate::components::{
     FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
     FighterStats, SimPosition,
 };
-#[cfg(test)]
-use crate::constants::ARENA_RADIUS;
 #[cfg(any(
     test,
     all(
@@ -2865,7 +2863,8 @@ mod tests {
 
     #[test]
     fn bot_movement_plan_uses_range_and_edge_pressure() {
-        let arena = crate::arena_defs::arena_definition(0);
+        let arena =
+            crate::arena_defs::arena_definition(crate::arena_defs::TRAINING_GROUND_ARENA_INDEX);
         let personality = bot_personality(
             crate::styles::FighterStyleKind::Anchor,
             EquipmentKind::CounterCell,
@@ -2900,8 +2899,8 @@ mod tests {
         );
         assert_eq!(
             choose_bot_movement_plan_for_arena(
-                Vec3::new(4.2, ARENA_TOP_Y, 4.2),
-                Vec3::new(5.55, ARENA_TOP_Y, 5.55),
+                Vec3::new(7.0, ARENA_TOP_Y, 0.0),
+                Vec3::new(8.8, ARENA_TOP_Y, 0.0),
                 range.ideal,
                 range,
                 personality,
@@ -2915,19 +2914,22 @@ mod tests {
 
     #[test]
     fn edge_steering_pulls_outward_motion_back_inward() {
-        let arena = crate::arena_defs::arena_definition(0);
-        let outward = Vec2::splat(std::f32::consts::FRAC_1_SQRT_2);
-        let edge = outward * (ARENA_RADIUS - 0.1);
-        let position = Vec3::new(edge.x, ARENA_TOP_Y, edge.y);
+        let arena =
+            crate::arena_defs::arena_definition(crate::arena_defs::TRAINING_GROUND_ARENA_INDEX);
+        let outward = Vec2::X;
+        let position = Vec3::new(8.9, ARENA_TOP_Y, 0.0);
         let steered = apply_edge_steering_for_arena(position, outward, arena);
 
-        assert!(edge_danger_for_arena(position, arena) > 0.8);
+        assert!(movement_points_toward_edge_for_arena(
+            position, outward, arena
+        ));
         assert!(steered.dot(outward) < 0.0);
     }
 
     #[test]
     fn dash_planning_rejects_edgeward_dashes() {
-        let arena = crate::arena_defs::arena_definition(0);
+        let arena =
+            crate::arena_defs::arena_definition(crate::arena_defs::TRAINING_GROUND_ARENA_INDEX);
         let personality = bot_personality(
             crate::styles::FighterStyleKind::Vector,
             EquipmentKind::DashCoil,
@@ -2944,11 +2946,10 @@ mod tests {
             TickTimer::ZERO,
             arena,
         ));
-        let outward = Vec2::splat(std::f32::consts::FRAC_1_SQRT_2);
-        let edge = outward * (ARENA_RADIUS - 0.2);
+        let outward = Vec2::X;
         assert!(!bot_should_dash_for_movement_for_arena(
             BotMovementPlan::Approach,
-            Vec3::new(edge.x, ARENA_TOP_Y, edge.y),
+            Vec3::new(8.8, ARENA_TOP_Y, 0.0),
             outward,
             range.max + 1.0,
             range,

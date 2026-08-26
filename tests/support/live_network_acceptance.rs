@@ -102,7 +102,10 @@ impl LiveMatrixScenario {
                     ..FaultConfig::default()
                 },
                 FaultConfig {
-                    base_latency_ticks: 9,
+                    // Leave one tick of headroom for bounded reliable-control
+                    // traffic while still driving corrections to the edge of
+                    // the twelve-tick normal rollback window.
+                    base_latency_ticks: 7,
                     jitter_ticks: 1,
                     reorder_per_10k: 500,
                     max_reorder_extra_ticks: 1,
@@ -197,7 +200,7 @@ fn build_four_peer_config(
         }
         LiveMatrixScenario::RollbackStorm4 => {
             // The RTT-midpoint clock estimator is conservatively biased behind
-            // the authority on this deliberately asymmetric one-up/nine-down
+            // the authority on this deliberately asymmetric one-up/seven-down
             // link. Six ticks keep upstream input ahead while retaining the
             // intended near-limit downstream correction depth.
             options.input_delay_ticks = 6;
@@ -341,6 +344,25 @@ impl LiveAcceptanceHarness {
             .snapshot_at(tick)
             .expect("authority retains its current canonical snapshot");
         let position = snapshot.fighters[assignment.fighter.index()].pose.position;
+        if self.config.local_setup.arena_index == crate::arena_defs::CHAMPIONS_COURT_ARENA_INDEX {
+            // The rebuilt Crown Ring has solid side wings and a centered front
+            // wall. Steer each spawn lane toward a clear front-apron exit so
+            // the acceptance matrix still reaches a natural stock result.
+            let target_x = if seat_index.is_multiple_of(2) {
+                -18_432_i32
+            } else {
+                18_432_i32
+            };
+            let target_z = 81_920_i32;
+            let x = target_x - position.x;
+            let z = target_z - position.z;
+            let maximum = x.unsigned_abs().max(z.unsigned_abs());
+            let scale = i64::from(maximum.max(1));
+            return (
+                (i64::from(x) * 127 / scale).clamp(-127, 127) as i8,
+                (i64::from(z) * 127 / scale).clamp(-127, 127) as i8,
+            );
+        }
         let maximum = position.x.unsigned_abs().max(position.z.unsigned_abs());
         if maximum == 0 {
             return if seat_index % 2 == 0 {
@@ -882,10 +904,13 @@ impl LiveAcceptanceHarness {
         for (index, client) in self.clients.iter_mut().enumerate() {
             let result = client.confirmed_result().unwrap_or_else(|| {
                 panic!(
-                    "peer {} did not confirm the draw: status={:?}, terminal={:?}",
+                    "peer {} did not confirm the draw: status={:?}, terminal={:?}, authority_phase={:?}, hub={:?}, audit={:?}",
                     client.peer_id().get(),
                     client_statuses[index],
-                    client.terminal()
+                    client.terminal(),
+                    self.hub.peer_phase(client.peer_id()),
+                    self.hub.metrics(),
+                    self.hub.observability().audit().iter().collect::<Vec<_>>(),
                 )
             });
             assert_eq!(result.result_id, authority.result_id.get());
@@ -1043,7 +1068,12 @@ impl LiveAcceptanceHarness {
         assert_eq!(hub.spoofed_messages, 0);
         assert_eq!(hub.malformed_or_abusive_disconnects, 0);
         assert!(hub.post_result_transport_closures <= PEER_COUNT as u64);
-        assert_eq!(hub.security_violations, 0);
+        assert_eq!(
+            hub.security_violations,
+            0,
+            "honest acceptance traffic accrued security score: hub={hub:?}, audit={:?}",
+            self.hub.observability().audit().iter().collect::<Vec<_>>()
+        );
         assert_eq!(hub.security_kicks, 0);
         assert_eq!(
             self.hub.authority().input_metrics().rejected_future_frames,

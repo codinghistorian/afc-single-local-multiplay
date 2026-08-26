@@ -10,7 +10,7 @@ use bevy::time::Virtual;
 use bevy::ui::UiTargetCamera;
 
 use crate::arena::ARENA_PREVIEW_RENDER_LAYER;
-use crate::arena_defs::{ActiveArena, arena_definitions};
+use crate::arena_defs::{ActiveArena, arena_definitions, arena_lighting_profile};
 use crate::audio_settings::CategorizedAudioPlayback;
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
@@ -80,6 +80,7 @@ const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
 const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
 const USER_MODE_ARENA_PREVIEW_ASPECT_RATIO: f32 = 1.5;
+const USER_MODE_CROWN_RING_ARENA_INDEX: usize = 0;
 const USER_MODE_PLAYER_FIGHTER_ID: usize = 0;
 const USER_MODE_BOT_FIGHTER_ID: usize = 1;
 const USER_MODE_STOCK_RULE_INDEX: usize = 2;
@@ -231,7 +232,6 @@ pub enum UserModeScreen {
     SoundSettings,
     CharacterSelect,
     ArenaSelect,
-    ControlsBriefing,
     BattleResult,
     TutorialHub,
     TutorialLesson,
@@ -489,7 +489,6 @@ impl UserModeResultChoice {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserModeMatchStartFlow {
-    ControlsBriefing,
     BattleStarted,
 }
 
@@ -540,10 +539,8 @@ enum UserModeRoute {
     ArenaEntered,
     ArenaChanged,
     PrepareMatch,
-    ConfirmBattle,
     Replay,
     ChooseCharacter,
-    ControlsBack,
     ReturnToStart,
     #[cfg(not(target_arch = "wasm32"))]
     ExitToDev,
@@ -588,7 +585,6 @@ pub struct UserModeState {
     controller_setup_input_latched: bool,
     controller_setup_clear_confirmation: bool,
     key_reset_confirmation: bool,
-    controls_briefing_seen: bool,
     battle_music_pending: bool,
     battle_bot_ai_pending: bool,
     battle_active: bool,
@@ -702,7 +698,6 @@ pub fn should_spawn_web_gameplay_scene(
 ) -> bool {
     !scene.loaded
         && (user_mode.screen == UserModeScreen::ArenaSelect
-            || user_mode.screen == UserModeScreen::ControlsBriefing
             || user_mode.battle_music_pending
             || user_mode.battle_active
             || state.reset_requested
@@ -783,28 +778,6 @@ fn take_web_match_config() -> Option<WebMatchConfig> {
         arena_index,
         bindings,
     })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn web_battle_start_signal_requested() -> bool {
-    use wasm_bindgen::JsValue;
-
-    let global = js_sys::global();
-    let key = JsValue::from_str("__ffcStartBattle");
-    let value = js_sys::Reflect::get(&global, &key).ok();
-    value
-        .as_ref()
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn clear_web_battle_start_signal() {
-    use wasm_bindgen::JsValue;
-
-    let global = js_sys::global();
-    let key = JsValue::from_str("__ffcStartBattle");
-    let _ = js_sys::Reflect::set(&global, &key, &JsValue::FALSE);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -975,7 +948,6 @@ impl Default for UserModeState {
             controller_setup_input_latched: false,
             controller_setup_clear_confirmation: false,
             key_reset_confirmation: false,
-            controls_briefing_seen: false,
             battle_music_pending: false,
             battle_bot_ai_pending: false,
             battle_active: false,
@@ -1091,7 +1063,6 @@ impl UserModeState {
             && (self.battle_active
                 || self.battle_music_pending
                 || self.result_sequence_active
-                || self.screen == UserModeScreen::ControlsBriefing
                 || self.screen == UserModeScreen::BattleResult)
     }
 
@@ -1176,7 +1147,6 @@ impl UserModeState {
         self.controller_setup_input_latched = false;
         self.controller_setup_clear_confirmation = false;
         self.key_reset_confirmation = false;
-        self.controls_briefing_seen = false;
         self.clear_battle_state();
     }
 
@@ -1343,14 +1313,8 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
-    fn enter_controls_briefing(&mut self) {
-        self.screen = UserModeScreen::ControlsBriefing;
-        self.key_capture = None;
-        self.controls_briefing_seen = true;
-        self.clear_battle_state();
-    }
-
     fn begin_battle_result_sequence(&mut self, winner: Option<usize>) {
+        self.screen = UserModeScreen::BattleResult;
         self.result_sequence_active = true;
         self.result_elapsed = 0.0;
         self.result_menu_ready = false;
@@ -1378,7 +1342,6 @@ impl UserModeState {
             .match_request_revision
             .checked_add(1)
             .expect("test match request revision exhausted");
-        self.controls_briefing_seen = true;
         self.exit_to_battle();
     }
 
@@ -1740,7 +1703,6 @@ fn controller_user_mode_action(
                 None
             }
         }
-        UserModeScreen::ControlsBriefing => accept.then_some(UserModeUiAction::Confirm),
         UserModeScreen::BattleResult if user_mode.result_menu_ready => {
             if left ^ right || up ^ down {
                 Some(UserModeUiAction::Next)
@@ -1843,11 +1805,6 @@ fn route_user_mode_action(
                     user_mode.play_mode.human_player_count().saturating_sub(1),
                 );
                 UserModeRoute::None
-            }
-            UserModeScreen::ControlsBriefing => {
-                user_mode.controls_briefing_seen = false;
-                user_mode.enter_arena_select();
-                UserModeRoute::ControlsBack
             }
             _ => UserModeRoute::None,
         };
@@ -1997,9 +1954,6 @@ fn route_user_mode_action(
             }
             UserModeRoute::None
         }
-        (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
-            UserModeRoute::ConfirmBattle
-        }
         (UserModeScreen::BattleResult, UserModeUiAction::Previous | UserModeUiAction::Next) => {
             user_mode.toggle_result_choice();
             UserModeRoute::None
@@ -2062,7 +2016,6 @@ fn user_mode_action_requires_transition(
                 | UserModeScreen::SoundSettings
                 | UserModeScreen::CharacterSelect
                 | UserModeScreen::ArenaSelect
-                | UserModeScreen::ControlsBriefing
         );
     }
 
@@ -2073,7 +2026,6 @@ fn user_mode_action_requires_transition(
             UserModeUiAction::PlayerCount(_) | UserModeUiAction::Confirm,
         )
         | (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
-        | (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm)
         | (UserModeScreen::BattleResult, UserModeUiAction::Result(_) | UserModeUiAction::Confirm) => {
             true
         }
@@ -2102,12 +2054,7 @@ fn user_mode_route_reveal(
     action: UserModeUiAction,
 ) -> GameTransitionReveal {
     match (user_mode.screen, action) {
-        (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
-            if user_mode.controls_briefing_seen =>
-        {
-            GameTransitionReveal::BattleReady
-        }
-        (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm) => {
             GameTransitionReveal::BattleReady
         }
         (
@@ -2323,12 +2270,6 @@ pub(crate) struct UserModeKeySettingsRowText {
 pub(crate) struct UserModeKeyResetPanel;
 
 #[derive(Component)]
-pub(crate) struct UserModeControlsPanel;
-
-#[derive(Component)]
-pub(crate) struct UserModeControlsText;
-
-#[derive(Component)]
 pub(crate) struct UserModeResultPanel;
 
 #[derive(Component)]
@@ -2357,6 +2298,12 @@ pub(crate) struct UserModeArenaPreviewPanel;
 
 #[derive(Component)]
 pub(crate) struct UserModeArenaPreviewCamera;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaPreviewDirectionalLight;
+
+#[derive(Component)]
+pub(crate) struct UserModeArenaPreviewPointLight;
 
 #[derive(Component)]
 pub(crate) struct UserModeMusic;
@@ -3000,23 +2947,29 @@ pub fn setup_user_mode_ui(
         preview_view_format,
     );
     let arena_preview_image = images.add(arena_preview_image);
+    let preview_lighting = arena_lighting_profile(0);
     commands.spawn((
         DirectionalLight {
-            illuminance: 18_000.0,
+            illuminance: preview_lighting.directional_illuminance,
+            color: preview_lighting.directional_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(-8.0, 16.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(preview_lighting.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y),
+        UserModeArenaPreviewDirectionalLight,
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
     commands.spawn((
         PointLight {
-            intensity: 900_000.0,
-            range: 40.0,
+            intensity: preview_lighting.point_intensity,
+            range: preview_lighting.point_range,
+            color: preview_lighting.point_color,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_xyz(0.0, 12.0, 7.0),
+        Transform::from_translation(preview_lighting.point_position),
+        UserModeArenaPreviewPointLight,
         RenderLayers::layer(ARENA_PREVIEW_RENDER_LAYER),
     ));
     commands.spawn((
@@ -3771,53 +3724,6 @@ pub fn setup_user_mode_ui(
                 ],
             ),
             (
-                UserModeControlsPanel,
-                Node {
-                    display: Display::None,
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(22.0),
-                    padding: UiRect::axes(Val::Px(52.0), Val::Px(32.0)),
-                    ..default()
-                },
-                Pickable::IGNORE,
-                children![
-                    (
-                        Text::new("CONTROLS BRIEFING"),
-                        TextFont {
-                            font_size: 42.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
-                        TextShadow::default(),
-                    ),
-                    (
-                        UserModeControlsText,
-                        Text::new(controls_briefing_message(
-                            &UserModeState::default(),
-                            &PlayerKeyBindings::default(),
-                            true,
-                        )),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.92, 0.88, 0.78)),
-                        TextLayout::new_with_justify(Justify::Center),
-                    ),
-                    user_mode_action_button(
-                        "FIGHT",
-                        UserModeUiAction::Confirm,
-                        Val::Px(240.0),
-                        54.0,
-                        22.0,
-                    ),
-                ],
-            ),
-            (
                 UserModeResultPanel,
                 Node {
                     display: Display::None,
@@ -4133,7 +4039,7 @@ fn handle_character_device_actions(
             return Some(CharacterDeviceOutcome::Transition(action));
         }
         let route = route_user_mode_action(user_mode, action);
-        if route == UserModeRoute::ArenaEntered || route == UserModeRoute::ControlsBack {
+        if route == UserModeRoute::ArenaEntered {
             return Some(CharacterDeviceOutcome::Immediate(route));
         }
         if user_mode.screen != UserModeScreen::CharacterSelect {
@@ -4559,16 +4465,11 @@ pub fn handle_user_mode_input(
             | UserModeScreen::ArenaSelect
     ) {
         if let Some(config) = take_web_match_config() {
-            let reveal = if user_mode.controls_briefing_seen {
-                GameTransitionReveal::BattleReady
-            } else {
-                GameTransitionReveal::Immediate
-            };
             request_user_mode_transition(
                 &mut game_transition,
                 &mut pause_owners,
                 UserModeTransitionAction::ApplyWebMatchConfig(config),
-                reveal,
+                GameTransitionReveal::BattleReady,
             );
             return;
         }
@@ -4682,12 +4583,6 @@ pub fn handle_user_mode_input(
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    let web_start_requested =
-        user_mode.screen == UserModeScreen::ControlsBriefing && web_battle_start_signal_requested();
-    #[cfg(not(target_arch = "wasm32"))]
-    let web_start_requested = false;
-
     if pointer_action.is_none() && user_mode.screen == UserModeScreen::CharacterSelect {
         if let Some(outcome) = handle_character_device_actions(
             &mut user_mode,
@@ -4768,8 +4663,7 @@ pub fn handle_user_mode_input(
     let action = pointer_action
         .or(device_action)
         .or(keyboard_action)
-        .or(controller_action)
-        .or_else(|| web_start_requested.then_some(UserModeUiAction::Confirm));
+        .or(controller_action);
     let Some(action) = action else {
         return;
     };
@@ -4807,18 +4701,12 @@ pub fn handle_user_mode_input(
 
     if user_mode_action_requires_transition(&user_mode, action) {
         let reveal = user_mode_route_reveal(&user_mode, action);
-        let started = request_user_mode_transition(
+        request_user_mode_transition(
             &mut game_transition,
             &mut pause_owners,
             UserModeTransitionAction::Route(action),
             reveal,
         );
-        #[cfg(target_arch = "wasm32")]
-        if started && web_start_requested {
-            clear_web_battle_start_signal();
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = started;
         return;
     }
 
@@ -4835,12 +4723,13 @@ pub fn handle_user_mode_input(
         UserModeRoute::ArenaChanged => active_arena.select(user_mode.arena_index),
         UserModeRoute::ArenaEntered
         | UserModeRoute::PrepareMatch
-        | UserModeRoute::ConfirmBattle
         | UserModeRoute::Replay
         | UserModeRoute::ChooseCharacter
-        | UserModeRoute::ControlsBack
-        | UserModeRoute::ReturnToStart
-        | UserModeRoute::ExitToDev => {
+        | UserModeRoute::ReturnToStart => {
+            unreachable!("confirmed screen changes must be committed by GameTransition")
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        UserModeRoute::ExitToDev => {
             unreachable!("confirmed screen changes must be committed by GameTransition")
         }
     }
@@ -5004,16 +4893,6 @@ fn commit_user_mode_route(
             active_arena.select(state.arena_index);
             announce_user_mode_match_flow(flow, setup, announcements);
         }
-        UserModeRoute::ConfirmBattle => {
-            confirm_user_mode_match_start(user_mode, state);
-            announcements.show(
-                format!(
-                    "Starting match as {}",
-                    character_label(setup.player_character())
-                ),
-                0.9,
-            );
-        }
         UserModeRoute::Replay => {
             reset_user_mode_presentation(presentation_time_scale, screen_look, screen_transition);
             let flow = prepare_user_mode_match(user_mode, setup, state);
@@ -5026,12 +4905,6 @@ fn commit_user_mode_route(
             stop_user_mode_music(commands, music);
             start_user_mode_menu_music(commands, asset_server, control_preferences);
             announcements.show("", 0.0);
-        }
-        UserModeRoute::ControlsBack => {
-            state.return_to_setup();
-            stop_user_mode_music(commands, music);
-            start_user_mode_menu_music(commands, asset_server, control_preferences);
-            announcements.show("Choose arena", 0.8);
         }
         UserModeRoute::ReturnToStart => {
             stop_user_mode_music(commands, music);
@@ -5066,9 +4939,7 @@ pub fn sync_web_battle_status(
         scene.warmup_remaining = (scene.warmup_remaining - time.delta_secs()).max(0.0);
     }
 
-    let briefing = user_mode.screen == UserModeScreen::ControlsBriefing;
-    let battle_requested = briefing
-        || user_mode.battle_music_pending
+    let battle_requested = user_mode.battle_music_pending
         || user_mode.battle_active
         || state.reset_requested
         || state.phase == MatchPhase::Resetting
@@ -5079,8 +4950,6 @@ pub fn sync_web_battle_status(
         && state.phase == MatchPhase::Fighting
     {
         "ready"
-    } else if briefing && scene.ready_for_battle() {
-        "briefing_ready"
     } else if battle_requested {
         "loading"
     } else {
@@ -5317,7 +5186,6 @@ fn single_player_takeover_eligible(
         user_mode.screen,
         UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
-            | UserModeScreen::ControlsBriefing
             | UserModeScreen::BattleResult
     ) || (controller_reconnect_combat_active(user_mode, state) && !user_mode.battle_music_pending)
 }
@@ -5335,7 +5203,6 @@ fn local_controller_reconnect_eligible(
                     user_mode.screen,
                     UserModeScreen::CharacterSelect
                         | UserModeScreen::ArenaSelect
-                        | UserModeScreen::ControlsBriefing
                         | UserModeScreen::BattleResult
                 )))
 }
@@ -5658,6 +5525,22 @@ pub fn update_user_mode_selection_previews(
         (&mut Camera, &mut Transform),
         With<UserModeArenaPreviewCamera>,
     >,
+    mut directional_lights: Query<
+        (&mut DirectionalLight, &mut Transform),
+        (
+            With<UserModeArenaPreviewDirectionalLight>,
+            Without<UserModeArenaPreviewPointLight>,
+            Without<UserModeArenaPreviewCamera>,
+        ),
+    >,
+    mut point_lights: Query<
+        (&mut PointLight, &mut Transform),
+        (
+            With<UserModeArenaPreviewPointLight>,
+            Without<UserModeArenaPreviewDirectionalLight>,
+            Without<UserModeArenaPreviewCamera>,
+        ),
+    >,
 ) {
     let arena_visible = user_mode.screen() == UserModeScreen::ArenaSelect;
     for mut node in &mut arena_preview_panels {
@@ -5675,6 +5558,19 @@ pub fn update_user_mode_selection_previews(
         if arena_visible {
             *transform = arena_preview_camera_transform(user_mode.arena_index);
         }
+    }
+    let profile = arena_lighting_profile(user_mode.arena_index);
+    for (mut light, mut transform) in &mut directional_lights {
+        light.illuminance = profile.directional_illuminance;
+        light.color = profile.directional_color;
+        *transform = Transform::from_translation(profile.directional_position)
+            .looking_at(Vec3::ZERO, Vec3::Y);
+    }
+    for (mut light, mut transform) in &mut point_lights {
+        light.intensity = profile.point_intensity;
+        light.range = profile.point_range;
+        light.color = profile.point_color;
+        transform.translation = profile.point_position;
     }
 }
 
@@ -5982,7 +5878,6 @@ pub fn update_user_mode_ui(
             Option<&mut TextColor>,
         ),
         (
-            Without<UserModeControlsText>,
             Without<UserModeDeviceJoinTitleText>,
             Without<UserModeDeviceJoinReadyText>,
             Without<UserModeDeviceJoinClearText>,
@@ -6063,7 +5958,6 @@ pub fn update_user_mode_ui(
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
             | UserModeScreen::KeySettings
-            | UserModeScreen::ControlsBriefing
     );
     for mut node in &mut back_buttons {
         node.display = if back_visible {
@@ -6300,36 +6194,6 @@ pub fn update_user_mode_button_styles(
     }
 }
 
-pub fn update_user_mode_controls_ui(
-    user_mode: Res<UserModeState>,
-    bindings: Res<PlayerKeyBindings>,
-    scene: Res<UserModeGameplayScene>,
-    metadata: Query<&ControllerDeviceInfo>,
-    mut panels: Query<&mut Node, With<UserModeControlsPanel>>,
-    mut texts: Query<&mut Text, With<UserModeControlsText>>,
-) {
-    let visible = user_mode.screen() == UserModeScreen::ControlsBriefing;
-    for mut node in &mut panels {
-        node.display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
-    for mut text in &mut texts {
-        **text = controls_briefing_message_for_family(
-            &user_mode,
-            &bindings,
-            scene.ready_for_battle(),
-            |entity| {
-                controller_info(entity, &metadata)
-                    .map(|info| info.family)
-                    .unwrap_or_default()
-            },
-        );
-    }
-}
-
 pub fn update_key_settings_ui(
     user_mode: Res<UserModeState>,
     mut reset_panels: Query<&mut Node, With<UserModeKeyResetPanel>>,
@@ -6391,7 +6255,6 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::KeySettings
         | UserModeScreen::SoundSettings
         | UserModeScreen::ArenaSelect
-        | UserModeScreen::ControlsBriefing
         | UserModeScreen::TutorialHub => 1.0,
         UserModeScreen::CharacterSelect => 0.0,
         UserModeScreen::BattleResult if user_mode.result_menu_ready => 0.58,
@@ -6717,9 +6580,6 @@ fn keyboard_user_mode_action(
                 None
             }
         }
-        UserModeScreen::ControlsBriefing => (keys.just_pressed(KeyCode::Enter)
-            || keys.just_pressed(KeyCode::Space))
-        .then_some(UserModeUiAction::Confirm),
         UserModeScreen::BattleResult if user_mode.result_menu_ready => {
             if select_previous_pressed(keys) || select_next_pressed(keys) {
                 Some(UserModeUiAction::Next)
@@ -6750,7 +6610,6 @@ fn keyboard_menu_confirm_action(
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
             | UserModeScreen::KeySettings
-            | UserModeScreen::ControlsBriefing
     ) || (user_mode.screen == UserModeScreen::BattleResult
         && user_mode.result_menu_ready);
 
@@ -6855,10 +6714,13 @@ fn arena_select_message(selected_index: usize) -> String {
 fn arena_preview_camera_transform(selected_index: usize) -> Transform {
     let arenas = arena_definitions();
     let selected_index = selected_index.min(arenas.len().saturating_sub(1));
-    Transform::from_translation(
-        arenas[selected_index].camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE,
-    )
-    .looking_at(Vec3::Y * 0.6, Vec3::Y)
+    let distance_scale = if selected_index == USER_MODE_CROWN_RING_ARENA_INDEX {
+        1.0
+    } else {
+        USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+    };
+    Transform::from_translation(arenas[selected_index].camera_offset * distance_scale)
+        .looking_at(Vec3::Y * 0.6, Vec3::Y)
 }
 
 fn user_mode_choice_message(user_mode: &UserModeState) -> String {
@@ -6972,194 +6834,6 @@ fn key_settings_action_index(action: ControlAction) -> Option<usize> {
     ControlAction::ACTIVE
         .iter()
         .position(|candidate| *candidate == action)
-}
-
-fn controls_briefing_message(
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    ready_for_battle: bool,
-) -> String {
-    controls_briefing_message_for_family(user_mode, bindings, ready_for_battle, |_| {
-        ControllerFamily::Xbox
-    })
-}
-
-fn controls_briefing_message_for_family(
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    ready_for_battle: bool,
-    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
-) -> String {
-    let p1_assignment = effective_assignment(user_mode, 0);
-    let status = if ready_for_battle {
-        match p1_assignment {
-            LocalInputAssignment::Gamepad(entity) => {
-                return controls_briefing_message_with_status(
-                    user_mode,
-                    bindings,
-                    &format!(
-                        "P1 press {} or click to fight",
-                        family_for(entity).confirm_label()
-                    ),
-                    family_for,
-                );
-            }
-            LocalInputAssignment::Keyboard(player) => {
-                return controls_briefing_message_with_status(
-                    user_mode,
-                    bindings,
-                    &format!(
-                        "P1 press {} or click to fight",
-                        control_key_label(bindings, player, ControlAction::Jump)
-                    ),
-                    family_for,
-                );
-            }
-            LocalInputAssignment::Unassigned => unreachable!(),
-        }
-    } else {
-        "Loading battle..."
-    };
-    controls_briefing_message_with_status(user_mode, bindings, status, family_for)
-}
-
-fn controls_briefing_message_with_status(
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    status: &str,
-    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
-) -> String {
-    let arena = arena_definitions()[user_mode
-        .arena_index
-        .min(arena_definitions().len().saturating_sub(1))]
-    .name;
-
-    if user_mode.play_mode.is_single_player() {
-        if matches!(
-            effective_assignment(user_mode, 0),
-            LocalInputAssignment::Gamepad(_)
-        ) {
-            return format!(
-                "Defeat the bot.\nArena: {arena}\n\n{}\n\n{status}",
-                controls_player_message(0, user_mode, bindings, family_for)
-            );
-        }
-        return format!(
-            "Defeat the bot.\nArena: {}\n\n{}\n\nDash: double-tap movement\nGuard: {} + {}\n\n{}",
-            arena,
-            controls_player_message(0, user_mode, bindings, family_for),
-            control_key_label(bindings, 0, ControlAction::Heavy),
-            control_key_label(bindings, 0, ControlAction::Light),
-            status,
-        );
-    }
-
-    let player_count = user_mode.play_mode.human_player_count();
-    let player_controls = (0..player_count)
-        .map(|player| controls_player_compact_message(player, user_mode, bindings, family_for))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "{player_count} local players.\nArena: {arena}\n\n{player_controls}\n\nKeyboard: double-tap dash, Heavy + Light guard\nController prompts match each detected device family.\n\n{status}"
-    )
-}
-
-fn effective_assignment(user_mode: &UserModeState, player: usize) -> LocalInputAssignment {
-    match user_mode.input_assignments[player] {
-        LocalInputAssignment::Unassigned => LocalInputAssignment::Keyboard(player),
-        assignment => assignment,
-    }
-}
-
-fn controls_player_message(
-    player: usize,
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
-) -> String {
-    if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
-        let family = family_for(entity);
-        return format!(
-            "P{} — {} Controller\nMove: Left stick / D-pad\n{} Jump  |  {} Light  |  {} Heavy  |  {} Aim/Grab\n{} Dash  |  {} Guard  |  {} Ultimate",
-            player + 1,
-            family.display_name(),
-            family.face_button_label(GamepadButton::South),
-            family.face_button_label(GamepadButton::West),
-            family.face_button_label(GamepadButton::North),
-            family.face_button_label(GamepadButton::East),
-            family.face_button_label(GamepadButton::RightTrigger2),
-            family.face_button_label(GamepadButton::LeftTrigger),
-            family.face_button_label(GamepadButton::LeftTrigger2),
-        );
-    }
-    format!(
-        "P{}\nMove: {}/{}/{}/{}\nHold Aim / Tap Grab: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
-        player + 1,
-        control_key_label(bindings, player, ControlAction::Left),
-        control_key_label(bindings, player, ControlAction::Right),
-        control_key_label(bindings, player, ControlAction::Up),
-        control_key_label(bindings, player, ControlAction::Down),
-        control_key_label(bindings, player, ControlAction::AimGrab),
-        control_key_label(bindings, player, ControlAction::Heavy),
-        control_key_label(bindings, player, ControlAction::Light),
-        control_key_label(bindings, player, ControlAction::Jump),
-    )
-}
-
-fn controls_player_compact_message(
-    player: usize,
-    user_mode: &UserModeState,
-    bindings: &PlayerKeyBindings,
-    family_for: impl Fn(Entity) -> ControllerFamily + Copy,
-) -> String {
-    if let LocalInputAssignment::Gamepad(entity) = effective_assignment(user_mode, player) {
-        let family = family_for(entity);
-        return format!(
-            "P{}  {}: Stick/D-pad move | {} jump | {} light | {} heavy | {} aim | {} dash | {} guard | {} ult",
-            player + 1,
-            family.display_name(),
-            family.face_button_label(GamepadButton::South),
-            family.face_button_label(GamepadButton::West),
-            family.face_button_label(GamepadButton::North),
-            family.face_button_label(GamepadButton::East),
-            family.face_button_label(GamepadButton::RightTrigger2),
-            family.face_button_label(GamepadButton::LeftTrigger),
-            family.face_button_label(GamepadButton::LeftTrigger2),
-        );
-    }
-    format!(
-        "P{}  Move {}/{}/{}/{}  |  Hold Aim / Tap Grab {}  |  Heavy {}  |  Light {}  |  Jump {}",
-        player + 1,
-        control_key_label(bindings, player, ControlAction::Left),
-        control_key_label(bindings, player, ControlAction::Right),
-        control_key_label(bindings, player, ControlAction::Up),
-        control_key_label(bindings, player, ControlAction::Down),
-        control_key_label(bindings, player, ControlAction::AimGrab),
-        control_key_label(bindings, player, ControlAction::Heavy),
-        control_key_label(bindings, player, ControlAction::Light),
-        control_key_label(bindings, player, ControlAction::Jump),
-    )
-}
-
-fn control_key_label(bindings: &PlayerKeyBindings, player: usize, action: ControlAction) -> String {
-    bindings
-        .key_for(player, action)
-        .map(key_code_label)
-        .unwrap_or_else(|| "?".to_string())
-}
-
-fn key_code_label(key: KeyCode) -> String {
-    let raw = format!("{key:?}");
-    if let Some(label) = raw.strip_prefix("Key") {
-        return label.to_string();
-    }
-    if let Some(label) = raw.strip_prefix("Digit") {
-        return label.to_string();
-    }
-    if let Some(label) = raw.strip_prefix("Arrow") {
-        return format!("{label} Arrow");
-    }
-    raw
 }
 
 fn result_title_message(user_mode: &UserModeState) -> String {
@@ -7352,7 +7026,6 @@ fn announce_user_mode_match_flow(
     announcements: &mut MatchAnnouncements,
 ) {
     match flow {
-        UserModeMatchStartFlow::ControlsBriefing => announcements.show("Review controls", 0.9),
         UserModeMatchStartFlow::BattleStarted => announcements.show(
             format!(
                 "Starting match as {}",
@@ -7398,13 +7071,8 @@ fn prepare_user_mode_match(
     state.apply_local_setup(setup);
     state.replay_seed = setup.replay_seed;
     state.reset_requested = false;
-    if user_mode.controls_briefing_seen {
-        confirm_user_mode_match_start(user_mode, state);
-        UserModeMatchStartFlow::BattleStarted
-    } else {
-        user_mode.enter_controls_briefing();
-        UserModeMatchStartFlow::ControlsBriefing
-    }
+    confirm_user_mode_match_start(user_mode, state);
+    UserModeMatchStartFlow::BattleStarted
 }
 
 fn confirm_user_mode_match_start(user_mode: &mut UserModeState, state: &mut MatchState) {
@@ -7628,7 +7296,6 @@ mod tests {
             user_mode.player_count_choice,
             UserModePlayerCountChoice::TwoPlayers
         );
-        assert!(!user_mode.controls_briefing_seen);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7658,7 +7325,6 @@ mod tests {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
-        user_mode.controls_briefing_seen = true;
         confirm_user_mode_match_start(&mut user_mode, &mut state);
         assert_eq!(user_mode.match_request_revision(), 1);
 
@@ -8255,20 +7921,6 @@ mod tests {
     }
 
     #[test]
-    fn controls_back_preserves_arena_and_requests_clean_menu_music_restore() {
-        let mut user_mode = UserModeState::default();
-        user_mode.arena_index = 7;
-        user_mode.enter_controls_briefing();
-
-        let route = route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
-
-        assert_eq!(route, UserModeRoute::ControlsBack);
-        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
-        assert_eq!(user_mode.arena_index, 7);
-        assert!(!user_mode.controls_briefing_seen);
-    }
-
-    #[test]
     fn keyboard_vertical_menu_actions_support_arrows_and_w_s() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_mode_select();
@@ -8518,7 +8170,6 @@ mod tests {
             UserModeScreen::CharacterSelect,
             UserModeScreen::ArenaSelect,
             UserModeScreen::KeySettings,
-            UserModeScreen::ControlsBriefing,
         ] {
             user_mode.screen = screen;
             assert_eq!(
@@ -8708,7 +8359,6 @@ mod tests {
         for screen in [
             UserModeScreen::CharacterSelect,
             UserModeScreen::ArenaSelect,
-            UserModeScreen::ControlsBriefing,
             UserModeScreen::BattleResult,
         ] {
             user_mode.screen = screen;
@@ -8936,7 +8586,7 @@ mod tests {
 
     #[test]
     fn takeover_back_and_escape_cancel_and_retain_keyboard_one() {
-        let mut back_app = takeover_test_app(UserModeScreen::ControlsBriefing);
+        let mut back_app = takeover_test_app(UserModeScreen::ArenaSelect);
         let mut nintendo = Gamepad::default();
         nintendo.digital_mut().press(GamepadButton::East);
         let controller = back_app
@@ -9714,14 +9364,27 @@ mod tests {
     #[test]
     fn arena_preview_camera_frames_each_selected_arena() {
         for (index, arena) in arena_definitions().iter().enumerate() {
+            let distance_scale = if index == USER_MODE_CROWN_RING_ARENA_INDEX {
+                1.0
+            } else {
+                USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+            };
             assert_eq!(
                 arena_preview_camera_transform(index).translation,
-                arena.camera_offset * USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE
+                arena.camera_offset * distance_scale
             );
         }
         assert_eq!(
             arena_preview_camera_transform(arena_definitions().len()).translation,
             arena_preview_camera_transform(arena_definitions().len() - 1).translation
+        );
+    }
+
+    #[test]
+    fn crown_ring_preview_uses_the_dev_mode_camera_transform() {
+        assert_eq!(
+            arena_preview_camera_transform(USER_MODE_CROWN_RING_ARENA_INDEX).translation,
+            arena_definitions()[USER_MODE_CROWN_RING_ARENA_INDEX].camera_offset
         );
     }
 
@@ -9860,6 +9523,66 @@ mod tests {
     }
 
     #[test]
+    fn live_arena_preview_lights_follow_the_selected_arena_profile() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_arena_select();
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_selection_previews);
+        let directional = app
+            .world_mut()
+            .spawn((
+                DirectionalLight::default(),
+                Transform::default(),
+                UserModeArenaPreviewDirectionalLight,
+            ))
+            .id();
+        let point = app
+            .world_mut()
+            .spawn((
+                PointLight::default(),
+                Transform::default(),
+                UserModeArenaPreviewPointLight,
+            ))
+            .id();
+
+        for arena_index in [0, TRAINING_GROUND_ARENA_INDEX] {
+            app.world_mut().resource_mut::<UserModeState>().arena_index = arena_index;
+            app.update();
+
+            let profile = arena_lighting_profile(arena_index);
+            let directional_light = app.world().get::<DirectionalLight>(directional).unwrap();
+            let directional_transform = app.world().get::<Transform>(directional).unwrap();
+            let expected_directional = Transform::from_translation(profile.directional_position)
+                .looking_at(Vec3::ZERO, Vec3::Y);
+            assert_eq!(
+                directional_light.illuminance,
+                profile.directional_illuminance
+            );
+            assert_eq!(directional_light.color, profile.directional_color);
+            assert_eq!(
+                directional_transform.translation,
+                expected_directional.translation
+            );
+            assert!(
+                directional_transform
+                    .rotation
+                    .dot(expected_directional.rotation)
+                    .abs()
+                    > 0.9999
+            );
+
+            let point_light = app.world().get::<PointLight>(point).unwrap();
+            let point_transform = app.world().get::<Transform>(point).unwrap();
+            assert_eq!(point_light.intensity, profile.point_intensity);
+            assert_eq!(point_light.range, profile.point_range);
+            assert_eq!(point_light.color, profile.point_color);
+            assert_eq!(point_transform.translation, profile.point_position);
+        }
+    }
+
+    #[test]
     fn user_mode_blocks_dev_input_for_screens_and_battle() {
         let mut user_mode = UserModeState::default();
         assert!(!user_mode.blocks_dev_input());
@@ -9886,12 +9609,9 @@ mod tests {
         user_mode.screen = UserModeScreen::CharacterSelect;
         prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
 
-        assert_eq!(user_mode.screen(), UserModeScreen::ControlsBriefing);
+        assert_eq!(user_mode.screen(), UserModeScreen::Dev);
         assert!(user_mode.blocks_dev_input());
         assert!(user_mode.hides_dev_controls());
-
-        confirm_user_mode_match_start(&mut user_mode, &mut state);
-        assert_eq!(user_mode.screen(), UserModeScreen::Dev);
         assert!(state.reset_requested);
     }
 
@@ -9927,7 +9647,7 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_prepare_applies_selected_character_without_starting_match() {
+    fn user_mode_prepare_applies_selection_and_starts_match_directly() {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
@@ -9937,7 +9657,7 @@ mod tests {
 
         let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
 
-        assert_eq!(flow, UserModeMatchStartFlow::ControlsBriefing);
+        assert_eq!(flow, UserModeMatchStartFlow::BattleStarted);
         assert_eq!(setup.player_character(), CharacterKind::Pig);
         assert_eq!(setup.arena_index, 5);
         assert_eq!(state.arena_index, 5);
@@ -9952,26 +9672,24 @@ mod tests {
         assert_eq!(setup.active_bot_count(), 1);
         assert_eq!(state.active_fighter_count, 2);
         assert!(state.rules.uses_stocks());
-        assert!(!state.reset_requested);
-        assert_eq!(user_mode.screen(), UserModeScreen::ControlsBriefing);
-        assert!(user_mode.controls_briefing_seen);
-        assert!(!user_mode.battle_music_pending);
-        assert!(!user_mode.battle_bot_ai_pending);
-        assert!(!user_mode.battle_active);
+        assert!(state.reset_requested);
+        assert_eq!(user_mode.screen(), UserModeScreen::Dev);
+        assert!(user_mode.battle_music_pending);
+        assert!(user_mode.battle_bot_ai_pending);
+        assert!(user_mode.battle_active);
         assert!(user_mode.restricts_bot_special_inputs());
         assert!(user_mode.hides_dev_controls());
     }
 
     #[test]
-    fn user_mode_prepare_skips_controls_after_first_briefing() {
+    fn user_mode_prepare_starts_fresh_and_replay_matches_without_briefing() {
         let mut user_mode = UserModeState::default();
         let mut setup = LocalSetup::default();
         let mut state = MatchState::default();
         user_mode.screen = UserModeScreen::CharacterSelect;
 
         let first_flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-        assert_eq!(first_flow, UserModeMatchStartFlow::ControlsBriefing);
-        confirm_user_mode_match_start(&mut user_mode, &mut state);
+        assert_eq!(first_flow, UserModeMatchStartFlow::BattleStarted);
 
         user_mode.enter_battle_result(Some(USER_MODE_PLAYER_FIGHTER_ID));
         user_mode.enter_mode_select();
@@ -9988,22 +9706,14 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_confirm_controls_starts_prepared_match() {
+    fn arena_confirmation_waits_for_battle_readiness_without_an_intermediate_screen() {
         let mut user_mode = UserModeState::default();
-        let mut setup = LocalSetup::default();
-        let mut state = MatchState::default();
-        user_mode.player_characters[0] = CharacterKind::Pig;
-        user_mode.screen = UserModeScreen::CharacterSelect;
-        prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+        user_mode.enter_arena_select();
 
-        confirm_user_mode_match_start(&mut user_mode, &mut state);
-
-        assert!(state.reset_requested);
-        assert_eq!(user_mode.screen(), UserModeScreen::Dev);
-        assert!(user_mode.battle_music_pending);
-        assert!(user_mode.battle_bot_ai_pending);
-        assert!(user_mode.restricts_bot_special_inputs());
-        assert!(user_mode.hides_dev_controls());
+        assert_eq!(
+            user_mode_route_reveal(&user_mode, UserModeUiAction::Confirm),
+            GameTransitionReveal::BattleReady
+        );
     }
 
     #[test]
@@ -10140,83 +9850,15 @@ mod tests {
     }
 
     #[test]
-    fn controls_briefing_copy_uses_current_single_player_bindings() {
-        let user_mode = UserModeState::default();
-        let bindings = PlayerKeyBindings::default();
-
-        let message = controls_briefing_message(&user_mode, &bindings, true);
-
-        assert!(message.contains("Defeat the bot"));
-        assert!(message.contains("Arena: Crown Ring"));
-        assert!(message.contains("Move: Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
-        assert!(message.contains("Hold Aim / Tap Grab: Z"));
-        assert!(message.contains("Heavy / Throw: X"));
-        assert!(message.contains("Light / Pickup / Item: C"));
-        assert!(message.contains("Jump: V"));
-        assert!(message.contains("Guard: X + C"));
-        assert!(message.contains("P1 press V or click to fight"));
-    }
-
-    #[test]
-    fn controls_briefing_shows_xbox_assignment_and_full_layout() {
-        let mut user_mode = UserModeState::default();
-        user_mode.input_assignments[0] =
-            LocalInputAssignment::Gamepad(Entity::from_raw_u32(41).expect("valid entity"));
-        let bindings = PlayerKeyBindings::default();
-
-        let message = controls_briefing_message(&user_mode, &bindings, true);
-
-        assert!(message.contains("Xbox Controller"));
-        assert!(message.contains("A Jump"));
-        assert!(message.contains("X Light"));
-        assert!(message.contains("Y Heavy"));
-        assert!(message.contains("B Aim/Grab"));
-        assert!(message.contains("RT Dash"));
-        assert!(message.contains("LB Guard"));
-        assert!(message.contains("LT Ultimate"));
-        assert!(!message.contains("Special"));
-        assert!(!message.contains("RB+"));
-        assert!(message.contains("P1 press A or click to fight"));
-    }
-
-    #[test]
-    fn controls_briefing_copy_shows_two_player_columns_and_loading_state() {
-        let mut user_mode = UserModeState::default();
-        user_mode.play_mode = UserPlayMode::TwoPlayers;
-        let bindings = PlayerKeyBindings::default();
-
-        let message = controls_briefing_message(&user_mode, &bindings, false);
-
-        assert!(message.contains("2 local players"));
-        assert!(message.contains("Arena: Crown Ring"));
-        assert!(message.contains("P1  Move Left Arrow/Right Arrow/Up Arrow/Down Arrow"));
-        assert!(message.contains("P2  Move A/D/W/S"));
-        assert!(message.contains("Loading battle"));
-    }
-
-    #[test]
-    fn controls_briefing_lists_all_four_players() {
-        let mut user_mode = UserModeState::default();
-        user_mode.play_mode = UserPlayMode::FourPlayers;
-        let bindings = PlayerKeyBindings::default();
-
-        let message = controls_briefing_message(&user_mode, &bindings, true);
-
-        assert!(message.contains("4 local players"));
-        assert!(message.contains("P1  Move"));
-        assert!(message.contains("P2  Move"));
-        assert!(message.contains("P3  Move F/H/R/G"));
-        assert!(message.contains("P4  Move J/L/O/K"));
-    }
-
-    #[test]
-    fn result_transition_starts_only_after_the_death_cinematic() {
+    fn result_sequence_hides_gameplay_stats_until_the_menu_is_revealed() {
         let mut user_mode = UserModeState::default();
         let mut transition = GameTransition::default();
         let mut owners = GameplayPauseOwners::default();
         user_mode.begin_battle_result_sequence(Some(USER_MODE_PLAYER_FIGHTER_ID));
 
-        assert_eq!(user_mode.screen(), default_user_mode_screen());
+        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
+        assert!(user_mode.active());
+        assert!(!user_mode.shows_gameplay_hud());
         assert!(!user_mode.result_menu_ready);
         assert!(!user_mode.tick_battle_result(USER_MODE_RESULT_MENU_DELAY_SECS - 0.1));
         assert!(!transition.active());
@@ -10228,7 +9870,7 @@ mod tests {
             UserModeTransitionAction::ShowBattleResult,
             GameTransitionReveal::Immediate,
         ));
-        assert_eq!(user_mode.screen(), default_user_mode_screen());
+        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
         assert!(!user_mode.result_menu_ready);
         assert!(owners.contains(GameplayPauseOwner::GameTransition));
 
@@ -10753,7 +10395,6 @@ mod tests {
         for screen in [
             UserModeScreen::Dev,
             UserModeScreen::Start,
-            UserModeScreen::ControlsBriefing,
             UserModeScreen::BattleResult,
             UserModeScreen::TutorialLesson,
             UserModeScreen::TutorialPause,
@@ -11006,25 +10647,6 @@ mod tests {
             let gamepads = system_state.get(&world);
             assert!(!controller_setup_can_finish(&user_mode, &gamepads));
         }
-    }
-
-    #[test]
-    fn nintendo_briefing_uses_physical_gameplay_button_labels() {
-        let controller = Entity::from_raw_u32(72).expect("valid entity");
-        let mut user_mode = UserModeState::default();
-        user_mode.input_assignments[0] = LocalInputAssignment::Gamepad(controller);
-        let message = controls_briefing_message_for_family(
-            &user_mode,
-            &PlayerKeyBindings::default(),
-            true,
-            |_| ControllerFamily::Nintendo,
-        );
-
-        assert!(message.contains("Nintendo Controller"));
-        assert!(message.contains("B Jump"));
-        assert!(message.contains("Y Light"));
-        assert!(message.contains("A Aim/Grab"));
-        assert!(message.contains("press A"));
     }
 
     #[test]

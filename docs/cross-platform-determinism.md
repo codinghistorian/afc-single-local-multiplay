@@ -2,7 +2,7 @@
 
 The repository contains one frozen, production-headless simulation tape at
 `headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result`.
-It boots a version-7 match manifest, commits bounded AFC `InputFrame` values for
+It boots a version-8 match manifest, commits bounded AFC `InputFrame` values for
 both occupied seats, runs the real canonical fixed schedule, and ends through
 the normal stock/result rules. It does not use the small input-harness probe.
 
@@ -10,17 +10,19 @@ The checked-in contract is:
 
 | Tick | Canonical hash |
 | ---: | ---: |
-| 1 | `84cee944e41fdcd9` |
-| 120 | `6e19030552720060` |
-| 240 | `811dfbafe6b568b1` |
-| 360 | `224983e404152d7a` |
-| 480 | `38d9a1a44b7ca53a` |
-| 600 | `33361084398fda66` |
-| 709 (final) | `58c567593bc82e7f` |
+| 1 | `c34d87990574f22c` |
+| 120 | `07ff272aa475c583` |
+| 240 | `6459463f461de504` |
+| 360 | `b2d426cacd2c037b` |
+| 480 | `b857fefdc4f4f8fb` |
+| 600 | `76d9d6cc9fba01cc` |
+| 720 | `f6df17830595a2ef` |
+| 840 | `8618ce26da8ad483` |
+| 934 (final) | `66be5d24c82da680` |
 
-The final canonical result is team 1 winning at tick 709. The GitHub Actions
+The final canonical result is team 1 winning at tick 934. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
-all 19 checked-in read-only versioned behavior tapes, and the compact
+all 20 checked-in read-only versioned behavior tapes, and the compact
 authored-content matrix on Linux, Windows, and macOS in both Cargo debug and
 release profiles. Changes under `tests/` trigger the same matrix. Workflow
 configuration is not a claim that the current release candidate has passed:
@@ -44,17 +46,17 @@ debug/release build metadata cannot enter the frozen hashes.
 
 | Arena | Retired-special/hazard final hash | Item final hash |
 | --- | ---: | ---: |
-| Crown Ring | `365ea128e4b146cd` | `0d34896d626088e4` |
-| Split Causeway | `1273bd116dc88b71` | `cbd6c658eedcb864` |
-| Sunstone Steps | `235919192a3fd974` | `11c36f66f0f878bb` |
-| Crank Yard | `ecf5dbfe9427c420` | `eb195f13237d8952` |
-| Vent Spiral | `f301ce42883308cf` | `2c3919cf1fd86798` |
-| Bumper Alley | `b7cea6c75c37aa6b` | `f4c166ff18eb285c` |
-| Feast Market | `217cf971f436345f` | `3be923d9ce3f8307` |
-| Snare Garden | `897c27fcfed032bb` | `e7e0ab653b936ad7` |
-| Sky Steps | `a1311a7442f60edb` | `01aac6469a98839b` |
-| Powder Keg Court | `46214acb53c51dc4` | `c51f9aeb924b4e33` |
-| Training Ground | `8daa139ee0d0d6f0` | `dcaa327aa5e5e218` (item-free branch) |
+| Crown Ring | `d311e16ba6d92ddc` | `2be39391e221c563` |
+| Split Causeway | `f069d584ab332e9b` | `fe6695a5f7bfa795` |
+| Sunstone Steps | `0e1418e7669d292b` | `357cbfecceca70ea` |
+| Crank Yard | `95acf0d54b401bcd` | `e8de48220265f7ac` |
+| Vent Spiral | `77e6ad71b3dc25e6` | `efad7ba79a92b39b` |
+| Bumper Alley | `a3aff842fea3eaea` | `ec16583cf28317f3` |
+| Feast Market | `7440ed2893e311e6` | `9f6627ac2ce513cc` |
+| Snare Garden | `f247692f15cbdfd3` | `f1123ac952c4d83a` |
+| Sky Steps | `ba47c189d29b2f54` | `ab6e814782757bf2` |
+| Powder Keg Court | `d356b5399cd82645` | `af71cfe717153451` |
+| Training Ground | `979d8110ed11d7bd` | `1664e9d65a4ce6f9` (item-free branch) |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -111,6 +113,19 @@ identical normalized checkpoints, stable-ID relationships, ordered events,
 final ticks, and results. Debug and fat-LTO release produced byte-identical
 files and BF001 tick-1 hash `b6e166cd6feadfa6`; the compiled content digest is
 `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`.
+
+Simulation v8 accepts the final Champion's Court and Split Causeway arena flow.
+The stock tape now follows the final Crown front apron and retains a team-1
+result at the intentional new deciding tick 934. BF031 adds one stable
+`ArenaDeviceToggled` event and freezes Split Causeway gate progress at every tick
+through the exact 18-tick movement, including restore from tick 10. Snapshot
+schema 4 serializes the two target bits and two progress bytes in a bounded
+80-byte arena payload. Exact-bit static geometry fingerprints separately cover
+35 Crown barriers (`c5499906dcd78474`), 18 Split barriers
+(`48cbea118f23e9bc`), and every dynamic gate pose (`cb28c0c31d638d57`).
+Debug and fat-LTO release generated a byte-identical 20-file corpus with BF001
+tick-1 hash `3eae3ee94c4516d7`; the compiled content digest is
+`11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03`.
 
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The

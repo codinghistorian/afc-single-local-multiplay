@@ -2265,10 +2265,10 @@ mod tests {
         }
     }
 
-    fn moving_input(seat: u8, movement_x: i8) -> RemoteLocalInputBatch {
+    fn front_apron_input(seat: u8, movement_y: i8) -> RemoteLocalInputBatch {
         RemoteLocalInputBatch::new(&[RemoteLocalInputSample {
             seat: SeatId::new(seat).unwrap(),
-            movement_x: QuantizedAxis::new(movement_x).unwrap(),
+            movement_y: QuantizedAxis::new(movement_y).unwrap(),
             ..RemoteLocalInputSample::default()
         }])
         .unwrap()
@@ -2480,11 +2480,11 @@ mod tests {
             harness
                 .listen
                 .host_client
-                .submit_inputs(moving_input(0, -112)),
+                .submit_inputs(front_apron_input(0, 112)),
             RemoteCommandSubmitOutcome::Queued
         );
         assert_eq!(
-            harness.remote.submit_inputs(moving_input(1, 112)),
+            harness.remote.submit_inputs(front_apron_input(1, 0)),
             RemoteCommandSubmitOutcome::Queued
         );
         for _ in 0..4_000 {

@@ -393,6 +393,14 @@ struct PendingTransfer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeferredRepairRequest {
+    request: ResyncRequest,
+    /// Crossing an active repair reserves the next encode immediately. A
+    /// cooldown-deferred request reserves only when it actually starts.
+    budget_reserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingTypedDisconnect {
     message: DisconnectMessage,
     send: Option<ReliableSendHandle>,
@@ -414,6 +422,16 @@ enum PeerRepairBudgetOutcome {
 }
 
 impl PeerRepairRequestBudget {
+    fn refresh_window(&mut self, now: SimTick, window_ticks: u64) {
+        if self
+            .window_started_at
+            .is_none_or(|started| now.get().saturating_sub(started.get()) >= window_ticks)
+        {
+            self.window_started_at = Some(now);
+            self.started_in_window = 0;
+        }
+    }
+
     fn try_start(
         &mut self,
         now: SimTick,
@@ -428,17 +446,30 @@ impl PeerRepairRequestBudget {
             return PeerRepairBudgetOutcome::Cooldown;
         }
 
-        if self
-            .window_started_at
-            .is_none_or(|started| now.get().saturating_sub(started.get()) >= window_ticks)
-        {
-            self.window_started_at = Some(now);
-            self.started_in_window = 0;
-        }
+        self.refresh_window(now, window_ticks);
         if self.started_in_window >= maximum {
             return PeerRepairBudgetOutcome::Exhausted;
         }
 
+        self.started_in_window = self.started_in_window.saturating_add(1);
+        self.last_started_at = Some(now);
+        PeerRepairBudgetOutcome::Allowed
+    }
+
+    /// Reserves one cooldown-exempt repair while retaining the fixed per-window
+    /// encode cap. This is limited to an acknowledgement-crossing successor or
+    /// the final canonical result, where dropping an honest request would leave
+    /// the client waiting forever with no later state packet to repair it.
+    fn try_start_bounded_without_cooldown(
+        &mut self,
+        now: SimTick,
+        window_ticks: u64,
+        maximum: u8,
+    ) -> PeerRepairBudgetOutcome {
+        self.refresh_window(now, window_ticks);
+        if self.started_in_window >= maximum {
+            return PeerRepairBudgetOutcome::Exhausted;
+        }
         self.started_in_window = self.started_in_window.saturating_add(1);
         self.last_started_at = Some(now);
         PeerRepairBudgetOutcome::Allowed
@@ -491,6 +522,9 @@ struct AuthorityPeerLink<E: NonBlockingDatagramEndpoint> {
     phase: AuthorityPeerPhase,
     runtime: NetworkRuntime<E>,
     transfer: Option<PendingTransfer>,
+    /// At most one distinct successor may cross the active repair's reliable
+    /// `ResyncApplied`. Exact retries remain idempotent and allocate no work.
+    deferred_repair_request: Option<DeferredRepairRequest>,
     applied_sync: Option<ResyncApplied>,
     resume_input_tick: Option<SimTick>,
     pending_result: Option<ResultIdentifier>,
@@ -530,6 +564,7 @@ impl<E: NonBlockingDatagramEndpoint> AuthorityPeerLink<E> {
             )
             .map_err(AuthorityPeerLinkError::Runtime)?,
             transfer: None,
+            deferred_repair_request: None,
             applied_sync: None,
             resume_input_tick: None,
             pending_result: None,
@@ -1161,6 +1196,7 @@ where
         link.phase = AuthorityPeerPhase::Closing;
         link.runtime.prepare_for_terminal_disconnect();
         link.transfer = None;
+        link.deferred_repair_request = None;
         link.applied_sync = None;
         link.resume_input_tick = None;
         link.pending_result = None;
@@ -1956,18 +1992,67 @@ where
         index: usize,
         batch: crate::network_protocol::InputBatch,
     ) -> Result<bool, AuthorityPeerHubError<S::Error>> {
-        let (peer_id, accepts) = {
+        let peer_id = self.peers[index].as_ref().expect("live peer index").peer_id;
+
+        // A client can legitimately have already-scheduled input in flight while
+        // the authority is transferring the final snapshot and ordered result.
+        // Once the canonical result is frozen, ticks and sequences no longer have
+        // a live admission window. Authenticate the envelope and its seat claims,
+        // then discard it as expected terminal-lifecycle traffic. Malformed,
+        // cross-match, spoofed, and unowned input remains security-significant.
+        if self.result.is_some() {
+            let validation = batch
+                .validate_structure()
+                .and_then(|()| {
+                    if batch.match_id == self.manifest.match_id {
+                        Ok(())
+                    } else {
+                        Err(ProtocolValidationError::MatchMismatch)
+                    }
+                })
+                .and_then(|()| {
+                    if batch.peer_id == peer_id {
+                        Ok(())
+                    } else {
+                        Err(ProtocolValidationError::PeerMismatch)
+                    }
+                })
+                .and_then(|()| {
+                    for window in batch.as_slice() {
+                        let seat = window
+                            .newest()
+                            .ok_or(ProtocolValidationError::EmptyInputWindow)?
+                            .seat;
+                        self.manifest.ownership.validate_peer_input(peer_id, seat)?;
+                    }
+                    Ok(())
+                });
+            self.metrics.input_batches_rejected =
+                self.metrics.input_batches_rejected.saturating_add(1);
+            self.observability.counters_mut().inputs_rejected = self
+                .observability
+                .counters()
+                .inputs_rejected
+                .saturating_add(1);
+            if let Err(error) = validation {
+                if error == ProtocolValidationError::PeerMismatch {
+                    self.metrics.spoofed_messages = self.metrics.spoofed_messages.saturating_add(1);
+                }
+                self.observe_peer_violation(index, input_protocol_violation(error), true)?;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        let accepts = {
             let link = self.peers[index].as_ref().expect("live peer index");
-            (
-                link.peer_id,
-                link.phase.accepts_live_input()
-                    && link.resume_input_tick.is_none_or(|resume| {
-                        batch
-                            .as_slice()
-                            .iter()
-                            .all(|window| window.newest().is_some_and(|frame| frame.tick >= resume))
-                    }),
-            )
+            link.phase.accepts_live_input()
+                && link.resume_input_tick.is_none_or(|resume| {
+                    batch
+                        .as_slice()
+                        .iter()
+                        .all(|window| window.newest().is_some_and(|frame| frame.tick >= resume))
+                })
         };
         if !accepts {
             self.metrics.input_batches_rejected =
@@ -2087,18 +2172,70 @@ where
                 ResyncReason::HashMismatch | ResyncReason::HistoryExpired
             )
         {
-            let matches_active_repair = self.peers[index]
+            let (active_request, deferred_request) = self.peers[index]
                 .as_ref()
-                .and_then(|link| link.transfer.as_ref())
-                .is_some_and(|pending| {
-                    pending.purpose == TransferPurpose::Repair
-                        && request.last_confirmed_tick <= pending.transfer.begin().snapshot_tick
-                });
-            if matches_active_repair {
-                // Reliable request retries can cross the active repair
-                // declaration. The snapshot already satisfies the same client
-                // fence, so this is an idempotent no-op rather than a phase
-                // attack.
+                .and_then(|link| {
+                    link.transfer.as_ref().map(|pending| {
+                        (
+                            (pending.purpose == TransferPurpose::Repair)
+                                .then_some(pending.transfer.request()),
+                            link.deferred_repair_request.map(|pending| pending.request),
+                        )
+                    })
+                })
+                .unwrap_or((None, None));
+            if active_request == Some(request) || deferred_request == Some(request) {
+                // Only byte-identical reliable retries are duplicates. A newer
+                // client fence may cross the prior transfer's applied ACK and
+                // must not be acknowledged and forgotten.
+                self.metrics.repair_requests_coalesced =
+                    self.metrics.repair_requests_coalesced.saturating_add(1);
+                return Ok(true);
+            }
+            if active_request.is_none() || deferred_request.is_some() {
+                return Ok(false);
+            }
+
+            let budget_index = self
+                .expected_peer_index(peer_id)
+                .expect("a live peer is always part of the authenticated roster");
+            match self.repair_request_budgets[budget_index].try_start_bounded_without_cooldown(
+                self.network_tick,
+                self.config.peer_repair_request_window_ticks,
+                self.config.max_peer_repair_requests_per_window,
+            ) {
+                PeerRepairBudgetOutcome::Allowed => {
+                    self.peers[index]
+                        .as_mut()
+                        .expect("live peer index")
+                        .deferred_repair_request = Some(DeferredRepairRequest {
+                        request,
+                        budget_reserved: true,
+                    });
+                    return Ok(true);
+                }
+                PeerRepairBudgetOutcome::Exhausted => {
+                    self.metrics.repair_request_budgets_exhausted = self
+                        .metrics
+                        .repair_request_budgets_exhausted
+                        .saturating_add(1);
+                    self.observe_peer_violation(
+                        index,
+                        SecurityViolation::ReceiveBudgetFlood,
+                        false,
+                    )?;
+                    return Ok(true);
+                }
+                PeerRepairBudgetOutcome::Cooldown => {
+                    unreachable!("successor reservations do not apply the cooldown")
+                }
+            }
+        }
+        if let Some(deferred) = self.peers[index]
+            .as_ref()
+            .and_then(|link| link.deferred_repair_request)
+        {
+            if deferred.request == request {
                 self.metrics.repair_requests_coalesced =
                     self.metrics.repair_requests_coalesced.saturating_add(1);
                 return Ok(true);
@@ -2119,26 +2256,41 @@ where
             let budget_index = self
                 .expected_peer_index(peer_id)
                 .expect("a live peer is always part of the authenticated roster");
-            match self.repair_request_budgets[budget_index].try_start(
-                self.network_tick,
-                self.config.peer_repair_request_cooldown_ticks,
-                self.config.peer_repair_request_window_ticks,
-                self.config.max_peer_repair_requests_per_window,
-            ) {
+            let budget = &mut self.repair_request_budgets[budget_index];
+            let budget_outcome = if self.result.is_some() {
+                // Once the result is canonical there will be no later state
+                // stream to heal a client. Allow the bounded final snapshot
+                // even when a legitimate mid-match repair completed less than
+                // two seconds earlier.
+                budget.try_start_bounded_without_cooldown(
+                    self.network_tick,
+                    self.config.peer_repair_request_window_ticks,
+                    self.config.max_peer_repair_requests_per_window,
+                )
+            } else {
+                budget.try_start(
+                    self.network_tick,
+                    self.config.peer_repair_request_cooldown_ticks,
+                    self.config.peer_repair_request_window_ticks,
+                    self.config.max_peer_repair_requests_per_window,
+                )
+            };
+            match budget_outcome {
                 PeerRepairBudgetOutcome::Allowed => {}
                 PeerRepairBudgetOutcome::Cooldown => {
                     self.metrics.repair_requests_rate_limited =
                         self.metrics.repair_requests_rate_limited.saturating_add(1);
-                    // A valid request inside the cooldown is a bounded,
-                    // attributable rate violation, not a session-state error.
-                    // Score it explicitly and consume the message here so the
-                    // generic dispatcher cannot turn the first duplicate into
-                    // an immediate forced disconnect.
-                    self.observe_peer_violation(
-                        index,
-                        SecurityViolation::ReceiveBudgetFlood,
-                        false,
-                    )?;
+                    // Keep one exact request until the cooldown elapses or a
+                    // canonical result makes it terminally urgent. Dropping an
+                    // acknowledged request would strand the client; additional
+                    // distinct requests still fail the phase boundary above.
+                    self.peers[index]
+                        .as_mut()
+                        .expect("live peer index")
+                        .deferred_repair_request = Some(DeferredRepairRequest {
+                        request,
+                        budget_reserved: false,
+                    });
                     return Ok(true);
                 }
                 PeerRepairBudgetOutcome::Exhausted => {
@@ -2173,6 +2325,83 @@ where
         Ok(true)
     }
 
+    fn maybe_start_deferred_repair(
+        &mut self,
+        index: usize,
+    ) -> Result<bool, AuthorityPeerHubError<S::Error>> {
+        let Some((peer_id, deferred)) = self.peers[index].as_ref().and_then(|link| {
+            (link.phase == AuthorityPeerPhase::Fighting && link.transfer.is_none())
+                .then_some(
+                    link.deferred_repair_request
+                        .map(|request| (link.peer_id, request)),
+                )
+                .flatten()
+        }) else {
+            return Ok(false);
+        };
+
+        if !deferred.budget_reserved {
+            let budget_index = self
+                .expected_peer_index(peer_id)
+                .expect("a live peer is always part of the authenticated roster");
+            let budget = &mut self.repair_request_budgets[budget_index];
+            let outcome = if self.result.is_some() {
+                budget.try_start_bounded_without_cooldown(
+                    self.network_tick,
+                    self.config.peer_repair_request_window_ticks,
+                    self.config.max_peer_repair_requests_per_window,
+                )
+            } else {
+                budget.try_start(
+                    self.network_tick,
+                    self.config.peer_repair_request_cooldown_ticks,
+                    self.config.peer_repair_request_window_ticks,
+                    self.config.max_peer_repair_requests_per_window,
+                )
+            };
+            match outcome {
+                PeerRepairBudgetOutcome::Allowed => {}
+                PeerRepairBudgetOutcome::Cooldown => return Ok(false),
+                PeerRepairBudgetOutcome::Exhausted => {
+                    self.peers[index]
+                        .as_mut()
+                        .expect("live peer index")
+                        .deferred_repair_request = None;
+                    self.metrics.repair_request_budgets_exhausted = self
+                        .metrics
+                        .repair_request_budgets_exhausted
+                        .saturating_add(1);
+                    self.observe_peer_violation(
+                        index,
+                        SecurityViolation::ReceiveBudgetFlood,
+                        false,
+                    )?;
+                    return Ok(false);
+                }
+            }
+        }
+
+        self.peers[index]
+            .as_mut()
+            .expect("live peer index")
+            .deferred_repair_request = None;
+        let tick = self.authority.simulation().current_tick();
+        let snapshot = self
+            .authority
+            .snapshot_at(tick)
+            .expect("the current authority snapshot is retained")
+            .clone();
+        self.prepare_transfer_for_peer(
+            peer_id,
+            deferred.request,
+            snapshot,
+            TransferPurpose::Repair,
+        )?;
+        self.peers[index].as_mut().expect("live peer index").phase =
+            AuthorityPeerPhase::RepairSyncInFlight;
+        Ok(true)
+    }
+
     fn handle_resync_applied(
         &mut self,
         index: usize,
@@ -2193,20 +2422,25 @@ where
         };
         self.peer_state
             .observe_validated_resync_applied(peer_id, &applied)?;
+        let confirmed_result = self.result;
         let link = self.peers[index].as_mut().expect("live peer index");
         link.transfer = None;
         link.applied_sync = Some(applied);
         match purpose {
             TransferPurpose::Initial => {
+                debug_assert!(link.deferred_repair_request.is_none());
                 link.phase = AuthorityPeerPhase::AwaitingInitialSyncDeclaration;
             }
             TransferPurpose::Repair => {
                 link.phase = AuthorityPeerPhase::Fighting;
-                if let Some(result) = self.result {
+                if link.deferred_repair_request.is_none()
+                    && let Some(result) = confirmed_result
+                {
                     link.pending_result = Some(result);
                 }
             }
             TransferPurpose::Reconnect(reservation) => {
+                debug_assert!(link.deferred_repair_request.is_none());
                 link.pending_reclaim_completion = Some((reservation, applied));
                 link.phase = AuthorityPeerPhase::ReconnectAwaitingClock;
             }
@@ -2223,6 +2457,9 @@ where
             u64::from(applied.transfer_id.get()),
             0,
         );
+        if self.maybe_start_deferred_repair(index)? {
+            return Ok(true);
+        }
         self.maybe_complete_reclaim(index)?;
         Ok(true)
     }
@@ -2407,6 +2644,7 @@ where
         {
             return Ok(());
         }
+        self.maybe_start_deferred_repair(index)?;
         let clock_progress = {
             let link = self.peers[index].as_mut().expect("live peer index");
             if link.phase != AuthorityPeerPhase::ReconnectSyncInFlight
@@ -2972,6 +3210,7 @@ where
         // ResultIdentifier and its ordered predecessors must retain their
         // exact ACK/retry lifecycle, and no contradictory Disconnect follows.
         link.transfer = None;
+        link.deferred_repair_request = None;
         link.applied_sync = None;
         link.resume_input_tick = None;
         if link.queued_result != Some(result) {
@@ -3161,9 +3400,10 @@ where
                 }
             }
             if let Some(result) = result
-                && self.peers[index]
-                    .as_ref()
-                    .is_some_and(|peer| matches!(peer.phase, AuthorityPeerPhase::Fighting))
+                && self.peers[index].as_ref().is_some_and(|peer| {
+                    matches!(peer.phase, AuthorityPeerPhase::Fighting)
+                        && peer.deferred_repair_request.is_none()
+                })
             {
                 self.peers[index]
                     .as_mut()
@@ -4195,6 +4435,44 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_post_result_input_is_ignored_without_security_score() {
+        let (mut hub, _clients) = make_hub(Some(1), 64, AuthorityPeerHubConfig::default());
+        force_fighting(&mut hub);
+        let report = hub.try_advance(neutral_bot).unwrap().1.unwrap();
+        assert_eq!(hub.confirmed_result().unwrap().final_tick, report.tick);
+        let frozen_tick = hub.authority().simulation().current_tick();
+        let rejected_before = hub.observability().counters().inputs_rejected;
+
+        assert!(hub.handle_input(0, batch(2, 0, 0)).unwrap());
+        assert_eq!(hub.authority().simulation().current_tick(), frozen_tick);
+        assert!(
+            !hub.authority()
+                .has_buffered_input(SeatId::new(0).unwrap(), frozen_tick.next())
+        );
+        assert_eq!(hub.metrics().input_batches_accepted, 0);
+        assert_eq!(hub.metrics().input_batches_rejected, 1);
+        assert_eq!(
+            hub.observability().counters().inputs_rejected,
+            rejected_before + 1
+        );
+        assert_eq!(hub.metrics().security_violations, 0);
+        assert_eq!(hub.metrics().security_kicks, 0);
+    }
+
+    #[test]
+    fn spoofed_post_result_input_remains_a_security_violation() {
+        let (mut hub, _clients) = make_hub(Some(1), 64, AuthorityPeerHubConfig::default());
+        force_fighting(&mut hub);
+        hub.try_advance(neutral_bot).unwrap();
+
+        assert!(!hub.handle_input(0, batch(2, 1, 0)).unwrap());
+        assert_eq!(hub.metrics().input_batches_accepted, 0);
+        assert_eq!(hub.metrics().input_batches_rejected, 1);
+        assert_eq!(hub.metrics().spoofed_messages, 1);
+        assert_eq!(hub.metrics().security_violations, 1);
+    }
+
+    #[test]
     fn readiness_after_manifest_proposal_selects_a_new_future_boundary() {
         let mut config = AuthorityPeerHubConfig::default();
         config.countdown_lead_ticks = 10;
@@ -4977,7 +5255,32 @@ mod tests {
     }
 
     #[test]
-    fn first_repair_inside_cooldown_is_scored_and_dropped_without_disconnect() {
+    fn exceptional_repair_bypasses_only_cooldown_and_keeps_window_cap() {
+        let mut budget = PeerRepairRequestBudget::default();
+        assert_eq!(
+            budget.try_start(SimTick(10), 120, 3_600, 3),
+            PeerRepairBudgetOutcome::Allowed
+        );
+        assert_eq!(
+            budget.try_start_bounded_without_cooldown(SimTick(11), 3_600, 3),
+            PeerRepairBudgetOutcome::Allowed
+        );
+        assert_eq!(
+            budget.try_start_bounded_without_cooldown(SimTick(12), 3_600, 3),
+            PeerRepairBudgetOutcome::Allowed
+        );
+        assert_eq!(
+            budget.try_start_bounded_without_cooldown(SimTick(13), 3_600, 3),
+            PeerRepairBudgetOutcome::Exhausted
+        );
+        assert_eq!(
+            budget.try_start_bounded_without_cooldown(SimTick(3_610), 3_600, 3),
+            PeerRepairBudgetOutcome::Allowed
+        );
+    }
+
+    #[test]
+    fn first_repair_inside_cooldown_is_bounded_and_started_when_eligible() {
         let mut config = AuthorityPeerHubConfig::default();
         config.peer_repair_request_cooldown_ticks = 10;
         config.peer_repair_request_window_ticks = 100;
@@ -5008,7 +5311,24 @@ mod tests {
         assert!(hub.connection_for_peer(peer(0)).is_some());
         assert_eq!(hub.metrics().resyncs_started, 1);
         assert_eq!(hub.metrics().repair_requests_rate_limited, 1);
-        assert_eq!(hub.metrics().security_violations, 1);
+        assert_eq!(hub.metrics().security_violations, 0);
+        assert_eq!(
+            hub.peers[0]
+                .as_ref()
+                .unwrap()
+                .deferred_repair_request
+                .map(|pending| pending.budget_reserved),
+            Some(false)
+        );
+        hub.pump_network(SimTick(19)).unwrap();
+        assert_eq!(hub.metrics().resyncs_started, 1);
+        hub.pump_network(SimTick(20)).unwrap();
+        assert_eq!(hub.metrics().resyncs_started, 2);
+        assert_eq!(hub.peers[0].as_ref().unwrap().deferred_repair_request, None);
+        assert_eq!(
+            hub.peer_phase(peer(0)),
+            Some(AuthorityPeerPhase::RepairSyncInFlight)
+        );
         assert_eq!(hub.metrics().spoofed_messages, 0);
         assert_eq!(hub.metrics().malformed_or_abusive_disconnects, 0);
     }
@@ -5058,7 +5378,84 @@ mod tests {
     }
 
     #[test]
-    fn crossing_client_repair_request_coalesces_and_result_is_delivered() {
+    fn distinct_crossing_repair_starts_after_active_applied_ack() {
+        let (mut hub, _clients) = make_hub(None, 256, AuthorityPeerHubConfig::default());
+        force_fighting(&mut hub);
+        let first = hub.try_advance(neutral_bot).unwrap().1.unwrap();
+        let snapshot = hub
+            .authority()
+            .snapshot_at(first.tick)
+            .expect("first tick snapshot")
+            .clone();
+        let active_request = ResyncRequest {
+            match_id: hub.manifest.match_id,
+            peer_id: peer(0),
+            reason: ResyncReason::HistoryExpired,
+            last_confirmed_tick: SimTick::ZERO,
+            last_confirmed_hash: StateHash(0),
+        };
+        hub.prepare_transfer_for_peer(peer(0), active_request, snapshot, TransferPurpose::Repair)
+            .unwrap();
+        let index = hub.peer_index(peer(0)).unwrap();
+        let active_begin = {
+            let pending = hub.peers[index]
+                .as_mut()
+                .unwrap()
+                .transfer
+                .as_mut()
+                .unwrap();
+            pending.stage = TransferStage::WaitingApplied;
+            pending.transfer.begin()
+        };
+        hub.peers[index].as_mut().unwrap().phase = AuthorityPeerPhase::RepairSyncInFlight;
+
+        let successor = ResyncRequest {
+            match_id: hub.manifest.match_id,
+            peer_id: peer(0),
+            reason: ResyncReason::HashMismatch,
+            last_confirmed_tick: first.tick,
+            last_confirmed_hash: first.state_hash,
+        };
+        assert!(hub.handle_resync_request(index, successor).unwrap());
+        assert_eq!(
+            hub.peers[index].as_ref().unwrap().deferred_repair_request,
+            Some(DeferredRepairRequest {
+                request: successor,
+                budget_reserved: true,
+            })
+        );
+        assert_eq!(hub.metrics().resyncs_started, 1);
+
+        assert!(
+            hub.handle_resync_applied(
+                index,
+                ResyncApplied {
+                    match_id: active_begin.match_id,
+                    transfer_id: active_begin.transfer_id,
+                    peer_id: peer(0),
+                    snapshot_tick: active_begin.snapshot_tick,
+                    snapshot_hash: active_begin.snapshot_hash,
+                },
+            )
+            .unwrap()
+        );
+
+        let link = hub.peers[index].as_ref().unwrap();
+        let successor_transfer = link.transfer.as_ref().unwrap();
+        assert_eq!(link.phase, AuthorityPeerPhase::RepairSyncInFlight);
+        assert_eq!(link.deferred_repair_request, None);
+        assert_eq!(successor_transfer.transfer.request(), successor);
+        assert_ne!(
+            successor_transfer.transfer.begin().transfer_id,
+            active_begin.transfer_id
+        );
+        assert_eq!(hub.metrics().resyncs_started, 2);
+        assert_eq!(hub.metrics().resyncs_applied, 1);
+        assert_eq!(hub.metrics().repair_requests_coalesced, 0);
+    }
+
+    #[test]
+    fn duplicate_crossing_client_repair_request_coalesces_and_result_is_delivered() {
         let (mut hub, mut clients) = make_hub(Some(2), 256, AuthorityPeerHubConfig::default());
         force_fighting(&mut hub);
         let first = hub.try_advance(neutral_bot).unwrap().1.unwrap();
@@ -5094,13 +5491,7 @@ mod tests {
             .transfer_id;
 
         clients[0]
-            .queue_message(WireMessage::ResyncRequest(ResyncRequest {
-                match_id: hub.manifest.match_id,
-                peer_id: peer(0),
-                reason: ResyncReason::HashMismatch,
-                last_confirmed_tick: first.tick,
-                last_confirmed_hash: first.state_hash,
-            }))
+            .queue_message(WireMessage::ResyncRequest(authority_request))
             .unwrap();
         clients[0].pump(SimTick(6));
         hub.pump_network(SimTick(6)).unwrap();

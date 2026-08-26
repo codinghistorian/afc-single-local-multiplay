@@ -1,6 +1,6 @@
 (
     schema_version: 1,
-    contract_version: 7,
+    contract_version: 8,
     id: 29,
     name: "BF029_manual_aim_lock_break_release",
     classification: AcceptedChange,
@@ -107,51 +107,51 @@
         hashes: [
             (
                 tick: 1,
-                hash: "5eb3fd1720814708",
+                hash: "90d8040ff607d885",
             ),
             (
                 tick: 2,
-                hash: "e63d3cc7f121446d",
+                hash: "ecedd69cbf4573a4",
             ),
             (
                 tick: 3,
-                hash: "4606edc26c685dbe",
+                hash: "21a29fe351590f83",
             ),
             (
                 tick: 4,
-                hash: "508881f9bca37db6",
+                hash: "3e4e993633808eaf",
             ),
             (
                 tick: 5,
-                hash: "c344c32e21fee9ff",
+                hash: "bcfa8a759ad84dee",
             ),
             (
                 tick: 6,
-                hash: "b402c1c47d729a7d",
+                hash: "f97a5ba5b82b2754",
             ),
             (
                 tick: 7,
-                hash: "388b9629b107040a",
+                hash: "8f8903ef6f5908c7",
             ),
             (
                 tick: 8,
-                hash: "16bf43bc96655c47",
+                hash: "9d9bcf89f2a5322e",
             ),
             (
                 tick: 9,
-                hash: "5d43f8610c84a264",
+                hash: "230e6036cd4046e1",
             ),
             (
                 tick: 10,
-                hash: "eb50016dd040e4d9",
+                hash: "b0b9edeb0a8e9d18",
             ),
             (
                 tick: 11,
-                hash: "137183f81db36716",
+                hash: "5cafda6350f673a3",
             ),
             (
                 tick: 12,
-                hash: "dc84b53daaa35fed",
+                hash: "94f10393e06bae00",
             ),
         ],
         checkpoints: [

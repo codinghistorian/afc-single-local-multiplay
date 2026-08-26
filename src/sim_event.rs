@@ -170,6 +170,14 @@ pub enum SimEventKind {
     MatchLifecycle {
         event: MatchLifecycleEvent,
     },
+    /// One immutable arena device changed its logical target state. Static
+    /// device indices are authored per arena and remain stable across peers;
+    /// animation and audio are presentation side effects of this fact.
+    ArenaDeviceToggled {
+        arena_index: u16,
+        device_index: u16,
+        active: bool,
+    },
     MatchResult {
         winner: Option<FighterId>,
         result_id: u64,
@@ -204,6 +212,7 @@ impl SimEventKind {
             | Self::FighterLifecycle { .. }
             | Self::ItemLifecycle { .. }
             | Self::AbilityLifecycle { .. }
+            | Self::ArenaDeviceToggled { .. }
             | Self::MatchLifecycle {
                 event: MatchLifecycleEvent::TimeUp,
             } => PresentationPolicy::PredictedDeduplicated,

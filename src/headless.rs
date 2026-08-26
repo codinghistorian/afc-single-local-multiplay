@@ -191,6 +191,7 @@ fn configure_canonical_fixed_schedule(app: &mut App) {
             simulation::advance_sim_tick,
             crate::sim_event::begin_sim_event_tick,
             arena::sync_active_arena_from_match_state,
+            arena::sync_split_causeway_door_state,
             crate::ecs_identity::reclaim_orphaned_sim_entities,
         )
             .chain()
@@ -208,7 +209,14 @@ fn configure_canonical_fixed_schedule(app: &mut App) {
     )
     .add_systems(
         FixedUpdate,
-        crate::fighter::apply_drunk_input_modifier.in_set(SimulationSet::Input),
+        (
+            crate::fighter::apply_drunk_input_modifier,
+            arena::update_split_causeway_door_eligibility,
+            arena::handle_split_causeway_door_inputs,
+        )
+            .chain()
+            .in_set(SimulationSet::Input)
+            .run_if(crate::game_state::match_accepts_gameplay),
     )
     .add_systems(
         FixedUpdate,
@@ -231,6 +239,7 @@ fn configure_canonical_fixed_schedule(app: &mut App) {
     .add_systems(
         FixedUpdate,
         (
+            arena::advance_split_causeway_doors,
             crate::fighter::apply_fighter_movement,
             arena::update_arena_pipe_transits,
             crate::fighter::separate_fighters,
@@ -701,13 +710,13 @@ mod tests {
 
     fn outward_ringout_inputs(config: &HeadlessMatchConfig, tick: SimTick) -> CommittedTickInputs {
         let mut committed = neutral_inputs(config, tick);
-        for (seat, axis) in [(0_u8, -127_i8), (1_u8, 127_i8)] {
-            let record = committed.by_seat[usize::from(seat)]
-                .as_mut()
-                .expect("golden fixture owns both active seats");
-            record.frame.movement_x = QuantizedAxis::new(axis).unwrap();
-            record.frame.held_buttons = InputButtons::default();
-        }
+        let record = committed.by_seat[0]
+            .as_mut()
+            .expect("golden fixture owns the first active seat");
+        // Crown Ring's rebuilt side wings are intentionally bounded. Route the
+        // red fighter through the unobstructed camera-near apron instead.
+        record.frame.movement_y = QuantizedAxis::new(127).unwrap();
+        record.frame.held_buttons = InputButtons::default();
         committed
     }
 
@@ -1326,16 +1335,18 @@ mod tests {
 
     #[test]
     fn cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result() {
-        const EXPECTED_CHECKPOINTS: [(u64, u64); 6] = [
-            (1, 0x84ce_e944_e41f_dcd9),
-            (120, 0x6e19_0305_5272_0060),
-            (240, 0x811d_fbaf_e6b5_68b1),
-            (360, 0x2249_83e4_0415_2d7a),
-            (480, 0x38d9_a1a4_4b7c_a53a),
-            (600, 0x3336_1084_398f_da66),
+        const EXPECTED_CHECKPOINTS: [(u64, u64); 8] = [
+            (1, 0xc34d_8799_0574_f22c),
+            (120, 0x07ff_272a_a475_c583),
+            (240, 0x6459_463f_461d_e504),
+            (360, 0xb2d4_26ca_cd2c_037b),
+            (480, 0xb857_fefd_c4f4_f8fb),
+            (600, 0x76d9_d6cc_9fba_01cc),
+            (720, 0xf6df_1783_0595_a2ef),
+            (840, 0x8618_ce26_da8a_d483),
         ];
-        const EXPECTED_FINAL_TICK: SimTick = SimTick(709);
-        const EXPECTED_FINAL_HASH: u64 = 0x58c5_6759_3bc8_2e7f;
+        const EXPECTED_FINAL_TICK: SimTick = SimTick(934);
+        const EXPECTED_FINAL_HASH: u64 = 0x66be_5d24_c82d_a680;
 
         let config = fixture();
         assert_eq!(
@@ -1391,17 +1402,17 @@ mod tests {
         // Each arena freezes the independent retired-special/hazard and item
         // branches after semantic review.
         const EXPECTED_FINAL_HASHES: [[u64; 2]; 11] = [
-            [0x365e_a128_e4b1_46cd, 0x0d34_896d_6260_88e4],
-            [0x1273_bd11_6dc8_8b71, 0xcbd6_c658_eedc_b864],
-            [0x2359_1919_2a3f_d974, 0x11c3_6f66_f0f8_78bb],
-            [0xecf5_dbfe_9427_c420, 0xeb19_5f13_237d_8952],
-            [0xf301_ce42_8833_08cf, 0x2c39_19cf_1fd8_6798],
-            [0xb7ce_a6c7_5c37_aa6b, 0xf4c1_66ff_18eb_285c],
-            [0x217c_f971_f436_345f, 0x3be9_23d9_ce3f_8307],
-            [0x897c_27fc_fed0_32bb, 0xe7e0_ab65_3b93_6ad7],
-            [0xa131_1a74_42f6_0edb, 0x01aa_c646_9a98_839b],
-            [0x4621_4acb_53c5_1dc4, 0xc51f_9aeb_924b_4e33],
-            [0x8daa_139e_e0d0_d6f0, 0xdcaa_327a_a5e5_e218],
+            [0xd311_e16b_a6d9_2ddc, 0x2be3_9391_e221_c563],
+            [0xf069_d584_ab33_2e9b, 0xfe66_95a5_f7bf_a795],
+            [0x0e14_18e7_669d_292b, 0x357c_bfec_ceca_70ea],
+            [0x95ac_f0d5_4b40_1bcd, 0xe8de_4822_0265_f7ac],
+            [0x77e6_ad71_b3dc_25e6, 0xefad_7ba7_9a92_b39b],
+            [0xa3af_f842_fea3_eaea, 0xec16_583c_f283_17f3],
+            [0x7440_ed28_93e3_11e6, 0x9f66_27ac_2ce5_13cc],
+            [0xf247_692f_15cb_dfd3, 0xf112_3ac9_52c4_d83a],
+            [0xba47_c189_d29b_2f54, 0xab6e_8147_8275_7bf2],
+            [0xd356_b539_9cd8_2645, 0xaf71_cfe7_1715_3451],
+            [0x979d_8110_ed11_d7bd, 0x1664_e9d6_5a4c_e6f9],
         ];
 
         assert_eq!(arena_definitions().len(), 11);

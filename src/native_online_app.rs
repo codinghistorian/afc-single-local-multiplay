@@ -3211,7 +3211,7 @@ mod tests {
         remote_inputs.merge_render_sample(
             seat,
             RenderInputSample {
-                movement: QuantizedMovement::new(127, 0),
+                movement: QuantizedMovement::new(0, 127),
                 ..default()
             },
         );
@@ -4188,8 +4188,9 @@ mod tests {
         host_application.listen_diagnostics_root = Some(diagnostics.path.clone());
 
         // Use the committed authored stock ruleset on Crown Ring. One ordinary
-        // continuous remote movement command causes three normal ring-outs; no
-        // simulation/result test hook is involved.
+        // continuous remote movement command through the clear front apron
+        // causes three normal ring-outs; no simulation/result test hook is
+        // involved.
         host_application.editor.rules = DefinitionId::new(2).unwrap();
         remote_application.editor.rules = DefinitionId::new(2).unwrap();
         host_application.editor.arena = DefinitionId::new(0).unwrap();

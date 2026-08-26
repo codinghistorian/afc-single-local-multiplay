@@ -1,6 +1,6 @@
 (
     schema_version: 1,
-    contract_version: 7,
+    contract_version: 8,
     id: 2,
     name: "BF002_move_air_control_land",
     classification: Preserve,
@@ -79,483 +79,483 @@
         hashes: [
             (
                 tick: 1,
-                hash: "b3bc9a0721705c46",
+                hash: "3bef70f841d4e27f",
             ),
             (
                 tick: 2,
-                hash: "a04ffcb0a178bfdd",
+                hash: "e4501c88e1b11094",
             ),
             (
                 tick: 3,
-                hash: "6e3be6866e08752e",
+                hash: "5bc4559e545b057b",
             ),
             (
                 tick: 4,
-                hash: "c2b5fc41e4e285df",
+                hash: "e8cf7bc80deb2e2e",
             ),
             (
                 tick: 5,
-                hash: "4ced825643c6b319",
+                hash: "d19ef109459908f4",
             ),
             (
                 tick: 6,
-                hash: "5273527a1f57e38e",
+                hash: "7f06023c27235563",
             ),
             (
                 tick: 7,
-                hash: "b0c70cbf400a49a7",
+                hash: "b0b7f70b3a42c6d2",
             ),
             (
                 tick: 8,
-                hash: "988bd7577b49d141",
+                hash: "1b4b9c16934379e4",
             ),
             (
                 tick: 9,
-                hash: "cd0e5a34362d06c4",
+                hash: "895bc771d21e6181",
             ),
             (
                 tick: 10,
-                hash: "4dd40c736a511d4c",
+                hash: "75557b795e288485",
             ),
             (
                 tick: 11,
-                hash: "8391c924bf3b36b0",
+                hash: "c86e04a12e4d5599",
             ),
             (
                 tick: 12,
-                hash: "be34e76f4f8dfae1",
+                hash: "22297a2f70a4db8c",
             ),
             (
                 tick: 13,
-                hash: "3a1e1883b62261cd",
+                hash: "1983fa822c77b288",
             ),
             (
                 tick: 14,
-                hash: "c9833e573cc8bf18",
+                hash: "e7eb1289dea66b81",
             ),
             (
                 tick: 15,
-                hash: "8850eeaf5bf7b9c0",
+                hash: "28f4443ea8064639",
             ),
             (
                 tick: 16,
-                hash: "9a3a3125fc5a391e",
+                hash: "efad425644303e47",
             ),
             (
                 tick: 17,
-                hash: "eb5f024297679637",
+                hash: "307f186f0cad8a56",
             ),
             (
                 tick: 18,
-                hash: "876da52ae8d24644",
+                hash: "81058b8b17fa852d",
             ),
             (
                 tick: 19,
-                hash: "8f1293fbf7d1e965",
+                hash: "d6e7ece2953a5db4",
             ),
             (
                 tick: 20,
-                hash: "d2381b5022ce5849",
+                hash: "ba7d97f74d2f0d54",
             ),
             (
                 tick: 21,
-                hash: "62dd0b0f81a6ed6d",
+                hash: "dcdfe54dc2374d20",
             ),
             (
                 tick: 22,
-                hash: "67503f7132341c9a",
+                hash: "920591ff9e2357a7",
             ),
             (
                 tick: 23,
-                hash: "8575f621159f3069",
+                hash: "f33d7feeb6f64378",
             ),
             (
                 tick: 24,
-                hash: "d58449cf127f5471",
+                hash: "7018d2f67d5cabb4",
             ),
             (
                 tick: 25,
-                hash: "4cd21fd351b30c0b",
+                hash: "6b9424154d4377b2",
             ),
             (
                 tick: 26,
-                hash: "35ade51e351ae8a8",
+                hash: "868a8bc840cff841",
             ),
             (
                 tick: 27,
-                hash: "5547f03e1438f589",
+                hash: "2527db76600b5550",
             ),
             (
                 tick: 28,
-                hash: "7b8fc7b65e3bac35",
+                hash: "5396392fec5cfe18",
             ),
             (
                 tick: 29,
-                hash: "b4932e198311dcce",
+                hash: "543cdacfbae2bdb7",
             ),
             (
                 tick: 30,
-                hash: "0dbccf62358041f0",
+                hash: "5bea83026f83bcc9",
             ),
             (
                 tick: 31,
-                hash: "41966dd17553238f",
+                hash: "f8a648aa045536d2",
             ),
             (
                 tick: 32,
-                hash: "af67689b242c1847",
+                hash: "71d6dd2b02fc6d3e",
             ),
             (
                 tick: 33,
-                hash: "3e57947663c12bd6",
+                hash: "259997977297485f",
             ),
             (
                 tick: 34,
-                hash: "358d40b023fb9493",
+                hash: "9401b7f6acdbae96",
             ),
             (
                 tick: 35,
-                hash: "78529b3a29061b16",
+                hash: "42c586ab849219fb",
             ),
             (
                 tick: 36,
-                hash: "d9dddd48607f78c8",
+                hash: "271607edbf663185",
             ),
             (
                 tick: 37,
-                hash: "eaf6791c4cc9187b",
+                hash: "f7f88f893aa80992",
             ),
             (
                 tick: 38,
-                hash: "46157c4e066c4811",
+                hash: "ddc0784e6c64d2f0",
             ),
             (
                 tick: 39,
-                hash: "c484eec416644354",
+                hash: "51f9e0db09be089d",
             ),
             (
                 tick: 40,
-                hash: "e40069ea12279ab3",
+                hash: "2884e6561a038cfa",
             ),
             (
                 tick: 41,
-                hash: "4314dd04cad19083",
+                hash: "5a13d417e966d1ea",
             ),
             (
                 tick: 42,
-                hash: "f7ac3849ad528036",
+                hash: "a4d76aa04cc9266b",
             ),
             (
                 tick: 43,
-                hash: "3d002531f0e75cf8",
+                hash: "1ca1a6eaa1a6b299",
             ),
             (
                 tick: 44,
-                hash: "9ff4d31d00a98422",
+                hash: "b1231e122577efcb",
             ),
             (
                 tick: 45,
-                hash: "587858e1bf9158a8",
+                hash: "e8d765494c9a7e25",
             ),
             (
                 tick: 46,
-                hash: "56de0410b3e620c0",
+                hash: "39975eabb71ffbc1",
             ),
             (
                 tick: 47,
-                hash: "ce67bc65f9cf5048",
+                hash: "87507b7538c5e1c9",
             ),
             (
                 tick: 48,
-                hash: "8c9b4110be12af04",
+                hash: "d19b7b5036d13a01",
             ),
             (
                 tick: 49,
-                hash: "96e57b91ef9747b0",
+                hash: "a2544bd65527a13d",
             ),
             (
                 tick: 50,
-                hash: "5b3bef65d065251f",
+                hash: "39f4a652b38adb32",
             ),
             (
                 tick: 51,
-                hash: "00998f7bba1663e7",
+                hash: "65843901bf3f4e6a",
             ),
             (
                 tick: 52,
-                hash: "c2b989f9dcf449f4",
+                hash: "601a7e9137dfc781",
             ),
             (
                 tick: 53,
-                hash: "b59a0d3053b63751",
+                hash: "ea9a7d555c8fb2e4",
             ),
             (
                 tick: 54,
-                hash: "c9300ba2687fb824",
+                hash: "3390203eb0bf9365",
             ),
             (
                 tick: 55,
-                hash: "20b98c483849963c",
+                hash: "78917414fbb6c795",
             ),
             (
                 tick: 56,
-                hash: "3d4dc5399b2f1364",
+                hash: "b8a7b39ab61ca839",
             ),
             (
                 tick: 57,
-                hash: "9de11ce4296fed9c",
+                hash: "2fc3650cf53b2d71",
             ),
             (
                 tick: 58,
-                hash: "dc8b03515abad9fc",
+                hash: "44cf814151c3ff5d",
             ),
             (
                 tick: 59,
-                hash: "40f3597f153345bc",
+                hash: "24ac60b7da022d75",
             ),
             (
                 tick: 60,
-                hash: "194a3a4342d5819c",
+                hash: "16d47fb302a6e0d9",
             ),
             (
                 tick: 61,
-                hash: "7a3535cd876d256c",
+                hash: "1d41d703746e6de9",
             ),
             (
                 tick: 62,
-                hash: "fb9e7d933cbb4414",
+                hash: "680c033a3c5d84e5",
             ),
             (
                 tick: 63,
-                hash: "69e4c9b9423e803c",
+                hash: "7ea8598930a11825",
             ),
             (
                 tick: 64,
-                hash: "9f25b98ab30fe784",
+                hash: "72c41bf41764c979",
             ),
             (
                 tick: 65,
-                hash: "971f6e3d3026b02c",
+                hash: "7f5b29387919e451",
             ),
             (
                 tick: 66,
-                hash: "2c273cfab289307c",
+                hash: "0018f9ae62fb8f2d",
             ),
             (
                 tick: 67,
-                hash: "0a78567f8f01581c",
+                hash: "a99dd8b8e104a765",
             ),
             (
                 tick: 68,
-                hash: "e8b09bac4d88a10c",
+                hash: "1c3d0ca0f8025359",
             ),
             (
                 tick: 69,
-                hash: "24b7309d9e85e03c",
+                hash: "929be06652cc49b9",
             ),
             (
                 tick: 70,
-                hash: "0b801151e9708024",
+                hash: "c4ec1c0086f1b4e5",
             ),
             (
                 tick: 71,
-                hash: "840899ce8232c87c",
+                hash: "c28757acbcdc4f15",
             ),
             (
                 tick: 72,
-                hash: "f28190dd37125c24",
+                hash: "c9a6be4034d7cc19",
             ),
             (
                 tick: 73,
-                hash: "39dbfd8df09d083c",
+                hash: "6171457cdf04d5f1",
             ),
             (
                 tick: 74,
-                hash: "ca8d278318e0613c",
+                hash: "09749899b61da09d",
             ),
             (
                 tick: 75,
-                hash: "a6b7df6b0e76ed5c",
+                hash: "c390cce513eb6f35",
             ),
             (
                 tick: 76,
-                hash: "c1324f15cb2c0f9c",
+                hash: "3056203bde08adf9",
             ),
             (
                 tick: 77,
-                hash: "445b21ec62ce70ac",
+                hash: "291b5b4542f358e9",
             ),
             (
                 tick: 78,
-                hash: "828d941101e70cf4",
+                hash: "69c15da91d3d50e5",
             ),
             (
                 tick: 79,
-                hash: "87ed689ea3cbc27c",
+                hash: "adcb3ea522772a45",
             ),
             (
                 tick: 80,
-                hash: "ba2956b01e865904",
+                hash: "454614bf85cc4e59",
             ),
             (
                 tick: 81,
-                hash: "5ad3baddc776f42c",
+                hash: "1c5676d7b6db1b11",
             ),
             (
                 tick: 82,
-                hash: "db1f3f3d576759fc",
+                hash: "cb6c31b6070d2e8d",
             ),
             (
                 tick: 83,
-                hash: "aa25c3f1150baafc",
+                hash: "5db1f849b0b664c5",
             ),
             (
                 tick: 84,
-                hash: "d2534eca82297e6c",
+                hash: "99b77d35e017d479",
             ),
             (
                 tick: 85,
-                hash: "8e184fe8a7bf5e1c",
+                hash: "45c7c022970b0a99",
             ),
             (
                 tick: 86,
-                hash: "9a3b69e10267ada4",
+                hash: "2f38ed830ab72c65",
             ),
             (
                 tick: 87,
-                hash: "8cabcea8270bb8fc",
+                hash: "1fd6eb41e1165c95",
             ),
             (
                 tick: 88,
-                hash: "ac0c4392e17e5924",
+                hash: "877b2b242bcf91f9",
             ),
             (
                 tick: 89,
-                hash: "de273a6c9294f91c",
+                hash: "13a7892c838c3a31",
             ),
             (
                 tick: 90,
-                hash: "1d2182695e4fdcbc",
+                hash: "4aa927daf0f4a49d",
             ),
             (
                 tick: 91,
-                hash: "b2aa9ee89c51917c",
+                hash: "ff2bc6536339d3b5",
             ),
             (
                 tick: 92,
-                hash: "f4e9f56a2a0448dc",
+                hash: "6e1e081ef4bbea99",
             ),
             (
                 tick: 93,
-                hash: "1b8dc426e7d64fec",
+                hash: "cfff82c34eefe0a9",
             ),
             (
                 tick: 94,
-                hash: "d72b84e3c132bc14",
+                hash: "8300bb66c47bf4e5",
             ),
             (
                 tick: 95,
-                hash: "f231fe5f9f90c8fc",
+                hash: "c54fe9e1399f3ae5",
             ),
             (
                 tick: 96,
-                hash: "7c066c3b937ba3c4",
+                hash: "ec6ed608bf222379",
             ),
             (
                 tick: 97,
-                hash: "09d34bc898e48dec",
+                hash: "2423b01a07bab491",
             ),
             (
                 tick: 98,
-                hash: "e28c9ebcd1437a3c",
+                hash: "6402d0937ae9ebad",
             ),
             (
                 tick: 99,
-                hash: "8b6ee92144fb6e5c",
+                hash: "484404cdb08eece5",
             ),
             (
                 tick: 100,
-                hash: "1dc027ac17d8ce4c",
+                hash: "7bbea742e59cf499",
             ),
             (
                 tick: 101,
-                hash: "3f8feb5cb95146bc",
+                hash: "631e2c9f5f92ba79",
             ),
             (
                 tick: 102,
-                hash: "f1298c6f2a78fea4",
+                hash: "1673f7a68cd83065",
             ),
             (
                 tick: 103,
-                hash: "2a522c53e721b9bc",
+                hash: "e81754e4a5485615",
             ),
             (
                 tick: 104,
-                hash: "6090d44c263de064",
+                hash: "90a15ed815832819",
             ),
             (
                 tick: 105,
-                hash: "615eb0323fb44dfc",
+                hash: "083e7aa77313d731",
             ),
             (
                 tick: 106,
-                hash: "b3fbc2393a9c697c",
+                hash: "dff26e3de364c55d",
             ),
             (
                 tick: 107,
-                hash: "a47df6f132d8035c",
+                hash: "f1717fb840593075",
             ),
             (
                 tick: 108,
-                hash: "d2828c8fe44263dc",
+                hash: "51beee47e1fc1ff9",
             ),
             (
                 tick: 109,
-                hash: "6814f9f3010ee5ac",
+                hash: "c0176b87e51144a9",
             ),
             (
                 tick: 110,
-                hash: "932f8cdf98ef71b4",
+                hash: "071268c9e5504365",
             ),
             (
                 tick: 111,
-                hash: "2745fa167d88c33c",
+                hash: "7cb5f94b585f6d45",
             ),
             (
                 tick: 112,
-                hash: "f538b1003b173044",
+                hash: "0e4cf5f2badc9a99",
             ),
             (
                 tick: 113,
-                hash: "fbf010fa9ffe876c",
+                hash: "eb615c2b7c5f8bd1",
             ),
             (
                 tick: 114,
-                hash: "bb5d3c67cf573fbc",
+                hash: "76ad7e6f25a716cd",
             ),
             (
                 tick: 115,
-                hash: "072eeff1ecd6427c",
+                hash: "91ec1059ecf79785",
             ),
             (
                 tick: 116,
-                hash: "b4201d1193cdbe6c",
+                hash: "9f4cac5c1380e3f9",
             ),
             (
                 tick: 117,
-                hash: "4d8c71366865cddc",
+                hash: "a0a880238d101199",
             ),
             (
                 tick: 118,
-                hash: "a956c98f4b20e724",
+                hash: "f21a74a3189cbce5",
             ),
             (
                 tick: 119,
-                hash: "0bec3e2c29c044bc",
+                hash: "b8d1e2e172893595",
             ),
             (
                 tick: 120,
-                hash: "89a256834b8fd664",
+                hash: "e8aca8eb836c0239",
             ),
         ],
         checkpoints: [

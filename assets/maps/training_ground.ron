@@ -183,8 +183,8 @@
     ],
 
     primitives: [
-        // The dark foundation reads as narrow grout between the batched pavers.
-        (id: "floor_foundation", kind: "cuboid", position: (0.0, -0.13, 0.0), scale: (18.18, 0.24, 18.18), material: "grout"),
+        // Keep the foundation top 0.02 below the pavers to prevent z-fighting.
+        (id: "floor_foundation", kind: "cuboid", position: (0.0, -0.14, 0.0), scale: (18.18, 0.24, 18.18), material: "grout"),
     ],
 
     lights: [

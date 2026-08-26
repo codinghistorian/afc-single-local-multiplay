@@ -260,6 +260,7 @@ pub fn build_app() -> App {
         .init_resource::<tick_input::LocalTickInputState>()
         .init_resource::<interpolation::SimPoseSnapRequest>()
         .init_resource::<game_state::GameplayPauseOwners>()
+        .init_resource::<arena::SplitCausewayDoorState>()
         .init_resource::<combat::HitEffects>()
         .init_resource::<combat::CombatPresentationIntentJournal>()
         .init_resource::<fighter::FighterPresentationIntentJournal>()
@@ -341,6 +342,7 @@ pub fn build_app() -> App {
                 simulation::advance_sim_tick,
                 sim_event::begin_sim_event_tick,
                 arena::sync_active_arena_from_match_state,
+                arena::sync_split_causeway_door_state,
                 ecs_identity::reclaim_orphaned_sim_entities,
                 interpolation::begin_sim_pose_tick,
             )
@@ -548,6 +550,8 @@ pub fn build_app() -> App {
                 bot::bot_input,
                 tutorial::script_tutorial_dummy,
                 fighter::apply_drunk_input_modifier,
+                arena::update_split_causeway_door_eligibility,
+                arena::handle_split_causeway_door_inputs,
             )
                 .chain()
                 .in_set(simulation::SimulationSet::Input)
@@ -574,6 +578,7 @@ pub fn build_app() -> App {
         .add_systems(
             FixedUpdate,
             (
+                arena::advance_split_causeway_doors,
                 fighter::apply_fighter_movement,
                 arena::update_arena_pipe_transits,
                 fighter::separate_fighters,
@@ -778,19 +783,31 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
-                arena::update_arena_hazard_visuals,
-                arena::update_arena_pipe_visuals,
-                arena::update_crank_yard_machinery_visuals,
-                arena::update_vent_spiral_machinery,
-                arena::sync_arena_cannon_bomb_visuals,
+                (
+                    arena::update_arena_hazard_visuals,
+                    arena::update_arena_pipe_visuals,
+                    arena::update_crank_yard_machinery_visuals,
+                    arena::update_vent_spiral_machinery,
+                    arena::sync_arena_cannon_bomb_visuals,
+                )
+                    .chain()
+                    .run_if(game_state::match_accepts_gameplay),
+                arena::sync_split_causeway_door_visuals
+                    .after(arena::sync_arena_visuals)
+                    .run_if(user_mode::gameplay_scene_loaded),
             )
-                .chain()
-                .run_if(game_state::match_accepts_gameplay)
                 .in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,
             arena::sync_arena_background_to_camera
+                .after(camera::follow_camera)
+                .run_if(user_mode::gameplay_scene_loaded)
+                .in_set(GameSet::Presentation),
+        )
+        .add_systems(
+            Update,
+            arena::update_split_causeway_door_prompts
                 .after(camera::follow_camera)
                 .run_if(user_mode::gameplay_scene_loaded)
                 .in_set(GameSet::Presentation),
@@ -805,7 +822,6 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
-                user_mode::update_user_mode_controls_ui,
                 user_mode::update_key_settings_ui,
                 user_mode::update_sound_settings_ui,
             )

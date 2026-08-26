@@ -4,8 +4,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::arena::{
-    ArenaFighterBurn, ArenaPipeState, ground_support_for_arena_with_radius,
-    resolve_platform_side_collision_for_arena,
+    ArenaFighterBurn, ArenaPipeState, SplitCausewayDoorState, ground_support_for_arena_with_radius,
+    resolve_platform_side_collision_with_doors,
 };
 use crate::arena_defs::{ActiveArena, ArenaDefinition};
 use crate::body_collision::{
@@ -5508,6 +5508,7 @@ fn should_defer_knockout_resolution(motor: &FighterMotor, action: &FighterAction
 pub fn apply_fighter_movement(
     hitstop: Res<Hitstop>,
     active_arena: Res<ActiveArena>,
+    split_causeway_doors: Res<SplitCausewayDoorState>,
     character_catalog: Res<CharacterMoveCatalog>,
     mut sim_events: ResMut<TickEventBuffer>,
     mut presentation_intents: Option<ResMut<FighterPresentationIntentJournal>>,
@@ -5698,10 +5699,11 @@ pub fn apply_fighter_movement(
 
         transform.translation += motor.velocity * dt;
         let before_collision = transform.translation;
-        transform.translation = resolve_platform_side_collision_for_arena(
+        transform.translation = resolve_platform_side_collision_with_doors(
             arena,
             transform.translation,
             FIGHTER_RADIUS * stats.item_size_multiplier(),
+            &split_causeway_doors,
         );
         let correction = transform.translation - before_collision;
         let mut did_wall_bounce = false;
@@ -12989,15 +12991,26 @@ mod tests {
 
     #[test]
     fn ringout_bounds_use_selected_arena_definition() {
-        let crown = crate::arena_defs::arena_definition(0);
-        let split = crate::arena_defs::arena_definition(1);
-        let between_radii = Vec3::new(crown.ringout_radius + 0.25, 0.0, 0.0);
+        let arenas = crate::arena_defs::arena_definitions();
+        let smaller = arenas
+            .iter()
+            .min_by(|left, right| left.ringout_radius.total_cmp(&right.ringout_radius))
+            .unwrap();
+        let larger = arenas
+            .iter()
+            .max_by(|left, right| left.ringout_radius.total_cmp(&right.ringout_radius))
+            .unwrap();
+        let between_radii = Vec3::new(
+            (smaller.ringout_radius + larger.ringout_radius) * 0.5,
+            0.0,
+            0.0,
+        );
 
-        assert!(is_ringout_position(between_radii, crown));
-        assert!(!is_ringout_position(between_radii, split));
+        assert!(is_ringout_position(between_radii, smaller));
+        assert!(!is_ringout_position(between_radii, larger));
         assert!(is_ringout_position(
-            Vec3::new(0.0, crown.ringout_y - 0.1, 0.0),
-            crown
+            Vec3::new(0.0, smaller.ringout_y - 0.1, 0.0),
+            smaller
         ));
     }
 
@@ -13017,11 +13030,18 @@ mod tests {
 
     #[test]
     fn ringout_danger_respects_arena_radius() {
-        let crown = crate::arena_defs::arena_definition(0);
-        let split = crate::arena_defs::arena_definition(1);
-        let position = Vec3::new(crown.ringout_radius - 0.4, 0.0, 0.0);
+        let arenas = crate::arena_defs::arena_definitions();
+        let smaller = arenas
+            .iter()
+            .min_by(|left, right| left.ringout_radius.total_cmp(&right.ringout_radius))
+            .unwrap();
+        let larger = arenas
+            .iter()
+            .max_by(|left, right| left.ringout_radius.total_cmp(&right.ringout_radius))
+            .unwrap();
+        let position = Vec3::new(smaller.ringout_radius - 0.4, 0.0, 0.0);
 
-        assert!(ringout_danger_level(position, crown) > ringout_danger_level(position, split));
+        assert!(ringout_danger_level(position, smaller) > ringout_danger_level(position, larger));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! - Bee source SHA-256: 92ee33353abc8245d5d0aadb99659359d03c8aced3acd04c3d6f1b47c3b400
 //! - Chick source SHA-256: 14aa16f2eeaaf65497c0f90561f76e35cd160a297e3fcc97fe17be9f12639ca1
 //! - Arena source SHA-256: b18cad60d8573c5f50480b76d6a233e1f5148812447b6e1d4ca55d783a1b99dc
-//! - Champion's Court RON SHA-256: 015157b7527b52eb536116f1b115002ed18880d132565a7bc55be78980168ff0
+//! - Champion's Court RON SHA-256: c6521a0653059189233228ff96df8360a5e7c8c021d569765be42f73a7db07bb
 //!
 //! Values were emitted by temporary in-module tests that invoked the pre-C1
 //! private production helpers. Normal builds never regenerate these values
@@ -288,8 +288,9 @@ pub(crate) const NON_COURT_COLLISION_YAW_BASES: [CollisionYawBasisBits; 17] = [
 pub(crate) const NON_COURT_COLLISION_YAW_BASES_FNV1A64: u64 = 0x71fabf30c69c0a85;
 
 #[cfg(test)]
-pub(crate) const COURT_COLLISION_YAW_BASES: [CollisionYawBasisBits; 29] = [
+pub(crate) const COURT_COLLISION_YAW_BASES: [CollisionYawBasisBits; 33] = [
     CollisionYawBasisBits::new(0x00000000, 0x3f800000, 0x00000000),
+    CollisionYawBasisBits::new(0x3d0efa35, 0x3f7fd814, 0x3d0ef2c6),
     CollisionYawBasisBits::new(0x3d567756, 0x3f7fa62f, 0x3d565e41),
     CollisionYawBasisBits::new(0x3e97e9d7, 0x3f74d064, 0x3e95b1bd),
     CollisionYawBasisBits::new(0x3ea0d97a, 0x3f737871, 0x3e9e3778),
@@ -304,12 +305,15 @@ pub(crate) const COURT_COLLISION_YAW_BASES: [CollisionYawBasisBits; 29] = [
     CollisionYawBasisBits::new(0x3fc90fda, 0x33a22169, 0x3f800000),
     CollisionYawBasisBits::new(0x4016cbe4, 0xbf3504f3, 0x3f3504f3),
     CollisionYawBasisBits::new(0x4032b8c2, 0xbf708fb2, 0x3eaf1d46),
+    CollisionYawBasisBits::new(0xbd0efa35, 0x3f7fd814, 0xbd0ef2c6),
     CollisionYawBasisBits::new(0xbe32b8c3, 0x3f7c1c5c, 0xbe31d0d5),
     CollisionYawBasisBits::new(0xbe567750, 0x3f7a67e2, 0xbe54e6ce),
+    CollisionYawBasisBits::new(0xbe7a35dd, 0x3f78654d, 0xbe77ba60),
     CollisionYawBasisBits::new(0xbea0d97d, 0x3f737870, 0xbe9e377b),
     CollisionYawBasisBits::new(0xbec49808, 0x3f6d5bec, 0xbebfcc6f),
     CollisionYawBasisBits::new(0xbec49809, 0x3f6d5bec, 0xbebfcc6f),
     CollisionYawBasisBits::new(0xbedf66f4, 0x3f6803c9, 0xbed8616d),
+    CollisionYawBasisBits::new(0xbf0a8263, 0x3f5b6f51, 0xbf03d989),
     CollisionYawBasisBits::new(0xbf1c61a9, 0x3f51b3f3, 0xbf12d5e7),
     CollisionYawBasisBits::new(0xbf490fdc, 0x3f3504f2, 0xbf3504f4),
     CollisionYawBasisBits::new(0xbf685695, 0x3f1d9bff, 0xbf49bb12),
@@ -321,10 +325,10 @@ pub(crate) const COURT_COLLISION_YAW_BASES: [CollisionYawBasisBits; 29] = [
 ];
 
 #[cfg(test)]
-pub(crate) const COURT_COLLISION_YAW_BASES_FNV1A64: u64 = 0x38b7d3194e714575;
+pub(crate) const COURT_COLLISION_YAW_BASES_FNV1A64: u64 = 0xce31cb76881edd8b;
 
 #[cfg(test)]
-pub(crate) const CHAMPIONS_COURT_RON_FNV1A64: u64 = 0x10cf9b30c17000da;
+pub(crate) const CHAMPIONS_COURT_RON_FNV1A64: u64 = 0x8749054ea69db3cc;
 
 /// Exact, symmetric relative bases for the Chick ultimate's sixteen projectiles.
 ///
@@ -403,6 +407,7 @@ pub(crate) fn chick_fresh_ride_bob(tick: u32) -> f32 {
 pub(crate) fn collision_yaw_basis(yaw: f32) -> (f32, f32) {
     match yaw.to_bits() {
         0x00000000 => (f32::from_bits(0x3f800000), f32::from_bits(0x00000000)),
+        0x3d0efa35 => (f32::from_bits(0x3f7fd814), f32::from_bits(0x3d0ef2c6)),
         0x3d567756 => (f32::from_bits(0x3f7fa62f), f32::from_bits(0x3d565e41)),
         0x3dcccccd => (f32::from_bits(0x3f7eb898), f32::from_bits(0x3dcc7577)),
         0x3e4ccccd => (f32::from_bits(0x3f7ae5a5), f32::from_bits(0x3e4b6ff9)),
@@ -426,16 +431,19 @@ pub(crate) fn collision_yaw_basis(yaw: f32) -> (f32, f32) {
         0x4016cbe4 => (f32::from_bits(0xbf3504f3), f32::from_bits(0x3f3504f3)),
         0x4032b8c2 => (f32::from_bits(0xbf708fb2), f32::from_bits(0x3eaf1d46)),
         0x40490fdb => (f32::from_bits(0xbf800000), f32::from_bits(0xb3bbbd2e)),
+        0xbd0efa35 => (f32::from_bits(0x3f7fd814), f32::from_bits(0xbd0ef2c6)),
         0xbe19999a => (f32::from_bits(0x3f7d201a), f32::from_bits(0xbe190650)),
         0xbe32b8c3 => (f32::from_bits(0x3f7c1c5c), f32::from_bits(0xbe31d0d5)),
         0xbe4ccccd => (f32::from_bits(0x3f7ae5a5), f32::from_bits(0xbe4b6ff9)),
         0xbe567750 => (f32::from_bits(0x3f7a67e2), f32::from_bits(0xbe54e6ce)),
+        0xbe7a35dd => (f32::from_bits(0x3f78654d), f32::from_bits(0xbe77ba60)),
         0xbe800000 => (f32::from_bits(0x3f780aa5), f32::from_bits(0xbe7d5777)),
         0xbea0d97d => (f32::from_bits(0x3f737870), f32::from_bits(0xbe9e377b)),
         0xbeb33333 => (f32::from_bits(0x3f707abb), f32::from_bits(0xbeaf904d)),
         0xbec49808 => (f32::from_bits(0x3f6d5bec), f32::from_bits(0xbebfcc6f)),
         0xbec49809 => (f32::from_bits(0x3f6d5bec), f32::from_bits(0xbebfcc6f)),
         0xbedf66f4 => (f32::from_bits(0x3f6803c9), f32::from_bits(0xbed8616d)),
+        0xbf0a8263 => (f32::from_bits(0x3f5b6f51), f32::from_bits(0xbf03d989)),
         0xbf0ccccd => (f32::from_bits(0x3f5a3f0c), f32::from_bits(0xbf05ced5)),
         0xbf1c61a9 => (f32::from_bits(0x3f51b3f3), f32::from_bits(0xbf12d5e7)),
         0xbf490fdc => (f32::from_bits(0x3f3504f2), f32::from_bits(0xbf3504f4)),
@@ -586,7 +594,7 @@ mod tests {
         assert_eq!(CHICK_ORBIT_BASIS_BITS_FLAT.len(), 962);
         assert_eq!(CHICK_FRESH_RIDE_BOB_BITS.len(), 35);
         assert_eq!(NON_COURT_COLLISION_YAW_BASES.len(), 17);
-        assert_eq!(COURT_COLLISION_YAW_BASES.len(), 29);
+        assert_eq!(COURT_COLLISION_YAW_BASES.len(), 33);
 
         assert_eq!(
             fnv1a64_words(&BEE_HONEY_PUDDLE_SCALE_BITS),
@@ -646,8 +654,8 @@ mod tests {
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    fn c1_frozen_yaws_match_v3_reference_libm_bits() {
-        const C1_REFERENCE_SIMULATION_VERSION: u16 = 3;
+    fn frozen_yaws_match_reference_libm_bits() {
+        const REFERENCE_SIMULATION_VERSION: u16 = 8;
         for entry in NON_COURT_COLLISION_YAW_BASES
             .iter()
             .chain(COURT_COLLISION_YAW_BASES.iter())
@@ -665,7 +673,7 @@ mod tests {
                 entry.yaw
             );
         }
-        assert_eq!(C1_REFERENCE_SIMULATION_VERSION, 3);
+        assert_eq!(REFERENCE_SIMULATION_VERSION, 8);
     }
 
     #[test]

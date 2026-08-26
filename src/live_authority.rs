@@ -812,8 +812,7 @@ mod tests {
     use super::*;
 
     use crate::arena::{
-        ArenaHazardState, ArenaImpactAccent, ArenaPipeState, ArenaPresentationIntent,
-        ArenaPresentationIntentJournal, PowderKegCannonState,
+        ArenaImpactAccent, ArenaPresentationIntent, ArenaPresentationIntentJournal,
     };
     use crate::arena_defs::ActiveArena;
     use crate::authority::AuthorityMatch;
@@ -1022,13 +1021,8 @@ mod tests {
                 ..MatchTelemetry::default()
             })
             .insert_resource(Hitstop::default())
-            .insert_resource(ArenaHazardState::new(
-                active_arena.index(),
-                active_arena.definition().hazards.len(),
-            ))
-            .insert_resource(ArenaPipeState::new(active_arena.index()))
-            .insert_resource(PowderKegCannonState::new(active_arena.index()))
             .insert_resource(SimulationIdentityAllocator::default());
+        crate::arena::bootstrap_canonical_arena_runtime(app.world_mut(), active_arena.index());
 
         for index in order {
             app.world_mut().spawn((

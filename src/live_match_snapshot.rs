@@ -515,7 +515,6 @@ impl NonFighterSnapshotCodec for LiveMatchSnapshotCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena::{ArenaHazardState, ArenaPipeState, PowderKegCannonState};
     use crate::components::FighterStats;
     use crate::ecs_identity::SIM_ENTITY_POOL_CAPACITIES;
     use crate::snapshot::{ArenaRuntimeSnapshot, SnapshotHeader};
@@ -554,12 +553,7 @@ mod tests {
             damage_by_fighter: [1.25, 2.5, 0.0, 0.0],
         });
         world.insert_resource(Hitstop { remaining_ticks: 6 });
-        world.insert_resource(ArenaHazardState::new(
-            active_arena.index(),
-            active_arena.definition().hazards.len(),
-        ));
-        world.insert_resource(ArenaPipeState::new(active_arena.index()));
-        world.insert_resource(PowderKegCannonState::new(active_arena.index()));
+        crate::arena::bootstrap_canonical_arena_runtime(&mut world, active_arena.index());
         for id in order {
             world.spawn((
                 Fighter {

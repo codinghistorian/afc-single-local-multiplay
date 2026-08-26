@@ -18,7 +18,7 @@ stock result. Its Linux/Windows/macOS gate and frozen literals are documented in
 also cover the central contact and batched life-loss permutations named later in
 this document.
 
-The simulation-v7 fixture tranche is checked in under
+The simulation-v8 fixture tranche is checked in under
 `tests/fixtures/behavior/v1` and runs through the crate-internal production
 headless harness in `tests/support/behavior_fixtures.rs`:
 
@@ -43,6 +43,7 @@ headless harness in `tests/support/behavior_fixtures.rs`:
 | BF028 | `item_use_throw_impact_respawn` | Pickup, apple use, turkey throw/impact, ownership, durability, telemetry, and respawn lifecycle |
 | BF029 | `manual_aim_lock_break_release` | **AcceptedChange:** stable-ID lock acquisition, fixed-tick 60-degree manual break, rollback-owned unlock count, release, and restore from an active lock |
 | BF030 | `training_ground_perimeter` | Held movement into the exact-bit east barrier; exact settled Q12 pose/velocity, grounded state, no stock loss/events, and restore replay |
+| BF031 | `split_causeway_gate_toggle` | **AcceptedChange:** stable arena/device toggle event, `FighterId`-selected interaction, exact 18-tick gate progress, and restore from tick 10 |
 
 Every tape stores a hash for every tick, bounded normalized checkpoints, ordered
 semantic events, and final result. The runner compares two clean runs, a
@@ -105,6 +106,19 @@ final ticks, and results. Debug and fat-LTO release produced identical fixture
 files with BF001 tick-1 hash `b6e166cd6feadfa6`; the current gameplay-content
 digest is
 `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`.
+
+The simulation-v8 arena-flow integration raises the corpus to 20 tapes and
+snapshot schema 4. Champion's Court adopts its final 35-barrier topology; BF021
+therefore changes from the old lateral-exit script at tick 709 to the final front
+apron and a team-1 result at tick 934. BF024, BF025, and BF028 only relocate
+their synthetic setups clear of final geometry and retain their named semantic
+outcomes. BF031 freezes Split Causeway's stable `ArenaDeviceToggled` event,
+target flag, 18 integer progress steps, and tick-10 restore replay. All other
+normalized checkpoints, stable-ID relationships, ordered events, final ticks,
+and results remain preserved. Debug and fat-LTO release produced byte-identical
+fixture files with BF001 tick-1 hash `3eae3ee94c4516d7`; the current
+gameplay-content digest is
+`11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03`.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
@@ -193,7 +207,8 @@ the original audit. That integration gap is now closed.
 | `generic_special_variants` | BF013 casts the generic projectile, trap, shockwave, and hazard variants and records their spawn/lifecycle input path, hashes, and restore replay. Activation/profile/repeat/radius and multi-target collector tests retain focused boundaries. | **Partial.** The tape is representative; it is not a generated contact/expiry/despawn matrix across every authored variant and target outcome. |
 | `character_skill_lifecycle` | Existing Bee/Chick/Penguin authored lifecycle tests remain. `bee_skills::tests::frozen_multi_target_projectile_outcomes_ignore_ecs_and_pool_allocation_order` proves all targets freeze before source consumption and the post consumer releases the exact generation under reversed allocation. Every character-skill family now uses the same collector/outcome-consumer boundary. | **Partial.** Representative multi-target lifecycle is covered, but no generated per-kind spawn/update/contact/child-spawn/despawn tape exists for the complete catalog. |
 | `arena_hazard_contact` | BF015 holds a fighter in an inactive vent, records the first active neutral-source impact, damage/reaction/cooldown, hitstop freeze and resume, per-tick hashes, and a restore across the lifecycle. `arena::tests::hazard_and_strike_both_land_independent_of_insertion_and_ecs_order` separately locks mixed-source allocation invariance. | **Partial.** The named vent path is a full v5 tape, but the requirement says each hazard boundary; the complete hazard catalog is not yet a generated matrix. |
-| `training_ground_perimeter` | BF030 holds a fighter into Training Ground's exact-bit east barrier, records the exact settled Q12 pose/zero velocity and grounded/no-stock-loss state, and restores from tick 60 through the unchanged final trace. The eleven-arena compact matrix also freezes this arena's item-free branch in two independently bootstrapped worlds. | **Covered by a full v7 input-tape/hash fixture.** Authored RON collision values remain presentation/editor data; the canonical barrier table is the frozen runtime contract. |
+| `training_ground_perimeter` | BF030 holds a fighter into Training Ground's exact-bit east barrier, records the exact settled Q12 pose/zero velocity and grounded/no-stock-loss state, and restores from tick 60 through the unchanged final trace. The eleven-arena compact matrix also freezes this arena's item-free branch in two independently bootstrapped worlds. | **Covered by a full versioned input-tape/hash fixture.** Authored RON collision values remain presentation/editor data; the canonical barrier table is the frozen runtime contract. |
+| `split_causeway_gate_toggle` | BF031 consumes one eligible light press in stable fighter order, emits the canonical arena/device event, advances the gate exactly once per fixed tick for 18 ticks, and reproduces the same target/progress state after tick-10 restore. Focused tests additionally freeze candidate tie-breaking, collision blocking, independent gates, exact hinge poses, reset behavior, and presentation-only prompts. | **Covered by a full v8 input-tape/hash fixture plus focused boundary tests.** Other arena devices remain partial below. |
 | `arena_pipe_transit` | `arena::tests::crank_pipe_accepts_a_grounded_fighter_or_descending_jump`: grounded or descending-jump entries are accepted; idle airborne, ascending, and heavy attack are rejected. `arena::tests::crank_pipe_transit_sinks_then_emerges_at_the_other_endpoint`: the sampled pose shrinks/sinks at entry, emerges at the other endpoint, and reaches completion. | **Partial.** Dwell threshold, per-fighter state transitions, action/pose lock, exit cooldown, and interaction with separation/hitstop are not run through `update_arena_pipe_transits`. |
 | `powder_cannon_bomb` | `arena::tests::headless_cannon_hit_emits_neutral_impact_without_inline_feedback` and `arena::tests::cannon_projectile_freezes_all_targets_and_ignores_ecs_allocation_order` cover neutral semantic impact, multi-target frozen detonation, stable source consumption, and reversed ECS order. | **Partial.** Alternating cannon selection, exact spawn/first-motion tick, ground-only detonation, and next-fire timer still need one tape. |
 

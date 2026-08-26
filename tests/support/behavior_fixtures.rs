@@ -50,7 +50,7 @@ use crate::tick_input::{
 };
 
 const FIXTURE_SCHEMA_VERSION: u16 = 1;
-const CONTRACT_VERSION: u16 = 7;
+const CONTRACT_VERSION: u16 = 8;
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/behavior/v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -317,6 +317,8 @@ struct TickObservation {
 struct CanonicalObservation {
     hazard_clock_ticks: u32,
     hazard_cooldowns: [u32; crate::network_protocol::MAX_FIGHTERS],
+    arena_device_flags: u8,
+    arena_device_progress: [u8; 2],
     special_objects: usize,
     special_cooldowns: [u32; crate::network_protocol::MAX_FIGHTERS],
     damage_by_fighter: [i32; crate::network_protocol::MAX_FIGHTERS],
@@ -769,7 +771,14 @@ fn run_with_driver(
                 inputs.tick.get()
             )
         });
-        let snapshot = driver.capture_live_snapshot().unwrap();
+        let snapshot = driver.capture_live_snapshot().unwrap_or_else(|error| {
+            let arena_error = crate::arena::capture_arena_runtime_snapshot(driver.world()).err();
+            panic!(
+                "fixture {} snapshot failed at tick {}: {error}; arena cause: {arena_error:?}",
+                fixture.name,
+                inputs.tick.get()
+            )
+        });
         let events = driver
             .world()
             .resource::<SimEventJournal>()
@@ -979,6 +988,14 @@ fn observation(
         canonical: CanonicalObservation {
             hazard_clock_ticks: snapshot.arena.hazard_clock_ticks,
             hazard_cooldowns: snapshot.arena.per_fighter_hazard_cooldowns,
+            // Arena rollback payload v2 freezes two Split Causeway gate target
+            // bits followed by their exact fixed-tick animation progress.
+            arena_device_flags: snapshot.arena.payload
+                [crate::arena::ARENA_PAYLOAD_DOOR_FLAGS_OFFSET],
+            arena_device_progress: [
+                snapshot.arena.payload[crate::arena::ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET],
+                snapshot.arena.payload[crate::arena::ARENA_PAYLOAD_DOOR_PROGRESS_OFFSET + 1],
+            ],
             special_objects: snapshot
                 .dynamic_objects
                 .iter()
@@ -1658,7 +1675,8 @@ fn assert_fixture_is_meaningful(
         "BF021_last_stock_match_completion" => {
             assert_eq!(
                 trace.ticks[final_index].semantics.phase, "result",
-                "last-stock fixture did not finish through normal rules"
+                "last-stock fixture did not finish through normal rules; final={:?}",
+                trace.ticks[final_index].semantics
             );
             assert_ne!(
                 trace.ticks[final_index].semantics.result, "Pending",
@@ -1799,7 +1817,7 @@ fn assert_fixture_is_meaningful(
             assert_eq!(
                 respawn_ticks.len(),
                 1,
-                "simultaneous life loss must produce one shared respawn tick"
+                "simultaneous life loss must produce one shared respawn tick: {respawn_ticks:?}"
             );
             assert_eq!(
                 respawn_ticks[0].1, 2,
@@ -2021,6 +2039,33 @@ fn assert_fixture_is_meaningful(
                 (final_fighter.position, final_fighter.velocity),
                 "holding into the frozen perimeter must settle before the restore boundary"
             );
+        }
+        "BF031_split_causeway_gate_toggle" => {
+            assert_eq!(
+                fixture.setup.arena,
+                crate::arena_defs::SPLIT_CAUSEWAY_ARENA_INDEX
+            );
+            assert_eq!(event_count(trace, "ArenaDeviceToggled"), 1);
+            assert_eq!(
+                observation_at(trace, 1).events,
+                [
+                    "SimEvent { id: SimEventId { tick: SimTick(1), source: Arena, ordinal: 0 }, kind: ArenaDeviceToggled { arena_index: 1, device_index: 0, active: true } }"
+                ]
+            );
+            for tick in 1..=18 {
+                let observation = observation_at(trace, tick);
+                assert_eq!(observation.canonical.arena_device_flags, 0b01);
+                assert_eq!(
+                    observation.canonical.arena_device_progress,
+                    [tick as u8, 0],
+                    "the gate must advance exactly once on fixed tick {tick}"
+                );
+            }
+            for tick in 19..=fixture.duration_ticks {
+                let observation = observation_at(trace, tick);
+                assert_eq!(observation.canonical.arena_device_flags, 0b01);
+                assert_eq!(observation.canonical.arena_device_progress, [18, 0]);
+            }
         }
         name => panic!("fixture {name} has no semantic coverage assertion"),
     }

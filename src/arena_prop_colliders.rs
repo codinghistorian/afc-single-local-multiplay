@@ -10,6 +10,7 @@ use crate::arena_defs::{
 pub enum PropBarrierBehavior {
     Solid,
     OneWayTop,
+    SideOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,9 +76,34 @@ impl LocalPropBarrier {
     }
 
     pub fn to_world_scaled(self, position: Vec3, yaw: f32, scale: Vec3) -> WorldPropBarrier {
+        self.to_world_scaled_with_basis(
+            position,
+            yaw,
+            scale,
+            crate::canonical_math::collision_yaw_basis(yaw),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn to_world_scaled_reference(
+        self,
+        position: Vec3,
+        yaw: f32,
+        scale: Vec3,
+    ) -> WorldPropBarrier {
+        self.to_world_scaled_with_basis(position, yaw, scale, (yaw.cos(), yaw.sin()))
+    }
+
+    fn to_world_scaled_with_basis(
+        self,
+        position: Vec3,
+        yaw: f32,
+        scale: Vec3,
+        basis: (f32, f32),
+    ) -> WorldPropBarrier {
         let scale = scale.abs();
         let local_center = Vec2::new(self.center.x * scale.x, self.center.y * scale.z);
-        let center = Vec2::new(position.x, position.z) + rotate(local_center, yaw);
+        let center = Vec2::new(position.x, position.z) + rotate_with_basis(local_center, basis);
         let top_y = position.y + self.top_y * scale.y;
         let definition = match self.footprint {
             LocalPropFootprint::Circle { radius } => ArenaBarrierDefinition::circle(
@@ -105,8 +131,7 @@ impl LocalPropBarrier {
     }
 }
 
-fn rotate(point: Vec2, yaw: f32) -> Vec2 {
-    let (cos, sin) = crate::canonical_math::collision_yaw_basis(yaw);
+fn rotate_with_basis(point: Vec2, (cos, sin): (f32, f32)) -> Vec2 {
     Vec2::new(cos * point.x - sin * point.y, sin * point.x + cos * point.y)
 }
 

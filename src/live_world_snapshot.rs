@@ -173,7 +173,7 @@ mod tests {
     use super::*;
     use bevy::prelude::*;
 
-    use crate::arena::{ArenaCannonBomb, ArenaHazardState, ArenaPipeState, PowderKegCannonState};
+    use crate::arena::ArenaCannonBomb;
     use crate::arena_defs::ActiveArena;
     use crate::bee_skills::{ActiveBeeSkill, BeeSkillKind};
     use crate::characters::{CharacterKind, FighterCharacter};
@@ -500,12 +500,7 @@ mod tests {
             damage_by_fighter: [q(1.25), 0.0, q(3.5), 0.0],
         });
         world.insert_resource(Hitstop { remaining_ticks: 4 });
-        world.insert_resource(ArenaHazardState::new(
-            active_arena.index(),
-            active_arena.definition().hazards.len(),
-        ));
-        world.insert_resource(ArenaPipeState::new(active_arena.index()));
-        world.insert_resource(PowderKegCannonState::new(active_arena.index()));
+        crate::arena::bootstrap_canonical_arena_runtime(&mut world, active_arena.index());
         world.insert_resource(SimulationIdentityAllocator::default());
 
         let fighters = spawn_fighter_slots(&mut world);
@@ -725,9 +720,10 @@ mod tests {
 
     #[test]
     fn full_production_pool_snapshot_has_resync_headroom() {
-        // Snapshot schema 3 adds a fixed 23-byte aim payload to each of the
-        // four fighter slots: 91,921 + (4 * 23) = 92,013 bytes.
-        const FULL_POOL_FIXTURE_ENCODED_BYTES: usize = 92_013;
+        // Snapshot schema 3 added a fixed 23-byte aim payload to each fighter;
+        // schema 4 reserves 16 more arena bytes for four hazard cooldown rows
+        // plus rollback-owned devices: 91,921 + (4 * 23) + 16 = 92,029 bytes.
+        const FULL_POOL_FIXTURE_ENCODED_BYTES: usize = 92_029;
         const DYNAMIC_OPTIONAL_FIELD_MAX_GROWTH: usize = 11;
         const CONSERVATIVE_NON_DYNAMIC_HEADROOM: usize = 1_024;
 

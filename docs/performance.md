@@ -313,6 +313,7 @@ only after the same executable and seed reproduce the result.
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Simulation-v6 canonical manual aim, immutable v5/v6 `afc-multiplayer-profile` executables, three interleaved 1,000-sample pairs | Median p99 changed from 56,166 to 55,917 ns for authority (-0.4%) and 369,458 to 375,167 ns for exact 12-tick rollback (+1.5%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and every depth/history gate was unchanged. | Accepted same-hardware preservation evidence. Both changes are immaterial against the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains the accepted baseline; minimum-supported-CPU evidence remains required. |
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, battery power, High Power mode, no fixed affinity | Simulation-v7 retired shared-special action, immutable simulation-v6/v7 `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs | Median p99 changed from 67,083 to 62,500 ns for authority (-6.8%) and 437,084 to 448,917 ns for exact 12-tick rollback (+2.7%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and every depth/history gate was unchanged. | Accepted same-hardware preservation evidence for a functional workload change, not an optimization claim. Both paths remain far inside the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains the accepted baseline; minimum-supported-CPU evidence remains required. |
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, Automatic energy mode, no fixed affinity | Additive Training Ground/content-identity integration, immutable pre-`dc2ef84` and final `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs ([raw JSON](performance-evidence/2026-08-26-training-ground.jsonl)) | Median p99 changed from 58,583 to 59,375 ns for authority (+1.4%) and 402,959 to 402,667 ns for exact 12-tick rollback (-0.1%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and depth/history gates stayed at 12 and 128/64/64. Executable SHA-256 values were `542c08e7937f500aef3b93c4335989dea29e6cfc92ab41bd77ce1decc275b143` before and `da870d5451dcc6d71aedd926bbd50335ab75466a9f039af66875f4b67771df52` after. | Accepted same-hardware preservation evidence for additive arena content, not an optimization claim. The changes are immaterial against the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains accepted; minimum-supported-CPU evidence remains required. |
+| 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, battery power, High Power mode, no fixed affinity | Simulation-v8 Crown Ring/Split Causeway flow and rollback-owned gate integration, immutable pre/post `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs ([raw JSON](performance-evidence/2026-08-26-arena-flow.jsonl)) | Median p99 changed from 67,667 to 103,750 ns for authority (+53.3%) and 504,583 to 507,125 ns for exact 12-tick rollback (+0.5%). All six captures passed; authority stayed allocation-free after a one-time bounded Bevy command-queue reserve, rollback diagnostics improved from 120,083 allocations / 142,279,564 bytes to 118,660 / 142,150,280, and depth/history gates stayed at 12 and 128/64/64. Executable SHA-256 values were `da870d5451dcc6d71aedd926bbd50335ab75466a9f039af66875f4b67771df52` before and `0de0ebade98d24bf3cc0d206185e62b9cf4462a91a0b899f74871321f4f89f1d` after. | Accepted same-hardware preservation evidence for a functional arena and snapshot workload change, not an optimization claim. Authority remains at 0.104 ms against 1 ms and rollback at 0.507 ms against 4 ms, so the canonical-pose nine-pair developer baseline remains accepted; minimum-supported-CPU evidence remains required. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 pre-backport `MapCycle100`, immutable timing triplicate plus one allocation run | Timing frame/CPU p99 medians 8.992834/2.439333 ms. Allocation run aligned RSS range/slope 2.125000 MiB / 1.402960 MiB/min passed, but aligned live range/slope 1.570396 MiB / 1.052623 MiB/min and +5,752,718 live bytes failed. | Accepted timing evidence; rejected allocation baseline. This same-hardware result identified the render-pass name leak corrected below. External GPU was not evaluated for the failed allocation run. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 post-backport full local matrix: timing and allocation `FourBotStress`/`MapCycle100`/`Soak10Minutes` | All 14 admissible captures passed fixture/canonical-mode and every applicable local timing, RSS/live, stale-owner, presentation, and exact-resource gate. Maximum reported frame/CPU p99, including diagnostic allocator timing, was 10.060500/3.847458 ms. Detailed exact values and hashes follow. | Accepted Apple M2 Max local baseline. Every result remains `external_gpu_evidence_required`; minimum-supported-CPU and external GPU captures remain pending. |
 | Pending | Minimum native target and Apple M2 Max | Schema-v6 external GPU trace and minimum-supported-CPU capture | Repeat the canonical matrix on the minimum CPU and attach platform GPU-completion evidence for stress and soak. | Required for release acceptance; the local JSON explicitly does not measure GPU completion. |
@@ -615,6 +616,47 @@ A prior valid non-alternating trio observed 68,083/434,042 ns before and
 captures are retained but do not replace the alternating set above. Raw result
 lines and power records are retained under
 `target/perf-captures/shared-specials/results/`.
+
+### Simulation-v8 arena-flow preservation capture
+
+This comparison covers Champion's Court's final collision topology, Split
+Causeway's exact-bit static collision and two rollback-owned interactive gates,
+and snapshot schema 4's 80-byte arena extension. The immutable before executable
+is the accepted Training Ground build; the after executable contains the final
+arena-flow source and a one-time 64 KiB reserve command in each combat command
+queue. That bounded warm-up prevents Bevy's deferred-command buffer from growing
+on the first hitbox spawn or despawn inside a measured fixed step. It does not
+mutate canonical state and is exhausted before timed samples begin.
+
+Both arm64 executables used rustc 1.94.1, the profiling profile, seed
+`0x00000000ffc00001`, 256 authority warmup ticks, 16 rollback warmup bursts,
+1,000 timed samples, and exact rollback depth 12. The machine remained on
+battery power under High Power mode with no fixed affinity; the six alternating
+captures stayed at 99% battery.
+
+| Pair | Before authority p99 (ns) | After authority p99 (ns) | Before rollback p99 (ns) | After rollback p99 (ns) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 78,083 | 103,750 | 489,584 | 507,125 |
+| 2 | 67,667 | 125,875 | 504,583 | 556,250 |
+| 3 | 65,333 | 97,208 | 512,250 | 415,042 |
+| Median | 67,667 | 103,750 | 504,583 | 507,125 |
+
+Authority p99 changed by +53.3%, but the absolute after median is 0.104 ms
+against the 1 ms gate; exact rollback changed by +0.5% and remains 0.507 ms
+against 4 ms. This is acceptance evidence for a materially different canonical
+arena workload, not an optimization claim. Every authority run allocated zero
+times. Rollback diagnostics improved from 120,083 allocations / 142,279,564
+requested bytes to 118,660 / 142,150,280, while exact depth 12 and the
+128/64/64 authority/snapshot/input history high-water marks remained fixed.
+Direct allocation attribution also reports zero allocations for bot generation,
+the canonical fixed step, snapshot hashing, and the full warmed authority step.
+
+The immutable before executable SHA-256 is
+`da870d5451dcc6d71aedd926bbd50335ab75466a9f039af66875f4b67771df52`;
+the after executable SHA-256 is
+`0de0ebade98d24bf3cc0d206185e62b9cf4462a91a0b899f74871321f4f89f1d`.
+The six accepted records are checked in as
+[raw JSON](performance-evidence/2026-08-26-arena-flow.jsonl).
 
 ### Superseded v1 FourBotStress evidence
 
