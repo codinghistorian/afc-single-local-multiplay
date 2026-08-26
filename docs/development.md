@@ -76,3 +76,45 @@ Before publishing, upload the ZIP as a draft HTML Game with click-to-launch
 fullscreen enabled, then verify controller discovery, audio startup, reconnect,
 and replacement-controller behavior in current Chrome and Safari with real
 hardware.
+
+## DualSense physical QA
+
+The standard DualSense is the required PlayStation hardware target. DualSense
+Edge should retain normalized compatibility, but its extra controls are not bound
+or included in acceptance. On Linux, use a current kernel with `hid-playstation`
+and confirm that the user has input and force-feedback permissions.
+
+Run this matrix with both USB and Bluetooth transports:
+
+| Runtime | Operating system | USB | Bluetooth |
+| --- | --- | --- | --- |
+| Native | Windows 10/11 | Required | Required |
+| Native | Current Linux | Required | Required |
+| Native | Current macOS | Required | Required |
+| Current Chrome | Windows 10/11 | Required | Required |
+| Current Chrome | Current Linux | Required | Required |
+| Current Chrome | Current macOS | Required | Required |
+| Current Safari | Current macOS | Required | Required |
+
+For every row and transport:
+
+1. Connect before launch, connect after launch, disconnect, and reconnect.
+2. Verify left stick and D-pad movement; Cross join/confirm/jump; Circle
+   leave/back/grab; Square light; Triangle heavy; L2 aim; R2 guard; R1 dash; L1
+   ultimate; and Options menu/pause behavior. Confirm the stick moves once per
+   neutral deflection and the D-pad repeats only after its initial delay.
+3. Verify controller setup, single-player two-press takeover and cancellation,
+   multiplayer ownership, menus, gameplay, and combat disconnect pausing.
+4. Reclaim a missing seat with the original controller and with an unassigned
+   replacement. Repeat with mixed Xbox and DualSense ownership.
+5. Verify family-specific tutorial, arena, takeover, and reconnect prompts.
+6. Verify vibration for every assigned controller, including both roles of a
+   mixed DualSense/Xbox match and simultaneous combat feedback. On macOS, confirm
+   the Xbox route reports `default actuator`. Where an operating system or browser
+   exposes no usable actuator, accurately reported unsupported capability passes;
+   loss of input or reconnect behavior does not.
+
+Before accepting native changes, run `cargo run` and `cargo test` on Windows,
+Linux, and macOS. When a browser build is explicitly requested, run
+`./scripts/build_web.sh` and keep the artifact in repository-root `web_dist/`; do
+not create an itch.io archive unless it is separately requested.

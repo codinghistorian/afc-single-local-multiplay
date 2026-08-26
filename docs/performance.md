@@ -51,11 +51,86 @@ script.
 | 2026-07-22 | Apple M2 Max, macOS | Existing generated WASM | Approximately 78.2 MiB before the optimization program | Planning baseline; replace with exact scripted result. |
 | 2026-07-26 | Apple M2 Max, macOS | itch.io web release with Bevy Gilrs | Optimized WASM 12,515,927 bytes; `web_dist/` 64,722,014 extracted bytes across 207 files; ZIP 48,525,710 bytes. | Invalid packaging measurement: the build script selected a stale headless dedicated-server WASM; superseded below. |
 | 2026-07-27 | Apple M2 Max, macOS | Corrected itch.io web release | Optimized game WASM 44,263,596 bytes; `web_dist/` 103,509,569 extracted bytes across 214 files; ZIP 64,575,622 bytes. | Corrected size/package baseline after pinning the `ffc-prototype` browser-game binary; Chrome and Safari runtime measurements remain pending. |
-| Pending | Apple M2 Max, macOS | `FourBotStress`, profiling profile | Capture median, p95, p99, CPU/GPU time, allocations, entities, assets, and memory. | Required before accepting hot-path gains. |
+| 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, profiling profile with `perf` | Median of three runs: 18,000 samples; frame 16.6617 / 17.7817 / 18.3724 ms; render CPU span 0.0924 / 0.1474 / 0.1747 ms; process CPU 88.23% total / 7.35% normalized; RSS 0.4812 / 0.4246 GiB. | Accepted post-change bot-intelligence baseline; GPU timestamps unavailable, with allocation and asset steady state unchanged. |
+| 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, move-aware bot combat, profiling profile with `perf` | Median of three runs: 17,989 samples; frame 16.6779 / 18.5510 / 19.4652 ms; render CPU span 0.1255 / 0.1975 / 0.2245 ms; process CPU 94.87% total / 7.91% normalized; RSS 0.4234 / 0.4234 GiB. | Accepted functional baseline for bots that now execute authored combat; not an optimization claim. GPU timestamps unavailable; ending allocations and assets are stable. |
+| 2026-08-06 | Apple M2 Max, macOS | `FourBotStress`, tactical bot planner, profiling profile with `perf` | Median-frame run of three clean final captures: 18,001 samples; frame 16.6667 / 18.5027 / 19.2957 ms; render CPU span 0.1180 / 0.1977 / 0.2258 ms; planner 0.0323 / 0.0785 / 0.0938 ms; process CPU 96.38% total / 8.03% normalized; RSS 0.4484 / 0.4484 GiB. | Accepted functional baseline for bounded tactical forecasting; not an optimization claim. Planner p95 passes the strict 0.10 ms gate, and ending allocations and assets are stable. |
 | Pending | Apple M2 Max, macOS | `MapCycle100` and `Soak10Minutes` | Capture peak/end counts and memory. | Required before accepting cache or pool changes. |
 | Pending | Current Chrome and Safari | Optimized web release | Capture p95/p99 frame time, WASM, and distribution size. | Required before changing the accepted web baseline. |
 
 ## Hot-path validation record
+
+The tactical bot-planner change was checked with three before and three clean after
+`FourBotStress` runs on 2026-08-06. All runs used the same Apple M2 Max, macOS,
+profiling profile with `perf`, `FFC00001` seed, Split Causeway setup, 30-second
+warmup, and 300-second sample. The rows below are the middle runs when ordered by
+frame median. The planner timer was introduced by this change, so no directly
+comparable before-planner percentile is available.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Planner median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median: move-aware combat, run 2 of 3 | 52,694 | 4.3857 / 16.2729 / 21.5136 ms | 0.0695 / 0.1054 / 0.1254 ms | Not instrumented | 180.39% total; 15.03% normalized | 0.4997 / 0.4489 GiB | 1,117 / 1,034 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: tactical planner, run 2 of 3 | 18,001 | 16.6667 / 18.5027 / 19.2957 ms | 0.1180 / 0.1977 / 0.2258 ms | 0.0323 / 0.0785 / 0.0938 ms | 96.38% total; 8.03% normalized | 0.4484 / 0.4484 GiB | 1,082 / 1,033 | 126 / 126 | 126 / 137 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+The frame results mix presentation regimes and therefore cannot establish a
+whole-frame speedup or regression. The three before frame medians were 4.2933,
+4.3857, and 16.1193 ms, while the three clean final after medians were 16.6569,
+16.6667, and 16.6752 ms. The bounded planner's direct p95 values were 0.0826,
+0.0785, and 0.0693 ms; every run passed the strict `< 0.10 ms` gate, and the
+median run retained 0.0215 ms (1.27x) headroom. Its p99 was 0.0938 ms.
+
+Mesh allocations remained fixed at 126, and all ending mesh, material, image,
+and scene counts matched the before build. Up to fourteen peak-only materials were
+transient combat effects, with every run ending at the baseline count of 130.
+RSS was stable within the first two clean captures and fell before the end of the
+third; the median ended 0.0005 GiB below the before median. Ending entities
+differed by one because the deterministic match was observed at a different
+presentation cadence; there was no monotonic entity or asset growth. This is an
+accepted functional baseline for the new planner, not an optimization claim.
+
+The move-aware bot-combat change was checked with three `FourBotStress` runs on
+2026-08-06 against the accepted bot-intelligence baseline below. All runs used the
+same Apple M2 Max, macOS, profiling profile, `FFC00001` seed, Split Causeway setup,
+30-second warmup, and 300-second sample. Presentation remained paced near 60 Hz in
+all three runs. The reported after row is run 1, the middle run when ordered by frame
+median.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before: accepted bot-intelligence baseline | 18,000 | 16.6617 / 17.7817 / 18.3724 ms | 0.0924 / 0.1474 / 0.1747 ms | 88.23% total; 7.35% normalized | 0.4812 / 0.4246 GiB | 1,177 / 1,032 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: move-aware combat, run 1 of 3 | 17,989 | 16.6779 / 18.5510 / 19.4652 ms | 0.1255 / 0.1975 / 0.2245 ms | 94.87% total; 7.91% normalized | 0.4234 / 0.4234 GiB | 1,100 / 1,031 | 126 / 126 | 126 / 136 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+Frame median changed by +0.0162 ms (+0.10%), p95 by +0.7693 ms (+4.33%),
+and p99 by +1.0928 ms (+5.95%). Render CPU-span overhead was 0.0331 / 0.0501 /
+0.0498 ms across median/p95/p99. Total process CPU rose by 6.64 percentage points
+while normalized CPU remained below 8%. This is the expected functional cost of bots
+now producing sustained authoritative attacks, projectiles, hits, and effects rather
+than a performance improvement. Peak RSS fell by 0.0578 GiB, ending RSS was stable,
+ending entities fell by one, mesh allocations were unchanged, and all ending asset
+counts matched. The six extra peak materials were transient combat effects. The
+change is retained for the gameplay improvement and this row becomes the functional
+baseline for subsequent bot work.
+
+The bot-intelligence change was checked with three paired `FourBotStress` runs
+on 2026-08-06. The before and after builds used the same Apple M2 Max and macOS
+configuration, the profiling profile with `perf`, a 30-second warmup, and a
+300-second sample. The reported rows are the middle runs when ordered by frame
+median, as required by the three-run protocol.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median, run 2 of 3 | 18,001 | 16.6565 / 17.9257 / 19.4548 ms | 0.0868 / 0.1348 / 0.1621 ms | 86.62% total; 7.22% normalized | 0.5110 / 0.4458 GiB | 1,128 / 1,032 | 126 / 126 | 126 / 137 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: bot intelligence, run 2 of 3 | 18,000 | 16.6617 / 17.7817 / 18.3724 ms | 0.0924 / 0.1474 / 0.1747 ms | 88.23% total; 7.35% normalized | 0.4812 / 0.4246 GiB | 1,177 / 1,032 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+Frame median changed by +0.0052 ms (+0.03%), while p95 improved by 0.1440 ms
+and p99 improved by 1.0824 ms. Render CPU-span overhead was at most 0.0126 ms
+across the reported percentiles. Peak and ending RSS improved, mesh allocations
+were unchanged, and all ending asset counts were unchanged. The higher entity
+peak reflects the functional bot workload; ending entities were identical.
+Metal did not expose GPU timestamps, so GPU measurements are unavailable. The
+post-change row is accepted as the new `FourBotStress` baseline because the
+frame-time distribution remained stable or improved, the measured CPU overhead
+was small and bounded, memory improved, and allocation and asset steady state
+did not regress.
 
 The Split Causeway interactive-gate change was checked with three paired
 `FourBotStress` runs on 2026-08-02. The before build was commit `c13dcd8`; the

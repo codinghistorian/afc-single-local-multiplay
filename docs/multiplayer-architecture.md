@@ -319,7 +319,7 @@ InputFrame
   sequence: wrapping sequence number
 ```
 
-The held-button set represents action-level controls such as aim/grab, light, heavy,
+The held-button set represents action-level controls such as aim, grab, light, heavy,
 jump, guard, ultimate, and special. Dash may be represented as an action after local
 double-tap recognition only if the recognition algorithm is identical for local and
 network play. Prefer moving all gameplay-relevant gesture recognition into the

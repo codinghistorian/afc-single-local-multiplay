@@ -23,7 +23,9 @@ use crate::components::{
 };
 use crate::constants::{ARENA_TOP_Y, FIGHTER_COUNT, MAX_HEALTH, STOCK_LIVES};
 use crate::control_settings::ControlPreferences;
-use crate::control_settings::{ControllerDeviceInfo, ControllerFamily, controller_info};
+use crate::control_settings::{
+    CONTROLLER_GAMEPLAY_BINDINGS, ControllerDeviceInfo, ControllerFamily, controller_info,
+};
 use crate::effects::{EffectKind, VisualEffect};
 use crate::equipment::FighterEquipment;
 use crate::game_state::{
@@ -1605,22 +1607,17 @@ fn controller_tutorial_action_label(
     action: TutorialPromptAction,
     family: ControllerFamily,
 ) -> String {
+    let bindings = CONTROLLER_GAMEPLAY_BINDINGS;
     match action {
         TutorialPromptAction::Move => "Left stick / D-pad".to_string(),
-        TutorialPromptAction::Aim => family.face_button_label(GamepadButton::East).to_string(),
-        TutorialPromptAction::Light => family.face_button_label(GamepadButton::West).to_string(),
-        TutorialPromptAction::Heavy => family.face_button_label(GamepadButton::North).to_string(),
-        TutorialPromptAction::Jump => family.face_button_label(GamepadButton::South).to_string(),
-        TutorialPromptAction::Dash => family
-            .face_button_label(GamepadButton::RightTrigger2)
-            .to_string(),
-        TutorialPromptAction::Guard => family
-            .face_button_label(GamepadButton::LeftTrigger)
-            .to_string(),
-        TutorialPromptAction::Ultimate => family
-            .face_button_label(GamepadButton::LeftTrigger2)
-            .to_string(),
-        TutorialPromptAction::Menu => family.face_button_label(GamepadButton::Start).to_string(),
+        TutorialPromptAction::Aim => family.face_button_label(bindings.aim).to_string(),
+        TutorialPromptAction::Light => family.face_button_label(bindings.light).to_string(),
+        TutorialPromptAction::Heavy => family.face_button_label(bindings.heavy).to_string(),
+        TutorialPromptAction::Jump => family.face_button_label(bindings.jump).to_string(),
+        TutorialPromptAction::Dash => family.face_button_label(bindings.dash).to_string(),
+        TutorialPromptAction::Guard => family.face_button_label(bindings.guard).to_string(),
+        TutorialPromptAction::Ultimate => family.face_button_label(bindings.ultimate).to_string(),
+        TutorialPromptAction::Menu => family.face_button_label(family.menu_button()).to_string(),
         TutorialPromptAction::Confirm => family
             .face_button_label(family.confirm_button())
             .to_string(),
@@ -3445,9 +3442,10 @@ fn tutorial_menu_input(
         let family = controller_info(entity, &devices.controller_metadata)
             .map(|info| info.family)
             .unwrap_or_default();
-        input.confirm |= gamepad.just_pressed(family.confirm_button());
-        input.back |= gamepad.just_pressed(family.back_button());
-        input.menu |= gamepad.just_pressed(GamepadButton::Start);
+        let controller_buttons = controller_tutorial_menu_buttons(gamepad, family);
+        input.confirm |= controller_buttons.confirm;
+        input.back |= controller_buttons.back;
+        input.menu |= controller_buttons.menu;
         let axis = if gamepad.dpad().length_squared() > 0.0 {
             gamepad.dpad()
         } else {
@@ -3471,6 +3469,18 @@ fn tutorial_menu_input(
     }
 
     input
+}
+
+fn controller_tutorial_menu_buttons(
+    gamepad: &Gamepad,
+    family: ControllerFamily,
+) -> TutorialMenuInput {
+    TutorialMenuInput {
+        confirm: gamepad.just_pressed(family.confirm_button()),
+        back: gamepad.just_pressed(family.back_button()),
+        menu: gamepad.just_pressed(family.menu_button()),
+        ..default()
+    }
 }
 
 fn record_tutorial_step_completion(
@@ -5198,6 +5208,80 @@ mod tests {
         );
 
         assert_eq!(keyboard, "double-tap Move + C");
-        assert_eq!(controller_prompt, "R2 + Square");
+        assert_eq!(controller_prompt, "R1 + Square");
+    }
+
+    #[test]
+    fn dualsense_tutorial_labels_cover_face_shoulders_triggers_and_options() {
+        let family = ControllerFamily::PlayStation;
+        for (action, label) in [
+            (TutorialPromptAction::Aim, "L2"),
+            (TutorialPromptAction::Light, "Square"),
+            (TutorialPromptAction::Heavy, "Triangle"),
+            (TutorialPromptAction::Jump, "Cross"),
+            (TutorialPromptAction::Dash, "R1"),
+            (TutorialPromptAction::Guard, "R2"),
+            (TutorialPromptAction::Ultimate, "L1"),
+            (TutorialPromptAction::Menu, "Options"),
+            (TutorialPromptAction::Confirm, "Cross"),
+        ] {
+            assert_eq!(controller_tutorial_action_label(action, family), label);
+        }
+        assert_eq!(
+            controller_tutorial_action_label(TutorialPromptAction::Light, ControllerFamily::Xbox),
+            "X"
+        );
+        assert_eq!(
+            controller_tutorial_action_label(TutorialPromptAction::Aim, ControllerFamily::Xbox),
+            "LT"
+        );
+        assert_eq!(
+            controller_tutorial_action_label(TutorialPromptAction::Dash, ControllerFamily::Xbox),
+            "RB"
+        );
+        assert_eq!(
+            controller_tutorial_action_label(TutorialPromptAction::Guard, ControllerFamily::Xbox),
+            "RT"
+        );
+        assert_eq!(
+            controller_tutorial_action_label(
+                TutorialPromptAction::Ultimate,
+                ControllerFamily::Xbox
+            ),
+            "LB"
+        );
+        assert_eq!(
+            controller_tutorial_action_label(
+                TutorialPromptAction::Light,
+                ControllerFamily::Nintendo
+            ),
+            "Y"
+        );
+    }
+
+    #[test]
+    fn dualsense_cross_circle_and_options_drive_tutorial_menu_actions() {
+        let family = ControllerFamily::PlayStation;
+
+        let mut cross = Gamepad::default();
+        cross.digital_mut().press(GamepadButton::South);
+        let input = controller_tutorial_menu_buttons(&cross, family);
+        assert!(input.confirm);
+        assert!(!input.back);
+        assert!(!input.menu);
+
+        let mut circle = Gamepad::default();
+        circle.digital_mut().press(GamepadButton::East);
+        let input = controller_tutorial_menu_buttons(&circle, family);
+        assert!(!input.confirm);
+        assert!(input.back);
+        assert!(!input.menu);
+
+        let mut options = Gamepad::default();
+        options.digital_mut().press(GamepadButton::Start);
+        let input = controller_tutorial_menu_buttons(&options, family);
+        assert!(!input.confirm);
+        assert!(!input.back);
+        assert!(input.menu);
     }
 }

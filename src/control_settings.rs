@@ -10,6 +10,9 @@ use crate::controller_haptics::{
 
 const CONTROL_PREFERENCES_VERSION: u32 = 5;
 pub(crate) const SOUND_VOLUME_STEP_PERCENT: u8 = 10;
+const SONY_VENDOR_ID: u16 = 0x054c;
+const DUALSENSE_PRODUCT_ID: u16 = 0x0ce6;
+const DUALSENSE_EDGE_PRODUCT_ID: u16 = 0x0df2;
 #[cfg(target_arch = "wasm32")]
 const CONTROL_PREFERENCES_STORAGE_KEY: &str = "animal-fighter-club.controls.v1";
 
@@ -21,6 +24,30 @@ pub enum ControllerFamily {
     #[default]
     Generic,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ControllerGameplayBindings {
+    pub aim: GamepadButton,
+    pub grab: GamepadButton,
+    pub jump: GamepadButton,
+    pub dash: GamepadButton,
+    pub light: GamepadButton,
+    pub heavy: GamepadButton,
+    pub guard: GamepadButton,
+    pub ultimate: GamepadButton,
+}
+
+pub(crate) const CONTROLLER_GAMEPLAY_BINDINGS: ControllerGameplayBindings =
+    ControllerGameplayBindings {
+        aim: GamepadButton::LeftTrigger2,
+        grab: GamepadButton::East,
+        jump: GamepadButton::South,
+        dash: GamepadButton::RightTrigger,
+        light: GamepadButton::West,
+        heavy: GamepadButton::North,
+        guard: GamepadButton::RightTrigger2,
+        ultimate: GamepadButton::LeftTrigger,
+    };
 
 impl ControllerFamily {
     pub const fn display_name(self) -> &'static str {
@@ -44,6 +71,10 @@ impl ControllerFamily {
             Self::Nintendo => GamepadButton::South,
             Self::Xbox | Self::PlayStation | Self::Generic => GamepadButton::East,
         }
+    }
+
+    pub const fn menu_button(self) -> GamepadButton {
+        GamepadButton::Start
     }
 
     pub const fn confirm_label(self) -> &'static str {
@@ -84,6 +115,7 @@ impl ControllerFamily {
             (_, GamepadButton::LeftTrigger2) => "LT",
             (_, GamepadButton::RightTrigger) => "RB",
             (_, GamepadButton::RightTrigger2) => "RT",
+            (Self::PlayStation, GamepadButton::Start) => "Options",
             (_, GamepadButton::Select) => "Select",
             (_, GamepadButton::Start) => "Menu",
             (_, GamepadButton::Mode) => "Home",
@@ -99,14 +131,37 @@ impl ControllerFamily {
 }
 
 pub fn classify_controller_family(name: &str, vendor_id: Option<u16>) -> ControllerFamily {
+    classify_controller_family_with_ids(name, vendor_id, None)
+}
+
+fn classify_controller_family_with_ids(
+    name: &str,
+    vendor_id: Option<u16>,
+    product_id: Option<u16>,
+) -> ControllerFamily {
     match vendor_id {
         Some(0x045e) => return ControllerFamily::Xbox,
-        Some(0x054c) => return ControllerFamily::PlayStation,
+        Some(SONY_VENDOR_ID) => return ControllerFamily::PlayStation,
         Some(0x057e) => return ControllerFamily::Nintendo,
         _ => {}
     }
 
+    if vendor_id.is_none()
+        && matches!(
+            product_id,
+            Some(DUALSENSE_PRODUCT_ID | DUALSENSE_EDGE_PRODUCT_ID)
+        )
+    {
+        return ControllerFamily::PlayStation;
+    }
+
     let normalized = name.to_ascii_lowercase();
+    let compact = normalized
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let browser_dualsense_id =
+        compact.contains("054c") && (compact.contains("0ce6") || compact.contains("0df2"));
     if normalized.contains("xbox")
         || normalized.contains("xinput")
         || normalized.contains("microsoft controller")
@@ -116,6 +171,9 @@ pub fn classify_controller_family(name: &str, vendor_id: Option<u16>) -> Control
         || normalized.contains("dualshock")
         || normalized.contains("dualsense")
         || normalized.contains("sony interactive")
+        || normalized.contains("sony computer entertainment")
+        || compact.contains("ps5controller")
+        || browser_dualsense_id
     {
         ControllerFamily::PlayStation
     } else if normalized.contains("nintendo")
@@ -144,8 +202,13 @@ impl ControllerDeviceInfo {
         vendor_id: Option<u16>,
         product_id: Option<u16>,
     ) -> Self {
+        let family = if product_id.is_some() {
+            classify_controller_family_with_ids(&display_name, vendor_id, product_id)
+        } else {
+            classify_controller_family(&display_name, vendor_id)
+        };
         Self {
-            family: classify_controller_family(&display_name, vendor_id),
+            family,
             display_name,
             vendor_id,
             product_id,
@@ -716,6 +779,73 @@ mod tests {
             classify_controller_family("USB Game Controller", None),
             ControllerFamily::Generic
         );
+    }
+
+    #[test]
+    fn dualsense_ids_and_platform_names_classify_as_playstation() {
+        for (name, vendor_id, product_id) in [
+            (
+                "Wireless Controller",
+                Some(SONY_VENDOR_ID),
+                Some(DUALSENSE_PRODUCT_ID),
+            ),
+            (
+                "Sony Interactive Entertainment Wireless Controller",
+                Some(SONY_VENDOR_ID),
+                Some(DUALSENSE_PRODUCT_ID),
+            ),
+            ("DualSense Wireless Controller", None, None),
+            (
+                "DualSense Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)",
+                None,
+                None,
+            ),
+            ("054c-0ce6-Wireless Controller", None, None),
+            ("PS5 Controller", None, None),
+            (
+                "DualSense Edge Wireless Controller",
+                Some(SONY_VENDOR_ID),
+                Some(DUALSENSE_EDGE_PRODUCT_ID),
+            ),
+            ("Generic controller", None, Some(DUALSENSE_PRODUCT_ID)),
+            ("Generic controller", None, Some(DUALSENSE_EDGE_PRODUCT_ID)),
+        ] {
+            assert_eq!(
+                classify_controller_family_with_ids(name, vendor_id, product_id),
+                ControllerFamily::PlayStation,
+                "expected PlayStation classification for {name:?}"
+            );
+        }
+        assert_eq!(
+            classify_controller_family_with_ids(
+                "Unrelated controller",
+                Some(0x1234),
+                Some(DUALSENSE_PRODUCT_ID),
+            ),
+            ControllerFamily::Generic,
+            "USB product IDs are scoped to their vendor"
+        );
+    }
+
+    #[test]
+    fn playstation_labels_match_dualsense_controls() {
+        let family = ControllerFamily::PlayStation;
+        for (button, label) in [
+            (GamepadButton::South, "Cross"),
+            (GamepadButton::East, "Circle"),
+            (GamepadButton::West, "Square"),
+            (GamepadButton::North, "Triangle"),
+            (GamepadButton::LeftTrigger, "L1"),
+            (GamepadButton::LeftTrigger2, "L2"),
+            (GamepadButton::RightTrigger, "R1"),
+            (GamepadButton::RightTrigger2, "R2"),
+            (GamepadButton::Start, "Options"),
+        ] {
+            assert_eq!(family.face_button_label(button), label);
+        }
+        assert_eq!(family.confirm_button(), GamepadButton::South);
+        assert_eq!(family.back_button(), GamepadButton::East);
+        assert_eq!(family.menu_button(), GamepadButton::Start);
     }
 
     #[test]

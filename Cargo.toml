@@ -13,6 +13,7 @@ native = [
 ]
 web = ["bevy/webgl2", "bevy/bevy_gilrs"]
 perf = []
+bot-quality = []
 trace = ["perf", "bevy/trace_tracy"]
 
 [dependencies]

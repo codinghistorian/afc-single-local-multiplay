@@ -14,18 +14,21 @@ use crate::equipment::FighterEquipment;
 use crate::feel::CombatFeelTuning;
 use crate::game_state::{Hitstop, MatchState, MatchTelemetry};
 use crate::styles::{FighterStyle, FighterStyleKind};
-use crate::techniques::{AttackPayloadId, AttackShapeId, BeeSkillId};
+use crate::techniques::{AttackPayloadId, AttackShapeId, BeeSkillId, SpawnedSkillPredictionFacts};
 
 const BEE_SKILL_LOCK_RANGE: f32 = 8.0;
 const BEE_SKILL_LOCK_CONE_DOT: f32 = 0.70710677;
 const BEE_WORKER_SPEED: f32 = 8.4;
 const BEE_WORKER_LIFETIME: f32 = 0.78;
 const BEE_WORKER_RADIUS: f32 = 0.3;
+const BEE_WORKER_SPAWN_FORWARD: f32 = 0.45;
 const BEE_HONEY_GLOB_SPEED: f32 = 7.8;
 const BEE_HONEY_GLOB_LIFT: f32 = 1.35;
 const BEE_HONEY_GLOB_GRAVITY: f32 = 9.5;
 const BEE_HONEY_GLOB_LIFETIME: f32 = 1.15;
 const BEE_HONEY_GLOB_RADIUS: f32 = 0.42;
+const BEE_HONEY_GLOB_SPAWN_FORWARD: f32 = 0.5;
+const BEE_HONEY_GLOB_SPAWN_HEIGHT: f32 = 1.05;
 const BEE_HONEY_PUDDLE_LIFETIME: f32 = 2.4;
 const BEE_HONEY_PUDDLE_RADIUS: f32 = 0.68;
 const BEE_HONEY_PUDDLE_TICK: f32 = 0.45;
@@ -35,6 +38,7 @@ const BEE_HOMING_SPEED: f32 = 11.2;
 const BEE_HOMING_TURN_RATE: f32 = 12.0;
 const BEE_HOMING_LIFETIME: f32 = 1.05;
 const BEE_HOMING_RADIUS: f32 = 0.34;
+const BEE_HOMING_SPAWN_FORWARD: f32 = 0.6;
 const BEE_ULTIMATE_SWARM_LIFETIME: f32 = 2.4;
 const BEE_ULTIMATE_SWARM_RADIUS: f32 = 2.0;
 const BEE_ULTIMATE_SWARM_TICK: f32 = 0.3;
@@ -69,6 +73,77 @@ pub struct BeeSkillTargetSnapshot {
 pub enum BeeSkillSpawnMode {
     Standard,
     AreaSwarm,
+}
+
+pub(crate) fn bee_skill_prediction(skill: BeeSkillId) -> SpawnedSkillPredictionFacts {
+    match skill {
+        BeeSkillId::WorkerSwarm => moving_bee_skill_prediction(
+            BEE_WORKER_SPAWN_FORWARD,
+            BEE_WORKER_SPEED,
+            BEE_WORKER_LIFETIME,
+            BEE_WORKER_RADIUS,
+            Some(BEE_SKILL_LOCK_RANGE),
+        ),
+        BeeSkillId::HoneyGlob => {
+            let flight_secs = ballistic_ground_time(
+                BEE_HONEY_GLOB_SPAWN_HEIGHT,
+                BEE_HONEY_GLOB_LIFT,
+                BEE_HONEY_GLOB_GRAVITY,
+            )
+            .min(BEE_HONEY_GLOB_LIFETIME);
+            moving_bee_skill_prediction(
+                BEE_HONEY_GLOB_SPAWN_FORWARD,
+                BEE_HONEY_GLOB_SPEED,
+                flight_secs,
+                BEE_HONEY_GLOB_RADIUS,
+                None,
+            )
+        }
+        BeeSkillId::HomingSting => moving_bee_skill_prediction(
+            BEE_HOMING_SPAWN_FORWARD,
+            BEE_HOMING_SPEED,
+            BEE_HOMING_LIFETIME,
+            BEE_HOMING_RADIUS,
+            Some(BEE_SKILL_LOCK_RANGE),
+        ),
+        BeeSkillId::UltimateSwarm => {
+            let contact_range =
+                BEE_ULTIMATE_SWARM_CENTER_OFFSET + BEE_ULTIMATE_SWARM_RADIUS + FIGHTER_RADIUS;
+            SpawnedSkillPredictionFacts {
+                effective_range: contact_range,
+                lead_distance_offset: contact_range,
+                travel_speed: 0.0,
+                fixed_travel_secs: 0.0,
+                lifetime_secs: BEE_ULTIMATE_SWARM_LIFETIME,
+                vertical_tolerance: BEE_ULTIMATE_SWARM_VERTICAL_REACH,
+                facing_cone_dot: None,
+            }
+        }
+    }
+}
+
+fn moving_bee_skill_prediction(
+    spawn_forward: f32,
+    speed: f32,
+    lifetime_secs: f32,
+    radius: f32,
+    lock_range: Option<f32>,
+) -> SpawnedSkillPredictionFacts {
+    let lead_distance_offset = spawn_forward + radius + FIGHTER_RADIUS;
+    let travel_range = lead_distance_offset + speed * lifetime_secs;
+    SpawnedSkillPredictionFacts {
+        effective_range: lock_range.map_or(travel_range, |range| travel_range.min(range)),
+        lead_distance_offset,
+        travel_speed: speed,
+        fixed_travel_secs: 0.0,
+        lifetime_secs,
+        vertical_tolerance: radius + FIGHTER_RADIUS,
+        facing_cone_dot: lock_range.map(|_| BEE_SKILL_LOCK_CONE_DOT),
+    }
+}
+
+fn ballistic_ground_time(height: f32, lift: f32, gravity: f32) -> f32 {
+    (lift + (lift * lift + 2.0 * gravity * height).sqrt()) / gravity
 }
 
 #[derive(Component)]
@@ -200,8 +275,9 @@ pub fn spawn_bee_skill(
             } else {
                 for side in [-1.0, 1.0] {
                     let side_vec = bee_skill_side_vec(facing) * side;
-                    let spawn =
-                        origin + (Vec3::Y * 1.05 + facing * 0.45 + side_vec * 0.28) * size_scale;
+                    let spawn = origin
+                        + (Vec3::Y * 1.05 + facing * BEE_WORKER_SPAWN_FORWARD + side_vec * 0.28)
+                            * size_scale;
                     let direction = target
                         .and_then(|entity| target_position(entity, targets))
                         .map(|position| flat_direction(spawn, position))
@@ -242,7 +318,10 @@ pub fn spawn_bee_skill(
                     );
                 }
             } else {
-                let spawn = origin + (Vec3::Y * 1.05 + facing * 0.5) * size_scale;
+                let spawn = origin
+                    + (Vec3::Y * BEE_HONEY_GLOB_SPAWN_HEIGHT
+                        + facing * BEE_HONEY_GLOB_SPAWN_FORWARD)
+                        * size_scale;
                 spawn_honey_glob(
                     commands,
                     assets,
@@ -277,7 +356,8 @@ pub fn spawn_bee_skill(
                     );
                 }
             } else {
-                let spawn = origin + (Vec3::Y * 0.98 + facing * 0.6) * size_scale;
+                let spawn =
+                    origin + (Vec3::Y * 0.98 + facing * BEE_HOMING_SPAWN_FORWARD) * size_scale;
                 let direction = target
                     .and_then(|entity| target_position(entity, targets))
                     .map(|position| flat_direction(spawn, position))

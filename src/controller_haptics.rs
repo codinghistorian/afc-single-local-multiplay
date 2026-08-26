@@ -1839,6 +1839,74 @@ mod tests {
     }
 
     #[test]
+    fn replaced_active_gamepad_is_stopped_before_new_haptics_are_routed() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ControllerHapticRequest>()
+            .init_resource::<CombatHapticQueue>()
+            .init_resource::<CombatHapticMixer>()
+            .init_resource::<ControlPreferences>()
+            .add_systems(Update, route_combat_haptics);
+        let original = app.world_mut().spawn(Gamepad::default()).id();
+        let replacement = app.world_mut().spawn(Gamepad::default()).id();
+        let controller = app
+            .world_mut()
+            .spawn(Controller::new(
+                PlayerSlotId::new(0).unwrap(),
+                ParticipantKind::Human,
+                LocalInputAssignment::Gamepad(original),
+            ))
+            .id();
+        let cue = CombatHapticCue::contact(
+            Some(1),
+            0,
+            HapticContactOutcome::Clean,
+            HapticImpactWeight::Heavy,
+        );
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(cue);
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .clear();
+
+        app.world_mut()
+            .get_mut::<Controller>(controller)
+            .unwrap()
+            .input = LocalInputAssignment::Gamepad(replacement);
+        app.update();
+
+        let request = app
+            .world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .drain()
+            .next()
+            .expect("replacement should stop the old controller");
+        assert_eq!(request.gamepad, original);
+        assert_eq!(request.command, ControllerHapticCommand::Stop);
+        assert!(
+            app.world()
+                .resource::<CombatHapticMixer>()
+                .devices
+                .is_empty()
+        );
+
+        app.world_mut()
+            .resource_mut::<CombatHapticQueue>()
+            .push(cue);
+        app.update();
+        let request = app
+            .world_mut()
+            .resource_mut::<Messages<ControllerHapticRequest>>()
+            .drain()
+            .next()
+            .expect("new feedback should route to the replacement");
+        assert_eq!(request.gamepad, replacement);
+        assert!(matches!(request.command, ControllerHapticCommand::Play(_)));
+    }
+
+    #[test]
     fn resolved_hit_routes_distinct_roles_to_owned_gamepads() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)

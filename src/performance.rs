@@ -248,6 +248,7 @@ fn collect_four_bot_stress(
     materials: Res<Assets<StandardMaterial>>,
     images: Res<Assets<Image>>,
     scenes: Res<Assets<Scene>>,
+    mut bot_runtime: ResMut<crate::bot::BotRuntimeStore>,
     mut run: ResMut<FourBotStressRun>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -269,6 +270,7 @@ fn collect_four_bot_stress(
     }
     if !run.sampling_announced {
         run.sampling_announced = true;
+        bot_runtime.clear_planner_timings();
         println!(
             "FOUR_BOT_STRESS_SAMPLE_BEGIN warmup_s={:.0} sample_s={:.0}",
             run.warmup_secs, run.sample_secs
@@ -277,8 +279,15 @@ fn collect_four_bot_stress(
 
     let sample_elapsed = elapsed - run.warmup_secs;
     if sample_elapsed >= run.sample_secs {
-        print_four_bot_stress_result(&run);
-        app_exit.write(AppExit::Success);
+        let planner_samples = bot_runtime.planner_timing_ms();
+        let planner_p95_ms = percentile(&planner_samples, 0.95);
+        let planner_pass = planner_p95_ms.is_finite() && planner_p95_ms < 0.10;
+        print_four_bot_stress_result(&run, &planner_samples, planner_pass);
+        app_exit.write(if planner_pass {
+            AppExit::Success
+        } else {
+            AppExit::error()
+        });
         return;
     }
 
@@ -418,7 +427,11 @@ fn percentile(samples: &[f64], percentile: f64) -> f64 {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-fn print_four_bot_stress_result(run: &FourBotStressRun) {
+fn print_four_bot_stress_result(
+    run: &FourBotStressRun,
+    planner_samples: &[f64],
+    planner_pass: bool,
+) {
     let frame = (
         percentile(&run.frame_ms, 0.5),
         percentile(&run.frame_ms, 0.95),
@@ -433,6 +446,11 @@ fn print_four_bot_stress_result(run: &FourBotStressRun) {
         percentile(&run.render_gpu_ms, 0.5),
         percentile(&run.render_gpu_ms, 0.95),
         percentile(&run.render_gpu_ms, 0.99),
+    );
+    let planner = (
+        percentile(planner_samples, 0.5),
+        percentile(planner_samples, 0.95),
+        percentile(planner_samples, 0.99),
     );
     let process_cpu_total_percent = run
         .process_cpu_start_secs
@@ -454,7 +472,9 @@ fn print_four_bot_stress_result(run: &FourBotStressRun) {
             "entities_peak={:.0} entities_end={:.0} mesh_allocations_peak={:.0} ",
             "mesh_allocations_end={:.0} meshes_peak={} meshes_end={} ",
             "materials_peak={} materials_end={} images_peak={} images_end={} ",
-            "scenes_peak={} scenes_end={}"
+            "scenes_peak={} scenes_end={} planner_samples={} ",
+            "planner_median_ms={:.4} planner_p95_ms={:.4} planner_p99_ms={:.4} ",
+            "planner_p95_under_0_10ms={}"
         ),
         run.frame_ms.len(),
         frame.0,
@@ -482,5 +502,10 @@ fn print_four_bot_stress_result(run: &FourBotStressRun) {
         run.image_count_end,
         run.scene_count_peak,
         run.scene_count_end,
+        planner_samples.len(),
+        planner.0,
+        planner.1,
+        planner.2,
+        planner_pass,
     );
 }

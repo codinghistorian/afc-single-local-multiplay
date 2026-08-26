@@ -6,6 +6,13 @@ mod audio_settings;
 mod bee_skills;
 mod body_collision;
 mod bot;
+mod bot_profiles;
+#[cfg(all(
+    feature = "bot-quality",
+    feature = "native",
+    not(target_arch = "wasm32")
+))]
+mod bot_quality;
 mod camera;
 mod characters;
 mod chick_skills;
@@ -56,12 +63,12 @@ enum GameSet {
 }
 
 fn primary_present_mode() -> PresentMode {
-    #[cfg(feature = "perf")]
+    #[cfg(any(feature = "perf", feature = "bot-quality"))]
     {
         PresentMode::AutoNoVsync
     }
 
-    #[cfg(not(feature = "perf"))]
+    #[cfg(not(any(feature = "perf", feature = "bot-quality")))]
     {
         PresentMode::AutoVsync
     }
@@ -126,6 +133,13 @@ pub fn build_app() -> App {
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
 
+    #[cfg(all(
+        feature = "bot-quality",
+        feature = "native",
+        not(target_arch = "wasm32")
+    ))]
+    app.add_plugins(bot_quality::BotQualityPlugin);
+
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     app.add_systems(
         Startup,
@@ -145,6 +159,8 @@ pub fn build_app() -> App {
         .init_resource::<game_state::MatchAnnouncements>()
         .init_resource::<game_state::GameplayPauseOwners>()
         .init_resource::<arena::SplitCausewayDoorState>()
+        .init_resource::<bot::BotRuntimeStore>()
+        .init_resource::<bot::BotNavigationCache>()
         .init_resource::<combat::HitEffects>()
         .init_resource::<camera::CameraActionEffects>()
         .init_resource::<components::PlayerKeyBindings>()
@@ -180,8 +196,12 @@ pub fn build_app() -> App {
                 chick_skills::setup_chick_skill_assets,
                 penguin_skills::setup_penguin_skill_assets,
                 combat_sfx::setup_combat_sfx_assets,
-                characters::setup_character_move_catalog,
-                feel::setup_combat_feel_tuning,
+                (
+                    characters::setup_character_move_catalog,
+                    feel::setup_combat_feel_tuning,
+                    bot_profiles::setup_bot_profile_catalog,
+                )
+                    .chain(),
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 bot::setup_bot_action_control,
                 #[cfg(target_arch = "wasm32")]
@@ -224,6 +244,8 @@ pub fn build_app() -> App {
                 characters::reload_character_move_catalog,
                 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
                 feel::reload_combat_feel_tuning,
+                #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+                bot_profiles::reload_bot_profile_catalog,
                 (
                     user_mode::sync_user_mode_pointer_hover,
                     user_mode::handle_local_controller_reconnect,

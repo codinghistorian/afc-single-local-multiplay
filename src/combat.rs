@@ -13,8 +13,8 @@ use crate::chick_skills::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, combat_sfx_kind_for_impact};
 use crate::components::{
-    AttackKind, Fighter, FighterAction, FighterActionState, FighterGrabState, FighterInput,
-    FighterMotor, FighterStats, FighterUltimateState, Hitbox,
+    AttackKind, Fighter, FighterAction, FighterActionState, FighterContactState, FighterGrabState,
+    FighterInput, FighterMotor, FighterStats, FighterUltimateState, Hitbox,
 };
 use crate::constants::*;
 use crate::controller_haptics::{
@@ -3022,6 +3022,20 @@ impl<T> InlineFighterMap<T> {
             .find_map(|(candidate, value)| (*candidate == fighter).then_some(value))
     }
 
+    fn insert_or_replace(&mut self, fighter: Entity, value: T) {
+        if let Some((_, current)) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .chain(self.overflow.iter_mut())
+            .find(|(candidate, _)| *candidate == fighter)
+        {
+            *current = value;
+            return;
+        }
+        self.insert_first(fighter, value);
+    }
+
     fn contains_key(&self, fighter: Entity) -> bool {
         self.get(fighter).is_some()
     }
@@ -3048,6 +3062,7 @@ pub fn resolve_hitboxes(
                 &mut FighterStats,
                 &mut FighterMotor,
                 &mut FighterActionState,
+                Option<&mut FighterContactState>,
                 &mut FighterGrabState,
                 &mut FighterUltimateState,
                 &FighterStyle,
@@ -3068,6 +3083,7 @@ pub fn resolve_hitboxes(
     let mut ultimate_release_fighters = InlineFighterMap::default();
     let mut jump_attackers_landed = InlineFighterMap::default();
     let mut confirmed_attackers = InlineFighterMap::default();
+    let mut guarded_attackers = InlineFighterMap::default();
     let mut penguin_slope_ultimate_recoil = InlineFighterMap::default();
     for (hitbox_entity, mut hitbox, mut hitbox_transform) in &mut hitboxes {
         let (owner_translation, owner_size_multiplier) = {
@@ -3094,6 +3110,7 @@ pub fn resolve_hitboxes(
             mut stats,
             mut motor,
             mut action,
+            _target_contact,
             mut grab_state,
             mut ultimate_state,
             target_style,
@@ -3204,6 +3221,9 @@ pub fn resolve_hitboxes(
             }
             hitbox.already_hit.push(target_entity);
             confirmed_attackers.insert_first(hitbox.owner, ());
+            let every_contact_guarded =
+                guarded_attackers.get(hitbox.owner).copied().unwrap_or(true) && guarded;
+            guarded_attackers.insert_or_replace(hitbox.owner, every_contact_guarded);
             if let Some(recoil_direction) = penguin_slope_ultimate_attacker_recoil_direction(
                 hitbox.payload_id,
                 guarded,
@@ -3241,6 +3261,7 @@ pub fn resolve_hitboxes(
         || !ultimate_release_fighters.is_empty()
         || !jump_attackers_landed.is_empty()
         || !confirmed_attackers.is_empty()
+        || !guarded_attackers.is_empty()
         || !penguin_slope_ultimate_recoil.is_empty()
     {
         let mut followup_fighters = fighters.p1();
@@ -3251,6 +3272,7 @@ pub fn resolve_hitboxes(
             _,
             mut motor,
             mut action,
+            contact,
             mut grab_state,
             mut ultimate_state,
             style,
@@ -3260,6 +3282,11 @@ pub fn resolve_hitboxes(
         {
             if confirmed_attackers.contains_key(entity) {
                 action.confirmed_hit = true;
+                if let Some(mut contact) = contact {
+                    contact.action = Some(action.action);
+                    contact.technique_id = action.technique_id;
+                    contact.guarded = guarded_attackers.get(entity).copied().unwrap_or(false);
+                }
             }
             if let Some(recoil_direction) = penguin_slope_ultimate_recoil.get(entity) {
                 apply_penguin_slope_ultimate_attacker_recoil(
