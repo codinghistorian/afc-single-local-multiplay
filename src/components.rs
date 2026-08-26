@@ -387,6 +387,8 @@ pub enum ControlAction {
 }
 
 impl ControlAction {
+    #[allow(dead_code)]
+    /// Full serialized action catalog, including retired compatibility entries.
     pub const ALL: [Self; 9] = [
         Self::Left,
         Self::Right,
@@ -398,6 +400,21 @@ impl ControlAction {
         Self::Jump,
         Self::Special,
     ];
+
+    pub const ACTIVE: [Self; 8] = [
+        Self::Left,
+        Self::Right,
+        Self::Up,
+        Self::Down,
+        Self::AimGrab,
+        Self::Heavy,
+        Self::Light,
+        Self::Jump,
+    ];
+
+    pub const fn is_active(self) -> bool {
+        !matches!(self, Self::Special)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -565,10 +582,17 @@ impl PlayerKeyBindings {
         action: ControlAction,
         key: KeyCode,
     ) -> Result<(), &'static str> {
+        if !action.is_active() {
+            return Err("inactive");
+        }
         if reserved_binding_key(key) {
             return Err("reserved");
         }
-        if self.all_keys().into_iter().any(|existing| existing == key) {
+        if self
+            .active_keys()
+            .into_iter()
+            .any(|existing| existing == key)
+        {
             return Err("duplicate");
         }
         self.set_key_for(player, action, key)?;
@@ -581,6 +605,9 @@ impl PlayerKeyBindings {
         action: ControlAction,
         key: KeyCode,
     ) -> Result<Option<(usize, ControlAction)>, &'static str> {
+        if !action.is_active() {
+            return Err("inactive");
+        }
         if reserved_binding_key(key) {
             return Err("reserved");
         }
@@ -616,7 +643,7 @@ impl PlayerKeyBindings {
 
     fn key_owner(&self, key: KeyCode) -> Option<(usize, ControlAction)> {
         for player in 0..FIGHTER_COUNT {
-            for action in ControlAction::ALL {
+            for action in ControlAction::ACTIVE {
                 if self.key_for(player, action) == Some(key) {
                     return Some((player, action));
                 }
@@ -627,16 +654,16 @@ impl PlayerKeyBindings {
 
     #[allow(dead_code)]
     pub fn has_duplicate_keys(&self) -> bool {
-        let keys = self.all_keys();
+        let keys = self.active_keys();
         keys.iter()
             .enumerate()
             .any(|(index, key)| keys.iter().skip(index + 1).any(|other| other == key))
     }
 
-    pub fn all_keys(&self) -> [KeyCode; FIGHTER_COUNT * ControlAction::ALL.len()] {
+    pub fn active_keys(&self) -> [KeyCode; FIGHTER_COUNT * ControlAction::ACTIVE.len()] {
         std::array::from_fn(|index| {
-            let player = index / ControlAction::ALL.len();
-            let action = ControlAction::ALL[index % ControlAction::ALL.len()];
+            let player = index / ControlAction::ACTIVE.len();
+            let action = ControlAction::ACTIVE[index % ControlAction::ACTIVE.len()];
             self.key_for(player, action)
                 .expect("every local player has a complete key binding")
         })

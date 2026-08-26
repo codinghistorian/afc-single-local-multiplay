@@ -10,6 +10,12 @@ pub const MATCH_SECONDS: f32 = 120.0;
 pub const TIME_UP_SECONDS: f32 = 1.2;
 pub const STOCK_LIVES: i32 = 3;
 
+/// Runtime gate for the shared Pulse Dart / Trip Plate / Snap Wave / Drift Field action.
+///
+/// Keep the subsystem compiled while this is false so the action can be restored without
+/// rebuilding its entities, payloads, effects, tuning, or saved-control compatibility.
+pub const SHARED_SPECIALS_ENABLED: bool = false;
+
 pub const ARENA_RADIUS: f32 = 8.0;
 pub const ARENA_HEIGHT: f32 = 0.9;
 pub const ARENA_TOP_Y: f32 = ARENA_HEIGHT * 0.5;

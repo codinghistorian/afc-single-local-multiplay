@@ -525,7 +525,7 @@ mod tests {
         FighterInput, FighterMotor, FighterStats, FighterVisualRoot, LocalInputAssignment,
         SimPosition,
     };
-    use crate::determinism::{DEFAULT_F32_QUANTIZATION, canonicalize_f32};
+    use crate::determinism::{DEFAULT_F32_QUANTIZATION, SimEntityKind, canonicalize_f32};
     use crate::ecs_identity::StableSimEntity;
     use crate::effects::VisualEffect;
     use crate::equipment::{EQUIPMENT_KINDS, FighterEquipment};
@@ -1327,15 +1327,15 @@ mod tests {
     #[test]
     fn cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result() {
         const EXPECTED_CHECKPOINTS: [(u64, u64); 6] = [
-            (1, 0x9121_c43e_31ab_fcec),
-            (120, 0x623c_d71e_898d_9101),
-            (240, 0xb0a7_3164_b760_488c),
-            (360, 0xe26f_3d2d_6095_6aa3),
-            (480, 0x393d_614e_1de6_7563),
-            (600, 0xc5cc_f9a1_2cfb_f003),
+            (1, 0x84ce_e944_e41f_dcd9),
+            (120, 0x6e19_0305_5272_0060),
+            (240, 0x811d_fbaf_e6b5_68b1),
+            (360, 0x2249_83e4_0415_2d7a),
+            (480, 0x38d9_a1a4_4b7c_a53a),
+            (600, 0x3336_1084_398f_da66),
         ];
         const EXPECTED_FINAL_TICK: SimTick = SimTick(709);
-        const EXPECTED_FINAL_HASH: u64 = 0x825a_e049_f62c_0244;
+        const EXPECTED_FINAL_HASH: u64 = 0x58c5_6759_3bc8_2e7f;
 
         let config = fixture();
         assert_eq!(
@@ -1388,19 +1388,19 @@ mod tests {
 
     #[test]
     fn compact_all_content_matrix_matches_frozen_hashes() {
-        // Each arena freezes the independent special/hazard and item branches
-        // after semantic review.
+        // Each arena freezes the independent retired-special/hazard and item
+        // branches after semantic review.
         const EXPECTED_FINAL_HASHES: [[u64; 2]; 10] = [
-            [0xfee4_83d1_4a6b_bf62, 0xf765_a690_7968_e7b1],
-            [0xbc82_c7b1_7fb9_57f5, 0x0b1b_ce2e_1c74_9e01],
-            [0x27f8_81aa_782a_f719, 0xa9b3_c873_0f2d_f5cc],
-            [0x4dbf_526a_23c1_6be3, 0xe513_eb2d_edd2_d0b7],
-            [0x7f54_a461_4aa9_3a65, 0x9815_b3d2_16f9_54c1],
-            [0x029a_a4e7_22a9_0216, 0x150e_524b_5630_3295],
-            [0x972b_67d0_4138_a842, 0x97a1_2707_175d_5176],
-            [0x7da5_6438_5137_b28f, 0x3ff2_03a1_c3f4_2d74],
-            [0x1ba9_0da8_9865_8abc, 0x81a3_91db_0f15_fba0],
-            [0x65fa_7657_f359_22ce, 0x1ea6_fa73_01ed_b60e],
+            [0x365e_a128_e4b1_46cd, 0x0d34_896d_6260_88e4],
+            [0x1273_bd11_6dc8_8b71, 0xcbd6_c658_eedc_b864],
+            [0x2359_1919_2a3f_d974, 0x11c3_6f66_f0f8_78bb],
+            [0xecf5_dbfe_9427_c420, 0xeb19_5f13_237d_8952],
+            [0xf301_ce42_8833_08cf, 0x2c39_19cf_1fd8_6798],
+            [0xb7ce_a6c7_5c37_aa6b, 0xf4c1_66ff_18eb_285c],
+            [0x217c_f971_f436_345f, 0x3be9_23d9_ce3f_8307],
+            [0x897c_27fc_fed0_32bb, 0xe7e0_ab65_3b93_6ad7],
+            [0xa131_1a74_42f6_0edb, 0x01aa_c646_9a98_839b],
+            [0x4621_4acb_53c5_1dc4, 0xc51f_9aeb_924b_4e33],
         ];
 
         assert_eq!(arena_definitions().len(), 10);
@@ -1412,7 +1412,7 @@ mod tests {
         let mut style_coverage = [false; 3];
         let mut equipment_coverage = [false; 4];
         let mut final_hashes = Vec::with_capacity(arena_definitions().len());
-        let mut ability_spawns = 0_usize;
+        let mut retired_special_spawns = 0_usize;
         let mut item_pickups = 0_usize;
         let mut hazard_contacts = 0_usize;
 
@@ -1422,7 +1422,7 @@ mod tests {
             let mut special_second = build_headless_simulation(config.clone()).unwrap();
             arrange_compact_hazard_world(&mut special_first, arena_index);
             arrange_compact_hazard_world(&mut special_second, arena_index);
-            let mut arena_ability_spawns = 0_usize;
+            let mut arena_retired_special_spawns = 0_usize;
 
             {
                 let world = special_first.world_mut();
@@ -1462,21 +1462,21 @@ mod tests {
                     if matches!(
                         event.kind,
                         SimEventKind::AbilityLifecycle {
+                            entity,
                             event: AbilityLifecycleEvent::Spawned,
-                            ..
-                        }
+                        } if entity.kind() == SimEntityKind::Special
                     ) {
-                        ability_spawns += 1;
-                        arena_ability_spawns += 1;
+                        retired_special_spawns += 1;
+                        arena_retired_special_spawns += 1;
                     }
                     if matches!(event.id.source, SimEventSource::ArenaHazard { .. }) {
                         hazard_contacts += 1;
                     }
                 }
             }
-            assert!(
-                arena_ability_spawns >= MAX_FIGHTERS,
-                "arena {arena_index} did not execute all four special requests"
+            assert_eq!(
+                arena_retired_special_spawns, 0,
+                "arena {arena_index} accepted a retired shared-special request"
             );
 
             let special_final_hash = special_first.state_hash().unwrap();
@@ -1522,9 +1522,9 @@ mod tests {
         assert!(character_coverage.into_iter().all(|covered| covered));
         assert!(style_coverage.into_iter().all(|covered| covered));
         assert!(equipment_coverage.into_iter().all(|covered| covered));
-        assert!(
-            ability_spawns >= arena_definitions().len() * MAX_FIGHTERS,
-            "all four special variants must spawn in every arena"
+        assert_eq!(
+            retired_special_spawns, 0,
+            "retired shared-special requests must remain inert in every arena"
         );
         assert!(
             item_pickups >= arena_definitions().len(),

@@ -113,6 +113,10 @@ pub struct ActiveSpecial {
     pub already_hit: FighterHitMask,
 }
 
+#[cfg(test)]
+#[derive(Resource)]
+pub(crate) struct TestSharedSpecialsEnabled;
+
 /// Renderer-facing work paired with one semantic special event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SpecialPresentationKind {
@@ -337,6 +341,7 @@ pub fn handle_special_inputs(
     mut identities: ResMut<SimulationIdentityAllocator>,
     mut sim_events: ResMut<TickEventBuffer>,
     mut presentation_intents: Option<ResMut<SpecialPresentationIntentJournal>>,
+    #[cfg(test)] test_enabled: Option<Res<TestSharedSpecialsEnabled>>,
     mut fighters: Query<(
         &Fighter,
         &mut FighterInput,
@@ -348,6 +353,18 @@ pub fn handle_special_inputs(
         &SimPosition,
     )>,
 ) {
+    #[cfg(test)]
+    let shared_specials_enabled = SHARED_SPECIALS_ENABLED || test_enabled.is_some();
+    #[cfg(not(test))]
+    let shared_specials_enabled = SHARED_SPECIALS_ENABLED;
+
+    if !shared_specials_enabled {
+        for (_, mut input, _, _, _, _, _, _) in &mut fighters {
+            input.special = false;
+        }
+        return;
+    }
+
     if hitstop.active() {
         return;
     }
@@ -1743,6 +1760,65 @@ mod tests {
     }
 
     #[test]
+    fn directly_injected_special_request_is_rejected_by_authoritative_handler() {
+        let mut app = App::new();
+        app.insert_resource(Hitstop::default())
+            .insert_resource(ActiveArena::default())
+            .insert_resource(SimulationIdentityAllocator::default())
+            .insert_resource(TickEventBuffer::default())
+            .add_systems(Update, handle_special_inputs);
+        let fighter = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    id: 0,
+                    name: "Injected",
+                    color: Color::WHITE,
+                    spawn: Vec3::ZERO,
+                },
+                FighterInput {
+                    special: true,
+                    ..default()
+                },
+                FighterMotor::default(),
+                FighterActionState::default(),
+                FighterSpecialState::default(),
+                FighterStyle {
+                    kind: FighterStyleKind::Catalyst,
+                },
+                FighterEquipment::new(crate::equipment::EquipmentKind::CounterCell),
+                SimPosition::default(),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query::<&ActiveSpecial>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let input = app.world().get::<FighterInput>(fighter).unwrap();
+        assert!(!input.special);
+        assert_eq!(
+            app.world()
+                .get::<FighterActionState>(fighter)
+                .unwrap()
+                .action,
+            FighterAction::Idle
+        );
+        assert_eq!(
+            app.world()
+                .get::<FighterSpecialState>(fighter)
+                .unwrap()
+                .cooldown,
+            TickTimer::ZERO
+        );
+    }
+
+    #[test]
     fn shockwave_radius_expands_over_lifetime() {
         let mut special = test_special(SpecialKind::Shockwave);
         special.age = ElapsedTicks::from_ticks(
@@ -1927,6 +2003,7 @@ mod tests {
         .insert_resource(Hitstop::default())
         .insert_resource(ActiveArena::default())
         .insert_resource(TickEventBuffer::new(SimTick(4)))
+        .insert_resource(TestSharedSpecialsEnabled)
         .add_systems(Update, handle_special_inputs);
 
         let fighter_one = spawn_casting_fighter(&mut app, 1);

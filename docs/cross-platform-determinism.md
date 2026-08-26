@@ -2,7 +2,7 @@
 
 The repository contains one frozen, production-headless simulation tape at
 `headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result`.
-It boots a version-6 match manifest, commits bounded AFC `InputFrame` values for
+It boots a version-7 match manifest, commits bounded AFC `InputFrame` values for
 both occupied seats, runs the real canonical fixed schedule, and ends through
 the normal stock/result rules. It does not use the small input-harness probe.
 
@@ -10,13 +10,13 @@ The checked-in contract is:
 
 | Tick | Canonical hash |
 | ---: | ---: |
-| 1 | `9121c43e31abfcec` |
-| 120 | `623cd71e898d9101` |
-| 240 | `b0a73164b760488c` |
-| 360 | `e26f3d2d60956aa3` |
-| 480 | `393d614e1de67563` |
-| 600 | `c5ccf9a12cfbf003` |
-| 709 (final) | `825ae049f62c0244` |
+| 1 | `84cee944e41fdcd9` |
+| 120 | `6e19030552720060` |
+| 240 | `811dfbafe6b568b1` |
+| 360 | `224983e404152d7a` |
+| 480 | `38d9a1a44b7ca53a` |
+| 600 | `33361084398fda66` |
+| 709 (final) | `58c567593bc82e7f` |
 
 The final canonical result is team 1 winning at tick 709. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
@@ -31,27 +31,28 @@ result assertion.
 
 The compact matrix uses all ten shipping arenas and distributes all eight
 characters, three styles, and four equipment choices across four occupied seats.
-Each arena has two deliberately independent branches: a 120-tick branch executes
-all four generic-special variants plus authored static-hazard contact, and a
-four-tick branch executes an immediate pickup of that arena's first authored
-portable item. Two independently bootstrapped production Bevy worlds must match
-on every tick in each branch. Keeping the branches separate prevents one feature
-from consuming or displacing another feature's acceptance input. Their synthetic
-compatibility identity is fixed, so debug/release build metadata cannot enter the
-frozen hashes.
+Each arena has two deliberately independent branches: a 120-tick branch injects
+all four retired generic-special request forms, proves that no stable `Special`
+entity is spawned, preserves any accompanying ordinary action, and exercises
+authored static-hazard contact; a four-tick branch executes an immediate pickup
+of that arena's first authored portable item. Two independently bootstrapped
+production Bevy worlds must match on every tick in each branch. Keeping the
+branches separate prevents one feature from consuming or displacing another
+feature's acceptance input. Their synthetic compatibility identity is fixed, so
+debug/release build metadata cannot enter the frozen hashes.
 
-| Arena | Special/hazard final hash | Item final hash |
+| Arena | Retired-special/hazard final hash | Item final hash |
 | --- | ---: | ---: |
-| Crown Ring | `fee483d14a6bbf62` | `f765a6907968e7b1` |
-| Split Causeway | `bc82c7b17fb957f5` | `0b1bce2e1c749e01` |
-| Sunstone Steps | `27f881aa782af719` | `a9b3c8730f2df5cc` |
-| Crank Yard | `4dbf526a23c16be3` | `e513eb2dedd2d0b7` |
-| Vent Spiral | `7f54a4614aa93a65` | `9815b3d216f954c1` |
-| Bumper Alley | `029aa4e722a90216` | `150e524b56303295` |
-| Feast Market | `972b67d04138a842` | `97a12707175d5176` |
-| Snare Garden | `7da564385137b28f` | `3ff203a1c3f42d74` |
-| Sky Steps | `1ba90da898658abc` | `81a391db0f15fba0` |
-| Powder Keg Court | `65fa7657f35922ce` | `1ea6fa7301edb60e` |
+| Crown Ring | `365ea128e4b146cd` | `0d34896d626088e4` |
+| Split Causeway | `1273bd116dc88b71` | `cbd6c658eedcb864` |
+| Sunstone Steps | `235919192a3fd974` | `11c36f66f0f878bb` |
+| Crank Yard | `ecf5dbfe9427c420` | `eb195f13237d8952` |
+| Vent Spiral | `f301ce42883308cf` | `2c3919cf1fd86798` |
+| Bumper Alley | `b7cea6c75c37aa6b` | `f4c166ff18eb285c` |
+| Feast Market | `217cf971f436345f` | `3be923d9ce3f8307` |
+| Snare Garden | `897c27fcfed032bb` | `e7e0ab653b936ad7` |
+| Sky Steps | `a1311a7442f60edb` | `01aac6469a98839b` |
+| Powder Keg Court | `46214acb53c51dc4` | `c51f9aeb924b4e33` |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -88,6 +89,15 @@ All 18 normalized checkpoint sets, ordered event ticks, final ticks, and final
 results remained identical. Debug and fat-LTO release independently produced
 BF001 tick-1 hash `f4e0979e6049e2af` before the identity-derived hashes were
 accepted.
+
+The simulation-v7 refresh retires shared specials while retaining the legacy
+wire bit. BF013 and the compact matrix inject those old requests and prove they
+cannot allocate a special stable ID, start a special cooldown, or emit a special
+ability lifecycle event. BF013 alone changes semantic output; all other behavior
+tapes retain their normalized checkpoints, ordered events, final ticks, and
+results before the identity refresh. Debug and fat-LTO release agreed on BF001
+tick-1 hash `cf49d1dde67d32a9`. The compiled gameplay-content digest is
+`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`.
 
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The

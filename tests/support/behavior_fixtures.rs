@@ -50,7 +50,7 @@ use crate::tick_input::{
 };
 
 const FIXTURE_SCHEMA_VERSION: u16 = 1;
-const CONTRACT_VERSION: u16 = 6;
+const CONTRACT_VERSION: u16 = 7;
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/behavior/v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -317,6 +317,8 @@ struct TickObservation {
 struct CanonicalObservation {
     hazard_clock_ticks: u32,
     hazard_cooldowns: [u32; crate::network_protocol::MAX_FIGHTERS],
+    special_objects: usize,
+    special_cooldowns: [u32; crate::network_protocol::MAX_FIGHTERS],
     damage_by_fighter: [i32; crate::network_protocol::MAX_FIGHTERS],
     fighters: [CanonicalFighterObservation; crate::network_protocol::MAX_FIGHTERS],
 }
@@ -977,6 +979,12 @@ fn observation(
         canonical: CanonicalObservation {
             hazard_clock_ticks: snapshot.arena.hazard_clock_ticks,
             hazard_cooldowns: snapshot.arena.per_fighter_hazard_cooldowns,
+            special_objects: snapshot
+                .dynamic_objects
+                .iter()
+                .filter(|object| object.id.kind() == SimEntityKind::Special)
+                .count(),
+            special_cooldowns: snapshot.fighters.map(|fighter| fighter.cooldowns.ticks[0]),
             damage_by_fighter: snapshot.stats.damage_by_fighter,
             fighters: snapshot
                 .fighters
@@ -1530,9 +1538,17 @@ fn assert_fixture_is_meaningful(
                 frames[3].pressed_buttons.bits(),
                 InputButtons::SPECIAL | InputButtons::HEAVY
             );
+            assert_eq!(
+                event_count(trace, "AbilityLifecycle"),
+                0,
+                "retired shared-special inputs must not emit canonical ability events"
+            );
             assert!(
-                event_count(trace, "AbilityLifecycle") >= 4,
-                "generic-special fixture did not exercise all four spawns"
+                trace.ticks.iter().all(|tick| {
+                    tick.canonical.special_objects == 0
+                        && tick.canonical.special_cooldowns == [0; 4]
+                }),
+                "retired shared-special inputs must not allocate stable special entities or start cooldowns"
             );
         }
         "BF015_arena_hazard_contact" => {

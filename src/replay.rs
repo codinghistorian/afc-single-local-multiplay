@@ -2235,20 +2235,20 @@ mod tests {
         assert!(replay.validate().is_err());
 
         let mut replay = fixture();
-        replay.header.compatibility.simulation = SimulationVersion::new(6).unwrap();
+        replay.header.compatibility.simulation = SimulationVersion::new(7).unwrap();
         assert!(replay.validate().is_err());
     }
 
     #[test]
-    fn v5_replay_is_rejected_by_v6_playback_compatibility() {
-        let replay = fixture_for_simulation_version(5);
+    fn v6_replay_is_rejected_by_v7_playback_compatibility() {
+        let replay = fixture_for_simulation_version(6);
         let expected = CompatibilityId {
-            simulation: SimulationVersion::new(6).unwrap(),
+            simulation: SimulationVersion::new(7).unwrap(),
             ..replay.header.compatibility
         };
 
-        assert_eq!(replay.header.compatibility.simulation.get(), 5);
-        assert_eq!(expected.simulation.get(), 6);
+        assert_eq!(replay.header.compatibility.simulation.get(), 6);
+        assert_eq!(expected.simulation.get(), 7);
         let result = replay.validate_against(&expected);
         assert!(
             matches!(

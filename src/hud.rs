@@ -9,9 +9,8 @@ use crate::characters::{
 use crate::combat::{HitEffects, ImpactSource};
 use crate::components::{
     AnnouncementText, DebugOverlayPanel, DebugOverlayText, Fighter, FighterAction,
-    FighterActionState, FighterInventory, FighterSpecialState, FighterStats, HealthBar, Hitbox,
-    ParticipantKind, PhaseText, ResultPanel, ResultText, SimPosition, StaminaBar, TeamScoreText,
-    TimerText,
+    FighterActionState, FighterInventory, FighterStats, HealthBar, Hitbox, ParticipantKind,
+    PhaseText, ResultPanel, ResultText, SimPosition, StaminaBar, TeamScoreText, TimerText,
 };
 use crate::constants::{FIGHTER_COLORS, MAX_HEALTH, MAX_STAMINA};
 use crate::ecs_identity::StableSimEntity;
@@ -29,7 +28,6 @@ use crate::items::{ArenaItem, ItemState, held_item_label};
 ))]
 use crate::map_editor::MapEditorState;
 use crate::match_presentation::{MatchPresentationPolicy, PresentationPhase};
-use crate::specials::{ActiveSpecial, SpecialKind};
 use crate::styles::{style_identity, style_label};
 use crate::user_mode::UserModeState;
 
@@ -43,7 +41,6 @@ struct FighterHudSnapshot {
     score: i32,
     stock: Option<i32>,
     flash: f32,
-    special_cooldown: f32,
     action: FighterAction,
     technique: &'static str,
     cancel_window_open: bool,
@@ -724,11 +721,10 @@ fn fighter_status_label(
     held_item: Option<String>,
     speed_timer: f32,
     giant_timer: f32,
-    special_cooldown: f32,
     equipment_cooldown: f32,
     ringout_danger: f32,
 ) -> String {
-    let mut indicators = Vec::with_capacity(6);
+    let mut indicators = Vec::with_capacity(5);
     if let Some(held_item) = held_item {
         indicators.push(format!("ITEM {held_item}"));
     }
@@ -737,9 +733,6 @@ fn fighter_status_label(
     }
     if giant_timer > 0.0 {
         indicators.push(format!("GIANT {giant_timer:.1}"));
-    }
-    if special_cooldown > 0.0 {
-        indicators.push(format!("SP {special_cooldown:.1}"));
     }
     if equipment_cooldown > 0.0 {
         indicators.push(format!("EQ {equipment_cooldown:.1}"));
@@ -814,12 +807,10 @@ pub fn update_hud(
         &Fighter,
         &FighterStats,
         &FighterCharacter,
-        &FighterSpecialState,
         &FighterActionState,
         &Transform,
     )>,
     items: Query<&ArenaItem>,
-    specials: Query<&ActiveSpecial>,
     hitboxes: Query<&Hitbox>,
     feedback: Res<HitEffects>,
     mut bar_queries: ParamSet<(
@@ -917,9 +908,9 @@ pub fn update_hud(
 
     let snapshots: Vec<FighterHudSnapshot> = fighters
         .iter()
-        .filter(|(fighter, _, _, _, _, _)| state.fighter_active(fighter.id))
+        .filter(|(fighter, _, _, _, _)| state.fighter_active(fighter.id))
         .map(
-            |(fighter, stats, character, special_state, action, transform)| FighterHudSnapshot {
+            |(fighter, stats, character, action, transform)| FighterHudSnapshot {
                 id: fighter.id,
                 character: character.kind,
                 name: character_label(character.kind),
@@ -929,7 +920,6 @@ pub fn update_hud(
                 score: stats.score,
                 stock: state.stock_for(fighter.id),
                 flash: stats.hud_flash,
-                special_cooldown: special_state.cooldown.as_seconds(),
                 action: action.action,
                 technique: action
                     .technique_id
@@ -1097,7 +1087,7 @@ pub fn update_hud(
 
     if state.debug_hitboxes && !user_mode.active() {
         let debug = debug_overlay_message(
-            &state, &setup, &snapshots, &items, &specials, &hitboxes, &telemetry, &feedback,
+            &state, &setup, &snapshots, &items, &hitboxes, &telemetry, &feedback,
         );
         let mut debug_texts = text_queries.p7();
         for mut text in &mut debug_texts {
@@ -1112,7 +1102,6 @@ pub fn update_hud_status_indicators(
     fighters: Query<(
         &Fighter,
         &FighterStats,
-        &FighterSpecialState,
         &FighterInventory,
         &FighterEquipment,
         &SimPosition,
@@ -1123,21 +1112,18 @@ pub fn update_hud_status_indicators(
     for (status, mut text) in &mut status_texts {
         let value = fighters
             .iter()
-            .find(|(fighter, _, _, _, _, _)| {
+            .find(|(fighter, _, _, _, _)| {
                 fighter.id == status.fighter_id && state.fighter_active(fighter.id)
             })
-            .map(
-                |(_, stats, special_state, inventory, equipment, transform)| {
-                    fighter_status_label(
-                        held_item_label(inventory, &items),
-                        stats.item_speed_timer.as_seconds(),
-                        stats.item_giant_timer.as_seconds(),
-                        special_state.cooldown.as_seconds(),
-                        equipment.cooldown.as_seconds(),
-                        ringout_danger_level(transform.translation, active_arena.definition()),
-                    )
-                },
-            )
+            .map(|(_, stats, inventory, equipment, position)| {
+                fighter_status_label(
+                    held_item_label(inventory, &items),
+                    stats.item_speed_timer.as_seconds(),
+                    stats.item_giant_timer.as_seconds(),
+                    equipment.cooldown.as_seconds(),
+                    ringout_danger_level(position.translation, active_arena.definition()),
+                )
+            })
             .unwrap_or_default();
         set_text_if_changed(&mut text, value);
     }
@@ -1438,20 +1424,11 @@ fn result_message(state: &MatchState, snapshots: &[FighterHudSnapshot]) -> Strin
     }
 }
 
-fn cooldown_label(seconds: f32) -> String {
-    if seconds <= 0.0 {
-        "Ready".to_string()
-    } else {
-        format!("{seconds:.1}s")
-    }
-}
-
 fn debug_overlay_message(
     state: &MatchState,
     setup: &LocalSetup,
     snapshots: &[FighterHudSnapshot],
     items: &Query<&ArenaItem>,
-    specials: &Query<&ActiveSpecial>,
     hitboxes: &Query<&Hitbox>,
     telemetry: &MatchTelemetry,
     feedback: &HitEffects,
@@ -1485,24 +1462,11 @@ fn debug_overlay_message(
         }
     }
 
-    let mut projectiles = 0;
-    let mut traps = 0;
-    let mut shockwaves = 0;
-    let mut hazards = 0;
-    for special in specials {
-        match special.kind {
-            SpecialKind::Projectile => projectiles += 1,
-            SpecialKind::Trap => traps += 1,
-            SpecialKind::Shockwave => shockwaves += 1,
-            SpecialKind::Hazard => hazards += 1,
-        }
-    }
-
     let fighter_line = snapshots
         .iter()
         .map(|snapshot| {
             format!(
-                "{} {:?} tech {} c{} b{} hp {:.0} sp {} edge {:.0}%",
+                "{} {:?} tech {} c{} b{} hp {:.0} edge {:.0}%",
                 snapshot.name,
                 snapshot.action,
                 snapshot.technique,
@@ -1517,7 +1481,6 @@ fn debug_overlay_message(
                     "-"
                 },
                 snapshot.health,
-                cooldown_label(snapshot.special_cooldown),
                 snapshot.ringout_danger * 100.0
             )
         })
@@ -1530,7 +1493,7 @@ fn debug_overlay_message(
         .unwrap_or_else(|| "none".to_string());
 
     format!(
-        "DEBUG\n{}\nCue: {} | Reaction: {}\nSeed {:08X} | RO {} falls {} item {} throws {} breaks {} dmg {:.0}\nHitboxes: {} | strike {} grab {} item-melee {}\nActive sources: throw {} blast {} projectile {} trap {} shockwave {} hazard {}\nItems: loose {} held {} thrown {} armed {} respawn {}\nSpecials: P{} T{} W{} H{}\n{}",
+        "DEBUG\n{}\nCue: {} | Reaction: {}\nSeed {:08X} | RO {} falls {} item {} throws {} breaks {} dmg {:.0}\nHitboxes: {} | strike {} grab {} item-melee {}\nActive item sources: throw {} blast {}\nItems: loose {} held {} thrown {} armed {} respawn {}\n{}",
         phase_label(state, setup),
         cue,
         reaction,
@@ -1547,19 +1510,11 @@ fn debug_overlay_message(
         melee_sources,
         thrown_items,
         armed_items,
-        projectiles,
-        traps,
-        shockwaves,
-        hazards,
         loose_items,
         held_items,
         thrown_items,
         armed_items,
         respawning_items,
-        projectiles,
-        traps,
-        shockwaves,
-        hazards,
         fighter_line
     )
 }
@@ -1579,7 +1534,6 @@ mod tests {
             score,
             stock: None,
             flash: 0.0,
-            special_cooldown: 0.0,
             action: FighterAction::Idle,
             technique: "--",
             cancel_window_open: false,
@@ -1683,16 +1637,13 @@ mod tests {
     }
 
     #[test]
-    fn fighter_status_label_surfaces_items_buffs_cooldowns_and_edge_danger() {
+    fn fighter_status_label_surfaces_items_buffs_equipment_and_edge_danger() {
         assert_eq!(
-            fighter_status_label(Some("Turkey 2/3".to_string()), 4.25, 0.0, 1.75, 2.5, 0.8),
-            "ITEM Turkey 2/3  SPEED 4.2  SP 1.8  EQ 2.5  EDGE"
+            fighter_status_label(Some("Turkey 2/3".to_string()), 4.25, 0.0, 2.5, 0.8),
+            "ITEM Turkey 2/3  SPEED 4.2  EQ 2.5  EDGE"
         );
-        assert_eq!(
-            fighter_status_label(None, 0.0, 3.0, 0.0, 0.0, 0.0),
-            "GIANT 3.0"
-        );
-        assert_eq!(fighter_status_label(None, 0.0, 0.0, 0.0, 0.0, 0.0), "");
+        assert_eq!(fighter_status_label(None, 0.0, 3.0, 0.0, 0.0), "GIANT 3.0");
+        assert_eq!(fighter_status_label(None, 0.0, 0.0, 0.0, 0.0), "");
     }
 
     #[test]

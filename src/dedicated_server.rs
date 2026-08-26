@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn four_production_bots_all_attack_hit_and_create_owner_workload() {
-        const MAX_TICKS: u32 = 1_800;
+        const MAX_TICKS: u32 = 3_600;
 
         let options = DedicatedLaunchOptions {
             match_id: MatchId::new(*b"4bot-bumper-test").unwrap(),

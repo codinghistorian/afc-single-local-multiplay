@@ -18,7 +18,7 @@ stock result. Its Linux/Windows/macOS gate and frozen literals are documented in
 also cover the central contact and batched life-loss permutations named later in
 this document.
 
-The simulation-v6 fixture tranche is checked in under
+The simulation-v7 fixture tranche is checked in under
 `tests/fixtures/behavior/v1` and runs through the crate-internal production
 headless harness in `tests/support/behavior_fixtures.rs`:
 
@@ -32,7 +32,7 @@ headless harness in `tests/support/behavior_fixtures.rs`:
 | BF006 | `heavy_charge_release` | Raw held/released heavy, charge/action/stamina evolution |
 | BF007 | `guard_hit` | Natural convergence, held guard, guarded strike contact |
 | BF008 | `aim_grab_short_tap` | **AcceptedChange:** held aim, in-window release, one grab pulse/relationship, noisy and post-boundary releases suppressed |
-| BF013 | `generic_special_variants` | Projectile, trap, shockwave, and hazard spawn/lifecycle inputs |
+| BF013 | `generic_special_variants` | **AcceptedChange:** legacy projectile/trap/shockwave/hazard requests remain wire-decodable but allocate no special stable IDs, start no cooldowns, and emit no ability lifecycle events; accompanying ordinary action bits retain their meanings |
 | BF015 | `arena_hazard_contact` | Vent inactive interval, impact, hitstop freeze/resume, neutral attribution, damage/reaction/cooldown, and restore replay |
 | BF021 | `last_stock_match_completion` | Natural outward movement, stock losses, result event and final phase |
 | BF023 | `hitstop_decrement_boundary` | Natural strike contact and the positive-one to post-decrement-zero boundary |
@@ -50,7 +50,7 @@ gesture scripts are compiled before all four runs. The explicit ignored updater
 is documented in [current-simulation-contract.md](current-simulation-contract.md);
 ordinary tests are read-only.
 
-The v6 refresh adds BF029 and snapshot-schema-3 aim state. The other 17 tapes
+The simulation-v6 refresh added BF029 and snapshot-schema-3 aim state. The other 17 tapes
 retained identical normalized checkpoints, ordered events, final ticks, and final
 results. Debug and release agreed on BF001's new tick-1 hash
 `c50b6cd168b8e793` before all 18 goldens were refreshed. The reviewed compiled
@@ -64,6 +64,17 @@ normalized checkpoints, event ticks, final ticks, and results. Debug and
 fat-LTO release agreed on BF001 tick-1 hash `f4e0979e6049e2af`; the reviewed
 content digest is
 `4253817efe2881ce03d537ba37a8f7f658c823173b3cb60d89019c1f370646b6`.
+
+The simulation-v7 refresh retires shared specials from active controls and the
+authoritative match while preserving their legacy wire and persistence IDs.
+BF013 is the only accepted semantic change: it now proves zero special stable
+objects, cooldowns, and `AbilityLifecycle` events while retaining the ordinary
+guard, aim/grab, and heavy meanings of accompanying bits. The other 17 tapes
+retained identical normalized checkpoints, ordered events, final ticks, and
+final results before their identity-derived hash refresh. Debug and fat-LTO
+release agreed on BF001 tick-1 hash `cf49d1dde67d32a9`; the reviewed content
+digest is
+`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from

@@ -1,6 +1,6 @@
 # Current Simulation Contract
 
-- Status: Implemented simulation-v6 contract with historical WP0 provenance
+- Status: Implemented simulation-v7 contract with historical WP0 provenance
 - Historical audited source: `d33ceff65065e18d0928820892bb24bfb5c845ae`
 - Current audit date: 2026-08-26
 - Scope: current deterministic combat contract plus the preserved pre-WP1 inventory
@@ -8,7 +8,7 @@
 
 This document originally froze local behavior before the fixed-tick,
 stable-identity, snapshot, and rollback migration. It now records the implemented
-simulation-v6 contract while retaining the original execution inventory as
+simulation-v7 contract while retaining the original execution inventory as
 migration provenance. Sections explicitly labelled **historical WP0** describe
 the old source above and are not claims about the current runtime.
 
@@ -43,11 +43,43 @@ version bump or authorize a different semantic result.
 
 Inside a section labelled historical WP0, **current** and **legacy** mean the
 audited pre-cutover commit above. Elsewhere, **current** means simulation version
-6 in this repository. **Target** refers to the multiplayer specification.
+7 in this repository. **Target** refers to the multiplayer specification.
+
+## Simulation v7 retired shared-special addendum
+
+The current online compatibility boundary is simulation version 7. Protocol
+version 1, replay schema 1, snapshot schema 3, and the 60 Hz fixed-tick schedule
+are unchanged. The shared Pulse Dart / Trip Plate / Snap Wave / Drift Field
+action is retired from active keyboard/gamepad controls, key settings, bot
+selection, HUD status, and the active tutorial curriculum.
+
+Simulation v7 freezes the fail-closed gameplay boundary:
+
+- Local fixed-tick samplers never emit `DIRECT_SPECIAL` while the gate is off.
+- The legacy serialized control action, saved keys, tutorial chapter ID, and
+  predicted-protocol `SPECIAL` bit remain decodable for compatibility.
+- The authoritative handler clears an injected legacy request before action
+  interpretation. It cannot allocate a stable `Special` entity, start a
+  cooldown, spend stamina, deal damage, or emit an `AbilityLifecycle` event.
+- The compiled subsystem and its stable-ID/event tests remain available behind
+  a test-only enable marker, so retiring the action does not discard its
+  deterministic implementation.
+- Other bits accompanying a legacy special request retain their canonical
+  meanings. BF013 therefore preserves the ordinary guard, aim/grab, and heavy
+  paths while proving the special portion is inert.
+
+BF013 is the sole accepted semantic fixture change. The other 17 behavior tapes
+retain identical normalized checkpoints, ordered semantic events, final ticks,
+and final outcomes before their version/content-derived hash refresh. A v6
+client or replay is rejected before gameplay by the v7 compatibility boundary.
+The reviewed gameplay-content digest is
+`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`;
+debug and fat-LTO release agree on the new BF001 tick-1 hash
+`cf49d1dde67d32a9`.
 
 ## Simulation v6 manual-aim addendum
 
-The current online compatibility boundary is simulation version 6. Protocol
+Simulation version 6 introduced the manual-aim compatibility boundary. Protocol
 version 1, replay schema 1, and the 60 Hz tick rate are unchanged. Snapshot
 schema 3 adds the rollback-owned aim direction, optional locked `FighterId`,
 held-state edge memory, and monotonic manual-unlock count.
@@ -1009,3 +1041,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-08-26 | 5 (unchanged) | All 17 behavior tapes; additive local tutorial, tutorial-scoped bot difficulty, HUD, controls, and pause ownership | **ContentIdentityOnly:** the new tutorial is a local mode whose fixed-tick objective observer and scripted dummy use canonical state, stable IDs, and existing input/event vocabulary. Its slower bot behavior is present only when the new `BotDifficulty::Tutorial` marker is explicitly installed; existing standard bots and every previously supported match manifest retain their rules. Presentation, control-help, persistence, and pause-owner changes do not feed canonical simulation. `tutorial.rs` is conservatively classified in `GAMEPLAY_SOURCES`, and the other boundary changes touch existing classified sources, so the gameplay-content digest changed from `8e45acb03e57d34f3b4398be916393d47490adf443ebfa45191bfacadf8c693b` to `3811091d85eb57f521706db16f4da1823ab1cef71b3f5c2263096d6d8cabbf16`. Debug and release produced the same first new BF001 hash (`11b6d8e6f8fb0fcf`). All 17 tapes received identity-derived per-tick hashes; their checkpoint counts and values, ordered semantic-event ticks and payloads, final ticks, and final results remained unchanged. This is an additive content-compatibility change only; simulation version 5 remains unchanged. |
 | 2026-08-26 | 6 | BF029 `manual_aim_lock_break_release`; all prior behavior tapes; v5/v6 lobby and replay compatibility; snapshot schema 3 round trip | **AcceptedChange:** holding Aim now deterministically acquires an opponent by alignment, squared distance, and `FighterId`; movement beyond the 60-degree retention boundary breaks the lock and increments a rollback-owned counter. Previously the BF029 tape had no canonical lock or unlock counter. The new tape freezes lock at tick 1, break at tick 4, release at tick 7, and active-lock restore at tick 2. Crosshair animation remains presentation-only. Simulation version 6 and snapshot schema 3 own the new state; protocol and replay schemas remain unchanged. The compiled gameplay-content digest is `5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`; debug and release agreed on BF001 tick-1 hash `c50b6cd168b8e793`. All 17 pre-existing tapes retained identical normalized checkpoints, ordered events, final ticks, and final results before their hash refresh. Approved by the browser-multiplayer integration scope. |
 | 2026-08-26 | 6 (unchanged) | All 18 behavior tapes; centralized menu/tutorial transition and audio-settings presentation boundary | **ContentIdentityOnly:** menu and tutorial transitions now share one `Time<Real>`-driven fade owner, with pause acquisition/release committed through explicit transition actions; persisted music/SFX gains remain presentation-only. Fixed-tick simulation, stable IDs, canonical events, and snapshot schema 3 are unchanged. The presentation refactor touches conservatively classified `game_state.rs` and `tutorial.rs`, so the gameplay-content digest changed from `5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed` to `4253817efe2881ce03d537ba37a8f7f658c823173b3cb60d89019c1f370646b6`. Debug and fat-LTO release produced the same new BF001 tick-1 hash (`f4e0979e6049e2af`). All 18 tapes retained identical normalized checkpoints, ordered semantic-event ticks and payloads, final ticks, and final results before their identity-derived hash refresh. This changes content compatibility only; simulation version 6 and snapshot schema 3 remain unchanged. |
+| 2026-08-26 | 7 | BF013 `generic_special_variants`; all prior behavior tapes; v6/v7 lobby and replay compatibility | **AcceptedChange:** shared specials are retired from active controls, bots, HUD, and tutorial. Local fixed-tick samplers omit the legacy bit and the authoritative handler rejects an injected request before stable allocation, cooldown, stamina, damage, or canonical ability events; the wire bit and serialized control/tutorial IDs remain decode-compatible. BF013 retains accompanying guard/aim/heavy semantics but changes from four shared-special spawns and their lifecycle/contact effects to zero special stable entities, zero special cooldowns, and zero `AbilityLifecycle` events. The other 17 tapes retained identical normalized checkpoints, ordered events, final ticks, and final results before the v7 identity refresh. Snapshot schema 3, protocol 1, replay schema 1, stable-ID rules, and the canonical event vocabulary are unchanged. The gameplay-content digest is `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`; debug and fat-LTO release agreed on BF001 tick-1 hash `cf49d1dde67d32a9`. Approved by the browser-multiplayer integration scope. |

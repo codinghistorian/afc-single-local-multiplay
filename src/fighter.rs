@@ -1136,15 +1136,17 @@ fn sample_bound_tick_input(
             released.insert(button);
         }
     }
-    for (mask, key) in [(InputMask::DIRECT_SPECIAL, bindings.special)] {
-        if keys.pressed(key) {
-            held.insert(mask);
-        }
-        if keys.just_pressed(key) {
-            pressed.insert(mask);
-        }
-        if keys.just_released(key) {
-            released.insert(mask);
+    if SHARED_SPECIALS_ENABLED {
+        for (mask, key) in [(InputMask::DIRECT_SPECIAL, bindings.special)] {
+            if keys.pressed(key) {
+                held.insert(mask);
+            }
+            if keys.just_pressed(key) {
+                pressed.insert(mask);
+            }
+            if keys.just_released(key) {
+                released.insert(mask);
+            }
         }
     }
 
@@ -1184,20 +1186,31 @@ fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputS
     let mut held = InputMask::NONE;
     let mut pressed = InputMask::NONE;
     let mut released = InputMask::NONE;
-    for (mask, button) in [
-        (InputMask::LEFT, GamepadButton::DPadLeft),
-        (InputMask::RIGHT, GamepadButton::DPadRight),
-        (InputMask::UP, GamepadButton::DPadUp),
-        (InputMask::DOWN, GamepadButton::DPadDown),
-        (InputMask::AIM_GRAB, GamepadButton::East),
-        (InputMask::HEAVY, GamepadButton::North),
-        (InputMask::LIGHT, GamepadButton::West),
-        (InputMask::JUMP, GamepadButton::South),
-        (InputMask::DIRECT_GUARD, GamepadButton::LeftTrigger),
-        (InputMask::DIRECT_ULTIMATE, GamepadButton::LeftTrigger2),
-        (InputMask::DIRECT_SPECIAL, GamepadButton::RightTrigger),
-        (InputMask::DIRECT_DASH, GamepadButton::RightTrigger2),
+    for (mask, button, enabled) in [
+        (InputMask::LEFT, GamepadButton::DPadLeft, true),
+        (InputMask::RIGHT, GamepadButton::DPadRight, true),
+        (InputMask::UP, GamepadButton::DPadUp, true),
+        (InputMask::DOWN, GamepadButton::DPadDown, true),
+        (InputMask::AIM_GRAB, GamepadButton::East, true),
+        (InputMask::HEAVY, GamepadButton::North, true),
+        (InputMask::LIGHT, GamepadButton::West, true),
+        (InputMask::JUMP, GamepadButton::South, true),
+        (InputMask::DIRECT_GUARD, GamepadButton::LeftTrigger, true),
+        (
+            InputMask::DIRECT_ULTIMATE,
+            GamepadButton::LeftTrigger2,
+            true,
+        ),
+        (
+            InputMask::DIRECT_SPECIAL,
+            GamepadButton::RightTrigger,
+            SHARED_SPECIALS_ENABLED,
+        ),
+        (InputMask::DIRECT_DASH, GamepadButton::RightTrigger2, true),
     ] {
+        if !enabled {
+            continue;
+        }
         if gamepad.pressed(button) {
             held.insert(mask);
         }
@@ -1396,7 +1409,7 @@ fn keyboard_action_sample(
         heavy_released: keys.just_released(bindings.heavy),
         grab_just: keys.just_pressed(bindings.aim_grab),
         grab_held: keys.pressed(bindings.aim_grab),
-        special_just: keys.just_pressed(bindings.special),
+        special_just: SHARED_SPECIALS_ENABLED && keys.just_pressed(bindings.special),
         ..default()
     }
 }
@@ -1410,7 +1423,7 @@ fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
     } else {
         Vec2::new(stick.x, -stick.y)
     };
-    let special_just = gamepad.just_pressed(GamepadButton::RightTrigger);
+    let special_just = SHARED_SPECIALS_ENABLED && gamepad.just_pressed(GamepadButton::RightTrigger);
 
     DeviceActionSample {
         movement,
@@ -1483,7 +1496,7 @@ fn collect_device_player_input(
     input.grab = chord.grab;
     input.guard = sample.guard_held || chord.guard;
     input.ultimate = sample.ultimate_just || chord.ultimate;
-    input.special = sample.special_just;
+    input.special = SHARED_SPECIALS_ENABLED && sample.special_just;
 }
 #[cfg(test)]
 fn collect_bound_player_input(
@@ -8146,24 +8159,46 @@ mod tests {
         assert!(sample.dash_just);
         assert!(sample.guard_held);
         assert!(sample.ultimate_just);
-        assert!(sample.special_just);
+        assert!(!sample.special_just);
     }
 
     #[test]
-    fn keyboard_special_and_modifiers_cross_the_canonical_wire_boundary() {
+    fn xbox_right_bumper_and_all_former_modifiers_produce_no_special_request() {
+        let modifiers = [
+            GamepadButton::East,
+            GamepadButton::North,
+            GamepadButton::LeftTrigger,
+        ];
+        for mask in 0..(1 << modifiers.len()) {
+            let mut buttons = vec![GamepadButton::RightTrigger];
+            for (index, modifier) in modifiers.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    buttons.push(*modifier);
+                }
+            }
+            let sample = gamepad_action_sample(&gamepad_with_buttons(&buttons));
+            assert!(!sample.special_just);
+        }
+    }
+
+    #[test]
+    fn default_e_and_all_former_keyboard_modifiers_produce_no_special_request() {
         let bindings = PlayerControlBindings::player_one_default();
-        for (modifier, expected_light, expected_aim, expected_heavy) in [
-            (None, false, false, false),
-            (Some(bindings.heavy), false, false, true),
-            (Some(bindings.aim_grab), false, true, false),
-            (Some(bindings.light), true, false, false),
-        ] {
+        assert_eq!(bindings.special, KeyCode::KeyE);
+        let modifiers = [bindings.light, bindings.aim_grab, bindings.heavy];
+        for mask in 0..(1 << modifiers.len()) {
             let mut keys = ButtonInput::default();
-            if let Some(modifier) = modifier {
-                keys.press(modifier);
+            for (index, modifier) in modifiers.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    keys.press(*modifier);
+                }
             }
             keys.press(bindings.special);
             let sample = sample_bound_tick_input(&keys, 0.0, bindings, false);
+            assert!(!sample.held.contains(InputMask::DIRECT_SPECIAL));
+            assert!(!sample.pressed.contains(InputMask::DIRECT_SPECIAL));
+            assert!(!sample.released.contains(InputMask::DIRECT_SPECIAL));
+
             let frame = TickInputFrame {
                 tick: 17,
                 seat: LocalSeatId::new(0).unwrap(),
@@ -8178,11 +8213,30 @@ mod tests {
                 &mut SeatGestureTrackers::default(),
             );
             let input = crate::live_input::network_input_to_fighter_input(network);
-            assert!(input.special);
-            assert_eq!(input.light_held, expected_light);
-            assert_eq!(input.aim, expected_aim);
-            assert_eq!(input.heavy_held, expected_heavy);
+            assert!(!input.special);
         }
+    }
+
+    #[test]
+    fn normalized_device_input_rejects_injected_special_samples() {
+        let mut dash = DashTapTracker::default();
+        let mut guard = GuardChordTracker::default();
+        let mut flick = StickFlickTracker::default();
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            DeviceActionSample {
+                special_just: true,
+                ..default()
+            },
+            1.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
+        );
+
+        assert!(!input.special);
     }
 
     #[test]
@@ -8812,7 +8866,7 @@ mod tests {
     }
 
     #[test]
-    fn gamepad_sampler_quantizes_movement_and_preserves_direct_action_edges() {
+    fn gamepad_sampler_quantizes_movement_and_omits_retired_special_edges() {
         let mut gamepad = Gamepad::default();
         gamepad.digital_mut().press(GamepadButton::DPadRight);
         gamepad.digital_mut().press(GamepadButton::South);
@@ -8826,11 +8880,11 @@ mod tests {
         assert!(sample.held.contains(InputMask::RIGHT | InputMask::JUMP));
         assert!(sample.pressed.contains(InputMask::RIGHT | InputMask::JUMP));
         assert!(sample.pressed.contains(
-            InputMask::DIRECT_GUARD
-                | InputMask::DIRECT_ULTIMATE
-                | InputMask::DIRECT_SPECIAL
-                | InputMask::DIRECT_DASH
+            InputMask::DIRECT_GUARD | InputMask::DIRECT_ULTIMATE | InputMask::DIRECT_DASH
         ));
+        assert!(!sample.held.contains(InputMask::DIRECT_SPECIAL));
+        assert!(!sample.pressed.contains(InputMask::DIRECT_SPECIAL));
+        assert!(!sample.released.contains(InputMask::DIRECT_SPECIAL));
         assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.held));
         assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.pressed));
     }
