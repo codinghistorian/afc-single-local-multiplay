@@ -1,4 +1,5 @@
 use bevy::asset::LoadState;
+use bevy::audio::Volume;
 use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -9,13 +10,14 @@ use bevy::ui::UiTargetCamera;
 
 use crate::arena::ARENA_PREVIEW_RENDER_LAYER;
 use crate::arena_defs::{ActiveArena, arena_definitions};
+use crate::audio_settings::CategorizedAudioPlayback;
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
 use crate::characters::{
     CharacterKind, CharacterMoveCatalog, character_label, character_scene_model,
 };
 use crate::combat::HitEffects;
-use crate::combat_sfx::{CombatSfxCue, CombatSfxKind};
+use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, SfxPreviewRequest};
 use crate::components::{
     BotBrain, ControlAction, Controller, Fighter, FighterInput, LocalInputAssignment,
     PlayerControlBindings, PlayerKeyBindings,
@@ -33,6 +35,9 @@ use crate::game_state::{
     GameplayPauseOwner, GameplayPauseOwners, LocalSetup, MatchAnnouncements, MatchPhase,
     MatchState, reconcile_fighter_control_from_setup,
 };
+use crate::game_transition::{
+    GameTransition, GameTransitionAction, GameTransitionReveal, request_game_transition,
+};
 use crate::match_presentation::{
     MatchPresentationPolicy, MatchPresentationTransient, PresentationMusicTrack,
     PresentationResultSfx, PresentedResultSfxHistory,
@@ -45,7 +50,7 @@ use crate::release_identity::current_release_identity;
 use crate::steam_platform::{
     MAX_STEAM_INPUT_CONTROLLERS, SteamInputSnapshot, SteamMenuAction, SteamMenuInputMask,
 };
-use crate::tutorial::{TutorialTransition, TutorialTransitionAction, request_tutorial_transition};
+use crate::tutorial::{TutorialTransitionAction, request_tutorial_transition};
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
 const USER_MODE_MAIN_MENU_BACKGROUND_FADE_SECS: f32 = 0.35;
@@ -57,6 +62,9 @@ const USER_MODE_TUTORIAL_BACKGROUND_PATH: &str =
 const USER_MODE_SETTINGS_BACKGROUND_PATH: &str =
     "backgrounds/menu/animal_fighter_settings_background_1920x1080.png";
 const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
+const USER_MODE_CONTROLLER_ICON_PATH: &str = "icons/controller.png";
+const USER_MODE_KEYBOARD_ICON_PATH: &str = "icons/keyboard.png";
+const USER_MODE_SOUND_ICON_PATH: &str = "icons/sound.png";
 const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
@@ -160,6 +168,7 @@ pub enum UserModeScreen {
     ControlsHub,
     ControllerTest,
     KeySettings,
+    SoundSettings,
     CharacterSelect,
     ArenaSelect,
     ControlsBriefing,
@@ -173,25 +182,94 @@ pub enum UserModeScreen {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ControlsHubChoice {
     #[default]
-    ControllerSetup,
-    ControllerTest,
-    KeyboardControls,
+    Controller,
+    Keyboard,
+    Sound,
 }
 
 impl ControlsHubChoice {
     fn previous(self) -> Self {
         match self {
-            Self::ControllerSetup => Self::KeyboardControls,
-            Self::ControllerTest => Self::ControllerSetup,
-            Self::KeyboardControls => Self::ControllerTest,
+            Self::Controller => Self::Sound,
+            Self::Keyboard => Self::Controller,
+            Self::Sound => Self::Keyboard,
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::ControllerSetup => Self::ControllerTest,
-            Self::ControllerTest => Self::KeyboardControls,
-            Self::KeyboardControls => Self::ControllerSetup,
+            Self::Controller => Self::Keyboard,
+            Self::Keyboard => Self::Sound,
+            Self::Sound => Self::Controller,
+        }
+    }
+
+    const fn icon_path(self) -> &'static str {
+        match self {
+            Self::Controller => USER_MODE_CONTROLLER_ICON_PATH,
+            Self::Keyboard => USER_MODE_KEYBOARD_ICON_PATH,
+            Self::Sound => USER_MODE_SOUND_ICON_PATH,
+        }
+    }
+
+    fn icon_source_rect(self) -> Rect {
+        match self {
+            Self::Controller => {
+                Rect::from_corners(Vec2::new(350.0, 180.0), Vec2::new(1_190.0, 810.0))
+            }
+            Self::Keyboard => {
+                Rect::from_corners(Vec2::new(418.0, 213.0), Vec2::new(1_122.0, 741.0))
+            }
+            Self::Sound => Rect::from_corners(Vec2::new(436.0, 244.0), Vec2::new(1_108.0, 748.0)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SoundSettingsChannel {
+    #[default]
+    BackgroundMusic,
+    SoundEffects,
+}
+
+impl SoundSettingsChannel {
+    const fn previous(self) -> Self {
+        match self {
+            Self::BackgroundMusic => Self::SoundEffects,
+            Self::SoundEffects => Self::BackgroundMusic,
+        }
+    }
+
+    const fn next(self) -> Self {
+        self.previous()
+    }
+
+    const fn audio_channel(self) -> crate::control_settings::AudioChannel {
+        match self {
+            Self::BackgroundMusic => crate::control_settings::AudioChannel::Music,
+            Self::SoundEffects => crate::control_settings::AudioChannel::SoundEffects,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BackgroundMusic => "BACKGROUND MUSIC",
+            Self::SoundEffects => "SOUND EFFECTS",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoundVolumeStep {
+    Decrease,
+    Increase,
+}
+
+impl SoundVolumeStep {
+    const fn direction(self) -> i8 {
+        match self {
+            Self::Decrease => -1,
+            Self::Increase => 1,
         }
     }
 }
@@ -359,6 +437,10 @@ pub(crate) enum UserModeUiAction {
     MainMenu(UserModeMainMenuChoice),
     PlayerCount(UserModePlayerCountChoice),
     ControlsHub(ControlsHubChoice),
+    OpenControllerSetup,
+    SelectSoundChannel(SoundSettingsChannel),
+    ToggleSoundChannel(SoundSettingsChannel),
+    AdjustSoundChannel(SoundSettingsChannel, SoundVolumeStep),
     Previous,
     Next,
     PreviousColumn,
@@ -379,6 +461,17 @@ pub(crate) enum UserModeUiAction {
     CancelKeyReset,
     KeyBinding(KeyBindingCapture),
     Result(UserModeResultChoice),
+}
+
+impl UserModeUiAction {
+    const fn sound_channel(self) -> Option<SoundSettingsChannel> {
+        match self {
+            Self::SelectSoundChannel(channel)
+            | Self::ToggleSoundChannel(channel)
+            | Self::AdjustSoundChannel(channel, _) => Some(channel),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +497,18 @@ enum UserModeControllerIntent {
     OpenBindings(usize),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UserModeTransitionAction {
+    EnterMainMenu {
+        reset_dev_state: bool,
+    },
+    Route(UserModeUiAction),
+    FinishControllerSetup,
+    ShowBattleResult,
+    #[cfg(target_arch = "wasm32")]
+    ApplyWebMatchConfig(WebMatchConfig),
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct UserModeState {
     screen: UserModeScreen,
@@ -418,6 +523,7 @@ pub struct UserModeState {
     key_settings_cursor: usize,
     key_capture: Option<KeyBindingCapture>,
     controls_hub_choice: ControlsHubChoice,
+    sound_settings_channel: SoundSettingsChannel,
     controller_setup_context: ControllerSetupContext,
     controller_setup_phase: ControllerSetupPhase,
     controller_setup_snapshot: [LocalInputAssignment; FIGHTER_COUNT],
@@ -432,6 +538,7 @@ pub struct UserModeState {
     battle_music_pending: bool,
     battle_bot_ai_pending: bool,
     battle_active: bool,
+    result_sequence_active: bool,
     result_elapsed: f32,
     result_menu_ready: bool,
     result_choice: UserModeResultChoice,
@@ -541,7 +648,8 @@ pub fn mark_web_gameplay_scene_loaded() {}
 pub fn mark_web_gameplay_scene_loaded() {}
 
 #[cfg(target_arch = "wasm32")]
-struct WebMatchConfig {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WebMatchConfig {
     play_mode: UserPlayMode,
     player_characters: [CharacterKind; FIGHTER_COUNT],
     arena_index: usize,
@@ -775,7 +883,8 @@ impl Default for UserModeState {
             character_select_player: 0,
             key_settings_cursor: 0,
             key_capture: None,
-            controls_hub_choice: ControlsHubChoice::ControllerSetup,
+            controls_hub_choice: ControlsHubChoice::Controller,
+            sound_settings_channel: SoundSettingsChannel::BackgroundMusic,
             controller_setup_context: ControllerSetupContext::Match,
             controller_setup_phase: ControllerSetupPhase::Normal,
             controller_setup_snapshot: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
@@ -790,6 +899,7 @@ impl Default for UserModeState {
             battle_music_pending: false,
             battle_bot_ai_pending: false,
             battle_active: false,
+            result_sequence_active: false,
             result_elapsed: 0.0,
             result_menu_ready: false,
             result_choice: UserModeResultChoice::PlayAgain,
@@ -876,7 +986,10 @@ impl UserModeState {
     }
 
     pub fn blocks_dev_input(&self) -> bool {
-        self.active() || self.battle_music_pending || self.battle_active
+        self.active()
+            || self.battle_music_pending
+            || self.battle_active
+            || self.result_sequence_active
     }
 
     pub fn hides_dev_controls(&self) -> bool {
@@ -884,7 +997,7 @@ impl UserModeState {
     }
 
     pub fn shows_gameplay_hud(&self) -> bool {
-        !self.active()
+        (!self.active() && !self.result_sequence_active)
             || matches!(
                 self.screen,
                 UserModeScreen::TutorialLesson
@@ -897,6 +1010,7 @@ impl UserModeState {
         !self.tutorial_screen_active()
             && (self.battle_active
                 || self.battle_music_pending
+                || self.result_sequence_active
                 || self.screen == UserModeScreen::ControlsBriefing
                 || self.screen == UserModeScreen::BattleResult)
     }
@@ -905,6 +1019,7 @@ impl UserModeState {
         (self.play_mode == UserPlayMode::SinglePlayer
             && (self.battle_active
                 || self.battle_music_pending
+                || self.result_sequence_active
                 || self.screen == UserModeScreen::BattleResult))
             .then_some(USER_MODE_PLAYER_FIGHTER_ID)
     }
@@ -957,7 +1072,9 @@ impl UserModeState {
 
     #[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
     pub fn blocks_practice_health_refill(&self) -> bool {
-        self.battle_active || self.screen == UserModeScreen::BattleResult
+        self.battle_active
+            || self.result_sequence_active
+            || self.screen == UserModeScreen::BattleResult
     }
 
     fn enter_fresh_mode_select(&mut self) {
@@ -972,7 +1089,8 @@ impl UserModeState {
         self.character_select_player = 0;
         self.key_settings_cursor = 0;
         self.key_capture = None;
-        self.controls_hub_choice = ControlsHubChoice::ControllerSetup;
+        self.controls_hub_choice = ControlsHubChoice::Controller;
+        self.sound_settings_channel = SoundSettingsChannel::BackgroundMusic;
         self.controller_setup_context = ControllerSetupContext::Match;
         self.controller_setup_phase = ControllerSetupPhase::Normal;
         self.controller_setup_snapshot = [LocalInputAssignment::Unassigned; FIGHTER_COUNT];
@@ -1152,6 +1270,13 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
+    fn enter_sound_settings(&mut self) {
+        self.screen = UserModeScreen::SoundSettings;
+        self.sound_settings_channel = SoundSettingsChannel::BackgroundMusic;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
     fn enter_controls_briefing(&mut self) {
         self.screen = UserModeScreen::ControlsBriefing;
         self.key_capture = None;
@@ -1159,8 +1284,8 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
-    fn enter_battle_result(&mut self, winner: Option<usize>) {
-        self.screen = UserModeScreen::BattleResult;
+    fn begin_battle_result_sequence(&mut self, winner: Option<usize>) {
+        self.result_sequence_active = true;
         self.result_elapsed = 0.0;
         self.result_menu_ready = false;
         self.result_choice = UserModeResultChoice::PlayAgain;
@@ -1172,7 +1297,8 @@ impl UserModeState {
     /// the only recovery path: Play Again creates a fresh revision and Choose
     /// Character explicitly cancels this request before a later new match.
     pub(crate) fn present_embedded_authority_failure(&mut self) {
-        self.enter_battle_result(None);
+        self.begin_battle_result_sequence(None);
+        self.reveal_battle_result();
         self.battle_music_pending = false;
         self.battle_bot_ai_pending = false;
         self.battle_active = false;
@@ -1191,15 +1317,23 @@ impl UserModeState {
     }
 
     fn tick_battle_result(&mut self, dt: f32) -> bool {
-        if self.screen != UserModeScreen::BattleResult || self.result_menu_ready {
+        if !self.result_sequence_active || self.result_menu_ready {
             return false;
         }
         self.result_elapsed += dt;
-        if self.result_elapsed >= USER_MODE_RESULT_MENU_DELAY_SECS {
-            self.result_menu_ready = true;
-            return true;
-        }
-        false
+        self.result_elapsed >= USER_MODE_RESULT_MENU_DELAY_SECS
+    }
+
+    fn reveal_battle_result(&mut self) {
+        self.screen = UserModeScreen::BattleResult;
+        self.result_sequence_active = false;
+        self.result_menu_ready = true;
+    }
+
+    #[cfg(test)]
+    fn enter_battle_result(&mut self, winner: Option<usize>) {
+        self.begin_battle_result_sequence(winner);
+        self.screen = UserModeScreen::BattleResult;
     }
 
     fn toggle_result_choice(&mut self) {
@@ -1214,6 +1348,7 @@ impl UserModeState {
     }
 
     fn clear_result_state(&mut self) {
+        self.result_sequence_active = false;
         self.result_elapsed = 0.0;
         self.result_menu_ready = false;
         self.result_choice = UserModeResultChoice::PlayAgain;
@@ -1491,6 +1626,23 @@ fn controller_user_mode_action(
                 accept.then_some(UserModeUiAction::Confirm)
             }
         }
+        UserModeScreen::SoundSettings => {
+            if up ^ down {
+                Some(if up {
+                    UserModeUiAction::Previous
+                } else {
+                    UserModeUiAction::Next
+                })
+            } else if left ^ right {
+                Some(if left {
+                    UserModeUiAction::PreviousColumn
+                } else {
+                    UserModeUiAction::NextColumn
+                })
+            } else {
+                accept.then_some(UserModeUiAction::Confirm)
+            }
+        }
         UserModeScreen::DeviceJoin
         | UserModeScreen::ControllerTest
         | UserModeScreen::CharacterSelect
@@ -1593,7 +1745,9 @@ fn route_user_mode_action(
                 user_mode.enter_mode_select();
                 UserModeRoute::None
             }
-            UserModeScreen::ControllerTest | UserModeScreen::KeySettings => {
+            UserModeScreen::ControllerTest
+            | UserModeScreen::KeySettings
+            | UserModeScreen::SoundSettings => {
                 user_mode.enter_controls_hub();
                 UserModeRoute::None
             }
@@ -1667,9 +1821,9 @@ fn route_user_mode_action(
         (UserModeScreen::ControlsHub, UserModeUiAction::ControlsHub(choice)) => {
             user_mode.controls_hub_choice = choice;
             match choice {
-                ControlsHubChoice::ControllerSetup => user_mode.enter_settings_device_join(),
-                ControlsHubChoice::ControllerTest => user_mode.enter_controller_test(),
-                ControlsHubChoice::KeyboardControls => user_mode.enter_key_settings(),
+                ControlsHubChoice::Controller => user_mode.enter_controller_test(),
+                ControlsHubChoice::Keyboard => user_mode.enter_key_settings(),
+                ControlsHubChoice::Sound => user_mode.enter_sound_settings(),
             }
             UserModeRoute::None
         }
@@ -1683,10 +1837,31 @@ fn route_user_mode_action(
         }
         (UserModeScreen::ControlsHub, UserModeUiAction::Confirm) => {
             match user_mode.controls_hub_choice {
-                ControlsHubChoice::ControllerSetup => user_mode.enter_settings_device_join(),
-                ControlsHubChoice::ControllerTest => user_mode.enter_controller_test(),
-                ControlsHubChoice::KeyboardControls => user_mode.enter_key_settings(),
+                ControlsHubChoice::Controller => user_mode.enter_controller_test(),
+                ControlsHubChoice::Keyboard => user_mode.enter_key_settings(),
+                ControlsHubChoice::Sound => user_mode.enter_sound_settings(),
             }
+            UserModeRoute::None
+        }
+        (UserModeScreen::SoundSettings, UserModeUiAction::Previous) => {
+            user_mode.sound_settings_channel = user_mode.sound_settings_channel.previous();
+            UserModeRoute::None
+        }
+        (UserModeScreen::SoundSettings, UserModeUiAction::Next) => {
+            user_mode.sound_settings_channel = user_mode.sound_settings_channel.next();
+            UserModeRoute::None
+        }
+        (
+            UserModeScreen::SoundSettings,
+            UserModeUiAction::SelectSoundChannel(channel)
+            | UserModeUiAction::ToggleSoundChannel(channel)
+            | UserModeUiAction::AdjustSoundChannel(channel, _),
+        ) => {
+            user_mode.sound_settings_channel = channel;
+            UserModeRoute::None
+        }
+        (UserModeScreen::ControllerTest, UserModeUiAction::OpenControllerSetup) => {
+            user_mode.enter_settings_device_join();
             UserModeRoute::None
         }
         (UserModeScreen::CharacterSelect, UserModeUiAction::Previous) => {
@@ -1768,6 +1943,110 @@ fn route_user_mode_action(
         }
         _ => UserModeRoute::None,
     }
+}
+
+fn user_mode_action_requires_transition(
+    user_mode: &UserModeState,
+    action: UserModeUiAction,
+) -> bool {
+    if action == UserModeUiAction::Back {
+        if user_mode.key_capture.is_some()
+            || user_mode.key_reset_confirmation
+            || (user_mode.screen == UserModeScreen::DeviceJoin
+                && (user_mode.controller_setup_clear_confirmation
+                    || user_mode.controller_setup_phase == ControllerSetupPhase::Reorder))
+            || (user_mode.screen == UserModeScreen::CharacterSelect
+                && user_mode.character_select_player > 0)
+        {
+            return false;
+        }
+        if user_mode.screen == UserModeScreen::ModeSelect {
+            return cfg!(all(feature = "native", not(target_arch = "wasm32")));
+        }
+        return matches!(
+            user_mode.screen,
+            UserModeScreen::PlayerCountSelect
+                | UserModeScreen::DeviceJoin
+                | UserModeScreen::ControlsHub
+                | UserModeScreen::ControllerTest
+                | UserModeScreen::KeySettings
+                | UserModeScreen::SoundSettings
+                | UserModeScreen::CharacterSelect
+                | UserModeScreen::ArenaSelect
+                | UserModeScreen::ControlsBriefing
+        );
+    }
+
+    match (user_mode.screen, action) {
+        (UserModeScreen::ModeSelect, UserModeUiAction::MainMenu(_) | UserModeUiAction::Confirm)
+        | (
+            UserModeScreen::PlayerCountSelect,
+            UserModeUiAction::PlayerCount(_) | UserModeUiAction::Confirm,
+        )
+        | (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
+        | (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm)
+        | (UserModeScreen::BattleResult, UserModeUiAction::Result(_) | UserModeUiAction::Confirm) => {
+            true
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::ControlsHub(choice)) => {
+            let _ = choice;
+            true
+        }
+        (UserModeScreen::ControlsHub, UserModeUiAction::Confirm) => true,
+        (UserModeScreen::ControllerTest, UserModeUiAction::OpenControllerSetup) => true,
+        (UserModeScreen::CharacterSelect, UserModeUiAction::Confirm) => {
+            let current = user_mode
+                .character_select_player
+                .min(user_mode.play_mode.human_player_count() - 1);
+            user_mode
+                .character_ready
+                .iter()
+                .take(user_mode.play_mode.human_player_count())
+                .enumerate()
+                .all(|(player, ready)| *ready || player == current)
+        }
+        _ => false,
+    }
+}
+
+fn user_mode_route_reveal(
+    user_mode: &UserModeState,
+    action: UserModeUiAction,
+) -> GameTransitionReveal {
+    match (user_mode.screen, action) {
+        (UserModeScreen::ArenaSelect, UserModeUiAction::Confirm)
+            if user_mode.controls_briefing_seen =>
+        {
+            GameTransitionReveal::BattleReady
+        }
+        (UserModeScreen::ControlsBriefing, UserModeUiAction::Confirm) => {
+            GameTransitionReveal::BattleReady
+        }
+        (
+            UserModeScreen::BattleResult,
+            UserModeUiAction::Result(UserModeResultChoice::PlayAgain),
+        ) => GameTransitionReveal::BattleReady,
+        (UserModeScreen::BattleResult, UserModeUiAction::Confirm)
+            if user_mode.result_choice == UserModeResultChoice::PlayAgain =>
+        {
+            GameTransitionReveal::BattleReady
+        }
+        _ => GameTransitionReveal::Immediate,
+    }
+}
+
+fn request_user_mode_transition(
+    transition: &mut GameTransition,
+    pause_owners: &mut GameplayPauseOwners,
+    action: UserModeTransitionAction,
+    reveal: GameTransitionReveal,
+) -> bool {
+    request_game_transition(
+        transition,
+        pause_owners,
+        GameTransitionAction::UserMode(action),
+        reveal,
+    )
 }
 
 #[derive(Component)]
@@ -1872,6 +2151,22 @@ pub(crate) struct UserModeDeviceJoinClearText;
 
 #[derive(Component)]
 pub(crate) struct UserModeControlsHubPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeSoundSettingsPanel;
+
+#[derive(Component)]
+pub(crate) struct UserModeSoundChannelCard;
+
+#[derive(Component)]
+pub(crate) struct UserModeSoundToggleText {
+    channel: SoundSettingsChannel,
+}
+
+#[derive(Component)]
+pub(crate) struct UserModeSoundVolumeText {
+    channel: SoundSettingsChannel,
+}
 
 #[derive(Component)]
 pub(crate) struct UserModeControllerTestPanel;
@@ -2013,6 +2308,135 @@ fn user_mode_action_button(
             TextShadow::default(),
             TextLayout::new_with_justify(Justify::Center),
         )],
+    )
+}
+
+fn settings_icon_button(asset_server: &AssetServer, choice: ControlsHubChoice) -> impl Bundle {
+    (
+        Button,
+        UserModeUiAction::ControlsHub(choice),
+        Node {
+            width: Val::Px(300.0),
+            height: Val::Px(260.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(10.0),
+            border: UiRect::all(Val::Px(3.0)),
+            padding: UiRect::all(Val::Px(14.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        children![(
+            Node {
+                width: Val::Px(248.0),
+                height: Val::Px(186.0),
+                ..default()
+            },
+            ImageNode::new(asset_server.load(choice.icon_path()))
+                .with_rect(choice.icon_source_rect())
+                .with_mode(NodeImageMode::Stretch),
+            Pickable::IGNORE,
+        ),],
+    )
+}
+
+fn sound_settings_card(channel: SoundSettingsChannel) -> impl Bundle {
+    (
+        Button,
+        UserModeUiAction::SelectSoundChannel(channel),
+        UserModeSoundChannelCard,
+        Node {
+            width: Val::Px(660.0),
+            min_height: Val::Px(176.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(14.0),
+            border: UiRect::all(Val::Px(3.0)),
+            padding: UiRect::all(Val::Px(18.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+        children![
+            (
+                Text::new(channel.label()),
+                TextFont {
+                    font_size: 26.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.98, 0.86, 0.58)),
+                TextShadow::default(),
+                Pickable::IGNORE,
+            ),
+            (
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(14.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
+                    (
+                        Button,
+                        UserModeUiAction::ToggleSoundChannel(channel),
+                        Node {
+                            width: Val::Px(128.0),
+                            height: Val::Px(52.0),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border: UiRect::all(Val::Px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.055, 0.055, 0.065, 0.94)),
+                        BorderColor::all(Color::srgb(0.42, 0.4, 0.35)),
+                        children![(
+                            UserModeSoundToggleText { channel },
+                            Text::new("ON"),
+                            TextFont {
+                                font_size: 20.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                            Pickable::IGNORE,
+                        )],
+                    ),
+                    user_mode_action_button(
+                        "-",
+                        UserModeUiAction::AdjustSoundChannel(channel, SoundVolumeStep::Decrease,),
+                        Val::Px(64.0),
+                        52.0,
+                        28.0,
+                    ),
+                    (
+                        UserModeSoundVolumeText { channel },
+                        Text::new("100%"),
+                        TextFont {
+                            font_size: 24.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.92, 0.82)),
+                        TextLayout::new_with_justify(Justify::Center),
+                        Node {
+                            width: Val::Px(96.0),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ),
+                    user_mode_action_button(
+                        "+",
+                        UserModeUiAction::AdjustSoundChannel(channel, SoundVolumeStep::Increase,),
+                        Val::Px(64.0),
+                        52.0,
+                        28.0,
+                    ),
+                ],
+            ),
+        ],
     )
 }
 
@@ -2412,8 +2836,9 @@ pub fn setup_user_mode_ui(
                         },
                         ImageNode::new(asset_server.load(USER_MODE_GAME_LOGO_PATH))
                             .with_rect(Rect {
-                                min: Vec2::new(288.0, 96.0),
-                                max: Vec2::new(1248.0, 816.0),
+                                // Center the visible artwork over the menu-button column.
+                                min: Vec2::new(230.0, 96.0),
+                                max: Vec2::new(1190.0, 816.0),
                             })
                             .with_mode(NodeImageMode::Stretch),
                         Pickable::IGNORE,
@@ -2452,14 +2877,6 @@ pub fn setup_user_mode_ui(
                         Val::Px(340.0),
                         58.0,
                         24.0,
-                    ),
-                    (
-                        Text::new("D-pad or W/S choose  |  A / Enter confirm  |  B back"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
                     ),
                 ],
             ),
@@ -2526,13 +2943,14 @@ pub fn setup_user_mode_ui(
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(16.0),
+                    row_gap: Val::Px(18.0),
+                    padding: UiRect::axes(Val::Px(36.0), Val::Px(24.0)),
                     ..default()
                 },
                 Pickable::IGNORE,
                 children![
                     (
-                        Text::new("CONTROLS"),
+                        Text::new("SETTINGS"),
                         TextFont {
                             font_size: 46.0,
                             ..default()
@@ -2541,42 +2959,49 @@ pub fn setup_user_mode_ui(
                         TextShadow::default(),
                     ),
                     (
-                        Text::new("Connect, verify, and tune every local player's controls."),
-                        TextFont {
-                            font_size: 19.0,
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(24.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.72, 0.7, 0.64)),
+                        Pickable::IGNORE,
+                        children![
+                            settings_icon_button(&asset_server, ControlsHubChoice::Controller),
+                            settings_icon_button(&asset_server, ControlsHubChoice::Keyboard),
+                            settings_icon_button(&asset_server, ControlsHubChoice::Sound),
+                        ],
                     ),
-                    user_mode_action_button(
-                        "CONTROLLER SETUP",
-                        UserModeUiAction::ControlsHub(ControlsHubChoice::ControllerSetup),
-                        Val::Px(420.0),
-                        68.0,
-                        24.0,
-                    ),
-                    user_mode_action_button(
-                        "CONTROLLER TEST",
-                        UserModeUiAction::ControlsHub(ControlsHubChoice::ControllerTest),
-                        Val::Px(420.0),
-                        68.0,
-                        24.0,
-                    ),
-                    user_mode_action_button(
-                        "KEYBOARD CONTROLS",
-                        UserModeUiAction::ControlsHub(ControlsHubChoice::KeyboardControls),
-                        Val::Px(420.0),
-                        68.0,
-                        24.0,
-                    ),
+                ],
+            ),
+            (
+                UserModeSoundSettingsPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(18.0),
+                    padding: UiRect::axes(Val::Px(42.0), Val::Px(28.0)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                children![
                     (
-                        Text::new("Up/Down choose  |  Confirm open  |  Back return"),
+                        Text::new("SOUND"),
                         TextFont {
-                            font_size: 18.0,
+                            font_size: 46.0,
                             ..default()
                         },
-                        TextColor(Color::srgb(0.68, 0.66, 0.62)),
+                        TextColor(Color::srgb(0.95, 0.86, 0.68)),
+                        TextShadow::default(),
                     ),
+                    sound_settings_card(SoundSettingsChannel::BackgroundMusic),
+                    sound_settings_card(SoundSettingsChannel::SoundEffects),
                 ],
             ),
             (
@@ -3042,6 +3467,13 @@ pub fn setup_user_mode_ui(
                         },
                         TextColor(Color::srgb(0.9, 0.86, 0.76)),
                         TextLayout::new_with_justify(Justify::Center),
+                    ),
+                    user_mode_action_button(
+                        "CONTROLLER SETUP",
+                        UserModeUiAction::OpenControllerSetup,
+                        Val::Px(230.0),
+                        48.0,
+                        18.0,
                     ),
                     (
                         Node {
@@ -3584,6 +4016,12 @@ fn controller_test_message(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CharacterDeviceOutcome {
+    Immediate(UserModeRoute),
+    Transition(UserModeUiAction),
+}
+
 fn handle_character_device_actions(
     user_mode: &mut UserModeState,
     keys: &ButtonInput<KeyCode>,
@@ -3592,7 +4030,7 @@ fn handle_character_device_actions(
     metadata: &Query<&ControllerDeviceInfo>,
     dt: f32,
     trackers: &mut MenuNavigationTrackers,
-) -> Option<UserModeRoute> {
+) -> Option<CharacterDeviceOutcome> {
     let mut handled = false;
     for player in 0..user_mode.play_mode.human_player_count() {
         let assignment = user_mode.input_assignments[player];
@@ -3621,15 +4059,18 @@ fn handle_character_device_actions(
             continue;
         }
 
+        if user_mode_action_requires_transition(user_mode, action) {
+            return Some(CharacterDeviceOutcome::Transition(action));
+        }
         let route = route_user_mode_action(user_mode, action);
         if route == UserModeRoute::ArenaEntered || route == UserModeRoute::ControlsBack {
-            return Some(route);
+            return Some(CharacterDeviceOutcome::Immediate(route));
         }
         if user_mode.screen != UserModeScreen::CharacterSelect {
-            return Some(route);
+            return Some(CharacterDeviceOutcome::Immediate(route));
         }
     }
-    handled.then_some(UserModeRoute::None)
+    handled.then_some(CharacterDeviceOutcome::Immediate(UserModeRoute::None))
 }
 
 fn unassigned_gamepad_user_mode_action(
@@ -3659,23 +4100,16 @@ pub struct UserModeInputDevices<'w, 's> {
 }
 
 #[derive(SystemParam)]
-pub struct UserModeInputContext<'w, 's> {
-    asset_server: Res<'w, AssetServer>,
+pub struct UserModeInputContext<'w> {
     user_mode: ResMut<'w, UserModeState>,
     key_bindings: ResMut<'w, PlayerKeyBindings>,
     control_preferences: ResMut<'w, ControlPreferences>,
     rumble_requests: MessageWriter<'w, ControllerHapticRequest>,
-    setup: ResMut<'w, LocalSetup>,
-    state: ResMut<'w, MatchState>,
     active_arena: ResMut<'w, ActiveArena>,
-    gameplay_scene: Res<'w, UserModeGameplayScene>,
+    sfx_preview_requests: MessageWriter<'w, SfxPreviewRequest>,
     announcements: ResMut<'w, MatchAnnouncements>,
-    music: Query<'w, 's, Entity, With<UserModeMusic>>,
-    presentation_time_scale: ResMut<'w, PresentationTimeScale>,
-    screen_look: ResMut<'w, ScreenLook>,
-    screen_transition: ResMut<'w, ScreenLookTransition>,
     pause_owners: ResMut<'w, GameplayPauseOwners>,
-    tutorial_transition: ResMut<'w, TutorialTransition>,
+    game_transition: ResMut<'w, GameTransition>,
 }
 
 /// Samples Steam's current menu-action values into an edge-latched user-mode
@@ -3708,32 +4142,112 @@ pub fn sample_user_mode_steam_input(
     }
 }
 
-pub fn sync_main_menu_pointer_hover(
+pub fn sync_user_mode_pointer_hover(
+    transition: Res<GameTransition>,
     mut user_mode: ResMut<UserModeState>,
     action_buttons: Query<(&Interaction, &UserModeUiAction), Changed<Interaction>>,
 ) {
-    if user_mode.screen != UserModeScreen::ModeSelect {
+    if transition.active() {
         return;
     }
 
-    if let Some(choice) = action_buttons.iter().find_map(|(interaction, action)| {
+    for (interaction, action) in &action_buttons {
         if *interaction != Interaction::Hovered {
-            return None;
+            continue;
         }
-        match action {
-            UserModeUiAction::MainMenu(choice) => Some(*choice),
-            _ => None,
+        match (user_mode.screen, action) {
+            (UserModeScreen::ModeSelect, UserModeUiAction::MainMenu(choice)) => {
+                user_mode.main_menu_choice = *choice;
+            }
+            (UserModeScreen::ControlsHub, UserModeUiAction::ControlsHub(choice)) => {
+                user_mode.controls_hub_choice = *choice;
+            }
+            (UserModeScreen::SoundSettings, action) => {
+                if let Some(channel) = action.sound_channel() {
+                    user_mode.sound_settings_channel = channel;
+                }
+            }
+            _ => {}
         }
-    }) {
-        user_mode.main_menu_choice = choice;
     }
+}
+
+fn handle_sound_settings_action(
+    user_mode: &mut UserModeState,
+    action: UserModeUiAction,
+    key_bindings: &PlayerKeyBindings,
+    preferences: &mut ControlPreferences,
+    preview_requests: &mut MessageWriter<SfxPreviewRequest>,
+    announcements: &mut MatchAnnouncements,
+) -> bool {
+    match action {
+        UserModeUiAction::Back => return false,
+        UserModeUiAction::Previous
+        | UserModeUiAction::Next
+        | UserModeUiAction::SelectSoundChannel(_) => {
+            route_user_mode_action(user_mode, action);
+            return true;
+        }
+        _ => {}
+    }
+
+    let (channel, step) = match action {
+        UserModeUiAction::Confirm => (user_mode.sound_settings_channel, None),
+        UserModeUiAction::PreviousColumn => (
+            user_mode.sound_settings_channel,
+            Some(SoundVolumeStep::Decrease),
+        ),
+        UserModeUiAction::NextColumn => (
+            user_mode.sound_settings_channel,
+            Some(SoundVolumeStep::Increase),
+        ),
+        UserModeUiAction::ToggleSoundChannel(channel) => (channel, None),
+        UserModeUiAction::AdjustSoundChannel(channel, step) => (channel, Some(step)),
+        _ => return false,
+    };
+    user_mode.sound_settings_channel = channel;
+
+    let preference = preferences.audio_mut(channel.audio_channel());
+    let message = if let Some(step) = step {
+        preference.step(step.direction());
+        format!(
+            "{}: {}%{}",
+            channel.label(),
+            preference.volume_percent(),
+            if preference.enabled() { "" } else { " (OFF)" }
+        )
+    } else {
+        preference.toggle();
+        format!(
+            "{}: {}",
+            channel.label(),
+            if preference.enabled() { "ON" } else { "OFF" }
+        )
+    };
+    let preference = *preference;
+
+    if channel == SoundSettingsChannel::SoundEffects {
+        preview_requests.write(if preference.enabled() && preference.volume_percent() > 0 {
+            SfxPreviewRequest::Play
+        } else {
+            SfxPreviewRequest::Stop
+        });
+    }
+
+    match save_control_preferences(key_bindings, preferences) {
+        Ok(()) => announcements.show(message, 0.8),
+        Err(error) => {
+            warn!("Could not save control preferences: {error}");
+            announcements.show(format!("{message} — save failed"), 1.1);
+        }
+    }
+    true
 }
 
 pub fn handle_user_mode_input(
     devices: UserModeInputDevices,
     context: UserModeInputContext,
     mut menu_navigation: Local<MenuNavigationTrackers>,
-    mut commands: Commands,
 ) {
     let UserModeInputDevices {
         keys,
@@ -3744,25 +4258,18 @@ pub fn handle_user_mode_input(
         action_buttons,
     } = devices;
     let UserModeInputContext {
-        asset_server,
         mut user_mode,
         mut key_bindings,
         mut control_preferences,
         mut rumble_requests,
-        mut setup,
-        mut state,
         mut active_arena,
-        gameplay_scene,
+        mut sfx_preview_requests,
         mut announcements,
-        music,
-        mut presentation_time_scale,
-        mut screen_look,
-        mut screen_transition,
         mut pause_owners,
-        mut tutorial_transition,
+        mut game_transition,
     } = context;
 
-    if tutorial_transition.active() {
+    if game_transition.active() {
         return;
     }
 
@@ -3780,8 +4287,14 @@ pub fn handle_user_mode_input(
                 gamepad.just_pressed(family.confirm_button())
             })
         {
-            user_mode.enter_fresh_mode_select();
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::EnterMainMenu {
+                    reset_dev_state: false,
+                },
+                GameTransitionReveal::Immediate,
+            );
         }
         return;
     }
@@ -3789,18 +4302,14 @@ pub fn handle_user_mode_input(
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     {
         if !user_mode.blocks_dev_input() && user_mode_pressed(&keys) {
-            stop_user_mode_music(&mut commands, &music);
-            reset_user_mode_presentation(
-                &mut presentation_time_scale,
-                &mut screen_look,
-                &mut screen_transition,
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::EnterMainMenu {
+                    reset_dev_state: true,
+                },
+                GameTransitionReveal::Immediate,
             );
-            start_user_mode_menu_music(&mut commands, &asset_server);
-            user_mode.enter_fresh_mode_select();
-            if state.phase != MatchPhase::Setup {
-                state.return_to_setup();
-            }
-            announcements.show("", 0.0);
             return;
         }
     }
@@ -3837,9 +4346,16 @@ pub fn handle_user_mode_input(
         {
             if user_mode.controller_setup_context == ControllerSetupContext::Tutorial {
                 request_tutorial_transition(
-                    &mut tutorial_transition,
+                    &mut game_transition,
                     &mut pause_owners,
                     TutorialTransitionAction::LeaveTutorial,
+                );
+            } else if user_mode_action_requires_transition(&user_mode, UserModeUiAction::Back) {
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(UserModeUiAction::Back),
+                    GameTransitionReveal::Immediate,
                 );
             } else {
                 route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
@@ -3943,20 +4459,20 @@ pub fn handle_user_mode_input(
                         );
                     }
                     match user_mode.controller_setup_context {
-                        ControllerSetupContext::Settings => {
-                            user_mode.enter_controls_hub();
-                            announcements.show("Controller setup saved for this session", 1.0);
+                        ControllerSetupContext::Settings | ControllerSetupContext::Match => {
+                            request_user_mode_transition(
+                                &mut game_transition,
+                                &mut pause_owners,
+                                UserModeTransitionAction::FinishControllerSetup,
+                                GameTransitionReveal::Immediate,
+                            );
                         }
                         ControllerSetupContext::Tutorial => {
                             request_tutorial_transition(
-                                &mut tutorial_transition,
+                                &mut game_transition,
                                 &mut pause_owners,
                                 TutorialTransitionAction::EnterHub,
                             );
-                        }
-                        ControllerSetupContext::Match => {
-                            user_mode.enter_character_select();
-                            announcements.show("Choose your characters", 0.9);
                         }
                     }
                 }
@@ -3975,16 +4491,17 @@ pub fn handle_user_mode_input(
             | UserModeScreen::ArenaSelect
     ) {
         if let Some(config) = take_web_match_config() {
-            user_mode.play_mode = config.play_mode;
-            user_mode.player_characters = config.player_characters;
-            user_mode.arena_index = config.arena_index;
-            if let Some(bindings) = config.bindings {
-                *key_bindings = bindings;
-            }
-            stop_user_mode_music(&mut commands, &music);
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
-            active_arena.select(state.arena_index);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            let reveal = if user_mode.controls_briefing_seen {
+                GameTransitionReveal::BattleReady
+            } else {
+                GameTransitionReveal::Immediate
+            };
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::ApplyWebMatchConfig(config),
+                reveal,
+            );
             return;
         }
     }
@@ -4003,6 +4520,15 @@ pub fn handle_user_mode_input(
         let toggle_haptic_style = pointer_action == Some(UserModeUiAction::ToggleHapticStyle);
         let pointer_test = pointer_action == Some(UserModeUiAction::TestVibration);
         let pointer_combat_test = pointer_action == Some(UserModeUiAction::TestCombatHaptics);
+        if pointer_action == Some(UserModeUiAction::OpenControllerSetup) {
+            request_user_mode_transition(
+                &mut game_transition,
+                &mut pause_owners,
+                UserModeTransitionAction::Route(UserModeUiAction::OpenControllerSetup),
+                GameTransitionReveal::Immediate,
+            );
+            return;
+        }
         if toggle_vibration {
             control_preferences.vibration = control_preferences.vibration.next();
             if !control_preferences.vibration.enabled() {
@@ -4244,7 +4770,12 @@ pub fn handle_user_mode_input(
                 }
             }
             Some(UserModeUiAction::Back) => {
-                route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(UserModeUiAction::Back),
+                    GameTransitionReveal::Immediate,
+                );
             }
             _ => {}
         }
@@ -4366,7 +4897,7 @@ pub fn handle_user_mode_input(
     let web_start_requested = false;
 
     if pointer_action.is_none() && user_mode.screen == UserModeScreen::CharacterSelect {
-        if let Some(route) = handle_character_device_actions(
+        if let Some(outcome) = handle_character_device_actions(
             &mut user_mode,
             &keys,
             &key_bindings,
@@ -4375,6 +4906,19 @@ pub fn handle_user_mode_input(
             real_time.delta_secs(),
             &mut menu_navigation,
         ) {
+            if let CharacterDeviceOutcome::Transition(action) = outcome {
+                let reveal = user_mode_route_reveal(&user_mode, action);
+                request_user_mode_transition(
+                    &mut game_transition,
+                    &mut pause_owners,
+                    UserModeTransitionAction::Route(action),
+                    reveal,
+                );
+                return;
+            }
+            let CharacterDeviceOutcome::Immediate(route) = outcome else {
+                unreachable!();
+            };
             if route == UserModeRoute::ArenaEntered {
                 active_arena.select(user_mode.arena_index);
                 announcements.show("Choose arena", 0.9);
@@ -4402,7 +4946,10 @@ pub fn handle_user_mode_input(
         UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect
     ) || (matches!(
         user_mode.screen,
-        UserModeScreen::ControlsHub | UserModeScreen::ControllerTest | UserModeScreen::KeySettings
+        UserModeScreen::ControlsHub
+            | UserModeScreen::ControllerTest
+            | UserModeScreen::KeySettings
+            | UserModeScreen::SoundSettings
     ) && user_mode.input_assignments[0]
         == LocalInputAssignment::Unassigned);
     let device_action = if before_device_join {
@@ -4438,6 +4985,19 @@ pub fn handle_user_mode_input(
         return;
     };
 
+    if user_mode.screen == UserModeScreen::SoundSettings
+        && handle_sound_settings_action(
+            &mut user_mode,
+            action,
+            &key_bindings,
+            &mut control_preferences,
+            &mut sfx_preview_requests,
+            &mut announcements,
+        )
+    {
+        return;
+    }
+
     let enters_tutorial = user_mode.screen == UserModeScreen::ModeSelect
         && match action {
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial) => true,
@@ -4449,14 +5009,192 @@ pub fn handle_user_mode_input(
     if enters_tutorial {
         user_mode.main_menu_choice = UserModeMainMenuChoice::Tutorial;
         request_tutorial_transition(
-            &mut tutorial_transition,
+            &mut game_transition,
             &mut pause_owners,
             TutorialTransitionAction::EnterDeviceJoin,
         );
         return;
     }
 
+    if user_mode_action_requires_transition(&user_mode, action) {
+        let reveal = user_mode_route_reveal(&user_mode, action);
+        let started = request_user_mode_transition(
+            &mut game_transition,
+            &mut pause_owners,
+            UserModeTransitionAction::Route(action),
+            reveal,
+        );
+        #[cfg(target_arch = "wasm32")]
+        if started && web_start_requested {
+            clear_web_battle_start_signal();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = started;
+        return;
+    }
+
     let route = route_user_mode_action(&mut user_mode, action);
+    match route {
+        UserModeRoute::None => {}
+        UserModeRoute::CharacterPlayerAdvanced => announcements.show(
+            format!(
+                "P{} choose character",
+                user_mode.character_select_player + 1
+            ),
+            0.9,
+        ),
+        UserModeRoute::ArenaChanged => active_arena.select(user_mode.arena_index),
+        UserModeRoute::ArenaEntered
+        | UserModeRoute::PrepareMatch
+        | UserModeRoute::ConfirmBattle
+        | UserModeRoute::Replay
+        | UserModeRoute::ChooseCharacter
+        | UserModeRoute::ControlsBack
+        | UserModeRoute::ReturnToStart
+        | UserModeRoute::ExitToDev => {
+            unreachable!("confirmed screen changes must be committed by GameTransition")
+        }
+    }
+}
+
+#[derive(SystemParam)]
+pub struct UserModeTransitionContext<'w, 's> {
+    asset_server: Res<'w, AssetServer>,
+    control_preferences: Res<'w, ControlPreferences>,
+    user_mode: ResMut<'w, UserModeState>,
+    #[cfg(target_arch = "wasm32")]
+    key_bindings: ResMut<'w, PlayerKeyBindings>,
+    setup: ResMut<'w, LocalSetup>,
+    state: ResMut<'w, MatchState>,
+    active_arena: ResMut<'w, ActiveArena>,
+    announcements: ResMut<'w, MatchAnnouncements>,
+    music: Query<'w, 's, Entity, With<UserModeMusic>>,
+    presentation_time_scale: ResMut<'w, PresentationTimeScale>,
+    screen_look: ResMut<'w, ScreenLook>,
+    screen_transition: ResMut<'w, ScreenLookTransition>,
+    feedback: ResMut<'w, HitEffects>,
+}
+
+pub fn commit_pending_user_mode_transition(
+    mut commands: Commands,
+    mut transition: ResMut<GameTransition>,
+    context: UserModeTransitionContext,
+) {
+    let Some(GameTransitionAction::UserMode(action)) = transition.pending_action().cloned() else {
+        return;
+    };
+    let UserModeTransitionContext {
+        asset_server,
+        control_preferences,
+        mut user_mode,
+        #[cfg(target_arch = "wasm32")]
+        mut key_bindings,
+        mut setup,
+        mut state,
+        mut active_arena,
+        mut announcements,
+        music,
+        mut presentation_time_scale,
+        mut screen_look,
+        mut screen_transition,
+        mut feedback,
+    } = context;
+
+    match action {
+        UserModeTransitionAction::EnterMainMenu { reset_dev_state } => {
+            stop_user_mode_music(&mut commands, &music);
+            if reset_dev_state {
+                reset_user_mode_presentation(
+                    &mut presentation_time_scale,
+                    &mut screen_look,
+                    &mut screen_transition,
+                );
+                if state.phase != MatchPhase::Setup {
+                    state.return_to_setup();
+                }
+                announcements.show("", 0.0);
+            }
+            user_mode.enter_fresh_mode_select();
+            start_user_mode_menu_music(&mut commands, &asset_server, &control_preferences);
+        }
+        UserModeTransitionAction::Route(action) => {
+            let route = route_user_mode_action(&mut user_mode, action);
+            commit_user_mode_route(
+                route,
+                &mut commands,
+                &asset_server,
+                &mut user_mode,
+                &mut setup,
+                &mut state,
+                &mut active_arena,
+                &mut announcements,
+                &music,
+                &control_preferences,
+                &mut presentation_time_scale,
+                &mut screen_look,
+                &mut screen_transition,
+            );
+        }
+        UserModeTransitionAction::FinishControllerSetup => {
+            match user_mode.controller_setup_context {
+                ControllerSetupContext::Settings => {
+                    user_mode.enter_controls_hub();
+                    announcements.show("Controller setup saved for this session", 1.0);
+                }
+                ControllerSetupContext::Match => {
+                    user_mode.enter_character_select();
+                    announcements.show("Choose your characters", 0.9);
+                }
+                ControllerSetupContext::Tutorial => {
+                    debug_assert!(false, "tutorial setup uses a tutorial transition action");
+                }
+            }
+        }
+        UserModeTransitionAction::ShowBattleResult => {
+            user_mode.reveal_battle_result();
+            presentation_time_scale.reset();
+            if let Some(kind) = result_sfx_kind(&user_mode) {
+                feedback.push_combat_sfx(CombatSfxCue::new(
+                    kind,
+                    Vec3::ZERO,
+                    USER_MODE_RESULT_SFX_PRIORITY,
+                ));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        UserModeTransitionAction::ApplyWebMatchConfig(config) => {
+            user_mode.play_mode = config.play_mode;
+            user_mode.player_characters = config.player_characters;
+            user_mode.arena_index = config.arena_index;
+            if let Some(bindings) = config.bindings {
+                *key_bindings = bindings;
+            }
+            stop_user_mode_music(&mut commands, &music);
+            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            active_arena.select(state.arena_index);
+            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+        }
+    }
+
+    transition.mark_committed();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_user_mode_route(
+    route: UserModeRoute,
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    user_mode: &mut UserModeState,
+    setup: &mut LocalSetup,
+    state: &mut MatchState,
+    active_arena: &mut ActiveArena,
+    announcements: &mut MatchAnnouncements,
+    music: &Query<Entity, With<UserModeMusic>>,
+    control_preferences: &ControlPreferences,
+    presentation_time_scale: &mut PresentationTimeScale,
+    screen_look: &mut ScreenLook,
+    screen_transition: &mut ScreenLookTransition,
+) {
     match route {
         UserModeRoute::None => {}
         UserModeRoute::CharacterPlayerAdvanced => announcements.show(
@@ -4472,74 +5210,54 @@ pub fn handle_user_mode_input(
         }
         UserModeRoute::ArenaChanged => active_arena.select(user_mode.arena_index),
         UserModeRoute::PrepareMatch => {
-            stop_user_mode_music(&mut commands, &music);
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            stop_user_mode_music(commands, music);
+            let flow = prepare_user_mode_match(user_mode, setup, state);
             active_arena.select(state.arena_index);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            announce_user_mode_match_flow(flow, setup, announcements);
         }
         UserModeRoute::ConfirmBattle => {
-            if gameplay_scene.ready_for_battle() {
-                #[cfg(target_arch = "wasm32")]
-                if web_start_requested {
-                    clear_web_battle_start_signal();
-                }
-                confirm_user_mode_match_start(&mut user_mode, &mut state);
-                announcements.show(
-                    format!(
-                        "Starting match as {}",
-                        character_label(setup.player_character())
-                    ),
-                    0.9,
-                );
-            } else {
-                announcements.show("Loading battle", 0.7);
-            }
+            confirm_user_mode_match_start(user_mode, state);
+            announcements.show(
+                format!(
+                    "Starting match as {}",
+                    character_label(setup.player_character())
+                ),
+                0.9,
+            );
         }
         UserModeRoute::Replay => {
-            reset_user_mode_presentation(
-                &mut presentation_time_scale,
-                &mut screen_look,
-                &mut screen_transition,
-            );
-            let flow = prepare_user_mode_match(&mut user_mode, &mut setup, &mut state);
+            reset_user_mode_presentation(presentation_time_scale, screen_look, screen_transition);
+            let flow = prepare_user_mode_match(user_mode, setup, state);
             active_arena.select(state.arena_index);
-            announce_user_mode_match_flow(flow, &setup, &mut announcements);
+            announce_user_mode_match_flow(flow, setup, announcements);
         }
         UserModeRoute::ChooseCharacter => {
-            reset_user_mode_presentation(
-                &mut presentation_time_scale,
-                &mut screen_look,
-                &mut screen_transition,
-            );
+            reset_user_mode_presentation(presentation_time_scale, screen_look, screen_transition);
             state.return_to_setup();
-            stop_user_mode_music(&mut commands, &music);
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            stop_user_mode_music(commands, music);
+            start_user_mode_menu_music(commands, asset_server, control_preferences);
             announcements.show("", 0.0);
         }
         UserModeRoute::ControlsBack => {
             state.return_to_setup();
-            stop_user_mode_music(&mut commands, &music);
-            start_user_mode_menu_music(&mut commands, &asset_server);
+            stop_user_mode_music(commands, music);
+            start_user_mode_menu_music(commands, asset_server, control_preferences);
             announcements.show("Choose arena", 0.8);
         }
         UserModeRoute::ReturnToStart => {
-            stop_user_mode_music(&mut commands, &music);
-            reset_user_mode_presentation(
-                &mut presentation_time_scale,
-                &mut screen_look,
-                &mut screen_transition,
-            );
+            stop_user_mode_music(commands, music);
+            reset_user_mode_presentation(presentation_time_scale, screen_look, screen_transition);
             announcements.show("", 0.0);
         }
         #[cfg(not(target_arch = "wasm32"))]
         UserModeRoute::ExitToDev => {
             #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
             {
-                stop_user_mode_music(&mut commands, &music);
+                stop_user_mode_music(commands, music);
                 reset_user_mode_presentation(
-                    &mut presentation_time_scale,
-                    &mut screen_look,
-                    &mut screen_transition,
+                    presentation_time_scale,
+                    screen_look,
+                    screen_transition,
                 );
                 user_mode.exit_to_dev();
                 announcements.show("Dev setup", 0.8);
@@ -4591,7 +5309,7 @@ pub fn announce_haptic_test_results(
 
 #[cfg(target_arch = "wasm32")]
 pub fn sync_web_battle_status(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     user_mode: Res<UserModeState>,
     state: Res<MatchState>,
     mut scene: ResMut<UserModeGameplayScene>,
@@ -4634,21 +5352,23 @@ pub fn sync_user_mode_battle_result(
     time: Res<Time<Real>>,
     mut presentation_time_scale: ResMut<PresentationTimeScale>,
     mut user_mode: ResMut<UserModeState>,
-    mut feedback: ResMut<HitEffects>,
     state: Res<MatchState>,
     mut screen_look: ResMut<ScreenLook>,
     mut screen_transition: ResMut<ScreenLookTransition>,
     simulation_drive: Res<crate::simulation::SimulationDriveMode>,
+    mut transition: ResMut<GameTransition>,
+    mut pause_owners: ResMut<GameplayPauseOwners>,
 ) {
     if *simulation_drive == crate::simulation::SimulationDriveMode::ExternalProjection {
         return;
     }
     if user_mode.battle_active
         && state.phase == MatchPhase::Results
+        && !user_mode.result_sequence_active
         && user_mode.screen != UserModeScreen::BattleResult
         && !user_mode.tutorial_screen_active()
     {
-        user_mode.enter_battle_result(user_mode_result_winner(&state));
+        user_mode.begin_battle_result_sequence(user_mode_result_winner(&state));
         presentation_time_scale.set(USER_MODE_DEATH_SLOW_MOTION_SCALE);
         begin_screen_look_transition(
             &mut screen_look,
@@ -4658,20 +5378,19 @@ pub fn sync_user_mode_battle_result(
         );
     }
 
-    if user_mode.tick_battle_result(time.delta_secs()) {
-        presentation_time_scale.reset();
-        if let Some(kind) = result_sfx_kind(&user_mode) {
-            feedback.push_combat_sfx(CombatSfxCue::new(
-                kind,
-                Vec3::ZERO,
-                USER_MODE_RESULT_SFX_PRIORITY,
-            ));
-        }
+    if user_mode.tick_battle_result(time.delta_secs()) && !transition.active() {
+        request_user_mode_transition(
+            &mut transition,
+            &mut pause_owners,
+            UserModeTransitionAction::ShowBattleResult,
+            GameTransitionReveal::Immediate,
+        );
     }
 }
 
 pub fn sync_user_mode_battle_music(
     asset_server: Res<AssetServer>,
+    preferences: Res<ControlPreferences>,
     mut user_mode: ResMut<UserModeState>,
     state: Res<MatchState>,
     arena_music: Query<(Entity, &ArenaMusic)>,
@@ -4687,6 +5406,7 @@ pub fn sync_user_mode_battle_music(
             &asset_server,
             &arena_music,
             state.arena_index,
+            &preferences,
         );
         user_mode.battle_music_pending = false;
         user_mode.battle_active = true;
@@ -4709,6 +5429,7 @@ fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
             | UserModeScreen::ControlsHub
             | UserModeScreen::ControllerTest
             | UserModeScreen::KeySettings
+            | UserModeScreen::SoundSettings
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
             | UserModeScreen::TutorialHub
@@ -4717,6 +5438,7 @@ fn user_mode_menu_music_enabled(user_mode: &UserModeState) -> bool {
 
 pub fn sync_user_mode_menu_music(
     asset_server: Res<AssetServer>,
+    preferences: Res<ControlPreferences>,
     user_mode: Res<UserModeState>,
     menu_music: Query<Entity, (With<UserModeMusic>, Without<ArenaMusic>)>,
     mut commands: Commands,
@@ -4733,12 +5455,13 @@ pub fn sync_user_mode_menu_music(
     }
 
     if should_play && !desired_track_kept {
-        start_user_mode_menu_music(&mut commands, &asset_server);
+        start_user_mode_menu_music(&mut commands, &asset_server, &preferences);
     }
 }
 
 pub fn sync_dev_mode_music(
     asset_server: Res<AssetServer>,
+    preferences: Res<ControlPreferences>,
     user_mode: Res<UserModeState>,
     active_arena: Res<ActiveArena>,
     arena_music: Query<(Entity, &ArenaMusic)>,
@@ -4757,6 +5480,7 @@ pub fn sync_dev_mode_music(
         &asset_server,
         &arena_music,
         active_arena.index(),
+        &preferences,
     );
 }
 
@@ -5296,6 +6020,7 @@ pub fn update_user_mode_ui(
             | UserModeScreen::DeviceJoin
             | UserModeScreen::ControlsHub
             | UserModeScreen::ControllerTest
+            | UserModeScreen::SoundSettings
             | UserModeScreen::CharacterSelect
             | UserModeScreen::ArenaSelect
             | UserModeScreen::KeySettings
@@ -5465,6 +6190,10 @@ fn user_mode_action_selected(user_mode: &UserModeState, action: UserModeUiAction
             user_mode.screen == UserModeScreen::ControlsHub
                 && user_mode.controls_hub_choice == choice
         }
+        UserModeUiAction::SelectSoundChannel(channel) => {
+            user_mode.screen == UserModeScreen::SoundSettings
+                && user_mode.sound_settings_channel == channel
+        }
         UserModeUiAction::ControllerSetupChangeOrder
         | UserModeUiAction::ControllerSetupClear
         | UserModeUiAction::ControllerSetupReady => {
@@ -5594,6 +6323,42 @@ pub fn update_control_settings_ui(
     }
 }
 
+pub fn update_sound_settings_ui(
+    user_mode: Res<UserModeState>,
+    preferences: Res<ControlPreferences>,
+    mut panels: Query<&mut Node, With<UserModeSoundSettingsPanel>>,
+    mut toggle_texts: Query<(&UserModeSoundToggleText, &mut Text)>,
+    mut volume_texts: Query<
+        (&UserModeSoundVolumeText, &mut Text),
+        Without<UserModeSoundToggleText>,
+    >,
+) {
+    let visible = user_mode.screen() == UserModeScreen::SoundSettings;
+    for mut node in &mut panels {
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (marker, mut text) in &mut toggle_texts {
+        **text = if preferences.audio(marker.channel.audio_channel()).enabled() {
+            "ON"
+        } else {
+            "OFF"
+        }
+        .to_string();
+    }
+    for (marker, mut text) in &mut volume_texts {
+        **text = format!(
+            "{}%",
+            preferences
+                .audio(marker.channel.audio_channel())
+                .volume_percent()
+        );
+    }
+}
+
 fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
     match user_mode.screen() {
         UserModeScreen::Start
@@ -5603,6 +6368,7 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::ControlsHub
         | UserModeScreen::ControllerTest
         | UserModeScreen::KeySettings
+        | UserModeScreen::SoundSettings
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
         | UserModeScreen::ControlsBriefing
@@ -5685,13 +6451,33 @@ fn direction_to_user_mode_action(
     direction: IVec2,
 ) -> Option<UserModeUiAction> {
     match screen {
-        UserModeScreen::ModeSelect
-        | UserModeScreen::PlayerCountSelect
-        | UserModeScreen::ControlsHub => {
+        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect => {
             if direction.y > 0 {
                 Some(UserModeUiAction::Previous)
             } else if direction.y < 0 {
                 Some(UserModeUiAction::Next)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::ControlsHub => {
+            if direction.x < 0 || direction.y > 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.x > 0 || direction.y < 0 {
+                Some(UserModeUiAction::Next)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::SoundSettings => {
+            if direction.y > 0 {
+                Some(UserModeUiAction::Previous)
+            } else if direction.y < 0 {
+                Some(UserModeUiAction::Next)
+            } else if direction.x < 0 {
+                Some(UserModeUiAction::PreviousColumn)
+            } else if direction.x > 0 {
+                Some(UserModeUiAction::NextColumn)
             } else {
                 None
             }
@@ -5817,14 +6603,44 @@ fn keyboard_user_mode_action(
     }
 
     match user_mode.screen {
-        UserModeScreen::ModeSelect
-        | UserModeScreen::PlayerCountSelect
-        | UserModeScreen::ControlsHub => {
+        UserModeScreen::ModeSelect | UserModeScreen::PlayerCountSelect => {
             if vertical_previous_pressed(keys) {
                 Some(UserModeUiAction::Previous)
             } else if vertical_next_pressed(keys) {
                 Some(UserModeUiAction::Next)
             } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::ControlsHub => {
+            if select_previous_pressed(keys) || vertical_previous_pressed(keys) {
+                Some(UserModeUiAction::Previous)
+            } else if select_next_pressed(keys) || vertical_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::Enter) {
+                Some(UserModeUiAction::Confirm)
+            } else {
+                None
+            }
+        }
+        UserModeScreen::SoundSettings => {
+            if vertical_previous_pressed(keys) {
+                Some(UserModeUiAction::Previous)
+            } else if vertical_next_pressed(keys) {
+                Some(UserModeUiAction::Next)
+            } else if keys.just_pressed(KeyCode::ArrowLeft)
+                || keys.just_pressed(KeyCode::KeyA)
+                || keys.just_pressed(KeyCode::KeyQ)
+            {
+                Some(UserModeUiAction::PreviousColumn)
+            } else if keys.just_pressed(KeyCode::ArrowRight)
+                || keys.just_pressed(KeyCode::KeyD)
+                || keys.just_pressed(KeyCode::KeyE)
+            {
+                Some(UserModeUiAction::NextColumn)
+            } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
                 Some(UserModeUiAction::Confirm)
             } else {
                 None
@@ -6112,8 +6928,7 @@ fn key_settings_prompt_message(user_mode: &UserModeState) -> String {
             capture.action.label()
         );
     }
-    "Up/Down row  |  Left/Right player  |  Confirm change  |  Menu/R restore defaults  |  Back"
-        .to_string()
+    "".to_string()
 }
 
 fn key_settings_row_message(action: ControlAction, key: KeyCode, selected: bool) -> String {
@@ -6367,11 +7182,16 @@ fn result_sfx_kind(user_mode: &UserModeState) -> Option<CombatSfxKind> {
     user_mode.result_winner.map(|_| CombatSfxKind::ResultWin)
 }
 
-pub(crate) fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
+pub(crate) fn start_user_mode_menu_music(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    preferences: &ControlPreferences,
+) {
     commands.spawn((
         UserModeMusic,
         AudioPlayer::new(asset_server.load(USER_MODE_MENU_MUSIC_PATH)),
-        PlaybackSettings::LOOP,
+        PlaybackSettings::LOOP.with_volume(Volume::Linear(preferences.music.effective_gain())),
+        CategorizedAudioPlayback::music(),
     ));
 }
 
@@ -6385,14 +7205,20 @@ fn normalized_arena_music_index(arena_index: usize) -> usize {
         .unwrap_or(0)
 }
 
-fn start_arena_music(commands: &mut Commands, asset_server: &AssetServer, arena_index: usize) {
+fn start_arena_music(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    arena_index: usize,
+    preferences: &ControlPreferences,
+) {
     let arena_index = normalized_arena_music_index(arena_index);
     commands.spawn((
         UserModeMusic,
         ArenaMusic { arena_index },
         MatchPresentationTransient,
         AudioPlayer::new(asset_server.load(user_mode_battle_music_path(arena_index))),
-        PlaybackSettings::LOOP,
+        PlaybackSettings::LOOP.with_volume(Volume::Linear(preferences.music.effective_gain())),
+        CategorizedAudioPlayback::music(),
     ));
 }
 
@@ -6400,6 +7226,7 @@ pub fn sync_online_match_presentation_audio(
     policy: Res<MatchPresentationPolicy>,
     simulation_drive: Res<crate::simulation::SimulationDriveMode>,
     asset_server: Res<AssetServer>,
+    preferences: Res<ControlPreferences>,
     menu_music: Query<Entity, (With<UserModeMusic>, Without<ArenaMusic>)>,
     arena_music: Query<(Entity, &ArenaMusic)>,
     mut feedback: ResMut<HitEffects>,
@@ -6428,14 +7255,20 @@ pub fn sync_online_match_presentation_audio(
                 }
             }
             if !kept {
-                start_user_mode_menu_music(&mut commands, &asset_server);
+                start_user_mode_menu_music(&mut commands, &asset_server, &preferences);
             }
         }
         PresentationMusicTrack::Arena(arena_index) => {
             for entity in &menu_music {
                 commands.entity(entity).despawn();
             }
-            reconcile_arena_music(&mut commands, &asset_server, &arena_music, arena_index);
+            reconcile_arena_music(
+                &mut commands,
+                &asset_server,
+                &arena_music,
+                arena_index,
+                &preferences,
+            );
         }
     }
 
@@ -6471,6 +7304,7 @@ fn reconcile_arena_music(
     asset_server: &AssetServer,
     music: &Query<(Entity, &ArenaMusic)>,
     arena_index: usize,
+    preferences: &ControlPreferences,
 ) {
     let arena_index = normalized_arena_music_index(arena_index);
     let mut desired_track_kept = false;
@@ -6484,7 +7318,7 @@ fn reconcile_arena_music(
     }
 
     if !desired_track_kept {
-        start_arena_music(commands, asset_server, arena_index);
+        start_arena_music(commands, asset_server, arena_index, preferences);
     }
 }
 
@@ -6898,6 +7732,100 @@ mod tests {
     }
 
     #[test]
+    fn steam_controller_sound_settings_maps_navigation_volume_and_toggle() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_sound_settings();
+        user_mode.controller_menu_intent(SteamInputSnapshot::default());
+
+        for (action, expected) in [
+            (SteamMenuAction::Up, UserModeUiAction::Previous),
+            (SteamMenuAction::Down, UserModeUiAction::Next),
+            (SteamMenuAction::Left, UserModeUiAction::PreviousColumn),
+            (SteamMenuAction::Right, UserModeUiAction::NextColumn),
+            (SteamMenuAction::Accept, UserModeUiAction::Confirm),
+        ] {
+            let snapshot = steam_menu_snapshot(0, &[action]);
+            assert_eq!(
+                user_mode.controller_menu_intent(snapshot),
+                UserModeControllerIntent::Dispatch(expected)
+            );
+            assert_eq!(
+                user_mode.controller_menu_intent(snapshot),
+                UserModeControllerIntent::None,
+                "held Steam menu actions must not repeat"
+            );
+            user_mode.controller_menu_intent(SteamInputSnapshot::default());
+        }
+    }
+
+    #[test]
+    fn confirmed_screen_change_waits_for_the_global_transition_commit() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        let mut transition = GameTransition::default();
+        let mut owners = GameplayPauseOwners::default();
+
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Next
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(
+            user_mode.main_menu_choice,
+            UserModeMainMenuChoice::LocalMultiplayer
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        let action = UserModeTransitionAction::Route(UserModeUiAction::Confirm);
+        assert!(request_user_mode_transition(
+            &mut transition,
+            &mut owners,
+            action.clone(),
+            GameTransitionReveal::Immediate,
+        ));
+
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+        assert_eq!(
+            transition.action(),
+            Some(&GameTransitionAction::UserMode(action))
+        );
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+    }
+
+    #[test]
+    fn only_the_final_multiplayer_character_confirmation_fades() {
+        let mut user_mode = UserModeState::default();
+        user_mode.play_mode = UserPlayMode::TwoPlayers;
+        user_mode.enter_character_select();
+
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::CharacterPlayerAdvanced
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+        assert_eq!(user_mode.character_select_player, 1);
+
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        assert!(!user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Next
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
+    }
+
+    #[test]
     fn main_menu_cycles_and_wraps_five_vertical_choices() {
         let choices = [
             UserModeMainMenuChoice::SinglePlayer,
@@ -6963,6 +7891,30 @@ mod tests {
     }
 
     #[test]
+    fn settings_icon_catalog_maps_all_three_choices_to_existing_art() {
+        let choices = [
+            ControlsHubChoice::Controller,
+            ControlsHubChoice::Keyboard,
+            ControlsHubChoice::Sound,
+        ];
+        assert_eq!(choices.len(), 3);
+        for choice in choices {
+            let path = choice.icon_path();
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(path)
+                    .is_file(),
+                "missing settings icon: {path}"
+            );
+            let rect = choice.icon_source_rect();
+            assert!(rect.min.x >= 0.0 && rect.min.y >= 0.0);
+            assert!(rect.max.x <= 1_536.0 && rect.max.y <= 1_024.0);
+            assert!(rect.width() > 0.0 && rect.height() > 0.0);
+        }
+    }
+
+    #[test]
     fn main_menu_background_fade_eases_and_reverses_without_a_jump() {
         let mut fade = MainMenuBackgroundFade::default();
 
@@ -6980,12 +7932,13 @@ mod tests {
     }
 
     #[test]
-    fn hovering_a_main_menu_button_moves_selection_without_activating_it() {
+    fn hovering_menu_cards_moves_selection_without_activating_it() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_fresh_mode_select();
         let mut app = App::new();
         app.insert_resource(user_mode)
-            .add_systems(Update, sync_main_menu_pointer_hover);
+            .insert_resource(GameTransition::default())
+            .add_systems(Update, sync_user_mode_pointer_hover);
         app.world_mut().spawn((
             Interaction::Hovered,
             UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial),
@@ -6996,6 +7949,35 @@ mod tests {
         let user_mode = app.world().resource::<UserModeState>();
         assert_eq!(user_mode.main_menu_choice, UserModeMainMenuChoice::Tutorial);
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .enter_controls_hub();
+        app.world_mut().spawn((
+            Interaction::Hovered,
+            UserModeUiAction::ControlsHub(ControlsHubChoice::Sound),
+        ));
+        app.update();
+
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Sound);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
+
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .enter_sound_settings();
+        app.world_mut().spawn((
+            Interaction::Hovered,
+            UserModeUiAction::ToggleSoundChannel(SoundSettingsChannel::SoundEffects),
+        ));
+        app.update();
+
+        let user_mode = app.world().resource::<UserModeState>();
+        assert_eq!(
+            user_mode.sound_settings_channel,
+            SoundSettingsChannel::SoundEffects
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::SoundSettings);
     }
 
     #[test]
@@ -7166,6 +8148,10 @@ mod tests {
         assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
         route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
         assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+
+        user_mode.enter_sound_settings();
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
 
         user_mode.play_mode = UserPlayMode::FourPlayers;
         user_mode.return_to_character_select_player(3);
@@ -7997,15 +8983,30 @@ mod tests {
     }
 
     #[test]
-    fn battle_result_menu_waits_for_death_cinematic() {
+    fn result_transition_starts_only_after_the_death_cinematic() {
         let mut user_mode = UserModeState::default();
-        user_mode.enter_battle_result(Some(USER_MODE_PLAYER_FIGHTER_ID));
+        let mut transition = GameTransition::default();
+        let mut owners = GameplayPauseOwners::default();
+        user_mode.begin_battle_result_sequence(Some(USER_MODE_PLAYER_FIGHTER_ID));
 
-        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
+        assert_eq!(user_mode.screen(), default_user_mode_screen());
         assert!(!user_mode.result_menu_ready);
         assert!(!user_mode.tick_battle_result(USER_MODE_RESULT_MENU_DELAY_SECS - 0.1));
-        assert!(!user_mode.result_menu_ready);
+        assert!(!transition.active());
         assert!(user_mode.tick_battle_result(0.1));
+
+        assert!(request_user_mode_transition(
+            &mut transition,
+            &mut owners,
+            UserModeTransitionAction::ShowBattleResult,
+            GameTransitionReveal::Immediate,
+        ));
+        assert_eq!(user_mode.screen(), default_user_mode_screen());
+        assert!(!user_mode.result_menu_ready);
+        assert!(owners.contains(GameplayPauseOwner::GameTransition));
+
+        user_mode.reveal_battle_result();
+        assert_eq!(user_mode.screen(), UserModeScreen::BattleResult);
         assert!(user_mode.result_menu_ready);
         assert_eq!(result_title_message(&user_mode), "YOU WIN");
     }
@@ -8107,6 +9108,23 @@ mod tests {
         assert!(user_mode_action_selected(
             &user_mode,
             UserModeUiAction::PlayerCount(UserModePlayerCountChoice::TwoPlayers)
+        ));
+
+        user_mode.enter_controls_hub();
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::ControlsHub(ControlsHubChoice::Controller)
+        ));
+
+        user_mode.enter_sound_settings();
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::SelectSoundChannel(SoundSettingsChannel::BackgroundMusic)
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert!(user_mode_action_selected(
+            &user_mode,
+            UserModeUiAction::SelectSoundChannel(SoundSettingsChannel::SoundEffects)
         ));
 
         user_mode.enter_key_settings();
@@ -8433,6 +9451,7 @@ mod tests {
             UserModeScreen::ControlsHub,
             UserModeScreen::ControllerTest,
             UserModeScreen::KeySettings,
+            UserModeScreen::SoundSettings,
             UserModeScreen::CharacterSelect,
             UserModeScreen::ArenaSelect,
             UserModeScreen::TutorialHub,
@@ -8478,26 +9497,80 @@ mod tests {
     }
 
     #[test]
-    fn controls_hub_cycles_and_opens_each_focused_subpage() {
+    fn settings_hub_cycles_three_cards_and_opens_every_page_through_a_transition() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_controls_hub();
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Controller);
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Keyboard);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Sound);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Controller);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Previous);
+        assert_eq!(user_mode.controls_hub_choice, ControlsHubChoice::Sound);
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Confirm
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::SoundSettings);
+        assert!(user_mode_action_requires_transition(
+            &user_mode,
+            UserModeUiAction::Back
+        ));
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControlsHub);
+
+        user_mode.controls_hub_choice = ControlsHubChoice::Controller;
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::ControllerTest);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::OpenControllerSetup);
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
         assert_eq!(
-            user_mode.controls_hub_choice,
-            ControlsHubChoice::ControllerSetup
+            user_mode.controller_setup_context,
+            ControllerSetupContext::Settings
+        );
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        user_mode.controls_hub_choice = ControlsHubChoice::Keyboard;
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
+        assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
+    }
+
+    #[test]
+    fn sound_settings_navigation_selects_channels_and_maps_volume_steps() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_sound_settings();
+        assert_eq!(
+            user_mode.sound_settings_channel,
+            SoundSettingsChannel::BackgroundMusic
         );
 
         route_user_mode_action(&mut user_mode, UserModeUiAction::Next);
         assert_eq!(
-            user_mode.controls_hub_choice,
-            ControlsHubChoice::ControllerTest
+            user_mode.sound_settings_channel,
+            SoundSettingsChannel::SoundEffects
         );
-        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
-        assert_eq!(user_mode.screen(), UserModeScreen::ControllerTest);
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Previous);
+        assert_eq!(
+            user_mode.sound_settings_channel,
+            SoundSettingsChannel::BackgroundMusic
+        );
 
-        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
-        user_mode.controls_hub_choice = ControlsHubChoice::KeyboardControls;
-        route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm);
-        assert_eq!(user_mode.screen(), UserModeScreen::KeySettings);
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::SoundSettings, IVec2::NEG_X),
+            Some(UserModeUiAction::PreviousColumn)
+        );
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::SoundSettings, IVec2::X),
+            Some(UserModeUiAction::NextColumn)
+        );
+        assert_eq!(
+            direction_to_user_mode_action(UserModeScreen::SoundSettings, IVec2::NEG_Y),
+            Some(UserModeUiAction::Next)
+        );
     }
 
     #[test]

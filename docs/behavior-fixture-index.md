@@ -57,6 +57,14 @@ results. Debug and release agreed on BF001's new tick-1 hash
 gameplay-content digest is
 `5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`.
 
+The centralized transition and audio-settings integration later changed the
+conservatively classified `game_state.rs` and `tutorial.rs` boundary without
+changing canonical simulation behavior. All 18 tapes retained identical
+normalized checkpoints, event ticks, final ticks, and results. Debug and
+fat-LTO release agreed on BF001 tick-1 hash `f4e0979e6049e2af`; the reviewed
+content digest is
+`4253817efe2881ce03d537ba37a8f7f658c823173b3cb60d89019c1f370646b6`.
+
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
 `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629`

@@ -77,6 +77,18 @@ BF001 tick-1 hash (`c50b6cd168b8e793`) before the corpus was refreshed. The
 compiled gameplay-content digest is
 `5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`.
 
+The subsequent browser-integration presentation batch centralized menu/tutorial
+fades and pause ownership and added persisted audio-channel settings. Simulation
+still advances exclusively on the existing fixed schedule; transition animation
+uses `Time<Real>` and audio gain synchronization is presentation-only. The
+conservatively classified `game_state.rs` and `tutorial.rs` sources changed, so
+the gameplay-content digest became
+`4253817efe2881ce03d537ba37a8f7f658c823173b3cb60d89019c1f370646b6`.
+All 18 normalized checkpoint sets, ordered event ticks, final ticks, and final
+results remained identical. Debug and fat-LTO release independently produced
+BF001 tick-1 hash `f4e0979e6049e2af` before the identity-derived hashes were
+accepted.
+
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The
 stock tape contains no `AIM_GRAB` input, so it is not expected to exercise the

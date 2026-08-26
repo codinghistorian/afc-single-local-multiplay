@@ -2,6 +2,7 @@ mod arena;
 mod arena_barriers;
 mod arena_defs;
 mod arena_prop_colliders;
+mod audio_settings;
 pub mod authority;
 pub mod authority_input;
 pub mod authority_peer_hub;
@@ -31,6 +32,7 @@ mod equipment;
 mod feel;
 mod fighter;
 mod game_state;
+mod game_transition;
 pub mod headless;
 mod hud;
 pub mod interpolation;
@@ -219,6 +221,7 @@ pub fn build_app() -> App {
     app.insert_non_send_resource(online_client::EmbeddedOnlineClientController::default());
     app.insert_non_send_resource(native_online_runtime);
     app.insert_non_send_resource(native_online_app::NativeOnlineApplication::default());
+    app.add_message::<combat_sfx::SfxPreviewRequest>();
 
     #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
     app.add_plugins(macos_gamepad::MacOsGamepadPlugin);
@@ -271,7 +274,7 @@ pub fn build_app() -> App {
         .init_resource::<control_settings::ControlPreferences>()
         .init_resource::<tutorial::TutorialProgress>()
         .init_resource::<tutorial::TutorialSession>()
-        .init_resource::<tutorial::TutorialTransition>()
+        .init_resource::<game_transition::GameTransition>()
         .init_resource::<user_mode::UserModeState>()
         .init_resource::<user_mode::UserModeGameplayScene>()
         .init_resource::<user_mode::PresentationTimeScale>()
@@ -414,6 +417,10 @@ pub fn build_app() -> App {
             tutorial::setup_tutorial_ui.after(user_mode::setup_user_mode_ui),
         )
         .add_systems(
+            Startup,
+            game_transition::setup_game_transition_overlay.after(tutorial::setup_tutorial_ui),
+        )
+        .add_systems(
             Update,
             (
                 interpolation::apply_sim_pose_snap_request,
@@ -471,7 +478,7 @@ pub fn build_app() -> App {
                 native_online_app::handle_native_online_ui_input,
                 native_online_app::handle_overlay_unavailable_notice_dismiss,
                 (
-                    user_mode::sync_main_menu_pointer_hover,
+                    user_mode::sync_user_mode_pointer_hover,
                     tutorial::handle_tutorial_input
                         .run_if(simulation::local_simulation_drive_enabled),
                     user_mode::handle_user_mode_input
@@ -480,12 +487,19 @@ pub fn build_app() -> App {
                     user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
-                user_mode::announce_haptic_test_results,
+                (
+                    combat_sfx::handle_sfx_preview_requests,
+                    audio_settings::sync_audio_playback_gains,
+                    user_mode::announce_haptic_test_results,
+                )
+                    .chain(),
                 (
                     game_state::handle_global_input,
                     tutorial::advance_tutorial_success,
-                    tutorial::advance_tutorial_transition
-                        .run_if(tutorial::tutorial_transition_active),
+                    game_transition::advance_game_transition
+                        .run_if(game_transition::game_transition_active),
+                    user_mode::commit_pending_user_mode_transition,
+                    tutorial::commit_pending_tutorial_transition,
                     tutorial::reset_tutorial_step,
                     tutorial::cleanup_tutorial_session,
                     game_state::sync_virtual_time_pause,
@@ -755,6 +769,7 @@ pub fn build_app() -> App {
                         user_mode::update_controller_reconnect_overlay,
                         tutorial::update_tutorial_ui,
                         tutorial::update_tutorial_button_styles,
+                        game_transition::update_game_transition_overlay,
                     )
                         .chain(),
                 ),
@@ -794,6 +809,7 @@ pub fn build_app() -> App {
             (
                 user_mode::update_user_mode_controls_ui,
                 user_mode::update_control_settings_ui,
+                user_mode::update_sound_settings_ui,
             )
                 .in_set(GameSet::Presentation),
         )
@@ -807,9 +823,7 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
-            combat_sfx::play_combat_sfx
-                .run_if(user_mode::gameplay_scene_loaded)
-                .in_set(GameSet::Presentation),
+            combat_sfx::play_combat_sfx.in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,
