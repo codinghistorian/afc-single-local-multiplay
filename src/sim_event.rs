@@ -195,8 +195,8 @@ pub enum PresentationPolicy {
 impl SimEventKind {
     pub const fn presentation_policy(self) -> PresentationPolicy {
         match self {
-            Self::ActionStarted { .. } => PresentationPolicy::Predicted,
-            Self::HitConfirmed { .. }
+            Self::ActionStarted { .. }
+            | Self::HitConfirmed { .. }
             | Self::Guarded { .. }
             | Self::EntitySpawned { .. }
             | Self::EntityDespawned { .. }
@@ -1408,7 +1408,7 @@ mod tests {
                 action_id: 2,
             }
             .presentation_policy(),
-            PresentationPolicy::Predicted
+            PresentationPolicy::PredictedDeduplicated
         );
     }
 

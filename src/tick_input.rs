@@ -99,8 +99,23 @@ impl InputMask {
     pub const HEAVY: Self = RawInputButton::Heavy.mask();
     pub const LIGHT: Self = RawInputButton::Light.mask();
     pub const JUMP: Self = RawInputButton::Jump.mask();
+    /// Device-level action buttons that bypass keyboard gesture recognition.
+    /// These occupy the high half of the existing `u16`; the action-level wire
+    /// frame remains unchanged.
+    pub const DIRECT_GUARD: Self = Self(1 << 8);
+    pub const DIRECT_ULTIMATE: Self = Self(1 << 9);
+    pub const DIRECT_SPECIAL: Self = Self(1 << 10);
+    pub const DIRECT_DASH: Self = Self(1 << 11);
     pub const DIRECTIONS: Self = Self(Self::LEFT.0 | Self::RIGHT.0 | Self::UP.0 | Self::DOWN.0);
+    pub const DIRECT_ACTIONS: Self = Self(
+        Self::DIRECT_GUARD.0
+            | Self::DIRECT_ULTIMATE.0
+            | Self::DIRECT_SPECIAL.0
+            | Self::DIRECT_DASH.0,
+    );
     pub const CURRENT_BINDINGS: Self = Self((1_u16 << RawInputButton::ALL.len()) - 1);
+    pub const SUPPORTED_DEVICE_INPUTS: Self =
+        Self(Self::CURRENT_BINDINGS.0 | Self::DIRECT_ACTIONS.0);
 
     pub const fn from_bits(bits: u16) -> Self {
         Self(bits)
@@ -911,6 +926,7 @@ mod tests {
         mask.remove(InputMask::LEFT);
         assert!(!mask.intersects(InputMask::DIRECTIONS));
         assert_eq!(InputMask::CURRENT_BINDINGS.bits(), 0xff);
+        assert_eq!(InputMask::SUPPORTED_DEVICE_INPUTS.bits(), 0x0fff);
     }
 
     #[test]

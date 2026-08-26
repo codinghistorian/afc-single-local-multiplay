@@ -43,7 +43,13 @@ pub fn local_tick_to_network_input(
         InputButtons::HEAVY,
         frame.held.contains(InputMask::HEAVY),
     );
-    set(&mut held, InputButtons::GUARD, chord.guard);
+    let direct_guard_held = frame.held.contains(InputMask::DIRECT_GUARD);
+    let direct_guard_pressed = frame.pressed.contains(InputMask::DIRECT_GUARD);
+    set(
+        &mut held,
+        InputButtons::GUARD,
+        chord.guard || direct_guard_held,
+    );
 
     let mut pressed = 0_u16;
     set(
@@ -51,12 +57,29 @@ pub fn local_tick_to_network_input(
         InputButtons::JUMP,
         frame.pressed.contains(InputMask::JUMP),
     );
-    set(&mut pressed, InputButtons::DASH, !dash.is_empty());
+    set(
+        &mut pressed,
+        InputButtons::DASH,
+        !dash.is_empty() || frame.pressed.contains(InputMask::DIRECT_DASH),
+    );
     set(&mut pressed, InputButtons::LIGHT, chord.light);
     set(&mut pressed, InputButtons::HEAVY, chord.heavy);
     set(&mut pressed, InputButtons::AIM_GRAB, chord.grab);
-    set(&mut pressed, InputButtons::GUARD, chord.guard);
-    set(&mut pressed, InputButtons::ULTIMATE, chord.ultimate);
+    set(
+        &mut pressed,
+        InputButtons::GUARD,
+        chord.guard || direct_guard_pressed,
+    );
+    set(
+        &mut pressed,
+        InputButtons::ULTIMATE,
+        chord.ultimate || frame.pressed.contains(InputMask::DIRECT_ULTIMATE),
+    );
+    set(
+        &mut pressed,
+        InputButtons::SPECIAL,
+        frame.pressed.contains(InputMask::DIRECT_SPECIAL),
+    );
     set(
         &mut pressed,
         InputButtons::RAW_LIGHT,
@@ -443,6 +466,31 @@ mod tests {
         assert!(live.heavy_released);
         assert!(live.movement.length() <= 1.0);
         assert_eq!(raw.pressed.contains(RawInputButton::Jump.mask()), live.jump);
+    }
+
+    #[test]
+    fn direct_controller_actions_cross_the_existing_wire_frame() {
+        let mut gestures = SeatGestureTrackers::default();
+        let direct_presses = InputMask::DIRECT_GUARD
+            | InputMask::DIRECT_ULTIMATE
+            | InputMask::DIRECT_SPECIAL
+            | InputMask::DIRECT_DASH;
+        let frame = local_tick_to_network_input(
+            local(77, InputMask::DIRECT_GUARD, direct_presses, InputMask::NONE),
+            &mut gestures,
+        );
+        frame.validate().unwrap();
+        assert_eq!(frame.held_buttons.bits(), InputButtons::GUARD);
+        assert_eq!(
+            frame.pressed_buttons.bits(),
+            InputButtons::GUARD
+                | InputButtons::ULTIMATE
+                | InputButtons::SPECIAL
+                | InputButtons::DASH
+        );
+
+        let live = network_input_to_fighter_input(frame);
+        assert!(live.guard && live.ultimate && live.special && live.dash);
     }
 
     #[test]

@@ -78,6 +78,9 @@ use crate::user_mode::UserModeState;
 
 #[cfg(test)]
 const DOUBLE_TAP_DASH_WINDOW: f32 = 0.28;
+pub(crate) const GAMEPAD_MOVEMENT_DEADZONE: f32 = 0.20;
+#[cfg(test)]
+const GAMEPAD_FLICK_DASH_THRESHOLD: f32 = 0.80;
 const FIGHTER_BODY_SEPARATION_ITERATIONS: usize = 3;
 const KNOCKDOWN_HEAD_LOW_PITCH: f32 = 2.72;
 const JUMP_ATTACK_QUEUE_GRACE: f32 = 0.18;
@@ -903,6 +906,7 @@ fn guard_shield_transform() -> Transform {
 /// setup/menu input and stale controller assignments from leaking into a match.
 pub fn sample_local_player_input(
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     camera_control: Res<GameplayCameraControl>,
     user_mode: Res<UserModeState>,
     match_state: Res<MatchState>,
@@ -941,26 +945,40 @@ pub fn sample_local_player_input(
             previous_sources[slot_index] = None;
             continue;
         };
-        let Some(player_bindings) = bindings.bindings_for_assignment(controller.input) else {
-            tick_inputs.reset_seat_input(seat);
-            previous_sources[slot_index] = None;
-            continue;
-        };
-
         let source_changed = previous_sources[slot_index] != Some(controller.input);
         if source_changed || bindings_changed {
             tick_inputs.reset_seat_input(seat);
         }
         previous_sources[slot_index] = Some(controller.input);
-        tick_inputs.merge_render_sample(
-            seat,
-            sample_bound_tick_input(
-                &keys,
-                camera_control.yaw,
-                player_bindings,
-                reserve_camera_inputs,
-            ),
-        );
+        let sample = match controller.input {
+            LocalInputAssignment::Keyboard(_) => {
+                let Some(player_bindings) = bindings.bindings_for_assignment(controller.input)
+                else {
+                    tick_inputs.reset_seat_input(seat);
+                    previous_sources[slot_index] = None;
+                    continue;
+                };
+                sample_bound_tick_input(
+                    &keys,
+                    camera_control.yaw,
+                    player_bindings,
+                    reserve_camera_inputs,
+                )
+            }
+            LocalInputAssignment::Gamepad(entity) => {
+                let Ok(gamepad) = gamepads.get(entity) else {
+                    tick_inputs.reset_seat_input(seat);
+                    continue;
+                };
+                sample_gamepad_tick_input(gamepad, camera_control.yaw)
+            }
+            LocalInputAssignment::Unassigned => {
+                tick_inputs.reset_seat_input(seat);
+                previous_sources[slot_index] = None;
+                continue;
+            }
+        };
+        tick_inputs.merge_render_sample(seat, sample);
     }
 }
 
@@ -982,10 +1000,7 @@ pub fn consume_local_player_input(
         }
 
         *input = FighterInput::default();
-        let LocalInputAssignment::Keyboard(keyboard_index) = controller.input else {
-            continue;
-        };
-        if keyboard_index >= FIGHTER_COUNT {
+        if matches!(controller.input, LocalInputAssignment::Unassigned) {
             continue;
         }
 
@@ -1041,6 +1056,66 @@ fn sample_bound_tick_input(
     }
 
     let movement = player_movement_input(keys, camera_yaw, bindings, reserve_camera_inputs);
+    RenderInputSample {
+        movement: QuantizedMovement::from_unit_axes(movement.x, movement.y),
+        held,
+        pressed,
+        released,
+    }
+}
+
+fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputSample {
+    // Read digital buttons directly: browser and macOS drivers can expose a
+    // button-only D-pad even when Bevy's axis-backed convenience value is zero.
+    let mut dpad = Vec2::ZERO;
+    if gamepad.pressed(GamepadButton::DPadLeft) {
+        dpad.x -= 1.0;
+    }
+    if gamepad.pressed(GamepadButton::DPadRight) {
+        dpad.x += 1.0;
+    }
+    if gamepad.pressed(GamepadButton::DPadUp) {
+        dpad.y -= 1.0;
+    }
+    if gamepad.pressed(GamepadButton::DPadDown) {
+        dpad.y += 1.0;
+    }
+    let stick = apply_gamepad_movement_deadzone(gamepad.left_stick());
+    let raw_movement = if dpad.length_squared() > 0.0 {
+        dpad.normalize_or_zero()
+    } else {
+        Vec2::new(stick.x, -stick.y)
+    };
+    let movement = camera_relative_direction(raw_movement, camera_yaw).normalize_or_zero();
+
+    let mut held = InputMask::NONE;
+    let mut pressed = InputMask::NONE;
+    let mut released = InputMask::NONE;
+    for (mask, button) in [
+        (InputMask::LEFT, GamepadButton::DPadLeft),
+        (InputMask::RIGHT, GamepadButton::DPadRight),
+        (InputMask::UP, GamepadButton::DPadUp),
+        (InputMask::DOWN, GamepadButton::DPadDown),
+        (InputMask::AIM_GRAB, GamepadButton::East),
+        (InputMask::HEAVY, GamepadButton::North),
+        (InputMask::LIGHT, GamepadButton::West),
+        (InputMask::JUMP, GamepadButton::South),
+        (InputMask::DIRECT_GUARD, GamepadButton::LeftTrigger),
+        (InputMask::DIRECT_ULTIMATE, GamepadButton::LeftTrigger2),
+        (InputMask::DIRECT_SPECIAL, GamepadButton::RightTrigger),
+        (InputMask::DIRECT_DASH, GamepadButton::RightTrigger2),
+    ] {
+        if gamepad.pressed(button) {
+            held.insert(mask);
+        }
+        if gamepad.just_pressed(button) {
+            pressed.insert(mask);
+        }
+        if gamepad.just_released(button) {
+            released.insert(mask);
+        }
+    }
+
     RenderInputSample {
         movement: QuantizedMovement::from_unit_axes(movement.x, movement.y),
         held,
@@ -1135,6 +1210,188 @@ pub fn update_drunk_status(
 }
 
 #[cfg(test)]
+pub(crate) struct PlayerInputTrackers {
+    dash: [DashTapTracker; FIGHTER_COUNT],
+    guard: [GuardChordTracker; FIGHTER_COUNT],
+    stick_flick: [StickFlickTracker; FIGHTER_COUNT],
+    assignment: [LocalInputAssignment; FIGHTER_COUNT],
+}
+
+#[cfg(test)]
+impl Default for PlayerInputTrackers {
+    fn default() -> Self {
+        Self {
+            dash: std::array::from_fn(|_| DashTapTracker::default()),
+            guard: std::array::from_fn(|_| GuardChordTracker::default()),
+            stick_flick: std::array::from_fn(|_| StickFlickTracker::default()),
+            assignment: [LocalInputAssignment::Unassigned; FIGHTER_COUNT],
+        }
+    }
+}
+
+#[cfg(test)]
+impl PlayerInputTrackers {
+    fn reset_if_assignment_changed(&mut self, slot_index: usize, assignment: LocalInputAssignment) {
+        if self.assignment[slot_index] == assignment {
+            return;
+        }
+        self.assignment[slot_index] = assignment;
+        self.dash[slot_index] = DashTapTracker::default();
+        self.guard[slot_index] = GuardChordTracker::default();
+        self.stick_flick[slot_index] = StickFlickTracker::default();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct DeviceActionSample {
+    movement: Vec2,
+    movement_just: [bool; 4],
+    aim_held: bool,
+    jump_just: bool,
+    dash_just: bool,
+    light_just: bool,
+    light_held: bool,
+    heavy_just: bool,
+    heavy_held: bool,
+    heavy_released: bool,
+    grab_just: bool,
+    grab_held: bool,
+    guard_held: bool,
+    ultimate_just: bool,
+    special_just: bool,
+}
+
+#[cfg(test)]
+fn keyboard_action_sample(
+    keys: &ButtonInput<KeyCode>,
+    bindings: PlayerControlBindings,
+    reserve_camera_inputs: bool,
+) -> DeviceActionSample {
+    let camera_movement_blocked =
+        reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings);
+    let light_blocked =
+        reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
+    DeviceActionSample {
+        movement: if camera_movement_blocked {
+            Vec2::ZERO
+        } else {
+            key_axis(
+                keys,
+                bindings.left,
+                bindings.right,
+                bindings.down,
+                bindings.up,
+            )
+        },
+        movement_just: if camera_movement_blocked {
+            [false; 4]
+        } else {
+            [
+                keys.just_pressed(bindings.left),
+                keys.just_pressed(bindings.right),
+                keys.just_pressed(bindings.down),
+                keys.just_pressed(bindings.up),
+            ]
+        },
+        aim_held: keys.pressed(bindings.aim_grab),
+        jump_just: keys.just_pressed(bindings.jump),
+        light_just: keys.just_pressed(bindings.light) && !light_blocked,
+        light_held: keys.pressed(bindings.light) && !light_blocked,
+        heavy_just: keys.just_pressed(bindings.heavy),
+        heavy_held: keys.pressed(bindings.heavy),
+        heavy_released: keys.just_released(bindings.heavy),
+        grab_just: keys.just_pressed(bindings.aim_grab),
+        grab_held: keys.pressed(bindings.aim_grab),
+        ..default()
+    }
+}
+
+#[cfg(test)]
+fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
+    let dpad = gamepad.dpad();
+    let stick = apply_gamepad_movement_deadzone(gamepad.left_stick());
+    let movement = if dpad.length_squared() > 0.0 {
+        Vec2::new(dpad.x, -dpad.y).normalize_or_zero()
+    } else {
+        Vec2::new(stick.x, -stick.y)
+    };
+    let special_just = gamepad.just_pressed(GamepadButton::RightTrigger);
+
+    DeviceActionSample {
+        movement,
+        movement_just: [
+            gamepad.just_pressed(GamepadButton::DPadLeft),
+            gamepad.just_pressed(GamepadButton::DPadRight),
+            gamepad.just_pressed(GamepadButton::DPadDown),
+            gamepad.just_pressed(GamepadButton::DPadUp),
+        ],
+        aim_held: gamepad.pressed(GamepadButton::East),
+        jump_just: gamepad.just_pressed(GamepadButton::South),
+        dash_just: gamepad.just_pressed(GamepadButton::RightTrigger2),
+        light_just: gamepad.just_pressed(GamepadButton::West),
+        light_held: gamepad.pressed(GamepadButton::West),
+        heavy_just: gamepad.just_pressed(GamepadButton::North),
+        heavy_held: gamepad.pressed(GamepadButton::North),
+        heavy_released: gamepad.just_released(GamepadButton::North),
+        grab_just: gamepad.just_pressed(GamepadButton::East),
+        grab_held: gamepad.pressed(GamepadButton::East),
+        guard_held: gamepad.pressed(GamepadButton::LeftTrigger),
+        ultimate_just: gamepad.just_pressed(GamepadButton::LeftTrigger2),
+        special_just,
+    }
+}
+
+fn apply_gamepad_movement_deadzone(axis: Vec2) -> Vec2 {
+    let magnitude = axis.length();
+    if magnitude <= GAMEPAD_MOVEMENT_DEADZONE {
+        return Vec2::ZERO;
+    }
+    let scaled_magnitude =
+        ((magnitude - GAMEPAD_MOVEMENT_DEADZONE) / (1.0 - GAMEPAD_MOVEMENT_DEADZONE)).min(1.0);
+    axis.normalize_or_zero() * scaled_magnitude
+}
+
+#[cfg(test)]
+fn collect_device_player_input(
+    sample: DeviceActionSample,
+    now: f32,
+    camera_yaw: f32,
+    dash_taps: &mut DashTapTracker,
+    guard_chord: &mut GuardChordTracker,
+    stick_flick: &mut StickFlickTracker,
+    input: &mut FighterInput,
+) {
+    let chord = resolve_guard_chord_input(
+        guard_chord,
+        sample.light_just,
+        sample.heavy_just,
+        sample.grab_just,
+        sample.light_held,
+        sample.heavy_held,
+        sample.grab_held,
+        now,
+    );
+
+    input.movement = camera_relative_direction(sample.movement, camera_yaw).normalize_or_zero();
+    input.aim = sample.aim_held;
+    input.jump = sample.jump_just;
+    input.dash = sample.dash_just
+        || movement_double_tapped(sample.movement_just, now, dash_taps)
+        || stick_flick.update(sample.movement);
+    input.light = chord.light;
+    input.light_held = sample.light_held;
+    input.raw_light_pressed = sample.light_just;
+    input.heavy = chord.heavy;
+    input.heavy_held = sample.heavy_held;
+    input.raw_heavy_pressed = sample.heavy_just;
+    input.heavy_released = sample.heavy_released;
+    input.grab = chord.grab;
+    input.guard = sample.guard_held || chord.guard;
+    input.ultimate = sample.ultimate_just || chord.ultimate;
+    input.special = sample.special_just;
+}
+#[cfg(test)]
 fn collect_bound_player_input(
     keys: &ButtonInput<KeyCode>,
     now: f32,
@@ -1145,36 +1402,16 @@ fn collect_bound_player_input(
     reserve_camera_inputs: bool,
     input: &mut FighterInput,
 ) {
-    let light_blocked =
-        reserve_camera_inputs && camera_shift_pressed(keys) && bindings.light == KeyCode::KeyC;
-    let raw_light_pressed = keys.just_pressed(bindings.light) && !light_blocked;
-    let raw_heavy_pressed = keys.just_pressed(bindings.heavy);
-    let chord = resolve_guard_chord_input(
-        guard_chord,
-        raw_light_pressed,
-        raw_heavy_pressed,
-        keys.just_pressed(bindings.aim_grab),
-        keys.pressed(bindings.light) && !light_blocked,
-        keys.pressed(bindings.heavy),
-        keys.pressed(bindings.aim_grab),
+    let mut stick_flick = StickFlickTracker::default();
+    collect_device_player_input(
+        keyboard_action_sample(keys, bindings, reserve_camera_inputs),
         now,
+        camera_yaw,
+        dash_taps,
+        guard_chord,
+        &mut stick_flick,
+        input,
     );
-
-    input.movement = player_movement_input(keys, camera_yaw, bindings, reserve_camera_inputs);
-    input.aim = keys.pressed(bindings.aim_grab);
-    input.jump = keys.just_pressed(bindings.jump);
-    input.dash = player_dash_input(keys, now, dash_taps, bindings, reserve_camera_inputs);
-    input.light = chord.light;
-    input.light_held = keys.pressed(bindings.light) && !light_blocked;
-    input.raw_light_pressed = raw_light_pressed;
-    input.heavy = chord.heavy;
-    input.heavy_held = keys.pressed(bindings.heavy);
-    input.raw_heavy_pressed = raw_heavy_pressed;
-    input.heavy_released = keys.just_released(bindings.heavy);
-    input.grab = chord.grab;
-    input.guard = chord.guard;
-    input.ultimate = chord.ultimate;
-    input.special = false;
 }
 
 #[cfg(test)]
@@ -1405,32 +1642,44 @@ pub(crate) struct DashTapTracker {
 }
 
 #[cfg(test)]
-fn movement_double_tapped(
-    keys: &ButtonInput<KeyCode>,
-    now: f32,
-    tracker: &mut DashTapTracker,
-    bindings: PlayerControlBindings,
-) -> bool {
-    double_tap_key(keys, bindings.left, now, &mut tracker.left)
-        || double_tap_key(keys, bindings.right, now, &mut tracker.right)
-        || double_tap_key(keys, bindings.down, now, &mut tracker.down)
-        || double_tap_key(keys, bindings.up, now, &mut tracker.up)
+fn movement_double_tapped(just_pressed: [bool; 4], now: f32, tracker: &mut DashTapTracker) -> bool {
+    double_tap_direction(just_pressed[0], now, &mut tracker.left)
+        || double_tap_direction(just_pressed[1], now, &mut tracker.right)
+        || double_tap_direction(just_pressed[2], now, &mut tracker.down)
+        || double_tap_direction(just_pressed[3], now, &mut tracker.up)
 }
 
 #[cfg(test)]
-fn double_tap_key(
-    keys: &ButtonInput<KeyCode>,
-    key: KeyCode,
-    now: f32,
-    last_tap: &mut Option<f32>,
-) -> bool {
-    if !keys.just_pressed(key) {
+fn double_tap_direction(just_pressed: bool, now: f32, last_tap: &mut Option<f32>) -> bool {
+    if !just_pressed {
         return false;
     }
 
     let dash = last_tap.is_some_and(|last| now - last <= DOUBLE_TAP_DASH_WINDOW);
     *last_tap = Some(now);
     dash
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct StickFlickTracker {
+    engaged: bool,
+}
+
+#[cfg(test)]
+impl StickFlickTracker {
+    fn update(&mut self, movement: Vec2) -> bool {
+        let magnitude = movement.length();
+        if magnitude <= f32::EPSILON {
+            self.engaged = false;
+            return false;
+        }
+        if self.engaged || magnitude < GAMEPAD_FLICK_DASH_THRESHOLD {
+            return false;
+        }
+        self.engaged = true;
+        true
+    }
 }
 
 fn player_movement_input(
@@ -1461,8 +1710,8 @@ fn player_dash_input(
     bindings: PlayerControlBindings,
     reserve_camera_inputs: bool,
 ) -> bool {
-    !(reserve_camera_inputs && camera_shift_pressed(keys) && uses_camera_arrow_keys(bindings))
-        && movement_double_tapped(keys, now, tracker, bindings)
+    let sample = keyboard_action_sample(keys, bindings, reserve_camera_inputs);
+    movement_double_tapped(sample.movement_just, now, tracker)
 }
 
 fn camera_shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -7524,6 +7773,117 @@ mod tests {
         }
     }
 
+    fn gamepad_with_buttons(buttons: &[GamepadButton]) -> Gamepad {
+        let mut gamepad = Gamepad::default();
+        for button in buttons {
+            gamepad.digital_mut().press(*button);
+        }
+        gamepad
+    }
+
+    #[test]
+    fn gamepad_movement_deadzone_is_radial_and_rescaled() {
+        assert_eq!(
+            apply_gamepad_movement_deadzone(Vec2::new(GAMEPAD_MOVEMENT_DEADZONE, 0.0)),
+            Vec2::ZERO
+        );
+        assert_eq!(
+            apply_gamepad_movement_deadzone(Vec2::new(0.12, 0.12)),
+            Vec2::ZERO
+        );
+        let outside = apply_gamepad_movement_deadzone(Vec2::new(0.6, 0.0));
+        assert_vec2_close(outside, Vec2::new(0.5, 0.0), 0.001);
+    }
+
+    #[test]
+    fn xbox_buttons_map_to_fixed_actions() {
+        let gamepad = gamepad_with_buttons(&[
+            GamepadButton::South,
+            GamepadButton::West,
+            GamepadButton::North,
+            GamepadButton::East,
+            GamepadButton::RightTrigger2,
+            GamepadButton::LeftTrigger,
+            GamepadButton::LeftTrigger2,
+            GamepadButton::RightTrigger,
+        ]);
+        let sample = gamepad_action_sample(&gamepad);
+
+        assert!(sample.jump_just);
+        assert!(sample.light_just);
+        assert!(sample.heavy_just);
+        assert!(sample.grab_just);
+        assert!(sample.aim_held);
+        assert!(sample.dash_just);
+        assert!(sample.guard_held);
+        assert!(sample.ultimate_just);
+        assert!(sample.special_just);
+    }
+
+    #[test]
+    fn xbox_shortcuts_keep_guard_and_ultimate_chords() {
+        let mut dash = DashTapTracker::default();
+        let mut guard = GuardChordTracker::default();
+        let mut flick = StickFlickTracker::default();
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            gamepad_action_sample(&gamepad_with_buttons(&[
+                GamepadButton::West,
+                GamepadButton::North,
+            ])),
+            1.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
+        );
+        assert!(input.guard);
+
+        let mut input = FighterInput::default();
+        collect_device_player_input(
+            gamepad_action_sample(&gamepad_with_buttons(&[
+                GamepadButton::East,
+                GamepadButton::West,
+                GamepadButton::North,
+            ])),
+            2.0,
+            0.0,
+            &mut dash,
+            &mut guard,
+            &mut flick,
+            &mut input,
+        );
+        assert!(input.ultimate);
+    }
+
+    #[test]
+    fn gamepad_flick_dash_requires_neutral_reset() {
+        let mut tracker = StickFlickTracker::default();
+        assert!(!tracker.update(Vec2::splat(0.4)));
+        assert!(tracker.update(Vec2::X));
+        assert!(!tracker.update(Vec2::X));
+        assert!(!tracker.update(Vec2::ZERO));
+        assert!(tracker.update(Vec2::NEG_X));
+    }
+
+    #[test]
+    fn changing_seat_device_resets_all_gesture_trackers() {
+        let first = Entity::from_raw_u32(11).expect("valid entity");
+        let second = Entity::from_raw_u32(12).expect("valid entity");
+        let mut trackers = PlayerInputTrackers::default();
+        trackers.reset_if_assignment_changed(0, LocalInputAssignment::Gamepad(first));
+        trackers.dash[0].left = Some(1.0);
+        trackers.guard[0].guard_latched = true;
+        trackers.stick_flick[0].engaged = true;
+
+        trackers.reset_if_assignment_changed(0, LocalInputAssignment::Gamepad(second));
+
+        assert_eq!(trackers.dash[0].left, None);
+        assert!(!trackers.guard[0].guard_latched);
+        assert!(!trackers.stick_flick[0].engaged);
+    }
+
     fn assert_vec3_close(actual: Vec3, expected: Vec3, tolerance: f32) {
         assert!(
             actual.distance(expected) <= tolerance,
@@ -8073,6 +8433,30 @@ mod tests {
             assert!(sample.pressed.contains(expected));
             assert_eq!(sample.released, InputMask::NONE);
         }
+    }
+
+    #[test]
+    fn gamepad_sampler_quantizes_movement_and_preserves_direct_action_edges() {
+        let mut gamepad = Gamepad::default();
+        gamepad.digital_mut().press(GamepadButton::DPadRight);
+        gamepad.digital_mut().press(GamepadButton::South);
+        gamepad.digital_mut().press(GamepadButton::LeftTrigger);
+        gamepad.digital_mut().press(GamepadButton::LeftTrigger2);
+        gamepad.digital_mut().press(GamepadButton::RightTrigger);
+        gamepad.digital_mut().press(GamepadButton::RightTrigger2);
+
+        let sample = sample_gamepad_tick_input(&gamepad, 0.0);
+        assert_ne!(sample.movement, QuantizedMovement::ZERO);
+        assert!(sample.held.contains(InputMask::RIGHT | InputMask::JUMP));
+        assert!(sample.pressed.contains(InputMask::RIGHT | InputMask::JUMP));
+        assert!(sample.pressed.contains(
+            InputMask::DIRECT_GUARD
+                | InputMask::DIRECT_ULTIMATE
+                | InputMask::DIRECT_SPECIAL
+                | InputMask::DIRECT_DASH
+        ));
+        assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.held));
+        assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.pressed));
     }
 
     #[test]

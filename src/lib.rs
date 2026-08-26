@@ -21,6 +21,8 @@ mod components;
 pub mod confirmed_progression;
 mod constants;
 pub mod contact_arbitration;
+mod control_settings;
+mod controller_haptics;
 pub mod dedicated_server;
 pub mod determinism;
 pub mod ecs_identity;
@@ -47,6 +49,8 @@ pub mod live_snapshot;
 pub mod live_special_snapshot;
 pub mod live_world_snapshot;
 pub mod local_loopback;
+#[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+mod macos_gamepad;
 mod map_editor;
 pub mod match_config;
 pub mod match_presentation;
@@ -192,6 +196,9 @@ pub fn build_app() -> App {
         })
         .disable::<LogPlugin>();
 
+    #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+    let default_plugins = default_plugins.disable::<bevy::gilrs::GilrsPlugin>();
+
     #[cfg(target_arch = "wasm32")]
     let default_plugins = default_plugins.set(AssetPlugin {
         meta_check: AssetMetaCheck::Never,
@@ -207,9 +214,13 @@ pub fn build_app() -> App {
     app.add_plugins(LogPlugin::default());
     let native_online_runtime = native_online::NativeOnlineRuntime::default();
     app.add_plugins(default_plugins);
+    app.add_plugins(controller_haptics::ControllerHapticsPlugin);
     app.insert_non_send_resource(online_client::EmbeddedOnlineClientController::default());
     app.insert_non_send_resource(native_online_runtime);
     app.insert_non_send_resource(native_online_app::NativeOnlineApplication::default());
+
+    #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+    app.add_plugins(macos_gamepad::MacOsGamepadPlugin);
 
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
@@ -255,9 +266,11 @@ pub fn build_app() -> App {
         .init_resource::<penguin_skills::PenguinPresentationIntentJournal>()
         .init_resource::<camera::CameraActionEffects>()
         .init_resource::<components::PlayerKeyBindings>()
+        .init_resource::<control_settings::ControlPreferences>()
         .init_resource::<user_mode::UserModeState>()
         .init_resource::<user_mode::UserModeGameplayScene>()
         .init_resource::<user_mode::PresentationTimeScale>()
+        .init_resource::<user_mode::LocalControllerReconnect>()
         .configure_sets(
             Update,
             (
@@ -339,6 +352,7 @@ pub fn build_app() -> App {
         .add_systems(
             Startup,
             (
+                control_settings::load_control_preferences,
                 effects::setup_effect_assets,
                 combat::setup_combat_visual_assets,
                 bee_skills::setup_bee_skill_assets,
@@ -412,6 +426,7 @@ pub fn build_app() -> App {
                     not(feature = "shipping"),
                     not(target_arch = "wasm32")
                 ))]
+                control_settings::sync_controller_device_info,
                 map_editor::toggle_map_editor,
                 #[cfg(all(
                     feature = "dev-hot-reload",
@@ -434,9 +449,14 @@ pub fn build_app() -> App {
                 user_mode::sample_user_mode_steam_input,
                 native_online_app::handle_native_online_ui_input,
                 native_online_app::handle_overlay_unavailable_notice_dismiss,
-                user_mode::handle_user_mode_input
-                    .run_if(simulation::local_simulation_drive_enabled),
-                user_mode::sync_user_mode_controllers,
+                (
+                    user_mode::handle_user_mode_input
+                        .run_if(simulation::local_simulation_drive_enabled),
+                    user_mode::sync_user_mode_controllers,
+                    user_mode::handle_local_controller_reconnect,
+                )
+                    .chain(),
+                user_mode::announce_haptic_test_results,
                 game_state::handle_global_input,
                 user_mode::sync_user_mode_battle_bot,
                 user_mode::sync_user_mode_battle_result,
@@ -688,10 +708,10 @@ pub fn build_app() -> App {
                         user_mode::update_user_mode_button_styles,
                         native_online_app::update_native_online_ui,
                         native_online_app::update_native_online_button_styles,
+                        user_mode::update_controller_reconnect_overlay,
                     )
                         .chain(),
-                )
-                    .chain(),
+                ),
             )
                 .chain()
                 .in_set(GameSet::Presentation),
@@ -725,7 +745,11 @@ pub fn build_app() -> App {
         )
         .add_systems(
             Update,
-            user_mode::update_user_mode_controls_ui.in_set(GameSet::Presentation),
+            (
+                user_mode::update_user_mode_controls_ui,
+                user_mode::update_control_settings_ui,
+            )
+                .in_set(GameSet::Presentation),
         )
         .add_systems(
             Update,

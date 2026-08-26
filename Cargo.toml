@@ -26,7 +26,7 @@ native = [
     "bevy/wayland",
 ]
 dev-hot-reload = ["native", "bevy/file_watcher"]
-web = ["bevy/webgl2"]
+web = ["bevy/webgl2", "bevy/bevy_gilrs"]
 perf = ["dep:libc"]
 # Allocation counters replace the process allocator and therefore stay out of
 # ordinary graphical timing/RSS captures. The render-free multiplayer profiler
@@ -59,6 +59,7 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_winit",
     "default_font",
     "reflect_auto_register",
+    "serialize",
     "2d_bevy_render",
     "3d_bevy_render",
     "ui_api",
@@ -93,6 +94,37 @@ steamworks = { version = "=0.12.2", optional = true, default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Storage", "Window"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-core-haptics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CHHapticEngine",
+    "CHHapticEvent",
+    "CHHapticParameter",
+    "CHHapticPattern",
+    "CHHapticPatternPlayer",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSError",
+    "NSString",
+] }
+objc2-game-controller = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "GCController",
+    "GCDevice",
+    "GCPhysicalInputProfile",
+    "GCExtendedGamepad",
+    "GCControllerElement",
+    "GCControllerButtonInput",
+    "GCControllerDirectionPad",
+    "GCControllerAxisInput",
+    "GCDeviceHaptics",
+] }
 
 [patch.crates-io]
 # Bevy 0.18.1 forgets an owned render-pass diagnostic label every frame.

@@ -24,6 +24,10 @@ use crate::contact_arbitration::{
     ContactBuffer, ContactFlags, ContactOutcomeKind, ContactPhase, ContactRecord, ContactSourceId,
     ContactSourceKind, MAX_CONTACTS_PER_TICK,
 };
+use crate::controller_haptics::{
+    CombatHapticCue, CombatHapticQueue, HapticActionPhase, HapticContactOutcome,
+    HapticImpactWeight, HapticMoveClass, haptic_move_class_for_action,
+};
 use crate::determinism::{
     DEFAULT_F32_QUANTIZATION, FighterHitMask, FighterId, SimEntityId, SimEntityKind, quantize_f32,
 };
@@ -68,7 +72,7 @@ use crate::techniques::{
     active_technique_definition_in_catalog, attack_payload_definition, attack_shape_definition,
     charged_payload_for_elapsed, damage_profile_definition, payload_is_jump_fish,
     payload_is_jump_spike, payload_is_ultimate_bomb, payload_is_ultimate_catch,
-    payload_is_ultimate_scratch, technique_slot_for_loadout,
+    payload_is_ultimate_scratch, technique_definition_by_id, technique_slot_for_loadout,
 };
 
 pub const NEUTRAL_IMPACT_OWNER_ID: usize = usize::MAX;
@@ -547,6 +551,8 @@ enum TimelineFeedbackVisual {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TimelineFeedbackPresentation {
     fighter: FighterId,
+    technique: TechniqueId,
+    phase: FeedbackPhase,
     position: Vec3,
     direction: Vec3,
     cue: &'static str,
@@ -1956,6 +1962,8 @@ pub fn spawn_attack_hitboxes(
                         technique.id,
                         TimelineFeedbackPresentation {
                             fighter: stable_owner,
+                            technique: technique.id,
+                            phase,
                             position: transform.translation,
                             direction: motor.facing,
                             cue,
@@ -4558,6 +4566,7 @@ pub struct CommittedCombatPresentation<'w> {
     cursor: ResMut<'w, PresentationEventCursor>,
     router: ResMut<'w, PresentationEventRouter>,
     dispatch_history: Option<ResMut<'w, CombatPresentationDispatchHistory>>,
+    haptics: Option<ResMut<'w, CombatHapticQueue>>,
 }
 
 type PresentationFighterQuery<'w, 's> = Query<
@@ -4598,6 +4607,7 @@ fn present_combat_cue(
     effect_assets: &EffectAssets,
     effects: &mut HitEffects,
     fighters: &mut PresentationFighterQuery,
+    haptics: Option<&mut CombatHapticQueue>,
 ) -> bool {
     match intent.kind {
         CombatPresentationCueKind::AttackSurfaceSpawn(surface) => matches!(
@@ -4627,6 +4637,20 @@ fn present_combat_cue(
         CombatPresentationCueKind::TimelineFeedback(cue) => {
             if !action_cue_matches(event, cue.fighter) {
                 return false;
+            }
+            if let Some(haptics) = haptics
+                && let Some(definition) = technique_definition_by_id(cue.technique)
+                && let Some(class) = haptic_move_class_for_action(definition.action)
+            {
+                let phase = match cue.phase {
+                    FeedbackPhase::Startup => HapticActionPhase::Startup,
+                    FeedbackPhase::PreHit if class == HapticMoveClass::Ultimate => {
+                        HapticActionPhase::Charge
+                    }
+                    FeedbackPhase::PreHit | FeedbackPhase::Impact => HapticActionPhase::Release,
+                    FeedbackPhase::Aftermath => HapticActionPhase::Aftermath,
+                };
+                haptics.push(CombatHapticCue::action(cue.fighter.index(), class, phase));
             }
             effects.push_feedback_cue(cue.cue, ImpactSource::FighterStrike, cue.priority);
             effects.shake = effects.shake.max(cue.shake);
@@ -4659,6 +4683,57 @@ fn present_combat_cue(
             true
         }
     }
+}
+
+fn queue_contact_haptic(
+    event: SimEvent,
+    outcome: Option<ImpactOutcome>,
+    terminal: bool,
+    haptics: &mut CombatHapticQueue,
+) {
+    let (attacker, defender, mut contact_outcome, damage_q) = match event.kind {
+        SimEventKind::Guarded { attacker, defender } => {
+            (attacker, defender, HapticContactOutcome::Guarded, 0)
+        }
+        SimEventKind::HitConfirmed {
+            attacker,
+            victim,
+            damage_q,
+            ..
+        } => (attacker, victim, HapticContactOutcome::Clean, damage_q),
+        _ => return,
+    };
+    if contact_outcome == HapticContactOutcome::Clean
+        && outcome.is_some_and(|outcome| outcome.presentation.source == ImpactSource::GrabThrow)
+    {
+        contact_outcome = HapticContactOutcome::Grab;
+    }
+    let weight = if terminal {
+        HapticImpactWeight::Terminal
+    } else if outcome
+        .is_some_and(|outcome| outcome.presentation.combat_sfx == CombatSfxKind::UltimateHit)
+    {
+        HapticImpactWeight::Ultimate
+    } else if outcome.is_some_and(|outcome| {
+        matches!(
+            outcome.presentation.visual,
+            ImpactVisualPresentation::Hit {
+                heavy_spark: true,
+                ..
+            }
+        )
+    }) || damage_q >= 12 * 4096
+    {
+        HapticImpactWeight::Heavy
+    } else {
+        HapticImpactWeight::Light
+    };
+    haptics.push(CombatHapticCue::contact(
+        attacker.map(FighterId::index),
+        defender.index(),
+        contact_outcome,
+        weight,
+    ));
 }
 
 fn install_attack_surface_visual(
@@ -4831,6 +4906,7 @@ pub fn present_committed_combat_events(
         mut cursor,
         mut router,
         mut dispatch_history,
+        mut haptics,
     } = presentation;
     // Offline/local rendering treats the newest locally committed tick as
     // confirmed. Online projection installs an explicit authority frontier, so
@@ -4855,6 +4931,31 @@ pub fn present_committed_combat_events(
     {
         let mut fighters = fighter_queries.p0();
         let _ = cursor.route_available(&sim_events, &mut router, confirmed_through, |event| {
+            if let Some(haptics) = haptics.as_deref_mut() {
+                if let SimEventKind::FighterLifecycle {
+                    fighter,
+                    event:
+                        crate::sim_event::FighterLifecycleEvent::WallBounced
+                        | crate::sim_event::FighterLifecycleEvent::GroundBounced,
+                } = event.kind
+                {
+                    haptics.push(CombatHapticCue::secondary(fighter.index()));
+                }
+                let terminal = combat_event_victim(event).is_some_and(|victim| {
+                    fighters
+                        .iter_mut()
+                        .find(|(_, fighter, ..)| fighter.id == victim.index())
+                        .is_some_and(|(_, _, stats, _, _)| stats.health <= 0.0)
+                });
+                queue_contact_haptic(
+                    event,
+                    presentation_intents
+                        .get(event.id)
+                        .map(|intent| intent.outcome),
+                    terminal,
+                    haptics,
+                );
+            }
             if crate::game_state::present_match_event(
                 event,
                 announcements.as_deref_mut(),
@@ -4875,6 +4976,7 @@ pub fn present_committed_combat_events(
                         &effect_assets,
                         &mut effects,
                         &mut fighters,
+                        haptics.as_deref_mut(),
                     );
                 }
                 return;
@@ -5796,9 +5898,16 @@ mod tests {
                 .metrics(),
             CombatPresentationDispatchMetrics {
                 presented: 1,
-                duplicates_suppressed: 1,
+                duplicates_suppressed: 0,
                 capacity_rejections: 0,
             }
+        );
+        assert_eq!(
+            app.world()
+                .resource::<PresentationEventRouter>()
+                .metrics()
+                .duplicate_events_suppressed,
+            1
         );
     }
 
