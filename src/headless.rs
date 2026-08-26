@@ -1390,7 +1390,7 @@ mod tests {
     fn compact_all_content_matrix_matches_frozen_hashes() {
         // Each arena freezes the independent retired-special/hazard and item
         // branches after semantic review.
-        const EXPECTED_FINAL_HASHES: [[u64; 2]; 10] = [
+        const EXPECTED_FINAL_HASHES: [[u64; 2]; 11] = [
             [0x365e_a128_e4b1_46cd, 0x0d34_896d_6260_88e4],
             [0x1273_bd11_6dc8_8b71, 0xcbd6_c658_eedc_b864],
             [0x2359_1919_2a3f_d974, 0x11c3_6f66_f0f8_78bb],
@@ -1401,9 +1401,10 @@ mod tests {
             [0x897c_27fc_fed0_32bb, 0xe7e0_ab65_3b93_6ad7],
             [0xa131_1a74_42f6_0edb, 0x01aa_c646_9a98_839b],
             [0x4621_4acb_53c5_1dc4, 0xc51f_9aeb_924b_4e33],
+            [0x8daa_139e_e0d0_d6f0, 0xdcaa_327a_a5e5_e218],
         ];
 
-        assert_eq!(arena_definitions().len(), 10);
+        assert_eq!(arena_definitions().len(), 11);
         assert_eq!(CHARACTER_KINDS.len(), 8);
         assert_eq!(FIGHTER_STYLE_KINDS.len(), 3);
         assert_eq!(EQUIPMENT_KINDS.len(), 4);
@@ -1414,6 +1415,7 @@ mod tests {
         let mut final_hashes = Vec::with_capacity(arena_definitions().len());
         let mut retired_special_spawns = 0_usize;
         let mut item_pickups = 0_usize;
+        let mut arenas_with_portable_items = 0_usize;
         let mut hazard_contacts = 0_usize;
 
         for arena_index in 0..arena_definitions().len() {
@@ -1482,8 +1484,10 @@ mod tests {
             let special_final_hash = special_first.state_hash().unwrap();
             let mut item_first = build_headless_simulation(config.clone()).unwrap();
             let mut item_second = build_headless_simulation(config.clone()).unwrap();
-            arrange_compact_item_world(&mut item_first, arena_index);
-            arrange_compact_item_world(&mut item_second, arena_index);
+            if !arena_definitions()[arena_index].item_anchors.is_empty() {
+                arrange_compact_item_world(&mut item_first, arena_index);
+                arrange_compact_item_world(&mut item_second, arena_index);
+            }
             let mut arena_item_pickups = 0_usize;
             for raw_tick in 1..=4 {
                 let tick = SimTick(raw_tick);
@@ -1512,10 +1516,19 @@ mod tests {
                     }
                 }
             }
-            assert!(
-                arena_item_pickups >= 1,
-                "arena {arena_index} did not execute its authored portable-item content"
-            );
+            let authored_item_count = arena_definitions()[arena_index].item_anchors.len();
+            if authored_item_count == 0 {
+                assert_eq!(
+                    arena_item_pickups, 0,
+                    "item-free arena {arena_index} unexpectedly produced a pickup"
+                );
+            } else {
+                arenas_with_portable_items += 1;
+                assert!(
+                    arena_item_pickups >= 1,
+                    "arena {arena_index} did not execute its authored portable-item content"
+                );
+            }
             final_hashes.push([special_final_hash, item_first.state_hash().unwrap()]);
         }
 
@@ -1527,8 +1540,8 @@ mod tests {
             "retired shared-special requests must remain inert in every arena"
         );
         assert!(
-            item_pickups >= arena_definitions().len(),
-            "every arena must execute its authored portable-item content"
+            item_pickups >= arenas_with_portable_items,
+            "every arena with portable items must execute its authored content"
         );
         assert!(
             hazard_contacts > 0,

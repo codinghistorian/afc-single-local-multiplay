@@ -72,10 +72,34 @@ BF013 is the sole accepted semantic fixture change. The other 17 behavior tapes
 retain identical normalized checkpoints, ordered semantic events, final ticks,
 and final outcomes before their version/content-derived hash refresh. A v6
 client or replay is rejected before gameplay by the v7 compatibility boundary.
-The reviewed gameplay-content digest is
+The shared-special tranche gameplay-content digest was
 `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`;
 debug and fat-LTO release agree on the new BF001 tick-1 hash
 `cf49d1dde67d32a9`.
+
+## Simulation v7 Training Ground additive addendum
+
+Training Ground is shipping arena index 10. Its 18-by-18-metre authored court,
+lighting, mesh, menu preview, and background remain presentation content. The
+authoritative collision boundary is a four-entry, exact-bit static barrier table
+owned by the selected per-world `ActiveArena`; canonical simulation never parses
+RON floats, evaluates Euler rotations, or reads process-global arena state.
+
+BF030 starts fighter 0 inside the east perimeter, holds movement into the wall,
+and freezes the exact settled Q12 pose `(34488, 1843, 0)` and zero velocity
+through tick 120 and a tick-60 restore. It also proves no stock loss and no
+canonical event side effect. The preceding 18 tapes retain identical normalized
+checkpoints, stable-ID relationships, ordered events, final ticks, and results.
+The eleven-arena compact content matrix independently reproduces every tick in
+two fresh worlds and freezes Training Ground's item-free branch.
+
+Because `arena.rs`, `arena_defs.rs`, `assets/maps/training_ground.ron`, and the
+arena-10 overlay are conservative gameplay-content inputs, the digest changes
+from `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`
+to `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`.
+Debug and fat-LTO release agree on all 19 fixture files and BF001 tick-1 hash
+`b6e166cd6feadfa6`. Protocol 1, simulation 7, replay 1, and snapshot schema 3
+remain unchanged.
 
 ## Simulation v6 manual-aim addendum
 
@@ -892,6 +916,7 @@ normal accepted-change and simulation-version process.
 | `generic_special_variants` | cast projectile/trap/shockwave/hazard | cooldown, spawn step, active contacts, expiry/despawn |
 | `character_skill_lifecycle` | exercise each bee/chick/penguin dynamic kind | stable spawn/update/contact/child spawn/despawn lifecycle |
 | `arena_hazard_contact` | one fighter crosses each hazard boundary | active-window boundary, cooldown, damage/reaction/attribution |
+| `training_ground_perimeter` | hold movement into the authored east wall across a restore boundary | exact Q12 contact pose/velocity, grounded state, no stock loss, no events, deterministic restore replay |
 | `arena_pipe_transit` | dwell at endpoint and complete transit | dwell threshold, pose/action during transit, exit/cooldown |
 | `powder_cannon_bomb` | fixed arena/cannon sequence | spawn step, first motion step, contact/ground detonation, next cannon |
 | `ringout_respawn` | cross ring-out bound with stock remaining | stock/score attribution, hidden/respawn timing, pose and invulnerability |
@@ -1000,7 +1025,7 @@ do not imply that the fixed-tick runtime still uses the historical architecture.
 
 - [x] Every Include group round-trips through canonical serialization.
 - [x] Every Exclude group can be changed or removed without changing a tick hash.
-- [x] Every one of the 17 checked-in behavior tapes restores at its declared
+- [x] Every one of the 19 checked-in behavior tapes restores at its declared
   `restore_tick` and replays to the same remaining per-tick hashes and final
   result.
 - [ ] Restore at each high-risk fixture checkpoint and replay to the same per-tick
@@ -1044,3 +1069,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-08-26 | 7 | BF013 `generic_special_variants`; all prior behavior tapes; v6/v7 lobby and replay compatibility | **AcceptedChange:** shared specials are retired from active controls, bots, HUD, and tutorial. Local fixed-tick samplers omit the legacy bit and the authoritative handler rejects an injected request before stable allocation, cooldown, stamina, damage, or canonical ability events; the wire bit and serialized control/tutorial IDs remain decode-compatible. BF013 retains accompanying guard/aim/heavy semantics but changes from four shared-special spawns and their lifecycle/contact effects to zero special stable entities, zero special cooldowns, and zero `AbilityLifecycle` events. The other 17 tapes retained identical normalized checkpoints, ordered events, final ticks, and final results before the v7 identity refresh. Snapshot schema 3, protocol 1, replay schema 1, stable-ID rules, and the canonical event vocabulary are unchanged. The gameplay-content digest is `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`; debug and fat-LTO release agreed on BF001 tick-1 hash `cf49d1dde67d32a9`. Approved by the browser-multiplayer integration scope. |
 | 2026-08-26 | 7 (unchanged) | All 18 behavior tapes; local controller setup, reconnect/takeover, and single-player menu flow | **Preservation evidence:** local setup now uses concise join/ready copy, removes the standalone controller-test and haptic-preview flow, and allows an unclaimed gamepad to take over P1 through a pause-owned reconnect gate. These are frame-driven UI/device-assignment changes around the existing fixed-tick sampler and predicted input vocabulary. Debug and fat-LTO release regenerated all 18 tapes byte-for-byte unchanged: normalized checkpoints, stable-ID relationships, ordered canonical events, final ticks, results, and per-tick hashes all match. The gameplay-content digest remains `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`, BF001 tick 1 remains `cf49d1dde67d32a9`, and simulation 7, protocol 1, replay schema 1, and snapshot schema 3 remain unchanged. |
 | 2026-08-26 | 7 (unchanged) | All 18 behavior tapes; menu backgrounds and five-character portrait-grid selector | **Preservation evidence:** character selection now uses supplied 2D portrait assets, deterministic menu-navigation state, and frame-driven UI markers instead of a presentation-world 3D preview scene. The online UI systems and gameplay-scene guards remain composed in the presentation schedule. The production-headless semantic fixture gate is unchanged, as are the gameplay-content digest (`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`) and BF001 tick-1 hash (`cf49d1dde67d32a9`). No fixed-tick rule, stable ID, canonical event, protocol/replay/snapshot schema, or simulation version changes. |
+| 2026-08-26 | 7 (unchanged) | BF030 `training_ground_perimeter`; all 18 prior behavior tapes; eleven-arena compact content matrix | **ContentIdentityOnly/additive content:** Training Ground adds arena index 10 and a presentation-authored court while authoritative collision uses four exact-bit static barriers selected through per-world `ActiveArena`. BF030 freezes east-wall contact at Q12 `(34488, 1843, 0)`, zero velocity, grounded/no-stock-loss state, no events, and tick-60 restore replay. The preceding 18 tapes retain identical normalized checkpoints, stable-ID relationships, ordered events, final ticks, and results before their identity-only refresh. The gameplay-content digest changes from `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6` to `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`; debug and fat-LTO release agree on all 19 files and BF001 tick-1 hash `b6e166cd6feadfa6`. Protocol 1, simulation 7, replay 1, and snapshot schema 3 remain unchanged. Approved by the browser-multiplayer integration scope. |

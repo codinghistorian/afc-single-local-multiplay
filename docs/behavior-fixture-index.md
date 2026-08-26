@@ -42,6 +42,7 @@ headless harness in `tests/support/behavior_fixtures.rs`:
 | BF027 | `quick_directional_heavy_throw` | Same-tick quick and directional-heavy throws with stable order, damage, reaction, knockback, attribution, and relationship cleanup |
 | BF028 | `item_use_throw_impact_respawn` | Pickup, apple use, turkey throw/impact, ownership, durability, telemetry, and respawn lifecycle |
 | BF029 | `manual_aim_lock_break_release` | **AcceptedChange:** stable-ID lock acquisition, fixed-tick 60-degree manual break, rollback-owned unlock count, release, and restore from an active lock |
+| BF030 | `training_ground_perimeter` | Held movement into the exact-bit east barrier; exact settled Q12 pose/velocity, grounded state, no stock loss/events, and restore replay |
 
 Every tape stores a hash for every tick, bounded normalized checkpoints, ordered
 semantic events, and final result. The runner compares two clean runs, a
@@ -92,6 +93,18 @@ production-headless semantic fixture gate remains unchanged, along with the
 compiled gameplay digest and BF001 tick-1 hash above. Stable-ID relationships,
 canonical events, and all fixed-tick gameplay paths remain outside the selector
 presentation world.
+
+The additive Training Ground integration raises the current corpus to 19 tapes.
+BF030 freezes the authoritative east-wall contact at Q12
+`(34488, 1843, 0)` with zero velocity through a tick-60 restore, while proving
+the fighter remains grounded and loses no stock or canonical events. Collision
+uses four exact-bit static barriers selected from per-world `ActiveArena`; the
+authored RON stays on the presentation/editor boundary. The other 18 tapes keep
+identical normalized checkpoints, stable-ID relationships, ordered events,
+final ticks, and results. Debug and fat-LTO release produced identical fixture
+files with BF001 tick-1 hash `b6e166cd6feadfa6`; the current gameplay-content
+digest is
+`aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
@@ -180,6 +193,7 @@ the original audit. That integration gap is now closed.
 | `generic_special_variants` | BF013 casts the generic projectile, trap, shockwave, and hazard variants and records their spawn/lifecycle input path, hashes, and restore replay. Activation/profile/repeat/radius and multi-target collector tests retain focused boundaries. | **Partial.** The tape is representative; it is not a generated contact/expiry/despawn matrix across every authored variant and target outcome. |
 | `character_skill_lifecycle` | Existing Bee/Chick/Penguin authored lifecycle tests remain. `bee_skills::tests::frozen_multi_target_projectile_outcomes_ignore_ecs_and_pool_allocation_order` proves all targets freeze before source consumption and the post consumer releases the exact generation under reversed allocation. Every character-skill family now uses the same collector/outcome-consumer boundary. | **Partial.** Representative multi-target lifecycle is covered, but no generated per-kind spawn/update/contact/child-spawn/despawn tape exists for the complete catalog. |
 | `arena_hazard_contact` | BF015 holds a fighter in an inactive vent, records the first active neutral-source impact, damage/reaction/cooldown, hitstop freeze and resume, per-tick hashes, and a restore across the lifecycle. `arena::tests::hazard_and_strike_both_land_independent_of_insertion_and_ecs_order` separately locks mixed-source allocation invariance. | **Partial.** The named vent path is a full v5 tape, but the requirement says each hazard boundary; the complete hazard catalog is not yet a generated matrix. |
+| `training_ground_perimeter` | BF030 holds a fighter into Training Ground's exact-bit east barrier, records the exact settled Q12 pose/zero velocity and grounded/no-stock-loss state, and restores from tick 60 through the unchanged final trace. The eleven-arena compact matrix also freezes this arena's item-free branch in two independently bootstrapped worlds. | **Covered by a full v7 input-tape/hash fixture.** Authored RON collision values remain presentation/editor data; the canonical barrier table is the frozen runtime contract. |
 | `arena_pipe_transit` | `arena::tests::crank_pipe_accepts_a_grounded_fighter_or_descending_jump`: grounded or descending-jump entries are accepted; idle airborne, ascending, and heavy attack are rejected. `arena::tests::crank_pipe_transit_sinks_then_emerges_at_the_other_endpoint`: the sampled pose shrinks/sinks at entry, emerges at the other endpoint, and reaches completion. | **Partial.** Dwell threshold, per-fighter state transitions, action/pose lock, exit cooldown, and interaction with separation/hitstop are not run through `update_arena_pipe_transits`. |
 | `powder_cannon_bomb` | `arena::tests::headless_cannon_hit_emits_neutral_impact_without_inline_feedback` and `arena::tests::cannon_projectile_freezes_all_targets_and_ignores_ecs_allocation_order` cover neutral semantic impact, multi-target frozen detonation, stable source consumption, and reversed ECS order. | **Partial.** Alternating cannon selection, exact spawn/first-motion tick, ground-only detonation, and next-fire timer still need one tape. |
 

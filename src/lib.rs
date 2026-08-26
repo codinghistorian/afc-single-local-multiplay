@@ -695,6 +695,7 @@ pub fn build_app() -> App {
                             .run_if(user_mode::gameplay_scene_loaded),
                     )
                         .chain(),
+                    arena::sync_arena_lighting.run_if(user_mode::gameplay_scene_loaded),
                     map_editor::sync_map_overlay_visuals.run_if(user_mode::gameplay_scene_loaded),
                     #[cfg(all(
                         feature = "dev-hot-reload",

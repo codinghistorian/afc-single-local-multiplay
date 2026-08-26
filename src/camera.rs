@@ -24,9 +24,9 @@ use std::fs;
 ))]
 use std::path::{Path, PathBuf};
 
-use crate::arena_defs::ActiveArena;
 #[cfg(test)]
 use crate::arena_defs::arena_definitions;
+use crate::arena_defs::{ActiveArena, ArenaDefinition};
 use crate::combat::HitEffects;
 use crate::components::{Fighter, FighterAction, FighterActionState};
 #[cfg(any(
@@ -161,7 +161,6 @@ const SINGLE_PLAYER_CAMERA_PRESET_PATH: &str = "assets/camera/single_player_came
     not(target_arch = "wasm32")
 ))]
 const DEV_PLAYER_CAMERA_TARGET_ID: usize = 0;
-
 #[derive(Component)]
 pub struct ArenaCamera;
 
@@ -447,9 +446,9 @@ pub fn setup_camera(mut commands: Commands, active_arena: Res<ActiveArena>) {
     commands.insert_resource(ScreenLookTransition::default());
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection::default()),
         ColorGrading::default(),
-        Transform::from_translation(active_arena.definition().camera_offset)
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        arena_camera_base_transform(active_arena.definition()),
         ArenaCamera,
     ));
     commands.spawn((
@@ -462,6 +461,10 @@ pub fn setup_camera(mut commands: Commands, active_arena: Res<ActiveArena>) {
         UiCamera,
         Name::new("Default UI camera"),
     ));
+}
+
+fn arena_camera_base_transform(arena: &ArenaDefinition) -> Transform {
+    Transform::from_translation(arena.camera_offset).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
 #[cfg(all(
@@ -1473,6 +1476,7 @@ fn gameplay_camera_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena_defs::{TRAINING_GROUND_ARENA_INDEX, arena_definition};
 
     fn assert_vec2_close(actual: Vec2, expected: Vec2, tolerance: f32) {
         assert!(
@@ -1485,6 +1489,20 @@ mod tests {
         assert!(
             actual.distance(expected) <= tolerance,
             "expected {actual:?} to be within {tolerance} of {expected:?}"
+        );
+    }
+
+    #[test]
+    fn training_ground_uses_the_standard_gameplay_camera_pitch() {
+        let arena = arena_definition(TRAINING_GROUND_ARENA_INDEX);
+        let transform = arena_camera_base_transform(arena);
+        assert_vec3_close(transform.translation, arena.camera_offset, 0.001);
+        assert!(
+            arena
+                .camera_offset
+                .normalize()
+                .distance(crate::constants::CAMERA_BASE_OFFSET.normalize())
+                < 0.002
         );
     }
 

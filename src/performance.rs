@@ -65,9 +65,9 @@ const DEFAULT_STRESS_SECONDS: f64 = 300.0;
 const DEFAULT_SOAK_SECONDS: f64 = 600.0;
 const PERFORMANCE_RESULT_SCHEMA_VERSION: u64 = 6;
 const MAP_SWITCH_COUNT: usize = 100;
-const MAP_WARM_PRECYCLE_SWITCH_COUNT: usize = 10;
+const MAP_WARM_PRECYCLE_SWITCH_COUNT: usize = 11;
 const MAP_CYCLE_PRELOAD_FOLDERS: [&str; 3] = ["arena", "backgrounds", "music/bgm"];
-const MAP_ALIGNED_CHECKPOINT_COUNT: usize = 11;
+const MAP_ALIGNED_CHECKPOINT_COUNT: usize = 1 + MAP_SWITCH_COUNT / MAP_WARM_PRECYCLE_SWITCH_COUNT;
 const MAP_ALIGNED_TAIL_CHECKPOINTS: usize = 4;
 const PERF_STOCKS: i32 = 1_000_000;
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3828,8 +3828,9 @@ mod tests {
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
         )
         .expect("checked-in render assets must be discoverable");
-        assert_eq!(paths.len(), 101);
+        assert_eq!(paths.len(), 113);
         assert!(paths.contains(&"backgrounds/crown_ring.png".to_string()));
+        assert!(paths.contains(&"backgrounds/menu/map_select/arena0.png".to_string()));
         assert!(paths.contains(&"arena/kits/platformer/lever.glb".to_string()));
         assert!(paths.iter().any(|path| path.ends_with(".ogg")));
         assert!(paths.iter().all(|path| {
@@ -4905,7 +4906,7 @@ mod tests {
     }
 
     #[test]
-    fn map_growth_uses_the_exact_last_four_of_eleven_aligned_checkpoints() {
+    fn map_growth_uses_the_exact_last_four_aligned_checkpoints() {
         let mut run = ScenarioRun::new(ScenarioConfig {
             scenario: PerformanceScenario::MapCycle100,
             warmup_seconds: DEFAULT_WARMUP_SECONDS,
@@ -4959,7 +4960,10 @@ mod tests {
 
         run.map_cycle_checkpoints.pop();
         let incomplete = aligned_cycle_growth_analysis(&run);
-        assert_eq!(incomplete.checkpoint_count, 10);
+        assert_eq!(
+            incomplete.checkpoint_count,
+            MAP_ALIGNED_CHECKPOINT_COUNT - 1
+        );
         assert_eq!(
             aligned_rss_growth_acceptance_status(&run, incomplete),
             "insufficient_aligned_cycle_evidence"

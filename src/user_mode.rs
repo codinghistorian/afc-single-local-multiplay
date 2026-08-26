@@ -63,7 +63,7 @@ const USER_MODE_GAME_LOGO_PATH: &str = "backgrounds/menu/game_logo.png";
 const USER_MODE_CONTROLLER_ICON_PATH: &str = "icons/controller.png";
 const USER_MODE_KEYBOARD_ICON_PATH: &str = "icons/keyboard.png";
 const USER_MODE_SOUND_ICON_PATH: &str = "icons/sound.png";
-const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
+const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 11] = [
     "music/bgm/cc0_crown_hope.ogg",
     "music/bgm/cc0_causeway_pirate_tune.ogg",
     "music/bgm/cc0_sunstone_desert_loop.mp3",
@@ -74,10 +74,12 @@ const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
     "music/bgm/cc0_snare_rhythm_garden.ogg",
     "music/bgm/cc0_sky_snow_stage.ogg",
     "music/bgm/cc0_powder_pirate_indenture_loop.wav",
+    "music/bgm/cc0_crown_hope.ogg",
 ];
 const USER_MODE_ARENA_PREVIEW_TEXTURE_WIDTH: u32 = 720;
 const USER_MODE_ARENA_PREVIEW_TEXTURE_HEIGHT: u32 = 480;
 const USER_MODE_ARENA_PREVIEW_CAMERA_DISTANCE_SCALE: f32 = 1.18;
+const USER_MODE_ARENA_PREVIEW_ASPECT_RATIO: f32 = 1.5;
 const USER_MODE_PLAYER_FIGHTER_ID: usize = 0;
 const USER_MODE_BOT_FIGHTER_ID: usize = 1;
 const USER_MODE_STOCK_RULE_INDEX: usize = 2;
@@ -4762,7 +4764,7 @@ pub fn handle_user_mode_input(
     let keyboard_action = before_device_join
         .then(|| keyboard_user_mode_action(&user_mode, &keys))
         .flatten()
-        .or_else(|| single_player_enter_action(&user_mode, &keys));
+        .or_else(|| keyboard_menu_confirm_action(&user_mode, &keys));
     let action = pointer_action
         .or(device_action)
         .or(keyboard_action)
@@ -5664,6 +5666,7 @@ pub fn update_user_mode_selection_previews(
         } else {
             Display::None
         };
+        node.aspect_ratio = Some(USER_MODE_ARENA_PREVIEW_ASPECT_RATIO);
     }
     for (mut camera, mut transform) in &mut arena_preview_cameras {
         if camera.is_active != arena_visible {
@@ -6730,19 +6733,28 @@ fn keyboard_user_mode_action(
     }
 }
 
-fn single_player_enter_action(
+fn keyboard_menu_confirm_action(
     user_mode: &UserModeState,
     keys: &ButtonInput<KeyCode>,
 ) -> Option<UserModeUiAction> {
-    (user_mode.play_mode == UserPlayMode::SinglePlayer
-        && matches!(
-            user_mode.screen,
-            UserModeScreen::CharacterSelect
-                | UserModeScreen::ArenaSelect
-                | UserModeScreen::ControlsBriefing
-        )
-        && keys.just_pressed(KeyCode::Enter))
-    .then_some(UserModeUiAction::Confirm)
+    if !keys.just_pressed(KeyCode::Enter) {
+        return None;
+    }
+
+    let confirmable = matches!(
+        user_mode.screen,
+        UserModeScreen::ModeSelect
+            | UserModeScreen::PlayerCountSelect
+            | UserModeScreen::ControlsHub
+            | UserModeScreen::SoundSettings
+            | UserModeScreen::CharacterSelect
+            | UserModeScreen::ArenaSelect
+            | UserModeScreen::KeySettings
+            | UserModeScreen::ControlsBriefing
+    ) || (user_mode.screen == UserModeScreen::BattleResult
+        && user_mode.result_menu_ready);
+
+    confirmable.then_some(UserModeUiAction::Confirm)
 }
 
 fn select_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -7453,6 +7465,7 @@ fn opposite_user_mode_character(character: CharacterKind) -> CharacterKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena_defs::TRAINING_GROUND_ARENA_INDEX;
     use crate::components::{LocalInputAssignment, ParticipantKind, PlayerSlotId};
     use crate::steam_platform::{SteamInputControllerId, SteamInputControllerSnapshot};
 
@@ -7593,6 +7606,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     fn shift_u_enters_user_mode() {
         let mut keys = ButtonInput::<KeyCode>::default();
         keys.press(KeyCode::ShiftLeft);
@@ -8491,42 +8505,60 @@ mod tests {
     }
 
     #[test]
-    fn enter_confirms_single_player_character_arena_and_fight() {
+    fn enter_confirms_user_mode_menu_actions() {
         let mut user_mode = UserModeState::default();
-        user_mode.play_mode = UserPlayMode::SinglePlayer;
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::Enter);
 
-        user_mode.enter_character_select();
-        let character_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(character_action, Some(UserModeUiAction::Confirm));
-        assert_eq!(
-            route_user_mode_action(&mut user_mode, character_action.unwrap()),
-            UserModeRoute::ArenaEntered
-        );
-        assert_eq!(user_mode.screen(), UserModeScreen::ArenaSelect);
+        for screen in [
+            UserModeScreen::ModeSelect,
+            UserModeScreen::PlayerCountSelect,
+            UserModeScreen::ControlsHub,
+            UserModeScreen::SoundSettings,
+            UserModeScreen::CharacterSelect,
+            UserModeScreen::ArenaSelect,
+            UserModeScreen::KeySettings,
+            UserModeScreen::ControlsBriefing,
+        ] {
+            user_mode.screen = screen;
+            assert_eq!(
+                keyboard_menu_confirm_action(&user_mode, &keys),
+                Some(UserModeUiAction::Confirm),
+                "Enter should confirm on {screen:?}"
+            );
+        }
 
-        let arena_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(arena_action, Some(UserModeUiAction::Confirm));
+        user_mode.enter_battle_result(Some(USER_MODE_BOT_FIGHTER_ID));
         assert_eq!(
-            route_user_mode_action(&mut user_mode, arena_action.unwrap()),
-            UserModeRoute::PrepareMatch
-        );
-
-        user_mode.enter_controls_briefing();
-        let fight_action = single_player_enter_action(&user_mode, &keys);
-        assert_eq!(fight_action, Some(UserModeUiAction::Confirm));
-        assert_eq!(
-            route_user_mode_action(&mut user_mode, fight_action.unwrap()),
-            UserModeRoute::ConfirmBattle
-        );
-
-        user_mode.play_mode = UserPlayMode::FourPlayers;
-        assert_eq!(
-            single_player_enter_action(&user_mode, &keys),
+            keyboard_menu_confirm_action(&user_mode, &keys),
             None,
-            "multiplayer confirmation must remain scoped to each assigned seat"
+            "Enter should wait until the result menu is revealed"
         );
+        user_mode.result_menu_ready = true;
+        assert_eq!(
+            keyboard_menu_confirm_action(&user_mode, &keys),
+            Some(UserModeUiAction::Confirm)
+        );
+
+        let p1_bindings = PlayerKeyBindings::default()
+            .bindings_for_player(0)
+            .expect("P1 bindings should exist");
+        assert_eq!(
+            keyboard_assignment_user_mode_action(UserModeScreen::BattleResult, &keys, p1_bindings),
+            None,
+            "the gameplay binding path does not consume Enter"
+        );
+
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::Replay
+        );
+        user_mode.result_choice = UserModeResultChoice::ChooseCharacter;
+        assert_eq!(
+            route_user_mode_action(&mut user_mode, UserModeUiAction::Confirm),
+            UserModeRoute::ChooseCharacter
+        );
+        assert_eq!(user_mode.screen(), UserModeScreen::CharacterSelect);
     }
 
     #[test]
@@ -9662,9 +9694,21 @@ mod tests {
     fn arena_selector_copy_only_exposes_focused_choice_and_counter() {
         let message = arena_select_message(5);
 
-        assert_eq!(message, "BUMPER ALLEY\n6 / 10");
+        assert_eq!(message, "BUMPER ALLEY\n6 / 11");
         assert!(!message.contains("CROWN RING"));
         assert!(!message.contains("POWDER KEG COURT"));
+    }
+
+    #[test]
+    fn training_ground_selector_is_registered_as_the_eleventh_arena() {
+        assert_eq!(
+            user_mode_battle_music_path(TRAINING_GROUND_ARENA_INDEX),
+            USER_MODE_BATTLE_MUSIC_PATHS[0]
+        );
+        assert_eq!(
+            arena_select_message(TRAINING_GROUND_ARENA_INDEX),
+            "TRAINING GROUND\n11 / 11"
+        );
     }
 
     #[test]
@@ -9772,6 +9816,47 @@ mod tests {
             app.world().get::<Node>(preview).unwrap().display,
             Display::None
         );
+    }
+
+    #[test]
+    fn every_arena_including_training_ground_uses_the_live_preview_camera() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_arena_select();
+
+        let mut app = App::new();
+        app.insert_resource(user_mode)
+            .add_systems(Update, update_user_mode_selection_previews);
+        let panel = app
+            .world_mut()
+            .spawn((UserModeArenaPreviewPanel, Node::default()))
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera::default(),
+                Transform::default(),
+                UserModeArenaPreviewCamera,
+            ))
+            .id();
+
+        for arena_index in 0..arena_definitions().len() {
+            app.world_mut().resource_mut::<UserModeState>().arena_index = arena_index;
+            app.update();
+
+            assert_eq!(
+                app.world().get::<Node>(panel).unwrap().display,
+                Display::Flex
+            );
+            assert_eq!(
+                app.world().get::<Node>(panel).unwrap().aspect_ratio,
+                Some(USER_MODE_ARENA_PREVIEW_ASPECT_RATIO)
+            );
+            assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+            assert_eq!(
+                app.world().get::<Transform>(camera).unwrap().translation,
+                arena_preview_camera_transform(arena_index).translation
+            );
+        }
     }
 
     #[test]

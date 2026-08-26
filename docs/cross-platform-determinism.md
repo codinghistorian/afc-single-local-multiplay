@@ -20,7 +20,7 @@ The checked-in contract is:
 
 The final canonical result is team 1 winning at tick 709. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
-all 18 checked-in read-only versioned behavior tapes, and the compact
+all 19 checked-in read-only versioned behavior tapes, and the compact
 authored-content matrix on Linux, Windows, and macOS in both Cargo debug and
 release profiles. Changes under `tests/` trigger the same matrix. Workflow
 configuration is not a claim that the current release candidate has passed:
@@ -29,13 +29,14 @@ creates no window, renderer, audio output, or UI. A mismatch fails at the first
 stored checkpoint, behavior observation, content-matrix final hash, or final
 result assertion.
 
-The compact matrix uses all ten shipping arenas and distributes all eight
+The compact matrix uses all eleven shipping arenas and distributes all eight
 characters, three styles, and four equipment choices across four occupied seats.
 Each arena has two deliberately independent branches: a 120-tick branch injects
 all four retired generic-special request forms, proves that no stable `Special`
 entity is spawned, preserves any accompanying ordinary action, and exercises
 authored static-hazard contact; a four-tick branch executes an immediate pickup
-of that arena's first authored portable item. Two independently bootstrapped
+of that arena's first authored portable item, or proves zero pickup when the
+arena deliberately authors no item. Two independently bootstrapped
 production Bevy worlds must match on every tick in each branch. Keeping the
 branches separate prevents one feature from consuming or displacing another
 feature's acceptance input. Their synthetic compatibility identity is fixed, so
@@ -53,6 +54,7 @@ debug/release build metadata cannot enter the frozen hashes.
 | Snare Garden | `897c27fcfed032bb` | `e7e0ab653b936ad7` |
 | Sky Steps | `a1311a7442f60edb` | `01aac6469a98839b` |
 | Powder Keg Court | `46214acb53c51dc4` | `c51f9aeb924b4e33` |
+| Training Ground | `8daa139ee0d0d6f0` | `dcaa327aa5e5e218` (item-free branch) |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -98,6 +100,17 @@ tapes retain their normalized checkpoints, ordered events, final ticks, and
 results before the identity refresh. Debug and fat-LTO release agreed on BF001
 tick-1 hash `cf49d1dde67d32a9`. The compiled gameplay-content digest is
 `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`.
+
+The additive Training Ground batch adds BF030 and the eleventh compact-matrix
+row without changing the simulation discriminator. Canonical collision uses a
+four-entry exact-bit barrier table selected by per-world `ActiveArena`; authored
+RON float/Euler data is never evaluated by simulation. BF030 freezes the east
+wall at Q12 `(34488, 1843, 0)`, zero velocity, grounded/no-stock-loss state, no
+events, and restore replay from tick 60. The other 18 behavior tapes retain
+identical normalized checkpoints, stable-ID relationships, ordered events,
+final ticks, and results. Debug and fat-LTO release produced byte-identical
+files and BF001 tick-1 hash `b6e166cd6feadfa6`; the compiled content digest is
+`aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`.
 
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The

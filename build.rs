@@ -62,6 +62,8 @@ pub(crate) const GAMEPLAY_SOURCES: &[&str] = &[
     "assets/maps/overlays/arena_7.ron",
     "assets/maps/overlays/arena_8.ron",
     "assets/maps/overlays/arena_9.ron",
+    "assets/maps/overlays/arena_10.ron",
+    "assets/maps/training_ground.ron",
 ];
 
 fn main() {

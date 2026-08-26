@@ -1775,6 +1775,7 @@ fn embedded_overlay_contents(arena_index: usize) -> Option<&'static str> {
         7 => include_str!("../assets/maps/overlays/arena_7.ron"),
         8 => include_str!("../assets/maps/overlays/arena_8.ron"),
         9 => include_str!("../assets/maps/overlays/arena_9.ron"),
+        10 => include_str!("../assets/maps/overlays/arena_10.ron"),
         _ => return None,
     })
 }

@@ -1995,6 +1995,33 @@ fn assert_fixture_is_meaningful(
                 "aim has no synthetic event side effects"
             );
         }
+        "BF030_training_ground_perimeter" => {
+            assert_eq!(
+                fixture.setup.arena,
+                crate::arena_defs::TRAINING_GROUND_ARENA_INDEX
+            );
+            assert_eq!(
+                event_count(trace, "StockLost"),
+                0,
+                "the authored Training Ground wall must prevent a held run from becoming a ring-out"
+            );
+            let initial = fighter_at(trace, 0, 0);
+            let final_fighter = fighter_at(trace, final_index, 0);
+            assert!(final_fighter.active);
+            assert_eq!(final_fighter.stocks, initial.stocks);
+            assert!(final_fighter.grounded);
+            assert_eq!(
+                (final_fighter.position, final_fighter.velocity),
+                ([34_488, 1_843, 0], [0, 0, 0]),
+                "the exact-bit east barrier contact is part of the frozen arena contract"
+            );
+            let at_restore = fighter_at(trace, 59, 0);
+            assert_eq!(
+                (at_restore.position, at_restore.velocity),
+                (final_fighter.position, final_fighter.velocity),
+                "holding into the frozen perimeter must settle before the restore boundary"
+            );
+        }
         name => panic!("fixture {name} has no semantic coverage assertion"),
     }
 }
