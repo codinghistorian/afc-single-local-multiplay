@@ -375,7 +375,12 @@ pub fn handle_special_inputs(
         let kind = requested_special_kind(&input);
         let loadout = LoadoutContext::new(style.kind, equipment.kind);
         input.special = false;
+        input.light = false;
+        input.light_held = false;
+        input.raw_light_pressed = false;
         input.heavy = false;
+        input.heavy_held = false;
+        input.raw_heavy_pressed = false;
         input.grab = false;
 
         let spawned = spawn_special(
@@ -430,12 +435,12 @@ fn can_cast_special(action: FighterAction) -> bool {
 }
 
 fn requested_special_kind(input: &FighterInput) -> SpecialKind {
-    if input.guard {
+    if input.guard || input.light || input.light_held || input.raw_light_pressed {
         SpecialKind::Trap
-    } else if input.heavy {
-        SpecialKind::Hazard
-    } else if input.grab {
+    } else if input.aim || input.grab {
         SpecialKind::Shockwave
+    } else if input.heavy || input.heavy_held || input.raw_heavy_pressed {
+        SpecialKind::Hazard
     } else {
         SpecialKind::Projectile
     }
@@ -1347,6 +1352,48 @@ mod tests {
     use crate::game_state::MatchTelemetry;
     use crate::reactions::ReactionFamilyId;
     use crate::sim_event::{PresentationEventCursor, PresentationEventRouter, SimEventJournal};
+
+    #[test]
+    fn canonical_special_modifiers_select_shared_specials_with_stable_precedence() {
+        for (input, expected) in [
+            (FighterInput::default(), SpecialKind::Projectile),
+            (
+                FighterInput {
+                    heavy_held: true,
+                    ..default()
+                },
+                SpecialKind::Hazard,
+            ),
+            (
+                FighterInput {
+                    aim: true,
+                    heavy_held: true,
+                    ..default()
+                },
+                SpecialKind::Shockwave,
+            ),
+            (
+                FighterInput {
+                    light_held: true,
+                    aim: true,
+                    heavy_held: true,
+                    ..default()
+                },
+                SpecialKind::Trap,
+            ),
+        ] {
+            assert_eq!(requested_special_kind(&input), expected);
+        }
+
+        assert_eq!(
+            requested_special_kind(&FighterInput {
+                guard: true,
+                ..default()
+            }),
+            SpecialKind::Trap,
+            "the pre-existing guard chord remains wire-compatible"
+        );
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct FrozenSpecialTargetState {

@@ -1054,6 +1054,17 @@ fn sample_bound_tick_input(
             released.insert(button);
         }
     }
+    for (mask, key) in [(InputMask::DIRECT_SPECIAL, bindings.special)] {
+        if keys.pressed(key) {
+            held.insert(mask);
+        }
+        if keys.just_pressed(key) {
+            pressed.insert(mask);
+        }
+        if keys.just_released(key) {
+            released.insert(mask);
+        }
+    }
 
     let movement = player_movement_input(keys, camera_yaw, bindings, reserve_camera_inputs);
     RenderInputSample {
@@ -1303,6 +1314,7 @@ fn keyboard_action_sample(
         heavy_released: keys.just_released(bindings.heavy),
         grab_just: keys.just_pressed(bindings.aim_grab),
         grab_held: keys.pressed(bindings.aim_grab),
+        special_just: keys.just_pressed(bindings.special),
         ..default()
     }
 }
@@ -7818,6 +7830,42 @@ mod tests {
         assert!(sample.guard_held);
         assert!(sample.ultimate_just);
         assert!(sample.special_just);
+    }
+
+    #[test]
+    fn keyboard_special_and_modifiers_cross_the_canonical_wire_boundary() {
+        let bindings = PlayerControlBindings::player_one_default();
+        for (modifier, expected_light, expected_aim, expected_heavy) in [
+            (None, false, false, false),
+            (Some(bindings.heavy), false, false, true),
+            (Some(bindings.aim_grab), false, true, false),
+            (Some(bindings.light), true, false, false),
+        ] {
+            let mut keys = ButtonInput::default();
+            if let Some(modifier) = modifier {
+                keys.press(modifier);
+            }
+            keys.press(bindings.special);
+            let sample = sample_bound_tick_input(&keys, 0.0, bindings, false);
+            let frame = TickInputFrame {
+                tick: 17,
+                seat: LocalSeatId::new(0).unwrap(),
+                sequence: crate::tick_input::InputSequence(9),
+                movement: sample.movement,
+                held: sample.held,
+                pressed: sample.pressed,
+                released: sample.released,
+            };
+            let network = crate::live_input::local_tick_to_network_input(
+                frame,
+                &mut SeatGestureTrackers::default(),
+            );
+            let input = crate::live_input::network_input_to_fighter_input(network);
+            assert!(input.special);
+            assert_eq!(input.light_held, expected_light);
+            assert_eq!(input.aim, expected_aim);
+            assert_eq!(input.heavy_held, expected_heavy);
+        }
     }
 
     #[test]

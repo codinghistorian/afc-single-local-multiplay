@@ -9,17 +9,19 @@ use crate::characters::{
 use crate::combat::{HitEffects, ImpactSource};
 use crate::components::{
     AnnouncementText, DebugOverlayPanel, DebugOverlayText, Fighter, FighterAction,
-    FighterActionState, FighterSpecialState, FighterStats, HealthBar, Hitbox, ParticipantKind,
-    PhaseText, ResultPanel, ResultText, StaminaBar, TeamScoreText, TimerText,
+    FighterActionState, FighterInventory, FighterSpecialState, FighterStats, HealthBar, Hitbox,
+    ParticipantKind, PhaseText, ResultPanel, ResultText, SimPosition, StaminaBar, TeamScoreText,
+    TimerText,
 };
 use crate::constants::{FIGHTER_COLORS, MAX_HEALTH, MAX_STAMINA};
-use crate::equipment::{equipment_effect_label, equipment_label};
+use crate::ecs_identity::StableSimEntity;
+use crate::equipment::{FighterEquipment, equipment_effect_label, equipment_label};
 use crate::fighter::ringout_danger_level;
 use crate::game_state::{
     LocalSetup, MatchAnnouncements, MatchPhase, MatchState, MatchTelemetry, StockMatchOutcome,
     TeamId,
 };
-use crate::items::{ArenaItem, ItemState};
+use crate::items::{ArenaItem, ItemState, held_item_label};
 #[cfg(all(
     feature = "dev-hot-reload",
     not(feature = "shipping"),
@@ -65,6 +67,11 @@ pub(crate) struct HudNameText {
 
 #[derive(Component)]
 pub(crate) struct HudLifeText {
+    fighter_id: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct HudStatusText {
     fighter_id: usize,
 }
 
@@ -561,7 +568,7 @@ fn fighter_plate(id: usize, color: Color, portraits: HudPortraitHandles) -> impl
     (
         Node {
             width: Val::Px(286.0),
-            height: Val::Px(88.0),
+            height: Val::Px(102.0),
             border: UiRect::all(Val::Px(2.0)),
             padding: UiRect::all(Val::Px(6.0)),
             column_gap: Val::Px(6.0),
@@ -633,6 +640,11 @@ fn fighter_plate(id: usize, color: Color, portraits: HudPortraitHandles) -> impl
                         Color::srgb(0.13, 0.72, 1.0),
                         StaminaBar { fighter_id: id }
                     ),
+                    (
+                        HudStatusText { fighter_id: id },
+                        Text::new(""),
+                        text_style(10.0, Color::srgb(0.88, 0.8, 0.48)),
+                    ),
                 ]
             )
         ],
@@ -677,7 +689,7 @@ pub fn sync_hud_fighter_plates(
 ) {
     let resources_changed = state.is_changed() || user_mode.is_changed() || policy.is_changed();
     let gameplay_hud_visible = if policy.phase == PresentationPhase::Offline {
-        !user_mode.active()
+        user_mode.shows_gameplay_hud()
     } else {
         policy.gameplay_hud_visible
     };
@@ -706,6 +718,36 @@ fn life_label(stock: Option<i32>) -> String {
         || "Life --".to_string(),
         |stock| format!("Life {}", stock.max(0)),
     )
+}
+
+fn fighter_status_label(
+    held_item: Option<String>,
+    speed_timer: f32,
+    giant_timer: f32,
+    special_cooldown: f32,
+    equipment_cooldown: f32,
+    ringout_danger: f32,
+) -> String {
+    let mut indicators = Vec::with_capacity(6);
+    if let Some(held_item) = held_item {
+        indicators.push(format!("ITEM {held_item}"));
+    }
+    if speed_timer > 0.0 {
+        indicators.push(format!("SPEED {speed_timer:.1}"));
+    }
+    if giant_timer > 0.0 {
+        indicators.push(format!("GIANT {giant_timer:.1}"));
+    }
+    if special_cooldown > 0.0 {
+        indicators.push(format!("SP {special_cooldown:.1}"));
+    }
+    if equipment_cooldown > 0.0 {
+        indicators.push(format!("EQ {equipment_cooldown:.1}"));
+    }
+    if ringout_danger > 0.0 {
+        indicators.push("EDGE".to_string());
+    }
+    indicators.join("  ")
 }
 
 fn meter_row(label: &'static str, color: Color, marker: impl Component) -> impl Bundle {
@@ -816,7 +858,8 @@ pub fn update_hud(
     {
         let mut gameplay_panels = bar_queries.p5();
         for mut node in &mut gameplay_panels {
-            let display = if (policy.phase == PresentationPhase::Offline && !user_mode.active())
+            let display = if (policy.phase == PresentationPhase::Offline
+                && user_mode.shows_gameplay_hud())
                 || policy.gameplay_hud_visible
             {
                 Display::Flex
@@ -1060,6 +1103,43 @@ pub fn update_hud(
         for mut text in &mut debug_texts {
             set_text_if_changed(&mut text, debug.clone());
         }
+    }
+}
+
+pub fn update_hud_status_indicators(
+    state: Res<MatchState>,
+    active_arena: Res<ActiveArena>,
+    fighters: Query<(
+        &Fighter,
+        &FighterStats,
+        &FighterSpecialState,
+        &FighterInventory,
+        &FighterEquipment,
+        &SimPosition,
+    )>,
+    items: Query<(&StableSimEntity, &ArenaItem)>,
+    mut status_texts: Query<(&HudStatusText, &mut Text)>,
+) {
+    for (status, mut text) in &mut status_texts {
+        let value = fighters
+            .iter()
+            .find(|(fighter, _, _, _, _, _)| {
+                fighter.id == status.fighter_id && state.fighter_active(fighter.id)
+            })
+            .map(
+                |(_, stats, special_state, inventory, equipment, transform)| {
+                    fighter_status_label(
+                        held_item_label(inventory, &items),
+                        stats.item_speed_timer.as_seconds(),
+                        stats.item_giant_timer.as_seconds(),
+                        special_state.cooldown.as_seconds(),
+                        equipment.cooldown.as_seconds(),
+                        ringout_danger_level(transform.translation, active_arena.definition()),
+                    )
+                },
+            )
+            .unwrap_or_default();
+        set_text_if_changed(&mut text, value);
     }
 }
 
@@ -1567,9 +1647,52 @@ mod tests {
     }
 
     #[test]
+    fn tutorial_hub_hides_fighter_plates_and_lessons_show_them() {
+        let mut app = App::new();
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_tutorial_hub();
+        app.insert_resource(MatchState::default());
+        app.insert_resource(MatchPresentationPolicy::default());
+        app.insert_resource(user_mode);
+        let player_plate = app
+            .world_mut()
+            .spawn((HudFighterPlate { fighter_id: 0 }, Node::default()))
+            .id();
+        app.add_systems(Update, sync_hud_fighter_plates);
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(player_plate).unwrap().display,
+            Display::None
+        );
+
+        app.world_mut()
+            .resource_mut::<UserModeState>()
+            .enter_tutorial_lesson();
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(player_plate).unwrap().display,
+            Display::Flex
+        );
+    }
+
+    #[test]
     fn life_label_uses_stock_when_available() {
         assert_eq!(life_label(Some(2)), "Life 2");
         assert_eq!(life_label(None), "Life --");
+    }
+
+    #[test]
+    fn fighter_status_label_surfaces_items_buffs_cooldowns_and_edge_danger() {
+        assert_eq!(
+            fighter_status_label(Some("Turkey 2/3".to_string()), 4.25, 0.0, 1.75, 2.5, 0.8),
+            "ITEM Turkey 2/3  SPEED 4.2  SP 1.8  EQ 2.5  EDGE"
+        );
+        assert_eq!(
+            fighter_status_label(None, 0.0, 3.0, 0.0, 0.0, 0.0),
+            "GIANT 3.0"
+        );
+        assert_eq!(fighter_status_label(None, 0.0, 0.0, 0.0, 0.0, 0.0), "");
     }
 
     #[test]

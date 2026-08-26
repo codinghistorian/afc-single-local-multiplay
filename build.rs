@@ -47,6 +47,7 @@ pub(crate) const GAMEPLAY_SOURCES: &[&str] = &[
     "src/styles.rs",
     "src/techniques.rs",
     "src/tick_input.rs",
+    "src/tutorial.rs",
     "arts/champions_court.ron",
     "assets/camera/single_player_camera.ron",
     "assets/characters/character_move_sets.ron",

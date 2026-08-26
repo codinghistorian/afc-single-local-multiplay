@@ -29,7 +29,8 @@ use crate::controller_haptics::{
     combat_preview_pattern, controller_test_pattern, queue_haptic_pattern,
 };
 use crate::game_state::{
-    LocalSetup, MatchAnnouncements, MatchPhase, MatchState, reconcile_fighter_control_from_setup,
+    GameplayPauseOwner, GameplayPauseOwners, LocalSetup, MatchAnnouncements, MatchPhase,
+    MatchState, reconcile_fighter_control_from_setup,
 };
 use crate::match_presentation::{
     MatchPresentationPolicy, MatchPresentationTransient, PresentationMusicTrack,
@@ -43,6 +44,7 @@ use crate::release_identity::current_release_identity;
 use crate::steam_platform::{
     MAX_STEAM_INPUT_CONTROLLERS, SteamInputSnapshot, SteamMenuAction, SteamMenuInputMask,
 };
+use crate::tutorial::{TutorialTransition, TutorialTransitionAction, request_tutorial_transition};
 
 const USER_MODE_MENU_MUSIC_PATH: &str = "music/bgm/cc0_menu_menu_music.ogg";
 const USER_MODE_BATTLE_MUSIC_PATHS: [&str; 10] = [
@@ -152,6 +154,10 @@ pub enum UserModeScreen {
     ArenaSelect,
     ControlsBriefing,
     BattleResult,
+    TutorialHub,
+    TutorialLesson,
+    TutorialPause,
+    TutorialFinalResult,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -185,6 +191,7 @@ enum ControllerSetupContext {
     #[default]
     Match,
     Settings,
+    Tutorial,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,6 +229,7 @@ pub(crate) enum UserModeMainMenuChoice {
     SinglePlayer,
     LocalMultiplayer,
     Online,
+    Tutorial,
     Settings,
 }
 
@@ -231,7 +239,8 @@ impl UserModeMainMenuChoice {
             Self::SinglePlayer => Self::Settings,
             Self::LocalMultiplayer => Self::SinglePlayer,
             Self::Online => Self::LocalMultiplayer,
-            Self::Settings => Self::Online,
+            Self::Tutorial => Self::Online,
+            Self::Settings => Self::Tutorial,
         }
     }
 
@@ -239,7 +248,8 @@ impl UserModeMainMenuChoice {
         match self {
             Self::SinglePlayer => Self::LocalMultiplayer,
             Self::LocalMultiplayer => Self::Online,
-            Self::Online => Self::Settings,
+            Self::Online => Self::Tutorial,
+            Self::Tutorial => Self::Settings,
             Self::Settings => Self::SinglePlayer,
         }
     }
@@ -649,6 +659,9 @@ fn parse_web_player_bindings(
         jump: js_string_prop(value, "jump")
             .and_then(|value| parse_web_key_code(&value))
             .unwrap_or(fallback.jump),
+        special: js_string_prop(value, "special")
+            .and_then(|value| parse_web_key_code(&value))
+            .unwrap_or(fallback.special),
     }
 }
 
@@ -660,6 +673,8 @@ fn parse_web_key_code(value: &str) -> Option<KeyCode> {
         "ArrowUp" => KeyCode::ArrowUp,
         "ArrowDown" => KeyCode::ArrowDown,
         "Comma" => KeyCode::Comma,
+        "Minus" => KeyCode::Minus,
+        "Period" => KeyCode::Period,
         "Digit0" => KeyCode::Digit0,
         "Digit1" => KeyCode::Digit1,
         "Digit2" => KeyCode::Digit2,
@@ -835,11 +850,22 @@ impl UserModeState {
         self.blocks_dev_input()
     }
 
+    pub fn shows_gameplay_hud(&self) -> bool {
+        !self.active()
+            || matches!(
+                self.screen,
+                UserModeScreen::TutorialLesson
+                    | UserModeScreen::TutorialPause
+                    | UserModeScreen::TutorialFinalResult
+            )
+    }
+
     pub fn restricts_bot_special_inputs(&self) -> bool {
-        self.battle_active
-            || self.battle_music_pending
-            || self.screen == UserModeScreen::ControlsBriefing
-            || self.screen == UserModeScreen::BattleResult
+        !self.tutorial_screen_active()
+            && (self.battle_active
+                || self.battle_music_pending
+                || self.screen == UserModeScreen::ControlsBriefing
+                || self.screen == UserModeScreen::BattleResult)
     }
 
     pub fn single_player_camera_target_id(&self) -> Option<usize> {
@@ -848,6 +874,52 @@ impl UserModeState {
                 || self.battle_music_pending
                 || self.screen == UserModeScreen::BattleResult))
             .then_some(USER_MODE_PLAYER_FIGHTER_ID)
+    }
+
+    pub fn tutorial_screen_active(&self) -> bool {
+        matches!(
+            self.screen,
+            UserModeScreen::TutorialHub
+                | UserModeScreen::TutorialLesson
+                | UserModeScreen::TutorialPause
+                | UserModeScreen::TutorialFinalResult
+        ) || (self.screen == UserModeScreen::DeviceJoin
+            && self.controller_setup_context == ControllerSetupContext::Tutorial)
+    }
+
+    pub(crate) fn tutorial_player_assignment(&self) -> LocalInputAssignment {
+        match self.input_assignments[0] {
+            LocalInputAssignment::Unassigned => LocalInputAssignment::Keyboard(0),
+            assignment => assignment,
+        }
+    }
+
+    pub(crate) fn enter_tutorial_hub(&mut self) {
+        self.screen = UserModeScreen::TutorialHub;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
+    pub(crate) fn enter_tutorial_lesson(&mut self) {
+        self.screen = UserModeScreen::TutorialLesson;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.battle_music_pending = true;
+        self.battle_bot_ai_pending = false;
+        self.battle_active = true;
+        self.clear_result_state();
+    }
+
+    pub(crate) fn enter_tutorial_pause(&mut self) {
+        self.screen = UserModeScreen::TutorialPause;
+    }
+
+    pub(crate) fn resume_tutorial_lesson(&mut self) {
+        self.screen = UserModeScreen::TutorialLesson;
+    }
+
+    pub(crate) fn enter_tutorial_final_result(&mut self) {
+        self.screen = UserModeScreen::TutorialFinalResult;
     }
 
     #[cfg(any(test, all(feature = "native", not(target_arch = "wasm32"))))]
@@ -968,6 +1040,21 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
+    pub(crate) fn enter_tutorial_device_join(&mut self) {
+        self.screen = UserModeScreen::DeviceJoin;
+        self.play_mode = UserPlayMode::SinglePlayer;
+        self.controller_setup_context = ControllerSetupContext::Tutorial;
+        self.controller_setup_phase = ControllerSetupPhase::Normal;
+        self.controller_setup_snapshot = self.input_assignments;
+        self.controller_setup_action_cursor = 2;
+        self.controller_setup_input_latched = false;
+        self.controller_setup_clear_confirmation = false;
+        self.character_ready = [false; FIGHTER_COUNT];
+        self.character_select_player = 0;
+        self.key_capture = None;
+        self.clear_battle_state();
+    }
+
     fn enter_settings_device_join(&mut self) {
         self.screen = UserModeScreen::DeviceJoin;
         self.controller_setup_context = ControllerSetupContext::Settings;
@@ -1010,7 +1097,7 @@ impl UserModeState {
         self.clear_battle_state();
     }
 
-    fn enter_mode_select(&mut self) {
+    pub(crate) fn enter_mode_select(&mut self) {
         self.screen = UserModeScreen::ModeSelect;
         self.key_capture = None;
         self.clear_battle_state();
@@ -1152,6 +1239,7 @@ impl UserModeState {
         match self.controller_setup_context {
             ControllerSetupContext::Match => self.play_mode.human_player_count(),
             ControllerSetupContext::Settings => FIGHTER_COUNT,
+            ControllerSetupContext::Tutorial => 1,
         }
     }
 
@@ -1321,6 +1409,7 @@ fn activate_main_menu_choice(user_mode: &mut UserModeState, choice: UserModeMain
         }
         UserModeMainMenuChoice::LocalMultiplayer => user_mode.enter_player_count_select(),
         UserModeMainMenuChoice::Online => user_mode.enter_online(),
+        UserModeMainMenuChoice::Tutorial => user_mode.enter_tutorial_device_join(),
         UserModeMainMenuChoice::Settings => user_mode.enter_controls_hub(),
     }
 }
@@ -1412,7 +1501,13 @@ fn controller_user_mode_action(
                 accept.then_some(UserModeUiAction::Confirm)
             }
         }
-        UserModeScreen::Dev | UserModeScreen::Online | UserModeScreen::BattleResult => None,
+        UserModeScreen::Dev
+        | UserModeScreen::Online
+        | UserModeScreen::BattleResult
+        | UserModeScreen::TutorialHub
+        | UserModeScreen::TutorialLesson
+        | UserModeScreen::TutorialPause
+        | UserModeScreen::TutorialFinalResult => None,
     }
 }
 
@@ -1472,6 +1567,7 @@ fn route_user_mode_action(
             UserModeScreen::DeviceJoin => {
                 match user_mode.controller_setup_context {
                     ControllerSetupContext::Settings => user_mode.enter_controls_hub(),
+                    ControllerSetupContext::Tutorial => user_mode.enter_mode_select(),
                     ControllerSetupContext::Match if user_mode.play_mode.is_single_player() => {
                         user_mode.enter_mode_select();
                     }
@@ -1950,6 +2046,7 @@ fn key_settings_column(player: usize) -> impl Bundle {
                     key_settings_row(player, ControlAction::Heavy),
                     key_settings_row(player, ControlAction::Light),
                     key_settings_row(player, ControlAction::Jump),
+                    key_settings_row(player, ControlAction::Special),
                 ],
             ),
         ],
@@ -2198,6 +2295,13 @@ pub fn setup_user_mode_ui(
                     user_mode_action_button(
                         "ONLINE",
                         UserModeUiAction::MainMenu(UserModeMainMenuChoice::Online),
+                        Val::Px(340.0),
+                        58.0,
+                        24.0,
+                    ),
+                    user_mode_action_button(
+                        "TUTORIAL",
+                        UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial),
                         Val::Px(340.0),
                         58.0,
                         24.0,
@@ -3194,7 +3298,7 @@ fn controller_setup_can_finish(
         .iter()
         .take(user_mode.controller_setup_target());
     match user_mode.controller_setup_context {
-        ControllerSetupContext::Match => assignments
+        ControllerSetupContext::Match | ControllerSetupContext::Tutorial => assignments
             .clone()
             .all(|assignment| controller_setup_assignment_connected(*assignment, gamepads)),
         ControllerSetupContext::Settings => assignments
@@ -3429,6 +3533,8 @@ pub struct UserModeInputContext<'w, 's> {
     presentation_time_scale: ResMut<'w, PresentationTimeScale>,
     screen_look: ResMut<'w, ScreenLook>,
     screen_transition: ResMut<'w, ScreenLookTransition>,
+    pause_owners: ResMut<'w, GameplayPauseOwners>,
+    tutorial_transition: ResMut<'w, TutorialTransition>,
 }
 
 /// Samples Steam's current menu-action values into an edge-latched user-mode
@@ -3490,7 +3596,13 @@ pub fn handle_user_mode_input(
         mut presentation_time_scale,
         mut screen_look,
         mut screen_transition,
+        mut pause_owners,
+        mut tutorial_transition,
     } = context;
+
+    if tutorial_transition.active() {
+        return;
+    }
 
     menu_navigation.reset_for_screen(user_mode.screen);
     let controller_action = user_mode.take_pending_controller_action();
@@ -3535,6 +3647,16 @@ pub fn handle_user_mode_input(
         return;
     }
 
+    if matches!(
+        user_mode.screen,
+        UserModeScreen::TutorialHub
+            | UserModeScreen::TutorialLesson
+            | UserModeScreen::TutorialPause
+            | UserModeScreen::TutorialFinalResult
+    ) {
+        return;
+    }
+
     let pointer_action = action_buttons.iter().find_map(|(interaction, action)| {
         (*interaction == Interaction::Pressed).then_some(*action)
     });
@@ -3551,7 +3673,15 @@ pub fn handle_user_mode_input(
             || p1_requested_exit
             || pointer_action == Some(UserModeUiAction::Back)
         {
-            route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+            if user_mode.controller_setup_context == ControllerSetupContext::Tutorial {
+                request_tutorial_transition(
+                    &mut tutorial_transition,
+                    &mut pause_owners,
+                    TutorialTransitionAction::LeaveTutorial,
+                );
+            } else {
+                route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+            }
             return;
         }
         if let Some(message) = handle_device_join_input(
@@ -3654,6 +3784,13 @@ pub fn handle_user_mode_input(
                         ControllerSetupContext::Settings => {
                             user_mode.enter_controls_hub();
                             announcements.show("Controller setup saved for this session", 1.0);
+                        }
+                        ControllerSetupContext::Tutorial => {
+                            request_tutorial_transition(
+                                &mut tutorial_transition,
+                                &mut pause_owners,
+                                TutorialTransitionAction::EnterHub,
+                            );
                         }
                         ControllerSetupContext::Match => {
                             user_mode.enter_character_select();
@@ -4138,6 +4275,24 @@ pub fn handle_user_mode_input(
         return;
     };
 
+    let enters_tutorial = user_mode.screen == UserModeScreen::ModeSelect
+        && match action {
+            UserModeUiAction::MainMenu(UserModeMainMenuChoice::Tutorial) => true,
+            UserModeUiAction::Confirm => {
+                user_mode.main_menu_choice == UserModeMainMenuChoice::Tutorial
+            }
+            _ => false,
+        };
+    if enters_tutorial {
+        user_mode.main_menu_choice = UserModeMainMenuChoice::Tutorial;
+        request_tutorial_transition(
+            &mut tutorial_transition,
+            &mut pause_owners,
+            TutorialTransitionAction::EnterDeviceJoin,
+        );
+        return;
+    }
+
     let route = route_user_mode_action(&mut user_mode, action);
     match route {
         UserModeRoute::None => {}
@@ -4328,6 +4483,7 @@ pub fn sync_user_mode_battle_result(
     if user_mode.battle_active
         && state.phase == MatchPhase::Results
         && user_mode.screen != UserModeScreen::BattleResult
+        && !user_mode.tutorial_screen_active()
     {
         user_mode.enter_battle_result(user_mode_result_winner(&state));
         presentation_time_scale.set(USER_MODE_DEATH_SLOW_MOTION_SCALE);
@@ -4477,16 +4633,14 @@ pub fn handle_local_controller_reconnect(
     gamepads: Query<(Entity, &Gamepad)>,
     metadata: Query<&ControllerDeviceInfo>,
     mut reconnect: ResMut<LocalControllerReconnect>,
-    mut virtual_time: ResMut<Time<Virtual>>,
+    mut pause_owners: ResMut<GameplayPauseOwners>,
     mut fighters: Query<(&Controller, &mut FighterInput)>,
 ) {
     if !user_mode.battle_active || state.phase != MatchPhase::Fighting {
         if !reconnect.blocks_gameplay() && !reconnect.any_missing() {
             return;
         }
-        if reconnect.paused_by_reconnect {
-            virtual_time.unpause();
-        }
+        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
         reconnect.clear();
         return;
     }
@@ -4501,7 +4655,7 @@ pub fn handle_local_controller_reconnect(
         }
         if !reconnect.paused_by_reconnect {
             reconnect.paused_by_reconnect = true;
-            virtual_time.pause();
+            pause_owners.set(GameplayPauseOwner::ControllerReconnect, true);
         }
 
         for (controller, mut input) in &mut fighters {
@@ -4547,7 +4701,7 @@ pub fn handle_local_controller_reconnect(
     }
     if reconnect.paused_by_reconnect {
         reconnect.paused_by_reconnect = false;
-        virtual_time.unpause();
+        pause_owners.set(GameplayPauseOwner::ControllerReconnect, false);
     }
 }
 
@@ -4904,6 +5058,7 @@ pub fn update_user_mode_ui(
             (_, ControllerSetupPhase::Reorder) => "CHANGE PLAYER ORDER",
             (ControllerSetupContext::Settings, _) => "CONTROLLER SETUP",
             (ControllerSetupContext::Match, _) => "READY YOUR FIGHTERS",
+            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
         }
         .to_string();
     }
@@ -4915,6 +5070,7 @@ pub fn update_user_mode_ui(
             (_, ControllerSetupPhase::Reorder) => "SAVE ORDER",
             (ControllerSetupContext::Settings, _) => "DONE",
             (ControllerSetupContext::Match, _) => "READY",
+            (ControllerSetupContext::Tutorial, _) => "READY TO TRAIN",
         }
         .to_string();
     }
@@ -5169,9 +5325,12 @@ fn user_mode_background_alpha(user_mode: &UserModeState) -> f32 {
         | UserModeScreen::KeySettings
         | UserModeScreen::CharacterSelect
         | UserModeScreen::ArenaSelect
-        | UserModeScreen::ControlsBriefing => 1.0,
+        | UserModeScreen::ControlsBriefing
+        | UserModeScreen::TutorialHub => 1.0,
         UserModeScreen::BattleResult if user_mode.result_menu_ready => 0.58,
         UserModeScreen::BattleResult => 0.0,
+        UserModeScreen::TutorialPause | UserModeScreen::TutorialFinalResult => 0.42,
+        UserModeScreen::TutorialLesson => 0.0,
         UserModeScreen::Dev | UserModeScreen::Online => 0.0,
     }
 }
@@ -5637,6 +5796,12 @@ fn device_join_message(
                 user_mode.joined_player_count()
             )
         }
+        (ControllerSetupContext::Tutorial, _) => {
+            format!(
+                "{} / 1 trainee ready  |  progress is saved separately",
+                user_mode.joined_player_count()
+            )
+        }
     };
     format!(
         "{}\nKeyboard: press that layout's Jump or Aim/Grab\n{keyboard_shortcuts}\n{status}  |  P1: Left/Right actions, Menu/Esc back",
@@ -5806,7 +5971,7 @@ fn controls_player_message(
         );
     }
     format!(
-        "P{}\nMove: {}/{}/{}/{}\nHold Aim / Tap Grab: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}",
+        "P{}\nMove: {}/{}/{}/{}\nHold Aim / Tap Grab: {}\nHeavy / Throw: {}\nLight / Pickup / Item: {}\nJump: {}\nSpecial: {}  |  +Light Trap  +Aim Shockwave  +Heavy Drift Field",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -5816,6 +5981,7 @@ fn controls_player_message(
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
+        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
@@ -5842,7 +6008,7 @@ fn controls_player_compact_message(
         );
     }
     format!(
-        "P{}  Move {}/{}/{}/{}  |  Hold Aim / Tap Grab {}  |  Heavy {}  |  Light {}  |  Jump {}",
+        "P{}  Move {}/{}/{}/{}  |  Hold Aim / Tap Grab {}  |  Heavy {}  |  Light {}  |  Jump {}  |  Special {}",
         player + 1,
         control_key_label(bindings, player, ControlAction::Left),
         control_key_label(bindings, player, ControlAction::Right),
@@ -5852,6 +6018,7 @@ fn controls_player_compact_message(
         control_key_label(bindings, player, ControlAction::Heavy),
         control_key_label(bindings, player, ControlAction::Light),
         control_key_label(bindings, player, ControlAction::Jump),
+        control_key_label(bindings, player, ControlAction::Special),
     )
 }
 
@@ -5905,7 +6072,7 @@ fn result_sfx_kind(user_mode: &UserModeState) -> Option<CombatSfxKind> {
     user_mode.result_winner.map(|_| CombatSfxKind::ResultWin)
 }
 
-fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
+pub(crate) fn start_user_mode_menu_music(commands: &mut Commands, asset_server: &AssetServer) {
     commands.spawn((
         UserModeMusic,
         AudioPlayer::new(asset_server.load(USER_MODE_MENU_MUSIC_PATH)),
@@ -6026,7 +6193,10 @@ fn reconcile_arena_music(
     }
 }
 
-fn stop_user_mode_music(commands: &mut Commands, music: &Query<Entity, With<UserModeMusic>>) {
+pub(crate) fn stop_user_mode_music(
+    commands: &mut Commands,
+    music: &Query<Entity, With<UserModeMusic>>,
+) {
     for entity in music {
         commands.entity(entity).despawn();
     }
@@ -6200,12 +6370,14 @@ mod tests {
             .insert_resource(LocalSetup::default())
             .insert_resource(state)
             .init_resource::<LocalControllerReconnect>()
+            .init_resource::<GameplayPauseOwners>()
             .init_resource::<Time<Virtual>>()
             .init_resource::<ReconnectGameplayTicks>()
             .add_systems(
                 Update,
                 (
                     handle_local_controller_reconnect,
+                    crate::game_state::sync_virtual_time_pause,
                     count_reconnect_gameplay_ticks
                         .run_if(crate::game_state::match_accepts_gameplay),
                 )
@@ -6431,11 +6603,12 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_cycles_and_wraps_four_vertical_choices() {
+    fn main_menu_cycles_and_wraps_five_vertical_choices() {
         let choices = [
             UserModeMainMenuChoice::SinglePlayer,
             UserModeMainMenuChoice::LocalMultiplayer,
             UserModeMainMenuChoice::Online,
+            UserModeMainMenuChoice::Tutorial,
             UserModeMainMenuChoice::Settings,
         ];
         let mut choice = UserModeMainMenuChoice::SinglePlayer;
@@ -6448,6 +6621,54 @@ mod tests {
             UserModeMainMenuChoice::SinglePlayer.previous(),
             UserModeMainMenuChoice::Settings
         );
+    }
+
+    #[test]
+    fn tutorial_routes_through_one_player_device_setup_and_back_to_main_menu() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+
+        activate_main_menu_choice(&mut user_mode, UserModeMainMenuChoice::Tutorial);
+
+        assert_eq!(user_mode.screen(), UserModeScreen::DeviceJoin);
+        assert_eq!(
+            user_mode.controller_setup_context,
+            ControllerSetupContext::Tutorial
+        );
+        assert_eq!(user_mode.controller_setup_target(), 1);
+        assert!(user_mode.tutorial_screen_active());
+
+        route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
+        assert_eq!(user_mode.screen(), UserModeScreen::ModeSelect);
+    }
+
+    #[test]
+    fn tutorial_lesson_keeps_normal_bot_specials_available() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_tutorial_lesson();
+
+        assert!(user_mode.battle_active);
+        assert_eq!(user_mode.single_player_camera_target_id(), Some(0));
+        assert!(!user_mode.restricts_bot_special_inputs());
+    }
+
+    #[test]
+    fn tutorial_match_screens_keep_the_gameplay_hud_visible() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_fresh_mode_select();
+        assert!(!user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_hub();
+        assert!(!user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_lesson();
+        assert!(user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_pause();
+        assert!(user_mode.shows_gameplay_hud());
+
+        user_mode.enter_tutorial_final_result();
+        assert!(user_mode.shows_gameplay_hud());
     }
 
     #[test]
@@ -7284,7 +7505,10 @@ mod tests {
                 assert!(bindings.key_for(player, action).is_some());
             }
         }
-        assert_eq!(bindings.all_keys().len(), FIGHTER_COUNT * 8);
+        assert_eq!(
+            bindings.all_keys().len(),
+            FIGHTER_COUNT * ControlAction::ALL.len()
+        );
         assert!(!bindings.has_duplicate_keys());
     }
 
@@ -7615,12 +7839,12 @@ mod tests {
         user_mode.begin_key_capture();
 
         let result = user_mode
-            .apply_key_capture(&mut bindings, KeyCode::KeyE)
+            .apply_key_capture(&mut bindings, KeyCode::KeyQ)
             .unwrap();
 
         assert_eq!(
             bindings.key_for(result.capture.player, result.capture.action),
-            Some(KeyCode::KeyE)
+            Some(KeyCode::KeyQ)
         );
         assert_eq!(result.swapped, None);
         assert_eq!(user_mode.key_capture, None);

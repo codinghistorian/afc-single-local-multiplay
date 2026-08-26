@@ -886,8 +886,7 @@ impl ArenaItem {
         self.reset_for_match();
     }
 
-    #[cfg(test)]
-    pub fn deactivate_for_match(&mut self) {
+    pub(crate) fn deactivate_for_match(&mut self) {
         self.state = ItemState::Respawning;
         self.respawn_timer = TickTimer::INDEFINITE;
         self.durability = self.max_durability;

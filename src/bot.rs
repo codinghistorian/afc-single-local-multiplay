@@ -333,6 +333,28 @@ struct BotPersonality {
     panic_health: f32,
 }
 
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BotDifficulty {
+    #[default]
+    Standard,
+    Tutorial,
+}
+
+impl BotDifficulty {
+    fn attack_timer_advances(self, tick: SimTick) -> bool {
+        match self {
+            Self::Standard => true,
+            // Tick 20 of every 33 committed ticks: the exact fixed-tick
+            // equivalent of the authored 1.65x tutorial recovery.
+            Self::Tutorial => tick.get() % 33 < 20,
+        }
+    }
+
+    fn normal_grab_allowed(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BotTargetSnapshot {
     fighter_id: FighterId,
@@ -494,6 +516,7 @@ pub(crate) struct BotDecisionQueries<'w, 's> {
             &'static FighterEquipment,
             &'static FighterStats,
             &'static FighterActionState,
+            Option<&'static BotDifficulty>,
         ),
     >,
     all_fighters: Query<
@@ -628,6 +651,7 @@ fn drive_bot_inputs(
         equipment,
         stats,
         action,
+        difficulty,
     ) in &mut queries.bots
     {
         if !controller.is_bot() {
@@ -644,7 +668,8 @@ fn drive_bot_inputs(
             continue;
         }
         let tuning = style_tuning(style.kind);
-        let personality = bot_personality(style.kind, equipment.kind);
+        let difficulty = difficulty.copied().unwrap_or_default();
+        let personality = bot_personality_for_difficulty(style.kind, equipment.kind, difficulty);
         let decision_key = BotDecisionKey::new(state.replay_seed, bot.id, tick);
         *input = FighterInput::default();
 
@@ -672,7 +697,7 @@ fn drive_bot_inputs(
             continue;
         }
 
-        advance_bot_brain_timers(&mut brain);
+        advance_bot_brain_timers(&mut brain, difficulty, tick);
 
         let nearest = nearest_bot_target(
             bot_id,
@@ -1025,7 +1050,8 @@ fn drive_bot_inputs(
             brain.dash_timer = bot_movement_dash_cooldown(brain.movement_plan, bot.id);
         }
 
-        if distance < 0.9
+        if difficulty.normal_grab_allowed()
+            && distance < 0.9
             && !brain.attack_timer.active()
             && bot_choice_ratio(decision_key, BotChoicePurpose::CloseGrab, 1, 3)
         {
@@ -1541,11 +1567,13 @@ fn bot_timer_at_most(timer: TickTimer, threshold: TickTimer) -> bool {
     timer <= threshold
 }
 
-fn advance_bot_brain_timers(brain: &mut BotBrain) {
+fn advance_bot_brain_timers(brain: &mut BotBrain, difficulty: BotDifficulty, tick: SimTick) {
     brain.decision_timer.tick();
     brain.movement_plan_timer.tick();
     brain.dash_timer.tick();
-    brain.attack_timer.tick();
+    if difficulty.attack_timer_advances(tick) {
+        brain.attack_timer.tick();
+    }
 }
 
 fn bot_choice_sample(key: BotDecisionKey, purpose: BotChoicePurpose) -> u32 {
@@ -1694,6 +1722,22 @@ fn bot_personality(
         EquipmentKind::HeavySeal => personality.item_greed *= 1.08,
     }
 
+    personality
+}
+
+fn bot_personality_for_difficulty(
+    style: crate::styles::FighterStyleKind,
+    equipment: EquipmentKind,
+    difficulty: BotDifficulty,
+) -> BotPersonality {
+    let mut personality = bot_personality(style, equipment);
+    if difficulty == BotDifficulty::Tutorial {
+        personality.aggression *= 0.62;
+        personality.item_greed *= 0.82;
+        personality.special_bias *= 0.7;
+        personality.mistake_rate = (personality.mistake_rate + 0.24).clamp(0.24, 0.38);
+        personality.panic_health += 12.0;
+    }
     personality
 }
 
@@ -2546,14 +2590,14 @@ mod tests {
             movement_plan: BotMovementPlan::Circle,
         };
 
-        advance_bot_brain_timers(&mut brain);
+        advance_bot_brain_timers(&mut brain, BotDifficulty::Standard, SimTick(1));
 
         assert_eq!(brain.decision_timer, TickTimer::ZERO);
         assert_eq!(brain.movement_plan_timer, TickTimer::from_ticks(1));
         assert_eq!(brain.dash_timer, TickTimer::from_ticks(2));
         assert_eq!(brain.attack_timer, TickTimer::from_ticks(3));
 
-        advance_bot_brain_timers(&mut brain);
+        advance_bot_brain_timers(&mut brain, BotDifficulty::Standard, SimTick(2));
         assert_eq!(brain.decision_timer, TickTimer::ZERO);
         assert_eq!(brain.movement_plan_timer, TickTimer::ZERO);
     }
@@ -2592,7 +2636,11 @@ mod tests {
 
             (0..90)
                 .map(|tick| {
-                    advance_bot_brain_timers(&mut brain);
+                    advance_bot_brain_timers(
+                        &mut brain,
+                        BotDifficulty::Standard,
+                        SimTick(tick + 1),
+                    );
                     if tick == 17 {
                         brain.attack_timer.set_max(bot_duration(0.35));
                     }
@@ -2935,6 +2983,37 @@ mod tests {
                 )
                 .item_greed
         );
+    }
+
+    #[test]
+    fn tutorial_difficulty_is_forgiving_but_bounded() {
+        let normal = bot_personality_for_difficulty(
+            crate::styles::FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+            BotDifficulty::Standard,
+        );
+        let tutorial = bot_personality_for_difficulty(
+            crate::styles::FighterStyleKind::Anchor,
+            EquipmentKind::CounterCell,
+            BotDifficulty::Tutorial,
+        );
+
+        assert!(tutorial.aggression < normal.aggression);
+        assert!(tutorial.special_bias < normal.special_bias);
+        assert!(tutorial.mistake_rate > normal.mistake_rate);
+        assert!((0.0..=0.4).contains(&tutorial.mistake_rate));
+        assert_eq!(
+            (0_u64..33)
+                .filter(|tick| BotDifficulty::Tutorial.attack_timer_advances(SimTick(*tick)))
+                .count(),
+            20
+        );
+    }
+
+    #[test]
+    fn tutorial_difficulty_disables_normal_grabs_only() {
+        assert!(BotDifficulty::Standard.normal_grab_allowed());
+        assert!(!BotDifficulty::Tutorial.normal_grab_allowed());
     }
 
     #[test]

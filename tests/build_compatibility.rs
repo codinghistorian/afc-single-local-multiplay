@@ -323,6 +323,7 @@ fn gameplay_digest_includes_frozen_authorship_but_excludes_presentation_and_test
         "src/arena.rs",
         "src/canonical_math.rs",
         "src/live_input.rs",
+        "src/tutorial.rs",
         "arts/champions_court.ron",
         "assets/characters/character_move_sets.ron",
         "assets/feel/combat_overrides.ron",
