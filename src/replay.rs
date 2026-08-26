@@ -2240,15 +2240,15 @@ mod tests {
     }
 
     #[test]
-    fn v7_replay_is_rejected_by_v8_playback_compatibility() {
-        let replay = fixture_for_simulation_version(7);
+    fn v8_replay_is_rejected_by_v9_playback_compatibility() {
+        let replay = fixture_for_simulation_version(8);
         let expected = CompatibilityId {
-            simulation: SimulationVersion::new(8).unwrap(),
+            simulation: SimulationVersion::new(9).unwrap(),
             ..replay.header.compatibility
         };
 
-        assert_eq!(replay.header.compatibility.simulation.get(), 7);
-        assert_eq!(expected.simulation.get(), 8);
+        assert_eq!(replay.header.compatibility.simulation.get(), 8);
+        assert_eq!(expected.simulation.get(), 9);
         let result = replay.validate_against(&expected);
         assert!(
             matches!(

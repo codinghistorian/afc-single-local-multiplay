@@ -26,10 +26,10 @@ use crate::combat::{
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, ground_impact_priority};
 use crate::components::{
     Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState,
-    FighterBody, FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory,
-    FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState,
-    FighterStats, FighterUltimateState, FighterVisualRoot, LocalInputAssignment,
-    PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SimPosition,
+    FighterBody, FighterContactState, FighterGrabState, FighterHand, FighterHead, FighterInput,
+    FighterInventory, FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel,
+    FighterSpecialState, FighterStats, FighterUltimateState, FighterVisualRoot,
+    LocalInputAssignment, PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SimPosition,
 };
 use crate::constants::*;
 use crate::determinism::{DEFAULT_F32_QUANTIZATION, FighterId, canonicalize_f32};
@@ -519,6 +519,7 @@ pub(crate) struct FighterSimulationBundle {
     style: FighterStyle,
     equipment: FighterEquipment,
     action: FighterActionState,
+    contact: FighterContactState,
     controller: Controller,
     drunk: DrunkStatus,
     character: FighterCharacter,
@@ -567,6 +568,7 @@ fn fighter_simulation_bundle(spawn: ConfiguredFighterSpawn) -> FighterSimulation
         style: FighterStyle { kind: spawn.style },
         equipment: FighterEquipment::new(spawn.equipment),
         action,
+        contact: FighterContactState::default(),
         controller: spawn.controller,
         drunk: DrunkStatus::default(),
         character: FighterCharacter::new(spawn.character),

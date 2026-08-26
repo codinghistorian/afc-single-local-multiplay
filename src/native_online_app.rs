@@ -3238,12 +3238,19 @@ mod tests {
                 .expect("host worker remains active through results")
                 .client()
                 .status();
-            let remote_status = remote_application
-                .active
-                .as_ref()
-                .expect("remote worker remains active through results")
-                .client()
-                .status();
+            let Some(remote_active) = remote_application.active.as_ref() else {
+                panic!(
+                    "remote worker remains active through results: view={:?}, failure_override={:?}, authority_disconnect={:?}, app_metrics={:?}, runtime_commands={:?}, host_transport={:?}, remote_transport={:?}",
+                    remote_runtime.view,
+                    remote_application.failure_override,
+                    remote_application.authority_disconnect,
+                    remote_application.metrics,
+                    remote_runtime.commands,
+                    transport.host.metrics(),
+                    transport.remote.metrics(),
+                );
+            };
+            let remote_status = remote_active.client().status();
 
             let host_terminal = host_application
                 .active

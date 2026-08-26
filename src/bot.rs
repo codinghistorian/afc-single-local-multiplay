@@ -15,11 +15,25 @@ use bevy::window::PrimaryWindow;
 use std::error::Error;
 use std::fmt;
 
+mod intelligence;
+mod navigation;
+mod tactics;
+
+pub(crate) use intelligence::BotRuntimeStore;
+#[cfg(all(
+    feature = "bot-quality",
+    feature = "native",
+    not(target_arch = "wasm32")
+))]
+pub(crate) use intelligence::run_tactics_quality_fixture;
+pub(crate) use navigation::BotNavigationCache;
+
 use crate::arena::{
-    ArenaHazardState, arena_hazard_affects_height, arena_hazard_is_active_for_kind_ticks,
-    ground_support_for_arena_with_radius,
+    ArenaHazardState, SplitCausewayDoorState, arena_hazard_affects_height,
+    arena_hazard_is_active_for_kind_ticks, ground_support_for_arena_with_radius,
 };
 use crate::arena_defs::{ActiveArena, ArenaDefinition, ArenaHazardDefinition, ArenaHazardKind};
+use crate::bot_profiles::BotProfileCatalog;
 #[cfg(any(
     test,
     all(
@@ -37,11 +51,12 @@ use crate::camera::ArenaCamera;
         not(target_arch = "wasm32")
     )
 ))]
-use crate::characters::{CharacterKind, FighterCharacter, character_label, next_character_kind};
+use crate::characters::{CharacterKind, character_label, next_character_kind};
+use crate::characters::{CharacterMoveCatalog, FighterCharacter};
 use crate::components::{
     BotBehaviorMode, BotBrain, BotMovementPlan, Controller, Fighter, FighterAction,
-    FighterActionState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
-    FighterStats, SimPosition,
+    FighterActionState, FighterContactState, FighterInput, FighterInventory, FighterMotor,
+    FighterSpecialState, FighterStats, SimPosition,
 };
 #[cfg(any(
     test,
@@ -53,14 +68,13 @@ use crate::components::{
 ))]
 use crate::constants::{ARENA_TOP_Y, FIGHTER_RADIUS};
 use crate::constants::{
-    COMBO_QUEUE_END, COMBO_QUEUE_START, ITEM_BREEZE_BUOY_STAMINA, ITEM_PICKUP_RANGE,
-    ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER, SHARED_SPECIALS_ENABLED,
-    SPECIAL_HAZARD_RADIUS, SPECIAL_PROJECTILE_RADIUS, SPECIAL_SHOCKWAVE_RADIUS,
-    SPECIAL_TRAP_RADIUS,
+    ITEM_BREEZE_BUOY_STAMINA, ITEM_THROW_RADIUS, MAX_STAMINA, POP_BOMB_RADIUS, QUICK_STAND_AFTER,
+    SHARED_SPECIALS_ENABLED, SPECIAL_HAZARD_RADIUS, SPECIAL_PROJECTILE_RADIUS,
+    SPECIAL_SHOCKWAVE_RADIUS, SPECIAL_TRAP_RADIUS,
 };
-use crate::determinism::{
-    DeterministicRngStream, FighterId, RngStreamName, SimEntityId, SimEntityKind, SimTick,
-};
+#[cfg(test)]
+use crate::determinism::{DeterministicRngStream, RngStreamName};
+use crate::determinism::{FighterId, SimEntityId, SimEntityKind, SimTick};
 use crate::ecs_identity::{SIM_ENTITY_POOL_CAPACITIES, StableSimEntity};
 use crate::equipment::{EquipmentKind, FighterEquipment};
 #[cfg(any(
@@ -81,7 +95,9 @@ use crate::network_protocol::{
 };
 use crate::simulation::TickTimer;
 use crate::specials::{ActiveSpecial, SpecialKind};
-use crate::styles::{FighterStyle, style_tuning};
+use crate::styles::FighterStyle;
+#[cfg(test)]
+use crate::styles::style_tuning;
 use crate::user_mode::UserModeState;
 
 #[cfg(any(
@@ -94,12 +110,18 @@ use crate::user_mode::UserModeState;
 ))]
 const BOT_ACTION_SELECT_RADIUS: f32 = FIGHTER_RADIUS * 2.65;
 const BOT_EDGE_WARNING_DISTANCE: f32 = 1.35;
+#[cfg(test)]
 const BOT_CHOICE_HOLD_TICKS: u64 = 12;
+#[cfg(test)]
 const BOT_ITEM_PICKUP_READY: TickTimer = TickTimer::from_millis_ceil(250);
+#[cfg(test)]
 const BOT_CLOSE_HEAVY_READY: TickTimer = TickTimer::from_millis_ceil(180);
 const BOT_SPATIAL_QUANTIZATION: f32 = 1_024.0;
+#[cfg(test)]
 const BOT_CHOICE_STREAM_DOMAIN: u64 = 0x424f_545f_4348_4f49;
+#[cfg(test)]
 const BOT_CHOICE_TICK_DOMAIN: u64 = 0x9e37_79b9_7f4a_7c15;
+#[cfg(test)]
 const BOT_CHOICE_ID_DOMAIN: u64 = 0xbf58_476d_1ce4_e5b9;
 const BOT_ITEM_SOURCE_CAPACITY: usize =
     SIM_ENTITY_POOL_CAPACITIES[SimEntityKind::Item.code() as usize] as usize;
@@ -178,6 +200,7 @@ const BOT_PROBE_DIRECTIONS: [(f32, f32); 16] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
+#[cfg(test)]
 enum BotChoicePurpose {
     Mistake = 0x01,
     HeldItem = 0x02,
@@ -193,12 +216,14 @@ enum BotChoicePurpose {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 struct BotDecisionKey {
     replay_seed: u64,
     bot_id: usize,
     tick: SimTick,
 }
 
+#[cfg(test)]
 impl BotDecisionKey {
     const fn new(replay_seed: u64, bot_id: usize, tick: SimTick) -> Self {
         Self {
@@ -223,6 +248,7 @@ pub struct BotActionControl {
     jump_bot_id: Option<usize>,
     guard_bot_id: Option<usize>,
     refill_bot_id: Option<usize>,
+    last_trace_signature: Option<u64>,
 }
 
 #[cfg(any(
@@ -234,7 +260,14 @@ pub struct BotActionControl {
     )
 ))]
 pub fn setup_bot_action_control(mut commands: Commands) {
-    commands.init_resource::<BotActionControl>();
+    let mut control = BotActionControl::default();
+    if let Ok(value) = std::env::var("AFC_BOT_TRACE_FIGHTER")
+        && let Ok(fighter_number) = value.parse::<usize>()
+        && (1..=crate::constants::FIGHTER_COUNT).contains(&fighter_number)
+    {
+        control.select(fighter_number - 1);
+    }
+    commands.insert_resource(control);
 }
 
 #[cfg(any(
@@ -247,6 +280,9 @@ pub fn setup_bot_action_control(mut commands: Commands) {
 ))]
 impl BotActionControl {
     fn select(&mut self, bot_id: usize) {
+        if self.selected_bot_id != Some(bot_id) {
+            self.last_trace_signature = None;
+        }
         self.selected_bot_id = Some(bot_id);
         if self.jump_bot_id.is_some_and(|id| id != bot_id) {
             self.jump_bot_id = None;
@@ -285,6 +321,7 @@ impl BotActionControl {
         self.jump_bot_id = None;
         self.guard_bot_id = None;
         self.refill_bot_id = None;
+        self.last_trace_signature = None;
         had_control
     }
 
@@ -327,8 +364,11 @@ struct BotPersonality {
     aggression: f32,
     item_greed: f32,
     hazard_fear: f32,
+    #[cfg(test)]
     special_bias: f32,
+    #[cfg(test)]
     mistake_rate: f32,
+    #[cfg(test)]
     panic_health: f32,
 }
 
@@ -339,6 +379,7 @@ pub enum BotDifficulty {
     Tutorial,
 }
 
+#[cfg(test)]
 impl BotDifficulty {
     fn attack_timer_advances(self, tick: SimTick) -> bool {
         match self {
@@ -511,6 +552,7 @@ pub(crate) struct BotDecisionQueries<'w, 's> {
             &'static FighterInventory,
             &'static SimPosition,
             &'static FighterSpecialState,
+            &'static FighterCharacter,
             &'static FighterStyle,
             &'static FighterEquipment,
             &'static FighterStats,
@@ -526,6 +568,11 @@ pub(crate) struct BotDecisionQueries<'w, 's> {
             &'static SimPosition,
             &'static FighterActionState,
             &'static FighterMotor,
+            &'static FighterStats,
+            &'static FighterCharacter,
+            &'static FighterStyle,
+            &'static FighterEquipment,
+            Option<&'static FighterContactState>,
         ),
     >,
     items: Query<'w, 's, (&'static StableSimEntity, &'static ArenaItem)>,
@@ -553,6 +600,12 @@ pub fn bot_input(
     user_mode: Res<UserModeState>,
     active_arena: Res<ActiveArena>,
     hazard_state: Res<ArenaHazardState>,
+    split_causeway_doors: Res<SplitCausewayDoorState>,
+    profiles: Res<BotProfileCatalog>,
+    move_catalog: Res<CharacterMoveCatalog>,
+    mut bot_runtime: ResMut<BotRuntimeStore>,
+    mut bot_navigation: ResMut<BotNavigationCache>,
+    mut bot_snapshot: Local<intelligence::BotSnapshotBuffer>,
     external_input: Option<Res<ExternallyStagedBotInput>>,
     #[cfg(all(
         feature = "dev-hot-reload",
@@ -572,6 +625,12 @@ pub fn bot_input(
         bot_ai_special_inputs_allowed(&user_mode),
         &active_arena,
         &hazard_state,
+        &split_causeway_doors,
+        &profiles,
+        &move_catalog,
+        &mut bot_runtime,
+        &mut bot_navigation,
+        &mut bot_snapshot,
         None,
         #[cfg(all(
             feature = "dev-hot-reload",
@@ -584,12 +643,18 @@ pub fn bot_input(
 }
 
 fn drive_bot_inputs(
-    tick: SimTick,
+    _tick: SimTick,
     hitstop: &Hitstop,
     state: &MatchState,
     special_inputs_allowed: bool,
     active_arena: &ActiveArena,
     hazard_state: &ArenaHazardState,
+    split_causeway_doors: &SplitCausewayDoorState,
+    profiles: &BotProfileCatalog,
+    move_catalog: &CharacterMoveCatalog,
+    bot_runtime: &mut BotRuntimeStore,
+    bot_navigation: &mut BotNavigationCache,
+    bot_snapshot: &mut intelligence::BotSnapshotBuffer,
     authority_fighter_mask: Option<u8>,
     #[cfg(all(
         feature = "dev-hot-reload",
@@ -603,7 +668,6 @@ fn drive_bot_inputs(
         return;
     }
 
-    let arena = active_arena.definition();
     let mut ordered_items = ArrayVec::<_, BOT_ITEM_SOURCE_CAPACITY>::new();
     let item_collection = queries.items.iter().try_for_each(|(stable, item)| {
         try_push_stable_source(&mut ordered_items, stable, item, SimEntityKind::Item)
@@ -637,6 +701,17 @@ fn drive_bot_inputs(
         return;
     }
     sort_stable_entries(&mut ordered_specials);
+    intelligence::build_world_snapshot(
+        bot_snapshot,
+        state,
+        active_arena.index(),
+        hazard_state.elapsed_ticks(),
+        &queries.all_fighters,
+        move_catalog,
+        ordered_items.as_slice(),
+        ordered_specials.as_slice(),
+    );
+    bot_runtime.begin_frame(state.replay_seed);
     for (
         bot,
         controller,
@@ -646,6 +721,7 @@ fn drive_bot_inputs(
         inventory,
         transform,
         special_state,
+        character,
         style,
         equipment,
         stats,
@@ -666,10 +742,7 @@ fn drive_bot_inputs(
             *input = FighterInput::default();
             continue;
         }
-        let tuning = style_tuning(style.kind);
         let difficulty = difficulty.copied().unwrap_or_default();
-        let personality = bot_personality_for_difficulty(style.kind, equipment.kind, difficulty);
-        let decision_key = BotDecisionKey::new(state.replay_seed, bot.id, tick);
         *input = FighterInput::default();
 
         #[cfg(all(
@@ -696,405 +769,35 @@ fn drive_bot_inputs(
             continue;
         }
 
-        advance_bot_brain_timers(&mut brain, difficulty, tick);
-
-        let nearest = nearest_bot_target(
-            bot_id,
-            transform.translation,
-            &state,
-            queries.all_fighters.iter().map(
-                |(other, other_transform, other_action, other_motor)| {
-                    (
-                        FighterId::from_index(other.id)
-                            .expect("fighter components must use a canonical slot"),
-                        other_transform.translation,
-                        other_action.action,
-                        other_motor.facing,
-                    )
-                },
-            ),
-        );
-
-        if action.action == FighterAction::Knockdown {
-            match bot_recovery_decision(action.elapsed.as_seconds(), transform.translation, nearest)
-            {
-                BotRecoveryDecision::Wait => {}
-                BotRecoveryDecision::QuickStand => input.jump = true,
-                BotRecoveryDecision::Roll(direction) => {
-                    input.movement = direction;
-                    input.dash = true;
-                }
-            }
-            continue;
-        }
-
-        if matches!(
-            action.action,
-            FighterAction::Hitstun
-                | FighterAction::GetUp
-                | FighterAction::GuardBroken
-                | FighterAction::GrabHold
-                | FighterAction::Grabbed
-                | FighterAction::LandingRecovery
-                | FighterAction::GuardCounter
-                | FighterAction::GuardStep
-                | FighterAction::QuickStand
-                | FighterAction::RecoveryRoll
-                | FighterAction::RingOut
-                | FighterAction::Respawning
-        ) {
-            continue;
-        }
-
-        if matches!(
-            action.action,
-            FighterAction::LightAttack1 | FighterAction::LightAttack2
-        ) {
-            let elapsed = action.elapsed.as_seconds();
-            if elapsed >= COMBO_QUEUE_START && elapsed <= COMBO_QUEUE_END {
-                input.light = true;
-            }
-            continue;
-        }
-
-        if !brain.decision_timer.active() {
-            brain.decision_timer =
-                bot_duration((0.65 + bot.id as f32 * 0.07) / personality.aggression);
-            brain.strafe_sign *= -1.0;
-        }
-
-        let avoid_arena_hazard = arena_hazard_avoidance(
-            transform.translation,
-            hazard_state.elapsed_ticks(),
-            arena.hazards,
-            personality.hazard_fear,
-        );
-        if avoid_arena_hazard.length_squared() > 0.01 {
-            input.movement = apply_edge_steering_for_arena(
-                transform.translation,
-                deterministic_normalize(avoid_arena_hazard),
-                arena,
-            );
-            if motor.grounded && !brain.dash_timer.active() {
-                input.dash = true;
-                brain.dash_timer = bot_duration(1.55);
-            }
-            continue;
-        }
-
-        let mut avoid_special = Vec2::ZERO;
-        for (_, (special, special_transform)) in ordered_specials.iter().copied() {
-            if special.owner.index() == bot.id
-                || !state.combat_target_allowed_for_state(special.owner.index(), bot.id)
-            {
-                continue;
-            }
-            let Some(avoid_radius) = special_avoid_radius(special.kind) else {
-                continue;
-            };
-            let delta = transform.translation - special_transform.translation;
-            let flat = Vec2::new(delta.x, delta.z);
-            let flat_distance = deterministic_flat_distance(flat);
-            if flat_distance < avoid_radius {
-                avoid_special += away_from_flat(flat) * (avoid_radius - flat_distance);
-            }
-        }
-        if avoid_special.length_squared() > 0.01 {
-            input.movement = apply_edge_steering_for_arena(
-                transform.translation,
-                deterministic_normalize(avoid_special),
-                arena,
-            );
-            if motor.grounded && !brain.dash_timer.active() {
-                input.dash = true;
-                brain.dash_timer = bot_duration(1.55);
-            }
-            continue;
-        }
-
-        let mut avoid_item = Vec2::ZERO;
-        for (_, item) in ordered_items.iter().copied() {
-            let Some((owner_id, avoid_radius)) = item_avoidance_radius(item) else {
-                continue;
-            };
-            if !state.combat_target_allowed_for_state(owner_id, bot.id) {
-                continue;
-            }
-            let delta = transform.translation - item.position;
-            let flat = Vec2::new(delta.x, delta.z);
-            let flat_distance = deterministic_flat_distance(flat);
-            if flat_distance < avoid_radius {
-                avoid_item += away_from_flat(flat) * (avoid_radius - flat_distance);
-            }
-        }
-        if avoid_item.length_squared() > 0.01 {
-            input.movement = apply_edge_steering_for_arena(
-                transform.translation,
-                deterministic_normalize(avoid_item),
-                arena,
-            );
-            if motor.grounded && !brain.dash_timer.active() {
-                input.dash = true;
-                brain.dash_timer = bot_duration(1.45);
-            }
-            continue;
-        }
-
-        let Some(target_snapshot) = nearest else {
-            continue;
-        };
-        let target = target_snapshot.position;
-        let distance = target_snapshot.distance;
-        let to_target = target - transform.translation;
-        let toward = deterministic_normalize(Vec2::new(to_target.x, to_target.z));
-        let strafe = Vec2::new(-toward.y, toward.x) * brain.strafe_sign;
-        let range = bot_range_band(tuning.bot_preferred_range, personality);
-
-        if bot_should_panic(stats.health, personality) && distance < 2.8 && motor.grounded {
-            input.guard = true;
-            brain.movement_plan = BotMovementPlan::Retreat;
-            brain.movement_plan_timer.set_max(bot_duration(0.35));
-            input.movement = apply_edge_steering_for_arena(
-                transform.translation,
-                defensive_away_from(transform.translation, target),
-                arena,
-            );
-            if !brain.dash_timer.active() {
-                input.dash = true;
-                brain.dash_timer = bot_duration(1.35);
-            }
-            brain.attack_timer.set_max(bot_duration(0.35));
-            continue;
-        }
-
-        if !brain.attack_timer.active() && bot_should_make_mistake(decision_key, personality) {
-            input.movement = strafe * 0.35;
-            brain.attack_timer = bot_duration(0.34);
-            continue;
-        }
-
-        if action.action == FighterAction::Dashing && distance < 2.15 {
-            input.light = true;
-            continue;
-        }
-
-        if !motor.grounded {
-            if !motor.air_attack_used && distance < 1.9 {
-                input.light = true;
-            }
-            continue;
-        }
-
-        if bot_should_guard_threat(transform.translation, target_snapshot) && motor.grounded {
-            input.guard = true;
-            input.movement = apply_edge_steering_for_arena(transform.translation, toward, arena);
-            brain.attack_timer.set_max(bot_duration(0.28));
-            if distance < 1.45 && !brain.dash_timer.active() {
-                input.movement = apply_edge_steering_for_arena(
-                    transform.translation,
-                    defensive_away_from(transform.translation, target),
-                    arena,
-                );
-                input.dash = true;
-                brain.dash_timer = bot_duration(1.65);
-            }
-            continue;
-        }
-
-        if let Some(held_entity) = inventory.held {
-            let held_kind = ordered_items
+        let held_kind = inventory.held.and_then(|held_id| {
+            ordered_items
                 .iter()
-                .copied()
-                .find(|(stable, _)| stable.id() == held_entity)
-                .map(|(_, item)| item.kind);
-            let use_held_item = bot_choice_ratio(decision_key, BotChoicePurpose::HeldItem, 3, 5);
-            if let Some(decision) = held_kind.and_then(|kind| {
-                bot_held_item_decision(
-                    kind,
-                    stats.stamina,
-                    distance,
-                    brain.attack_timer,
-                    use_held_item,
-                )
-            }) {
-                match decision {
-                    BotHeldItemDecision::Light => {
-                        input.light = true;
-                    }
-                    BotHeldItemDecision::Heavy => {
-                        input.heavy = true;
-                    }
-                }
-                brain.attack_timer = bot_held_item_recovery(decision);
-                continue;
-            }
-        } else if distance > 1.0 && bot_timer_at_most(brain.attack_timer, BOT_ITEM_PICKUP_READY) {
-            let mut best_item_score = 0.0;
-            for (_, item) in ordered_items.iter().copied() {
-                if !matches!(item.state, ItemState::Loose) || item.pickup_lockout.active() {
-                    continue;
-                }
-                let delta = item.position - transform.translation;
-                let item_distance = deterministic_flat_distance(Vec2::new(delta.x, delta.z));
-                if item_distance <= ITEM_PICKUP_RANGE + 0.25 {
-                    let score = bot_pickup_score(item.kind, stats.stamina, distance, item_distance)
-                        * personality.item_greed;
-                    if score > best_item_score {
-                        best_item_score = score;
-                    }
-                }
-            }
-            if best_item_score > 0.25 {
-                input.grab = true;
-                brain.attack_timer = bot_duration(0.7);
-                continue;
-            }
-        }
-        if special_inputs_allowed
-            && inventory.held.is_none()
-            && !special_state.cooldown.active()
-            && !brain.attack_timer.active()
-        {
-            let special_rate = ((2_500.0 * tuning.bot_special_bias * personality.special_bias)
-                .clamp(800.0, 5_000.0)) as u32;
-            if distance > 2.4
-                && distance < 6.0
-                && bot_choice_per_10k(decision_key, BotChoicePurpose::SpecialRanged, special_rate)
-            {
-                input.special = true;
-                brain.attack_timer = bot_duration(1.2);
-                continue;
-            }
-            if distance < 1.35
-                && bot_choice_per_10k(decision_key, BotChoicePurpose::SpecialGrab, special_rate)
-            {
-                input.special = true;
-                input.grab = true;
-                brain.attack_timer = bot_duration(1.35);
-                continue;
-            }
-            if distance > 1.6
-                && distance < 3.4
-                && bot_choice_per_10k(
-                    decision_key,
-                    BotChoicePurpose::SpecialGuard,
-                    special_rate.saturating_mul(4) / 5,
-                )
-            {
-                input.special = true;
-                input.guard = true;
-                brain.attack_timer = bot_duration(1.4);
-                continue;
-            }
-            if distance > 1.4
-                && distance < 3.8
-                && bot_choice_per_10k(
-                    decision_key,
-                    BotChoicePurpose::SpecialHeavy,
-                    special_rate.saturating_mul(4) / 5,
-                )
-            {
-                input.special = true;
-                input.heavy = true;
-                brain.attack_timer = bot_duration(1.55);
-                continue;
-            }
-        }
-
-        if !brain.movement_plan_timer.active() {
-            brain.movement_plan = choose_bot_movement_plan_for_arena(
-                transform.translation,
-                target,
-                distance,
-                range,
-                personality,
-                stats.health,
-                decision_key,
-                arena,
-            );
-            brain.movement_plan_timer =
-                bot_movement_plan_duration(brain.movement_plan, bot.id, personality);
-        }
-        input.movement = bot_tactical_movement(
-            brain.movement_plan,
+                .find(|(stable, _)| stable.id() == held_id)
+                .map(|(_, item)| item.kind)
+        });
+        intelligence::drive_bot(
+            active_arena.index(),
+            bot.id,
+            &mut brain,
+            motor,
             transform.translation,
-            target,
-            toward,
-            strafe,
-            distance,
-            range,
-            arena,
+            special_state,
+            character,
+            style,
+            equipment,
+            stats,
+            action,
+            difficulty,
+            held_kind,
+            special_inputs_allowed,
+            bot_snapshot,
+            profiles,
+            move_catalog,
+            bot_runtime,
+            bot_navigation,
+            split_causeway_doors,
+            &mut input,
         );
-
-        if bot_should_jump_for_elevation(
-            transform.translation,
-            input.movement,
-            motor.grounded,
-            arena,
-        ) {
-            input.jump = true;
-        }
-
-        if bot_should_dash_for_movement_for_arena(
-            brain.movement_plan,
-            transform.translation,
-            input.movement,
-            distance,
-            range,
-            motor.grounded,
-            brain.dash_timer,
-            arena,
-        ) {
-            input.dash = true;
-            brain.dash_timer = bot_movement_dash_cooldown(brain.movement_plan, bot.id);
-        }
-
-        if difficulty.normal_grab_allowed()
-            && distance < 0.9
-            && !brain.attack_timer.active()
-            && bot_choice_ratio(decision_key, BotChoicePurpose::CloseGrab, 1, 3)
-        {
-            input.grab = true;
-            brain.attack_timer = bot_duration(1.15);
-        }
-
-        if distance < 1.55 * personality.aggression && !brain.attack_timer.active() {
-            input.light = true;
-            brain.attack_timer = bot_duration(0.72 / personality.aggression);
-        }
-
-        if distance < 1.75
-            && !brain.attack_timer.active()
-            && bot_choice_ratio(decision_key, BotChoicePurpose::CloseJump, 1, 3)
-        {
-            input.jump = true;
-            brain.attack_timer = bot_duration(0.9);
-        }
-
-        if distance < 1.95
-            && bot_timer_at_most(brain.attack_timer, BOT_CLOSE_HEAVY_READY)
-            && bot_choice_ratio(decision_key, BotChoicePurpose::CloseHeavy, 1, 4)
-        {
-            input.heavy = true;
-            brain.attack_timer = bot_duration(0.95);
-        }
-
-        if distance > 3.2
-            && !brain.dash_timer.active()
-            && edge_danger_for_arena(transform.translation, arena) <= 0.0
-        {
-            input.dash = true;
-            brain.dash_timer = bot_duration(2.4 + bot.id as f32 * 0.35);
-        }
-
-        let facing = deterministic_normalize(Vec2::new(motor.facing.x, motor.facing.z));
-        let facing_target = facing.dot(toward) > 0.35;
-        if distance < 1.35
-            && facing_target
-            && bot_choice_ratio(decision_key, BotChoicePurpose::CloseGuard, 1, 4)
-        {
-            input.guard = true;
-        }
     }
 }
 
@@ -1104,6 +807,11 @@ struct AuthorityBotWorld<'w, 's> {
     state: Res<'w, MatchState>,
     active_arena: Res<'w, ActiveArena>,
     hazard_state: Res<'w, ArenaHazardState>,
+    split_causeway_doors: Res<'w, SplitCausewayDoorState>,
+    profiles: Res<'w, BotProfileCatalog>,
+    move_catalog: Res<'w, CharacterMoveCatalog>,
+    bot_runtime: ResMut<'w, BotRuntimeStore>,
+    bot_navigation: ResMut<'w, BotNavigationCache>,
     queries: BotDecisionQueries<'w, 's>,
 }
 
@@ -1145,6 +853,7 @@ impl From<ProtocolValidationError> for AuthorityBotInputError {
 /// is stable and independent of entity or ownership iteration order.
 pub(crate) struct AuthorityBotInputGenerator {
     world_state: SystemState<AuthorityBotWorld<'static, 'static>>,
+    bot_snapshot: intelligence::BotSnapshotBuffer,
     last_generated_tick: Option<SimTick>,
     last_frames: [Option<InputFrame>; MAX_SEATS],
     cached_frames: [Option<InputFrame>; MAX_SEATS],
@@ -1154,6 +863,7 @@ impl AuthorityBotInputGenerator {
     pub(crate) fn new(world: &mut World) -> Self {
         Self {
             world_state: SystemState::new(world),
+            bot_snapshot: intelligence::BotSnapshotBuffer::default(),
             last_generated_tick: None,
             last_frames: [None; MAX_SEATS],
             cached_frames: [None; MAX_SEATS],
@@ -1208,6 +918,11 @@ impl AuthorityBotInputGenerator {
                 state,
                 active_arena,
                 hazard_state,
+                split_causeway_doors,
+                profiles,
+                move_catalog,
+                mut bot_runtime,
+                mut bot_navigation,
                 mut queries,
             } = self.world_state.get_mut(world);
             let paused = hitstop.active();
@@ -1262,6 +977,12 @@ impl AuthorityBotInputGenerator {
                 true,
                 &active_arena,
                 &hazard_state,
+                &split_causeway_doors,
+                &profiles,
+                &move_catalog,
+                &mut bot_runtime,
+                &mut bot_navigation,
+                &mut self.bot_snapshot,
                 Some(authority_mask),
                 #[cfg(all(
                     feature = "dev-hot-reload",
@@ -1320,6 +1041,7 @@ impl AuthorityBotInputGenerator {
     }
 }
 
+#[cfg(test)]
 fn nearest_bot_target(
     bot: FighterId,
     bot_position: Vec3,
@@ -1562,10 +1284,12 @@ fn bot_duration(seconds: f32) -> TickTimer {
     TickTimer::from_seconds_ceil(seconds)
 }
 
+#[cfg(test)]
 fn bot_timer_at_most(timer: TickTimer, threshold: TickTimer) -> bool {
     timer <= threshold
 }
 
+#[cfg(test)]
 fn advance_bot_brain_timers(brain: &mut BotBrain, difficulty: BotDifficulty, tick: SimTick) {
     brain.decision_timer.tick();
     brain.movement_plan_timer.tick();
@@ -1575,6 +1299,7 @@ fn advance_bot_brain_timers(brain: &mut BotBrain, difficulty: BotDifficulty, tic
     }
 }
 
+#[cfg(test)]
 fn bot_choice_sample(key: BotDecisionKey, purpose: BotChoicePurpose) -> u32 {
     let choice_tick = key.tick.get() / BOT_CHOICE_HOLD_TICKS;
     let stream_code = BOT_CHOICE_STREAM_DOMAIN
@@ -1586,6 +1311,7 @@ fn bot_choice_sample(key: BotDecisionKey, purpose: BotChoicePurpose) -> u32 {
     stream.next_u32()
 }
 
+#[cfg(test)]
 fn bot_choice_ratio(
     key: BotDecisionKey,
     purpose: BotChoicePurpose,
@@ -1602,6 +1328,7 @@ fn bot_choice_ratio(
     u64::from(bot_choice_sample(key, purpose)) < threshold
 }
 
+#[cfg(test)]
 fn bot_choice_per_10k(key: BotDecisionKey, purpose: BotChoicePurpose, rate_per_10k: u32) -> bool {
     bot_choice_ratio(key, purpose, rate_per_10k.min(10_000), 10_000)
 }
@@ -1669,6 +1396,7 @@ fn bot_recovery_decision(
 }
 
 fn bot_should_guard_threat(bot_position: Vec3, target: BotTargetSnapshot) -> bool {
+    debug_assert!(target.fighter_id.index() < crate::constants::FIGHTER_COUNT);
     let Some(range) = guard_threat_range(target.action) else {
         return false;
     };
@@ -1692,31 +1420,45 @@ fn bot_personality(
             aggression: 0.92,
             item_greed: 0.9,
             hazard_fear: 1.1,
+            #[cfg(test)]
             special_bias: 0.85,
+            #[cfg(test)]
             mistake_rate: 0.08,
+            #[cfg(test)]
             panic_health: 34.0,
         },
         crate::styles::FighterStyleKind::Vector => BotPersonality {
             aggression: 1.16,
             item_greed: 0.96,
             hazard_fear: 0.92,
+            #[cfg(test)]
             special_bias: 1.0,
+            #[cfg(test)]
             mistake_rate: 0.12,
+            #[cfg(test)]
             panic_health: 24.0,
         },
         crate::styles::FighterStyleKind::Catalyst => BotPersonality {
             aggression: 0.98,
             item_greed: 0.86,
             hazard_fear: 1.0,
+            #[cfg(test)]
             special_bias: 1.22,
+            #[cfg(test)]
             mistake_rate: 0.07,
+            #[cfg(test)]
             panic_health: 28.0,
         },
     };
 
     match equipment {
         EquipmentKind::DashCoil => personality.aggression *= 1.06,
-        EquipmentKind::AerialSpur => personality.mistake_rate *= 1.03,
+        EquipmentKind::AerialSpur => {
+            #[cfg(test)]
+            {
+                personality.mistake_rate *= 1.03;
+            }
+        }
         EquipmentKind::CounterCell => personality.hazard_fear *= 1.08,
         EquipmentKind::HeavySeal => personality.item_greed *= 1.08,
     }
@@ -1724,6 +1466,7 @@ fn bot_personality(
     personality
 }
 
+#[cfg(test)]
 fn bot_personality_for_difficulty(
     style: crate::styles::FighterStyleKind,
     equipment: EquipmentKind,
@@ -1740,10 +1483,12 @@ fn bot_personality_for_difficulty(
     personality
 }
 
+#[cfg(test)]
 fn bot_should_panic(health: f32, personality: BotPersonality) -> bool {
     health <= personality.panic_health
 }
 
+#[cfg(test)]
 fn bot_should_make_mistake(key: BotDecisionKey, personality: BotPersonality) -> bool {
     let rate_per_10k = (personality.mistake_rate.clamp(0.0, 1.0) * 10_000.0) as u32;
     bot_choice_per_10k(key, BotChoicePurpose::Mistake, rate_per_10k)
@@ -1831,6 +1576,7 @@ fn bot_held_item_decision(
     }
 }
 
+#[cfg(test)]
 fn bot_held_item_recovery(decision: BotHeldItemDecision) -> TickTimer {
     bot_duration(match decision {
         BotHeldItemDecision::Light => 0.72,
@@ -1864,6 +1610,7 @@ fn bot_range_band(preferred_range: f32, personality: BotPersonality) -> BotRange
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn choose_bot_movement_plan_for_arena(
     bot_position: Vec3,
     target_position: Vec3,
@@ -1902,6 +1649,7 @@ fn choose_bot_movement_plan_for_arena(
     }
 }
 
+#[cfg(test)]
 fn bot_movement_plan_duration(
     plan: BotMovementPlan,
     bot_id: usize,
@@ -1917,6 +1665,7 @@ fn bot_movement_plan_duration(
     bot_duration(base / personality.aggression.clamp(0.75, 1.35) + bot_id as f32 * 0.015)
 }
 
+#[cfg(test)]
 fn bot_tactical_movement(
     plan: BotMovementPlan,
     bot_position: Vec3,
@@ -1958,6 +1707,7 @@ fn bot_tactical_movement(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn bot_should_dash_for_movement_for_arena(
     plan: BotMovementPlan,
     bot_position: Vec3,
@@ -1984,6 +1734,7 @@ fn bot_should_dash_for_movement_for_arena(
     }
 }
 
+#[cfg(test)]
 fn bot_movement_dash_cooldown(plan: BotMovementPlan, bot_id: usize) -> TickTimer {
     let base = match plan {
         BotMovementPlan::Approach => 1.45,
@@ -2039,6 +1790,7 @@ fn edge_inward_direction_for_arena(position: Vec3, arena: &ArenaDefinition) -> V
     }
 }
 
+#[cfg(test)]
 fn movement_points_toward_edge_for_arena(
     position: Vec3,
     movement: Vec2,
@@ -2177,6 +1929,11 @@ mod tests {
         ));
         world.insert_resource(active_arena);
         world.insert_resource(state);
+        world.insert_resource(SplitCausewayDoorState::default());
+        world.insert_resource(BotProfileCatalog::from_embedded_gameplay().unwrap());
+        world.insert_resource(CharacterMoveCatalog::from_embedded_gameplay().unwrap());
+        world.insert_resource(BotRuntimeStore::default());
+        world.insert_resource(BotNavigationCache::default());
 
         let positions = [
             Vec3::ZERO,
@@ -2208,6 +1965,7 @@ mod tests {
                     FighterInventory::default(),
                     SimPosition::new(positions[fighter_id]),
                     FighterSpecialState::default(),
+                    FighterCharacter::new(crate::characters::CharacterKind::Cat),
                     FighterStyle {
                         kind: crate::styles::FighterStyleKind::Anchor,
                     },

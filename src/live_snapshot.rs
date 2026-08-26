@@ -9,9 +9,9 @@ use bevy::prelude::*;
 
 use crate::characters::{CharacterKind, FighterCharacter};
 use crate::components::{
-    DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState, FighterGrabState,
-    FighterInput, FighterInventory, FighterMotor, FighterSpecialState, FighterStats,
-    FighterUltimateState, SimPosition,
+    DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState, FighterContactState,
+    FighterGrabState, FighterInput, FighterInventory, FighterMotor, FighterSpecialState,
+    FighterStats, FighterUltimateState, SimPosition,
 };
 use crate::determinism::{
     DEFAULT_F32_QUANTIZATION, FIGHTER_CAPACITY, FighterId, SimEntityKind, canonicalize_f32,
@@ -360,6 +360,7 @@ struct PreparedFighter {
     stats: FighterStats,
     motor: FighterMotor,
     action: FighterActionState,
+    contact: FighterContactState,
     drunk: DrunkStatus,
     inventory: FighterInventory,
     grab: FighterGrabState,
@@ -485,6 +486,7 @@ fn ensure_required_components(world: &World, entity: Entity) -> Result<(), Snaps
     required::<FighterStats>(world, entity)?;
     required::<FighterMotor>(world, entity)?;
     required::<FighterActionState>(world, entity)?;
+    required::<FighterContactState>(world, entity)?;
     required::<DrunkStatus>(world, entity)?;
     required::<FighterInventory>(world, entity)?;
     required::<FighterGrabState>(world, entity)?;
@@ -508,6 +510,7 @@ fn capture_fighter(
     let stats = required::<FighterStats>(world, entity)?;
     let motor = required::<FighterMotor>(world, entity)?;
     let action = required::<FighterActionState>(world, entity)?;
+    let contact = required::<FighterContactState>(world, entity)?;
     let drunk = required::<DrunkStatus>(world, entity)?;
     let inventory = required::<FighterInventory>(world, entity)?;
     let grab = required::<FighterGrabState>(world, entity)?;
@@ -591,6 +594,12 @@ fn capture_fighter(
         reaction_recover_ms: optional_u32(action.reaction_recover_ms),
         reaction_family: optional_u8(action.reaction_family.map(reaction_family_code)),
         charge_elapsed_ticks: action.charge_elapsed.get(),
+        contact_action: optional_u8(contact.action.map(|action| {
+            u8::try_from(fighter_action_code(action))
+                .expect("the fighter action code domain fits in a u8")
+        })),
+        contact_technique: optional_u16(contact.technique_id.map(technique_code)),
+        contact_guarded: contact.guarded,
     };
     let rollback = FighterRollbackExtensionSnapshot {
         position: vec3_bits(position.translation),
@@ -941,6 +950,7 @@ fn prepare_inactive_fighter(
             ..default()
         },
         action,
+        contact: FighterContactState::default(),
         drunk: DrunkStatus::default(),
         inventory: FighterInventory::default(),
         grab: FighterGrabState::default(),
@@ -1069,6 +1079,11 @@ fn prepare_fighter(
         charge_release_requested: action_snapshot.flags & FIGHTER_ACTION_CHARGE_RELEASE_REQUESTED
             != 0,
     };
+    let contact = FighterContactState {
+        action: decode_optional_fighter_action(action_snapshot.contact_action)?,
+        technique_id: decode_optional_technique(action_snapshot.contact_technique)?,
+        guarded: action_snapshot.contact_guarded,
+    };
     let drunk = DrunkStatus {
         remaining: TickTimer::from_ticks(snapshot.status.timers[DRUNK_STATUS_TIMER_SLOT]),
     };
@@ -1105,6 +1120,7 @@ fn prepare_fighter(
         stats,
         motor,
         action,
+        contact,
         drunk,
         inventory: FighterInventory {
             held: snapshot.relationships.held_item,
@@ -1220,6 +1236,21 @@ fn decode_optional_technique(
             .ok_or(SnapshotCodecError::new(
                 ERR_INVALID_ENUM,
                 "invalid TechniqueId snapshot code",
+            ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn decode_optional_fighter_action(
+    value: OptionalU8CodeSnapshot,
+) -> Result<Option<FighterAction>, SnapshotCodecError> {
+    if value.present {
+        fighter_action_from_code(u16::from(value.code))
+            .map(Some)
+            .ok_or(SnapshotCodecError::new(
+                ERR_INVALID_ENUM,
+                "invalid FighterAction contact snapshot code",
             ))
     } else {
         Ok(None)
@@ -1419,6 +1450,7 @@ fn commit_fighter(world: &mut World, prepared: PreparedFighter) {
         stats,
         motor,
         action,
+        contact,
         drunk,
         inventory,
         grab,
@@ -1468,6 +1500,9 @@ fn commit_fighter(world: &mut World, prepared: PreparedFighter) {
         *live = action;
         live.reaction_visual_side = reaction_visual_side;
     }
+    *world
+        .get_mut::<FighterContactState>(entity)
+        .expect("restore preflight checked FighterContactState") = contact;
     *world
         .get_mut::<DrunkStatus>(entity)
         .expect("restore preflight checked DrunkStatus") = drunk;
@@ -1591,6 +1626,11 @@ mod tests {
                 charge_elapsed: ElapsedTicks::from_ticks(200 + index as u32),
                 charge_release_requested: index == 1,
             };
+            let contact = FighterContactState {
+                action: Some(action.action),
+                technique_id: action.technique_id,
+                guarded: index == 2,
+            };
             let grab = FighterGrabState {
                 holding: (index == 0).then_some(FighterId::new(1).unwrap()),
                 held_by: (index == 1).then_some(FighterId::new(0).unwrap()),
@@ -1659,12 +1699,15 @@ mod tests {
                         cooldown: TickTimer::from_ticks(230 + index as u32),
                     },
                 ))
-                .insert(FighterAimState {
-                    direction: Vec3::new(0.75, 0.0, -0.5),
-                    locked_target: Some(FighterId::from_index(index ^ 1).unwrap()),
-                    aim_pressed: index % 2 == 0,
-                    manual_unlock_count: 250 + index as u64,
-                })
+                .insert((
+                    contact,
+                    FighterAimState {
+                        direction: Vec3::new(0.75, 0.0, -0.5),
+                        locked_target: Some(FighterId::from_index(index ^ 1).unwrap()),
+                        aim_pressed: index % 2 == 0,
+                        manual_unlock_count: 250 + index as u64,
+                    },
+                ))
                 .id();
             entities[index] = Some(entity);
         }
@@ -1721,6 +1764,7 @@ mod tests {
                 aftermath.cue = "future-side-cue-must-not-survive-restore";
             }
             world.get_mut::<FighterActionState>(entity).unwrap().action = FighterAction::Idle;
+            *world.get_mut::<FighterContactState>(entity).unwrap() = FighterContactState::default();
             world
                 .get_mut::<FighterActionState>(entity)
                 .unwrap()

@@ -12,6 +12,7 @@ use std::fmt;
 
 use crate::arena;
 use crate::arena_defs::arena_definitions;
+use crate::bot_profiles::{BOT_PROFILE_CATALOG_PATH, BotProfileCatalog};
 use crate::characters::{CHARACTER_KINDS, CHARACTER_MOVE_CATALOG_PATH, CharacterMoveCatalog};
 use crate::components::ParticipantKind;
 use crate::determinism::{CanonicalHash64, FighterId};
@@ -314,7 +315,7 @@ fn initialize_headless_resources(
     app: &mut App,
     config: &HeadlessMatchConfig,
 ) -> Result<(), HeadlessBuildError> {
-    // Parse both baked assets before mutating the world. Online authority and
+    // Parse all baked gameplay assets before mutating the world. Online authority and
     // prediction may never inherit the rendered developer sandbox's mutable
     // native loose-file defaults or file-watcher state.
     let character_moves = CharacterMoveCatalog::from_embedded_gameplay().map_err(|reason| {
@@ -326,6 +327,12 @@ fn initialize_headless_resources(
     let combat_feel = CombatFeelTuning::from_embedded_gameplay().map_err(|reason| {
         HeadlessBuildError::InvalidEmbeddedGameplayContent {
             asset: COMBAT_FEEL_PATH,
+            reason,
+        }
+    })?;
+    let bot_profiles = BotProfileCatalog::from_embedded_gameplay().map_err(|reason| {
+        HeadlessBuildError::InvalidEmbeddedGameplayContent {
+            asset: BOT_PROFILE_CATALOG_PATH,
             reason,
         }
     })?;
@@ -357,7 +364,10 @@ fn initialize_headless_resources(
         .init_resource::<crate::items::ItemContactFrame>()
         .init_resource::<crate::arena::ArenaOrdnanceContactFrame>()
         .insert_resource(character_moves)
-        .insert_resource(combat_feel);
+        .insert_resource(combat_feel)
+        .insert_resource(bot_profiles)
+        .init_resource::<crate::bot::BotRuntimeStore>()
+        .init_resource::<crate::bot::BotNavigationCache>();
     Ok(())
 }
 
@@ -1336,17 +1346,17 @@ mod tests {
     #[test]
     fn cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result() {
         const EXPECTED_CHECKPOINTS: [(u64, u64); 8] = [
-            (1, 0xc34d_8799_0574_f22c),
-            (120, 0x07ff_272a_a475_c583),
-            (240, 0x6459_463f_461d_e504),
-            (360, 0xb2d4_26ca_cd2c_037b),
-            (480, 0xb857_fefd_c4f4_f8fb),
-            (600, 0x76d9_d6cc_9fba_01cc),
-            (720, 0xf6df_1783_0595_a2ef),
-            (840, 0x8618_ce26_da8a_d483),
+            (1, 0xc70e_eb0a_1615_1318),
+            (120, 0xbbe0_a608_d0e8_c527),
+            (240, 0x5870_65ba_1f15_4868),
+            (360, 0x9b30_5e71_cb01_efef),
+            (480, 0x16a6_5f95_d916_635f),
+            (600, 0xdeba_d3d6_e430_5410),
+            (720, 0xe1d1_3626_4d73_e633),
+            (840, 0x6a10_dddd_d904_eedf),
         ];
         const EXPECTED_FINAL_TICK: SimTick = SimTick(934);
-        const EXPECTED_FINAL_HASH: u64 = 0x66be_5d24_c82d_a680;
+        const EXPECTED_FINAL_HASH: u64 = 0x2ead_7d00_af44_aaf4;
 
         let config = fixture();
         assert_eq!(
@@ -1402,17 +1412,17 @@ mod tests {
         // Each arena freezes the independent retired-special/hazard and item
         // branches after semantic review.
         const EXPECTED_FINAL_HASHES: [[u64; 2]; 11] = [
-            [0xd311_e16b_a6d9_2ddc, 0x2be3_9391_e221_c563],
-            [0xf069_d584_ab33_2e9b, 0xfe66_95a5_f7bf_a795],
-            [0x0e14_18e7_669d_292b, 0x357c_bfec_ceca_70ea],
-            [0x95ac_f0d5_4b40_1bcd, 0xe8de_4822_0265_f7ac],
-            [0x77e6_ad71_b3dc_25e6, 0xefad_7ba7_9a92_b39b],
-            [0xa3af_f842_fea3_eaea, 0xec16_583c_f283_17f3],
-            [0x7440_ed28_93e3_11e6, 0x9f66_27ac_2ce5_13cc],
-            [0xf247_692f_15cb_dfd3, 0xf112_3ac9_52c4_d83a],
-            [0xba47_c189_d29b_2f54, 0xab6e_8147_8275_7bf2],
-            [0xd356_b539_9cd8_2645, 0xaf71_cfe7_1715_3451],
-            [0x979d_8110_ed11_d7bd, 0x1664_e9d6_5a4c_e6f9],
+            [0x0b7d_4baf_42b0_cf80, 0xda35_ffd1_6ba1_c577],
+            [0xe031_03d8_9065_f663, 0xb2ef_39aa_0d16_b002],
+            [0xce46_455e_c877_54fb, 0x2fdc_d071_124c_117a],
+            [0xa2da_26ca_5f22_e66d, 0x1e39_8318_892d_b1d4],
+            [0x8fa8_0892_11d5_7042, 0x0092_7efd_229a_cc90],
+            [0x6610_d63b_80b2_9482, 0xb39a_9da4_16ef_5960],
+            [0xd85b_8d61_6f4f_5ca2, 0x783b_b79c_6fb0_c708],
+            [0x6fab_9367_bfbb_c91b, 0x6087_6c45_b723_f33a],
+            [0x5117_853f_e639_2264, 0x9131_d7cf_e1e3_aec2],
+            [0x6704_8546_95fa_33ad, 0x6a17_dd58_4601_c561],
+            [0x338c_11bc_fae0_6b25, 0x686f_4f47_c9ae_9ce5],
         ];
 
         assert_eq!(arena_definitions().len(), 11);

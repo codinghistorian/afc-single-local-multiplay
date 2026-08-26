@@ -98,6 +98,17 @@ Snapshot schema 4 owns the target/progress fields in an 80-byte bounded arena
 payload. Exact static tables and all 19 dynamic gate poses are fingerprinted;
 presentation prompts, mesh transforms, and audio cannot feed that state.
 
+Simulation version 9 replaces the separate legacy/local authority-bot decisions
+with one bounded planner driven by the 60 Hz fixed schedule and a 20 Hz integer
+decision clock. Fighter, item, special, and arena inputs are ordered by
+`FighterId`, `SimEntityId`, or authored arena/device index; vector decisions use
+the canonical software-math helpers. Shipping, browser, renderless authority,
+and fixture compositions use the same embedded, validated profile catalog.
+Snapshot schema 5 owns the action, authored technique, and guarded flag of the
+latest accepted fighter contact because those fields can change later tactical
+branches. Planner-private memory stays on the authority boundary; its committed
+`InputFrame` tape is the replay and prediction contract.
+
 Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 
 - `FighterStats::hud_flash` is written/decayed for HUD feedback but is never read
@@ -129,7 +140,7 @@ Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 | Match | `game_state::tick_match_timer` | Integer match/phase ticks | none | Phase event has one ordered presentation side effect | PASS |
 | Match | `fighter::update_drunk_status` | Gameplay duration is `TickTimer`; bubble cadence/phase derive from its canonical remaining ticks | boundary | Fighter-local status emits an ordered semantic lifecycle event plus optional presentation sidecar | PASS |
 | Input | `fighter::consume_local_player_input` | Tick-addressed `SimTick` drain | none | Per-seat frame is cached once, so duplicate seat reads do not depend on query order | PASS |
-| Input | `bot::bot_input` | All brain windows are `TickTimer`; choices are keyed by seed/fighter/tick | stable | Equal target distance breaks by `FighterId`; special/item sources sort by `SimEntityId`; bot mutations are fighter-local | FIXED |
+| Input | `bot::bot_input` | All brain windows are `TickTimer`; the shared planner advances at integer 20 Hz and choices are keyed by seed/fighter/decision tick | stable | One stable snapshot feeds every bot; target ties break by `FighterId`, dynamic sources sort by `SimEntityId`, bounded navigation reads match-owned arena state, and mutations are fighter-local | FIXED |
 | Input | `fighter::apply_drunk_input_modifier` | No timer mutation | none | Per-fighter input inversion | PASS |
 | Input | `arena::update_split_causeway_door_eligibility` | No countdown | stable | Candidate pose/action is canonical; distance ties break by `FighterId`; result is a fixed authored-device array | FIXED |
 | Input | `arena::handle_split_causeway_door_inputs` | Current fixed tick only | stable | Requests are consumed and committed in `FighterId::ALL` order; event identity is stable arena/device indices | FIXED |

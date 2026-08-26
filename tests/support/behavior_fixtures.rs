@@ -2898,8 +2898,8 @@ fn authority_headless_bot_tape_is_seeded_and_repeatable() {
         })
         .map(|index| index + 1);
 
-    assert_eq!(first_input_difference, Some(24));
-    assert_eq!(first_action_difference, Some(44));
+    assert_eq!(first_input_difference, Some(4));
+    assert_eq!(first_action_difference, None);
     assert_ne!(first, different);
 }
 

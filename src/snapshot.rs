@@ -16,7 +16,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"AFCS";
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 4;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 5;
 pub const SNAPSHOT_QUANTIZATION_UNITS: u32 = 4_096;
 
 pub const DYNAMIC_PAYLOAD_BYTES: usize = 128;
@@ -40,7 +40,7 @@ pub const SIM_ENTITY_KIND_COUNT: usize = SimEntityKind::ALL.len();
 ///
 /// This is deliberately fixed: adding a field requires a schema-version bump,
 /// and decoding never allocates or follows an attacker-controlled length.
-pub const FIGHTER_ROLLBACK_EXTENSION_BYTES: usize = 266;
+pub const FIGHTER_ROLLBACK_EXTENSION_BYTES: usize = 272;
 
 /// Stable schema-v3-and-later discriminant counts. The ECS bridge must map the gameplay
 /// enums explicitly rather than relying on Rust's unspecified enum layout.
@@ -394,6 +394,12 @@ pub struct FighterActionRollbackSnapshot {
     /// Schema-v2 `ReactionFamilyId` discriminant.
     pub reaction_family: OptionalU8CodeSnapshot,
     pub charge_elapsed_ticks: u32,
+    /// The action associated with the latest accepted contact. Guarded strikes
+    /// are accepted contacts too, so `confirmed_hit` alone is insufficient.
+    pub contact_action: OptionalU8CodeSnapshot,
+    /// The authored technique associated with `contact_action`, when present.
+    pub contact_technique: OptionalU16CodeSnapshot,
+    pub contact_guarded: bool,
 }
 
 /// Fixed-width, heap-free schema extension for rollback-relevant fighter ECS
@@ -1132,6 +1138,23 @@ fn validate_fighter_rollback(
         REACTION_FAMILY_CODE_COUNT,
         "reaction-family code or absent padding",
     )?;
+    validate_optional_u8_code(
+        action.contact_action,
+        FIGHTER_ACTION_CODE_COUNT as u8,
+        "contact action code or absent padding",
+    )?;
+    validate_optional_u16_code(
+        action.contact_technique,
+        TECHNIQUE_CODE_COUNT,
+        "contact technique code or absent padding",
+    )?;
+    if !action.contact_action.present
+        && (action.contact_technique.present || action.contact_guarded)
+    {
+        return Err(SnapshotError::InvariantViolation(
+            "contact technique and guarded state require a contact action",
+        ));
+    }
     Ok(())
 }
 
@@ -1855,6 +1878,9 @@ fn encode_fighter_rollback(
     encode_optional_u32(encoder, action.reaction_recover_ms)?;
     encode_optional_u8_code(encoder, action.reaction_family)?;
     encoder.write_u32(action.charge_elapsed_ticks)?;
+    encode_optional_u8_code(encoder, action.contact_action)?;
+    encode_optional_u16_code(encoder, action.contact_technique)?;
+    encoder.write_bool(action.contact_guarded)?;
     encoder.write_u32(rollback.regrab_lockout_ticks)?;
 
     debug_assert_eq!(encoder.len() - start, FIGHTER_ROLLBACK_EXTENSION_BYTES);
@@ -2487,6 +2513,9 @@ fn decode_fighter_rollback(
         reaction_recover_ms: decode_optional_u32(decoder, "reaction-recovery presence tag")?,
         reaction_family: decode_optional_u8_code(decoder, "reaction-family presence tag")?,
         charge_elapsed_ticks: decoder.read_u32()?,
+        contact_action: decode_optional_u8_code(decoder, "contact-action presence tag")?,
+        contact_technique: decode_optional_u16_code(decoder, "contact-technique presence tag")?,
+        contact_guarded: decoder.read_bool("contact-guarded flag")?,
     };
     let rollback = FighterRollbackExtensionSnapshot {
         position,
@@ -3200,6 +3229,15 @@ mod tests {
                         code: 12,
                     },
                     charge_elapsed_ticks: 35,
+                    contact_action: OptionalU8CodeSnapshot {
+                        present: true,
+                        code: 8,
+                    },
+                    contact_technique: OptionalU16CodeSnapshot {
+                        present: true,
+                        code: 1,
+                    },
+                    contact_guarded: true,
                 },
                 regrab_lockout_ticks: 36,
             },
@@ -3487,6 +3525,22 @@ mod tests {
                 field: "queued technique code or absent padding",
                 value: 1,
             })
+        ));
+
+        let mut impossible_contact = fixture(782);
+        impossible_contact.fighters[0]
+            .rollback
+            .action
+            .contact_action = OptionalU8CodeSnapshot::default();
+        impossible_contact.fighters[0]
+            .rollback
+            .action
+            .contact_guarded = true;
+        assert!(matches!(
+            impossible_contact.validate(),
+            Err(SnapshotError::InvariantViolation(
+                "contact technique and guarded state require a contact action"
+            ))
         ));
     }
 

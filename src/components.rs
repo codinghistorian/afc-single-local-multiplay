@@ -791,6 +791,53 @@ impl Default for FighterActionState {
     }
 }
 
+/// Authoritative contact detail that is not represented by `confirmed_hit`.
+/// `confirmed_hit` records any accepted contact, including a guarded strike;
+/// this component preserves whether the latest contact in that same action was
+/// guarded without changing combat resolution or exposing input state.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FighterContactState {
+    pub action: Option<FighterAction>,
+    pub technique_id: Option<TechniqueId>,
+    pub guarded: bool,
+}
+
+impl FighterContactState {
+    pub fn guarded_for(self, action: &FighterActionState) -> bool {
+        action.confirmed_hit
+            && self.action == Some(action.action)
+            && self.technique_id == action.technique_id
+            && self.guarded
+    }
+}
+
+#[cfg(test)]
+mod fighter_contact_state_tests {
+    use super::*;
+
+    #[test]
+    fn guarded_contact_must_match_the_authoritative_action_and_technique() {
+        let mut action = FighterActionState {
+            action: FighterAction::LightAttack1,
+            technique_id: Some(TechniqueId::CatLight1),
+            confirmed_hit: true,
+            ..default()
+        };
+        let contact = FighterContactState {
+            action: Some(FighterAction::LightAttack1),
+            technique_id: Some(TechniqueId::CatLight1),
+            guarded: true,
+        };
+
+        assert!(contact.guarded_for(&action));
+        action.technique_id = Some(TechniqueId::BeeLight1);
+        assert!(!contact.guarded_for(&action));
+        action.technique_id = Some(TechniqueId::CatLight1);
+        action.confirmed_hit = false;
+        assert!(!contact.guarded_for(&action));
+    }
+}
+
 #[derive(Component)]
 pub struct FighterVisualRoot;
 
@@ -824,6 +871,7 @@ pub enum BotBehaviorMode {
 pub enum BotMovementPlan {
     Approach,
     Circle,
+    #[cfg(test)]
     Backstep,
     Pressure,
     Retreat,

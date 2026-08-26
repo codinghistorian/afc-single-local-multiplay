@@ -16,8 +16,8 @@ use crate::chick_skills::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, combat_sfx_kind_for_impact};
 use crate::components::{
-    AttackKind, Fighter, FighterAction, FighterActionState, FighterGrabState, FighterInput,
-    FighterMotor, FighterStats, FighterUltimateState, Hitbox, SimPosition,
+    AttackKind, Fighter, FighterAction, FighterActionState, FighterContactState, FighterGrabState,
+    FighterInput, FighterMotor, FighterStats, FighterUltimateState, Hitbox, SimPosition,
 };
 use crate::constants::*;
 use crate::contact_arbitration::{
@@ -3783,6 +3783,10 @@ impl<T> FighterSlots<T> {
         self.entries[fighter.index()].as_ref()
     }
 
+    fn insert_or_replace(&mut self, fighter: FighterId, value: T) {
+        self.entries[fighter.index()] = Some(value);
+    }
+
     fn contains(&self, fighter: FighterId) -> bool {
         self.entries[fighter.index()].is_some()
     }
@@ -4091,6 +4095,7 @@ pub fn resolve_contacts(
                 &mut FighterStats,
                 &mut FighterMotor,
                 &mut FighterActionState,
+                Option<&mut FighterContactState>,
                 &mut FighterGrabState,
                 &mut FighterUltimateState,
                 &FighterStyle,
@@ -4137,6 +4142,7 @@ pub fn resolve_contacts(
     let mut ultimate_release_fighters = FighterSlots::default();
     let mut jump_attackers_landed = FighterSlots::default();
     let mut confirmed_attackers = FighterSlots::default();
+    let mut guarded_attackers = FighterSlots::default();
     let mut penguin_slope_ultimate_recoil = FighterSlots::default();
     let mut ordinary_damage_participants = [false; FighterId::ALL.len()];
 
@@ -4170,6 +4176,7 @@ pub fn resolve_contacts(
                 mut stats,
                 mut motor,
                 mut action,
+                _,
                 _,
                 mut ultimate_state,
                 target_style,
@@ -4246,6 +4253,9 @@ pub fn resolve_contacts(
         }
         if let Some(owner) = contact.owner {
             confirmed_attackers.insert_first(owner, ());
+            let every_contact_guarded =
+                guarded_attackers.get(owner).copied().unwrap_or(true) && resolved.guarded;
+            guarded_attackers.insert_or_replace(owner, every_contact_guarded);
             let owner_translation = {
                 let owners = fighters.p0();
                 owners
@@ -4361,6 +4371,7 @@ pub fn resolve_contacts(
                                     mut stats,
                                     mut motor,
                                     mut action,
+                                    _,
                                     mut grab_state,
                                     _,
                                     _,
@@ -4406,6 +4417,7 @@ pub fn resolve_contacts(
         || !ultimate_release_fighters.is_empty()
         || !jump_attackers_landed.is_empty()
         || !confirmed_attackers.is_empty()
+        || !guarded_attackers.is_empty()
         || !penguin_slope_ultimate_recoil.is_empty()
     {
         let mut followup_fighters = fighters.p1();
@@ -4415,6 +4427,7 @@ pub fn resolve_contacts(
             _,
             mut motor,
             mut action,
+            contact,
             mut grab_state,
             mut ultimate_state,
             style,
@@ -4427,6 +4440,11 @@ pub fn resolve_contacts(
             };
             if confirmed_attackers.contains(fighter_id) {
                 action.confirmed_hit = true;
+                if let Some(mut contact) = contact {
+                    contact.action = Some(action.action);
+                    contact.technique_id = action.technique_id;
+                    contact.guarded = guarded_attackers.get(fighter_id).copied().unwrap_or(false);
+                }
             }
             if let Some(recoil_direction) = penguin_slope_ultimate_recoil.get(fighter_id) {
                 apply_penguin_slope_ultimate_attacker_recoil(

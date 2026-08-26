@@ -10,6 +10,13 @@ pub mod authority_thread;
 mod bee_skills;
 mod body_collision;
 mod bot;
+mod bot_profiles;
+#[cfg(all(
+    feature = "bot-quality",
+    feature = "native",
+    not(target_arch = "wasm32")
+))]
+mod bot_quality;
 mod camera;
 mod canonical_math;
 mod canonical_state;
@@ -125,7 +132,7 @@ enum GameSet {
 }
 
 fn primary_present_mode() -> PresentMode {
-    #[cfg(feature = "perf")]
+    #[cfg(any(feature = "perf", feature = "bot-quality"))]
     {
         if performance::uncapped_present_mode_requested_from_environment() {
             return PresentMode::AutoNoVsync;
@@ -229,6 +236,23 @@ pub fn build_app() -> App {
     #[cfg(feature = "perf")]
     app.add_plugins(performance::PerformancePlugin::default());
 
+    #[cfg(all(
+        feature = "bot-quality",
+        feature = "native",
+        not(target_arch = "wasm32")
+    ))]
+    app.add_plugins(bot_quality::BotQualityPlugin);
+
+    #[cfg(all(
+        feature = "bot-quality",
+        feature = "native",
+        not(target_arch = "wasm32")
+    ))]
+    app.add_systems(
+        Startup,
+        camera::configure_training_ground_capture.before(arena::setup_arena),
+    );
+
     app.insert_resource(ClearColor(Color::srgb(0.006, 0.006, 0.012)))
         .insert_resource(Time::<Fixed>::from_hz(simulation::SIM_HZ))
         .insert_resource(GlobalAmbientLight {
@@ -261,6 +285,8 @@ pub fn build_app() -> App {
         .init_resource::<interpolation::SimPoseSnapRequest>()
         .init_resource::<game_state::GameplayPauseOwners>()
         .init_resource::<arena::SplitCausewayDoorState>()
+        .init_resource::<bot::BotRuntimeStore>()
+        .init_resource::<bot::BotNavigationCache>()
         .init_resource::<combat::HitEffects>()
         .init_resource::<combat::CombatPresentationIntentJournal>()
         .init_resource::<fighter::FighterPresentationIntentJournal>()
@@ -373,8 +399,12 @@ pub fn build_app() -> App {
                 chick_skills::setup_chick_skill_assets,
                 penguin_skills::setup_penguin_skill_assets,
                 combat_sfx::setup_combat_sfx_assets,
-                characters::setup_character_move_catalog,
-                feel::setup_combat_feel_tuning,
+                (
+                    characters::setup_character_move_catalog,
+                    feel::setup_combat_feel_tuning,
+                    bot_profiles::setup_bot_profile_catalog,
+                )
+                    .chain(),
                 #[cfg(all(
                     feature = "dev-hot-reload",
                     not(feature = "shipping"),
@@ -476,6 +506,12 @@ pub fn build_app() -> App {
                     not(target_arch = "wasm32")
                 ))]
                 feel::reload_combat_feel_tuning,
+                #[cfg(all(
+                    feature = "dev-hot-reload",
+                    not(feature = "shipping"),
+                    not(target_arch = "wasm32")
+                ))]
+                bot_profiles::reload_bot_profile_catalog,
                 user_mode::sample_user_mode_steam_input,
                 native_online_app::handle_native_online_ui_input,
                 native_online_app::handle_overlay_unavailable_notice_dismiss,

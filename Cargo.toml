@@ -32,6 +32,7 @@ perf = ["dep:libc"]
 # ordinary graphical timing/RSS captures. The render-free multiplayer profiler
 # explicitly opts into this feature.
 perf-alloc = ["perf"]
+bot-quality = []
 trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
 steam-net = ["native-net", "dep:steamworks"]

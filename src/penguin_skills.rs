@@ -25,7 +25,9 @@ use crate::sim_event::{
 };
 use crate::simulation::{ElapsedTicks, SIM_HZ_U32, SimTick, TickTimer};
 use crate::styles::FighterStyleKind;
-use crate::techniques::{AttackPayloadId, AttackShapeId, PenguinSkillId};
+use crate::techniques::{
+    AttackPayloadId, AttackShapeId, PenguinSkillId, SpawnedSkillPredictionFacts,
+};
 use arrayvec::ArrayVec;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
@@ -61,14 +63,18 @@ const PENGUIN_FISH_TORPEDO_SPEED: f32 = 8.8;
 const PENGUIN_FISH_TORPEDO_TURN_RATE: f32 = 5.0;
 const PENGUIN_FISH_TORPEDO_LIFETIME: f32 = 0.86;
 const PENGUIN_FISH_TORPEDO_RADIUS: f32 = 0.38;
+const PENGUIN_FISH_TORPEDO_SPAWN_FORWARD: f32 = 0.55;
 const PENGUIN_POPSICLE_SPEED: f32 = 6.9;
 const PENGUIN_POPSICLE_LIFT: f32 = 2.35;
 const PENGUIN_POPSICLE_GRAVITY: f32 = 8.8;
 const PENGUIN_POPSICLE_LIFETIME: f32 = 1.12;
 const PENGUIN_POPSICLE_RADIUS: f32 = 0.34;
+const PENGUIN_POPSICLE_SPAWN_FORWARD: f32 = 0.52;
+const PENGUIN_POPSICLE_SPAWN_HEIGHT: f32 = 1.05;
 const PENGUIN_SLED_WAKE_SPEED: f32 = 2.6;
 const PENGUIN_SLED_WAKE_LIFETIME: f32 = 1.18;
 const PENGUIN_SLED_WAKE_RADIUS: f32 = 0.92;
+const PENGUIN_SLED_WAKE_SPAWN_FORWARD: f32 = 0.75;
 const PENGUIN_SLED_WAKE_TICK: f32 = 0.38;
 const PENGUIN_SLED_WAKE_DAMPING: f32 = 0.58;
 const PENGUIN_SNOWFLAKE_SPEED: f32 = 7.2;
@@ -104,6 +110,8 @@ const PENGUIN_ULTIMATE_SNOW_FLAT_LARGE_SCALE: f32 = 0.88;
 const PENGUIN_ULTIMATE_SNOW_FLAT_DETAIL_SCALE: f32 = 0.34;
 const PENGUIN_SNOW_HILL_LIFETIME: f32 = 6.5;
 const PENGUIN_SNOW_HILL_RADIUS: f32 = 1.08;
+const PENGUIN_SNOW_HILL_NEAR_DISTANCE: f32 = 1.15;
+const PENGUIN_SNOW_HILL_FAR_DISTANCE: f32 = 2.05;
 const PENGUIN_SNOW_HILL_LAUNCH: f32 = 4.2;
 const PENGUIN_SNOW_HILL_PUSH: f32 = 3.4;
 const PENGUIN_SNOW_HILL_RIDE_LIFT: f32 = 1.05;
@@ -121,12 +129,17 @@ const PENGUIN_SNOW_SLOPE_RIDE_PUSH: f32 = 4.8;
 const PENGUIN_SNOW_SLOPE_RIDE_SLIDE: f32 = 0.62;
 const PENGUIN_SNOW_SLOPE_RIDE_SPEED_LIMIT: f32 = 0.56;
 const PENGUIN_SNOW_SLOPE_RIDE_EXIT_PROGRESS: f32 = 0.92;
+const PENGUIN_SNOW_SLOPE_RIDE_SPAWN_FORWARD: f32 = 1.72;
 const PENGUIN_SNOWFORT_LIFETIME: f32 = 1.55;
+const PENGUIN_SNOWFORT_SPAWN_FORWARD: f32 = 1.05;
 const PENGUIN_GLACIER_PARADE_LIFETIME: f32 = 15.0;
 const PENGUIN_GLACIER_PARADE_TICK: f32 = 0.34;
 const PENGUIN_SPRING_PAD_LIFETIME: f32 = 1.6;
 const PENGUIN_SPRING_PAD_RADIUS: f32 = 0.64;
 const PENGUIN_SPRING_PAD_LIFT: f32 = 5.6;
+const PENGUIN_SPRING_PAD_SPAWN_FORWARD: f32 = 0.52;
+const PENGUIN_BODY_SLAM_NEAR_DISTANCE: f32 = 0.72;
+const PENGUIN_BODY_SLAM_FAR_DISTANCE: f32 = 1.35;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FixedPenguinCollectionOverflow {
@@ -156,6 +169,157 @@ pub enum PenguinSkillKind {
     SnowBoulder,
     SnowmanDrop,
     BodySlamShockwave,
+}
+
+pub(crate) fn penguin_skill_prediction(
+    skill: PenguinSkillId,
+) -> Option<SpawnedSkillPredictionFacts> {
+    let placed =
+        |range: f32, lifetime_secs: f32, vertical_tolerance: f32| SpawnedSkillPredictionFacts {
+            effective_range: range,
+            lead_distance_offset: range,
+            travel_speed: 0.0,
+            fixed_travel_secs: 0.0,
+            lifetime_secs,
+            vertical_tolerance,
+            facing_cone_dot: None,
+        };
+
+    Some(match skill {
+        PenguinSkillId::FishTorpedo => moving_penguin_skill_prediction(
+            PENGUIN_FISH_TORPEDO_SPAWN_FORWARD,
+            PENGUIN_FISH_TORPEDO_SPEED,
+            PENGUIN_FISH_TORPEDO_LIFETIME,
+            PENGUIN_FISH_TORPEDO_RADIUS,
+            Some(PENGUIN_SKILL_LOCK_RANGE),
+        ),
+        PenguinSkillId::PopsicleBounce => {
+            let flight_secs = ballistic_ground_time(
+                PENGUIN_POPSICLE_SPAWN_HEIGHT,
+                PENGUIN_POPSICLE_LIFT,
+                PENGUIN_POPSICLE_GRAVITY,
+            )
+            .min(PENGUIN_POPSICLE_LIFETIME);
+            moving_penguin_skill_prediction(
+                PENGUIN_POPSICLE_SPAWN_FORWARD,
+                PENGUIN_POPSICLE_SPEED,
+                flight_secs,
+                PENGUIN_POPSICLE_RADIUS,
+                Some(PENGUIN_SKILL_LOCK_RANGE),
+            )
+        }
+        PenguinSkillId::SledWake => {
+            let mut prediction = moving_penguin_skill_prediction(
+                PENGUIN_SLED_WAKE_SPAWN_FORWARD,
+                PENGUIN_SLED_WAKE_SPEED,
+                PENGUIN_SLED_WAKE_LIFETIME,
+                PENGUIN_SLED_WAKE_RADIUS,
+                None,
+            );
+            prediction.vertical_tolerance = f32::INFINITY;
+            prediction
+        }
+        PenguinSkillId::IceTrail => placed(
+            PENGUIN_ICE_TRAIL_RADIUS + FIGHTER_RADIUS,
+            PENGUIN_ICE_TRAIL_LIFETIME,
+            FIGHTER_HEIGHT,
+        ),
+        PenguinSkillId::UltimateIceField => {
+            let half_grid = (PENGUIN_ULTIMATE_ICE_FIELD_GRID_SIDE - 1) as f32
+                * PENGUIN_ULTIMATE_ICE_FIELD_TILE_SPACING
+                * 0.5;
+            placed(
+                half_grid + PENGUIN_ULTIMATE_ICE_FIELD_TILE_RADIUS + FIGHTER_RADIUS,
+                PENGUIN_ULTIMATE_ICE_FIELD_LIFETIME,
+                FIGHTER_HEIGHT,
+            )
+        }
+        PenguinSkillId::SnowmanDrop => {
+            let contact_range =
+                PENGUIN_SNOWMAN_DROP_FORWARD + PENGUIN_SNOWMAN_DROP_RADIUS + FIGHTER_RADIUS;
+            let fall_secs = ((PENGUIN_SNOWMAN_DROP_INITIAL_FALL_SPEED
+                * PENGUIN_SNOWMAN_DROP_INITIAL_FALL_SPEED
+                + 2.0 * PENGUIN_SNOWMAN_DROP_GRAVITY * PENGUIN_SNOWMAN_DROP_HEIGHT)
+                .sqrt()
+                - PENGUIN_SNOWMAN_DROP_INITIAL_FALL_SPEED)
+                / PENGUIN_SNOWMAN_DROP_GRAVITY;
+            let mut prediction = placed(
+                contact_range,
+                PENGUIN_SNOWMAN_DROP_LIFETIME,
+                PENGUIN_SNOWMAN_DROP_RADIUS + FIGHTER_RADIUS,
+            );
+            prediction.fixed_travel_secs = fall_secs;
+            prediction
+        }
+        PenguinSkillId::SnowHillRamp => placed(
+            PENGUIN_SNOW_HILL_FAR_DISTANCE + PENGUIN_SNOW_HILL_RADIUS + FIGHTER_RADIUS,
+            PENGUIN_SNOW_HILL_LIFETIME,
+            FIGHTER_HEIGHT,
+        ),
+        PenguinSkillId::SnowSlopeRide => placed(
+            PENGUIN_SNOW_SLOPE_RIDE_SPAWN_FORWARD
+                + PENGUIN_SNOW_SLOPE_RIDE_HALF_LENGTH
+                + FIGHTER_RADIUS,
+            PENGUIN_SNOW_SLOPE_RIDE_LIFETIME,
+            PENGUIN_SNOW_SLOPE_RIDE_HEIGHT + FIGHTER_HEIGHT,
+        ),
+        PenguinSkillId::SnowfortCannon => moving_penguin_skill_prediction(
+            PENGUIN_SNOWFORT_SPAWN_FORWARD,
+            PENGUIN_BOULDER_SPEED,
+            PENGUIN_BOULDER_LIFETIME,
+            PENGUIN_BOULDER_RADIUS,
+            None,
+        ),
+        PenguinSkillId::SpringPeck => placed(
+            PENGUIN_SPRING_PAD_SPAWN_FORWARD + PENGUIN_SPRING_PAD_RADIUS + FIGHTER_RADIUS,
+            PENGUIN_SPRING_PAD_LIFETIME,
+            FIGHTER_HEIGHT,
+        ),
+        PenguinSkillId::BodySlam => placed(
+            PENGUIN_BODY_SLAM_FAR_DISTANCE + PENGUIN_BODY_SLAM_RADIUS + FIGHTER_RADIUS,
+            PENGUIN_BODY_SLAM_LIFETIME,
+            PENGUIN_BODY_SLAM_RADIUS + FIGHTER_RADIUS,
+        ),
+        PenguinSkillId::SnowflakeShot => moving_penguin_skill_prediction(
+            PENGUIN_SNOWFLAKE_SHOT_FORWARD,
+            PENGUIN_SNOWFLAKE_SPEED,
+            PENGUIN_SNOWFLAKE_LIFETIME,
+            PENGUIN_SNOWFLAKE_RADIUS,
+            None,
+        ),
+        PenguinSkillId::SnowflakeBurst => moving_penguin_skill_prediction(
+            0.0,
+            PENGUIN_SNOWFLAKE_SPEED,
+            PENGUIN_SNOWFLAKE_LIFETIME,
+            PENGUIN_SNOWFLAKE_RADIUS,
+            None,
+        ),
+        PenguinSkillId::SnowflakeSwapShot | PenguinSkillId::GlacierParade => return None,
+    })
+}
+
+fn moving_penguin_skill_prediction(
+    spawn_forward: f32,
+    speed: f32,
+    lifetime_secs: f32,
+    radius: f32,
+    lock_range: Option<f32>,
+) -> SpawnedSkillPredictionFacts {
+    let lead_distance_offset = spawn_forward + radius + FIGHTER_RADIUS;
+    let travel_range = lead_distance_offset + speed * lifetime_secs;
+    SpawnedSkillPredictionFacts {
+        effective_range: lock_range.map_or(travel_range, |range| travel_range.min(range)),
+        lead_distance_offset,
+        travel_speed: speed,
+        fixed_travel_secs: 0.0,
+        lifetime_secs,
+        vertical_tolerance: radius + FIGHTER_RADIUS,
+        facing_cone_dot: lock_range.map(|_| PENGUIN_SKILL_LOCK_CONE_DOT),
+    }
+}
+
+fn ballistic_ground_time(height: f32, lift: f32, gravity: f32) -> f32 {
+    (lift + (lift * lift + 2.0 * gravity * height).sqrt()) / gravity
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -983,7 +1147,10 @@ pub(crate) fn spawn_penguin_skill_with_presentation(
             );
         }
         PenguinSkillId::PopsicleBounce => {
-            let spawn = origin + (Vec3::Y * 1.05 + facing * 0.52) * size_scale;
+            let spawn = origin
+                + (Vec3::Y * PENGUIN_POPSICLE_SPAWN_HEIGHT
+                    + facing * PENGUIN_POPSICLE_SPAWN_FORWARD)
+                    * size_scale;
             let direction = target
                 .and_then(|entity| target_position(entity, targets))
                 .map(|position| flat_direction(spawn, position))
@@ -1002,7 +1169,11 @@ pub(crate) fn spawn_penguin_skill_with_presentation(
             );
         }
         PenguinSkillId::SledWake => {
-            let spawn = grounded_position(arena, origin + facing * 0.75, 0.05);
+            let spawn = grounded_position(
+                arena,
+                origin + facing * PENGUIN_SLED_WAKE_SPAWN_FORWARD,
+                0.05,
+            );
             spawn_sled_wake(
                 commands,
                 identities,

@@ -2,7 +2,7 @@
 
 The repository contains one frozen, production-headless simulation tape at
 `headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result`.
-It boots a version-8 match manifest, commits bounded AFC `InputFrame` values for
+It boots a version-9 match manifest, commits bounded AFC `InputFrame` values for
 both occupied seats, runs the real canonical fixed schedule, and ends through
 the normal stock/result rules. It does not use the small input-harness probe.
 
@@ -10,15 +10,15 @@ The checked-in contract is:
 
 | Tick | Canonical hash |
 | ---: | ---: |
-| 1 | `c34d87990574f22c` |
-| 120 | `07ff272aa475c583` |
-| 240 | `6459463f461de504` |
-| 360 | `b2d426cacd2c037b` |
-| 480 | `b857fefdc4f4f8fb` |
-| 600 | `76d9d6cc9fba01cc` |
-| 720 | `f6df17830595a2ef` |
-| 840 | `8618ce26da8ad483` |
-| 934 (final) | `66be5d24c82da680` |
+| 1 | `c70eeb0a16151318` |
+| 120 | `bbe0a608d0e8c527` |
+| 240 | `587065ba1f154868` |
+| 360 | `9b305e71cb01efef` |
+| 480 | `16a65f95d916635f` |
+| 600 | `debad3d6e4305410` |
+| 720 | `e1d136264d73e633` |
+| 840 | `6a10ddddd904eedf` |
+| 934 (final) | `2ead7d00af44aaf4` |
 
 The final canonical result is team 1 winning at tick 934. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
@@ -46,17 +46,17 @@ debug/release build metadata cannot enter the frozen hashes.
 
 | Arena | Retired-special/hazard final hash | Item final hash |
 | --- | ---: | ---: |
-| Crown Ring | `d311e16ba6d92ddc` | `2be39391e221c563` |
-| Split Causeway | `f069d584ab332e9b` | `fe6695a5f7bfa795` |
-| Sunstone Steps | `0e1418e7669d292b` | `357cbfecceca70ea` |
-| Crank Yard | `95acf0d54b401bcd` | `e8de48220265f7ac` |
-| Vent Spiral | `77e6ad71b3dc25e6` | `efad7ba79a92b39b` |
-| Bumper Alley | `a3aff842fea3eaea` | `ec16583cf28317f3` |
-| Feast Market | `7440ed2893e311e6` | `9f6627ac2ce513cc` |
-| Snare Garden | `f247692f15cbdfd3` | `f1123ac952c4d83a` |
-| Sky Steps | `ba47c189d29b2f54` | `ab6e814782757bf2` |
-| Powder Keg Court | `d356b5399cd82645` | `af71cfe717153451` |
-| Training Ground | `979d8110ed11d7bd` | `1664e9d65a4ce6f9` (item-free branch) |
+| Crown Ring | `0b7d4baf42b0cf80` | `da35ffd16ba1c577` |
+| Split Causeway | `e03103d89065f663` | `b2ef39aa0d16b002` |
+| Sunstone Steps | `ce46455ec87754fb` | `2fdcd071124c117a` |
+| Crank Yard | `a2da26ca5f22e66d` | `1e398318892db1d4` |
+| Vent Spiral | `8fa8089211d57042` | `00927efd229acc90` |
+| Bumper Alley | `6610d63b80b29482` | `b39a9da416ef5960` |
+| Feast Market | `d85b8d616f4f5ca2` | `783bb79c6fb0c708` |
+| Snare Garden | `6fab9367bfbbc91b` | `60876c45b723f33a` |
+| Sky Steps | `5117853fe6392264` | `9131d7cfe1e3aec2` |
+| Powder Keg Court | `6704854695fa33ad` | `6a17dd584601c561` |
+| Training Ground | `338c11bcfae06b25` | `686f4f47c9ae9ce5` (item-free branch) |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -126,6 +126,19 @@ schema 4 serializes the two target bits and two progress bytes in a bounded
 Debug and fat-LTO release generated a byte-identical 20-file corpus with BF001
 tick-1 hash `3eae3ee94c4516d7`; the compiled content digest is
 `11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03`.
+
+Simulation v9 integrates the shared tactical bot planner and makes its latest
+accepted fighter-contact context rollback-owned. Snapshot schema 5 appends the
+optional contact action and technique plus guarded state for each stable fighter;
+the simulation discriminator and conservative bot source/profile digest are also
+canonical hash inputs. The 20 production-builder tapes preserved every
+normalized checkpoint, stable-ID relationship, ordered event, final tick, and
+result while receiving identity-derived hashes; debug and fat-LTO release match
+the checked-in corpus, whose BF001 now begins at
+`0ff0f4a42dcc0fa3`. The current compiled gameplay-content digest is
+`d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`.
+The stock tape and eleven-arena matrix above freeze the corresponding synthetic
+v9 compatibility identity independently of the production content digest.
 
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The

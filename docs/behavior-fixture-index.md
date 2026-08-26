@@ -18,7 +18,7 @@ stock result. Its Linux/Windows/macOS gate and frozen literals are documented in
 also cover the central contact and batched life-loss permutations named later in
 this document.
 
-The simulation-v8 fixture tranche is checked in under
+The simulation-v9 fixture tranche is checked in under
 `tests/fixtures/behavior/v1` and runs through the crate-internal production
 headless harness in `tests/support/behavior_fixtures.rs`:
 
@@ -119,6 +119,19 @@ and results remain preserved. Debug and fat-LTO release produced byte-identical
 fixture files with BF001 tick-1 hash `3eae3ee94c4516d7`; the current
 gameplay-content digest is
 `11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03`.
+
+The simulation-v9 bot-intelligence integration retains the same 20 tapes while
+raising the snapshot boundary to schema 5. `FighterContactState` is now required
+rollback state because tactical hit/guard/whiff branches can change later bot
+inputs. All normalized checkpoints, stable-ID relationships, canonical event
+sequences, final ticks, and final results remained byte-for-byte equal after
+removing only the per-tick hash fields, and fat-LTO release reproduces the same
+checked-in corpus. BF001 tick 1 is now
+`0ff0f4a42dcc0fa3`, and the current gameplay-content digest is
+`d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`.
+Authority/local bot seed repeatability remains covered by the named production
+headless test, while the versioned tapes continue to freeze the human-input
+gameplay contract independently of planner-private memory.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from

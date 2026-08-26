@@ -483,6 +483,12 @@ pub(crate) fn vec2_distance_squared(a: Vec2, b: Vec2) -> f32 {
     vec2_length_squared(Vec2::new(a.x - b.x, a.y - b.y))
 }
 
+/// Fixed scalar operation order for canonical two-dimensional dot products.
+#[inline(always)]
+pub(crate) fn vec2_dot(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.x + a.y * b.y
+}
+
 #[inline(always)]
 pub(crate) fn vec3_distance_squared(a: Vec3, b: Vec3) -> f32 {
     vec3_length_squared(Vec3::new(a.x - b.x, a.y - b.y, a.z - b.z))

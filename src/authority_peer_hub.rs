@@ -2044,6 +2044,70 @@ where
             return Ok(true);
         }
 
+        // Resync and Control are independent reliable channels. A replacement
+        // client can apply the reconnect snapshot and resume its input loop
+        // while the authority is still processing the final clock probes. A
+        // repair can likewise begin while a pre-epoch redundant input window is
+        // already in flight. Those windows will be sent again after admission,
+        // so authenticate and discard them without opening the new input epoch
+        // or assigning security score. Malformed, cross-match, spoofed, and
+        // unowned batches remain violations.
+        let (phase, resume_input_tick) = {
+            let link = self.peers[index].as_ref().expect("live peer index");
+            (link.phase, link.resume_input_tick)
+        };
+        let crosses_reconnect_clock = phase == AuthorityPeerPhase::ReconnectAwaitingClock;
+        let precedes_input_epoch = phase.accepts_live_input()
+            && resume_input_tick.is_some_and(|resume| {
+                batch
+                    .as_slice()
+                    .iter()
+                    .any(|window| window.newest().is_some_and(|frame| frame.tick < resume))
+            });
+        if crosses_reconnect_clock || precedes_input_epoch {
+            let validation = batch
+                .validate_structure()
+                .and_then(|()| {
+                    if batch.match_id == self.manifest.match_id {
+                        Ok(())
+                    } else {
+                        Err(ProtocolValidationError::MatchMismatch)
+                    }
+                })
+                .and_then(|()| {
+                    if batch.peer_id == peer_id {
+                        Ok(())
+                    } else {
+                        Err(ProtocolValidationError::PeerMismatch)
+                    }
+                })
+                .and_then(|()| {
+                    for window in batch.as_slice() {
+                        let seat = window
+                            .newest()
+                            .ok_or(ProtocolValidationError::EmptyInputWindow)?
+                            .seat;
+                        self.manifest.ownership.validate_peer_input(peer_id, seat)?;
+                    }
+                    Ok(())
+                });
+            self.metrics.input_batches_rejected =
+                self.metrics.input_batches_rejected.saturating_add(1);
+            self.observability.counters_mut().inputs_rejected = self
+                .observability
+                .counters()
+                .inputs_rejected
+                .saturating_add(1);
+            if let Err(error) = validation {
+                if error == ProtocolValidationError::PeerMismatch {
+                    self.metrics.spoofed_messages = self.metrics.spoofed_messages.saturating_add(1);
+                }
+                self.observe_peer_violation(index, input_protocol_violation(error), true)?;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
         let accepts = {
             let link = self.peers[index].as_ref().expect("live peer index");
             link.phase.accepts_live_input()
@@ -4576,6 +4640,18 @@ mod tests {
             report.committed_inputs.by_seat[0].unwrap().origin,
             AuthorityInputOrigin::Peer(owner) if owner == peer(0)
         ));
+
+        hub.peers[0].as_mut().unwrap().resume_input_tick = Some(SimTick(3));
+        let rejected_before = hub.metrics().input_batches_rejected;
+        assert!(hub.handle_input(0, batch(2, 0, 0)).unwrap());
+        assert_eq!(hub.metrics().input_batches_rejected, rejected_before + 1);
+        assert_eq!(hub.metrics().security_violations, 0);
+        assert_eq!(hub.metrics().security_kicks, 0);
+        assert!(hub.connection_for_peer(peer(0)).is_some());
+        assert!(
+            !hub.authority()
+                .has_buffered_input(SeatId::new(0).unwrap(), SimTick(2))
+        );
     }
 
     #[test]
@@ -4946,6 +5022,21 @@ mod tests {
         assert_eq!(
             hub.peer_phase(peer(0)),
             Some(AuthorityPeerPhase::ReconnectAwaitingClock)
+        );
+        let rejected_before = hub.metrics().input_batches_rejected;
+        let authority_tick = hub.authority().simulation().current_tick();
+        assert!(hub.handle_input(0, batch(2, 0, 0)).unwrap());
+        assert_eq!(hub.metrics().input_batches_rejected, rejected_before + 1);
+        assert_eq!(hub.metrics().security_violations, 0);
+        assert_eq!(hub.metrics().security_kicks, 0);
+        assert_eq!(
+            hub.peer_phase(peer(0)),
+            Some(AuthorityPeerPhase::ReconnectAwaitingClock)
+        );
+        assert_eq!(hub.authority().simulation().current_tick(), authority_tick);
+        assert!(
+            !hub.authority()
+                .has_buffered_input(SeatId::new(0).unwrap(), SimTick(2))
         );
         // The three probes arrived before ResyncApplied and were held. Their
         // replies are released only now, proving acknowledgement causality.

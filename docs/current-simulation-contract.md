@@ -1,6 +1,6 @@
 # Current Simulation Contract
 
-- Status: Implemented simulation-v8 contract with historical WP0 provenance
+- Status: Implemented simulation-v9 contract with historical WP0 provenance
 - Historical audited source: `d33ceff65065e18d0928820892bb24bfb5c845ae`
 - Current audit date: 2026-08-26
 - Scope: current deterministic combat contract plus the preserved pre-WP1 inventory
@@ -8,7 +8,7 @@
 
 This document originally froze local behavior before the fixed-tick,
 stable-identity, snapshot, and rollback migration. It now records the implemented
-simulation-v8 contract while retaining the original execution inventory as
+simulation-v9 contract while retaining the original execution inventory as
 migration provenance. Sections explicitly labelled **historical WP0** describe
 the old source above and are not claims about the current runtime.
 
@@ -43,11 +43,51 @@ version bump or authorize a different semantic result.
 
 Inside a section labelled historical WP0, **current** and **legacy** mean the
 audited pre-cutover commit above. Elsewhere, **current** means simulation version
-8 in this repository. **Target** refers to the multiplayer specification.
+9 in this repository. **Target** refers to the multiplayer specification.
+
+## Simulation v9 tactical-bot and contact-state addendum
+
+The current online compatibility boundary is simulation version 9. Protocol
+version 1 and replay schema 1 remain unchanged. Snapshot schema 5 extends each
+fighter's fixed rollback payload by six bytes: the optional action and technique
+of the latest accepted contact plus its guarded flag. A guarded or
+technique-bearing contact without an action is rejected during snapshot
+validation. The live snapshot bridge requires, captures, restores, and tests
+`FighterContactState`; a full-capacity snapshot is now 92,053 bytes.
+
+This state is canonical because the Standard bot's conditional tactical plans
+branch on authoritative hit, guard, and whiff outcomes. Omitting it allowed a
+restore to choose a different future bot input even when the restored snapshot
+hash otherwise matched. The bot planner itself remains authority-private: it
+reads a stable-ID-sorted snapshot, immutable embedded profiles and authored move
+data, the replay seed, `FighterId`, and an integer 20 Hz decision tick, then
+commits ordinary `InputFrame` values through the existing authority input tape.
+It does not enter a browser client's rollback world or emit a second event
+vocabulary.
+
+The planner uses bounded fixed arrays, canonical software vector math, stable
+tie-breaking, and no wall-clock or ECS-entity identity. Authority bot generation
+and local bots share the same planner. Split Causeway routing reads the selected
+match's rollback-owned gate state, while dynamic items and specials are ordered
+by `SimEntityId`. The production profiler requires planner p95 below 100,000 ns
+and still enforces zero allocations around every measured authority step.
+
+All 20 checked-in behavior tapes retain identical normalized checkpoints,
+stable-ID relationships, canonical event sequences, final ticks, and final
+results; debug and fat-LTO release reproduce the same checked-in corpus. Their
+hashes change at tick 1 for the simulation/schema/content
+identity. BF001 now begins at `0ff0f4a42dcc0fa3`. The current compiled gameplay
+content digest is
+`d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`.
+The production stock tape still ends with team 1 at tick 934, and the complete
+v9 literals are frozen in
+[cross-platform-determinism.md](cross-platform-determinism.md). This accepted
+compatibility change is approved by the browser-multiplayer integration scope;
+v8 peers and replays are rejected before gameplay.
 
 ## Simulation v8 arena-flow addendum
 
-The current online compatibility boundary is simulation version 8. Protocol
+At this historical compatibility boundary, simulation version 8, protocol
 version 1 and replay schema 1 are unchanged. Snapshot schema 4 expands the
 fixed-width arena payload to 80 bytes and owns Split Causeway's two logical gate
 targets and integer progress values; v7 clients, snapshots, and replays are
@@ -1066,7 +1106,7 @@ do not imply that the fixed-tick runtime still uses the historical architecture.
 
 - [x] Every Include group round-trips through canonical serialization.
 - [x] Every Exclude group can be changed or removed without changing a tick hash.
-- [x] Every one of the 19 checked-in behavior tapes restores at its declared
+- [x] Every one of the 20 checked-in behavior tapes restores at its declared
   `restore_tick` and replays to the same remaining per-tick hashes and final
   result.
 - [ ] Restore at each high-risk fixture checkpoint and replay to the same per-tick
@@ -1112,3 +1152,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-08-26 | 7 (unchanged) | All 18 behavior tapes; menu backgrounds and five-character portrait-grid selector | **Preservation evidence:** character selection now uses supplied 2D portrait assets, deterministic menu-navigation state, and frame-driven UI markers instead of a presentation-world 3D preview scene. The online UI systems and gameplay-scene guards remain composed in the presentation schedule. The production-headless semantic fixture gate is unchanged, as are the gameplay-content digest (`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`) and BF001 tick-1 hash (`cf49d1dde67d32a9`). No fixed-tick rule, stable ID, canonical event, protocol/replay/snapshot schema, or simulation version changes. |
 | 2026-08-26 | 7 (unchanged) | BF030 `training_ground_perimeter`; all 18 prior behavior tapes; eleven-arena compact content matrix | **ContentIdentityOnly/additive content:** Training Ground adds arena index 10 and a presentation-authored court while authoritative collision uses four exact-bit static barriers selected through per-world `ActiveArena`. BF030 freezes east-wall contact at Q12 `(34488, 1843, 0)`, zero velocity, grounded/no-stock-loss state, no events, and tick-60 restore replay. The preceding 18 tapes retain identical normalized checkpoints, stable-ID relationships, ordered events, final ticks, and results before their identity-only refresh. The gameplay-content digest changes from `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6` to `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`; debug and fat-LTO release agree on all 19 files and BF001 tick-1 hash `b6e166cd6feadfa6`. Protocol 1, simulation 7, replay 1, and snapshot schema 3 remain unchanged. Approved by the browser-multiplayer integration scope. |
 | 2026-08-26 | 8 | BF021 `last_stock_match_completion`, BF031 `split_causeway_gate_toggle`, all prior tapes, production stock tape, eleven-arena compact matrix, v7/v8 compatibility and snapshot-schema-4 round trips | **AcceptedChange:** Champion's Court adopts its final 35-barrier topology and front-apron ring-out route; BF021 preserves team 1 as winner while its deciding tick changes from 709 to 934. Split Causeway adds two fixed-tick gates whose target/progress state is rollback-owned, whose interaction winner is selected by `FighterId`, and whose toggle is the canonical `ArenaDeviceToggled` event keyed by stable arena/device indices. BF031 freezes the 18-tick motion and tick-10 restore. BF024/BF025/BF028 move only their synthetic setups clear of the final topology and retain their named semantics; all other normalized semantic observations remain preserved. Snapshot schema 4 expands the bounded arena payload to 80 bytes; protocol 1 and replay schema 1 remain unchanged. Debug and fat-LTO release produced byte-identical 20-file corpora with digest `11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03` and BF001 tick-1 hash `3eae3ee94c4516d7`. Approved by the browser-multiplayer integration scope. |
+| 2026-08-26 | 9 | All 20 behavior tapes, production stock tape, eleven-arena compact matrix, authority bot seed tape, v8/v9 compatibility and snapshot-schema-5 round trips | **AcceptedChange:** Standard and Tutorial bots now share the bounded fixed-tick utility/navigation/tactical planner in local and authority compositions. Decisions use immutable embedded profiles, replay seed, integer decision ticks, canonical math, `FighterId`, and `SimEntityId`; authority commits only ordinary predicted-protocol input frames. The latest accepted action/technique/guarded contact becomes required rollback state because it controls later tactical branches, adding six fixed bytes per fighter and raising the full-pool snapshot to 92,053 bytes. All 20 existing tapes preserve identical normalized checkpoints, stable-ID relationships, canonical events, final ticks, and results; debug and fat-LTO release reproduce their v9 hashes, beginning with BF001 `0ff0f4a42dcc0fa3`. The gameplay-content digest is `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`; protocol 1 and replay schema 1 remain unchanged. Approved by the browser-multiplayer integration scope. |

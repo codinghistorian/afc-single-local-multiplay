@@ -832,8 +832,9 @@ mod tests {
     use crate::combat_sfx::CombatSfxKind;
     use crate::components::{
         BotBehaviorMode, BotBrain, BotMovementPlan, DrunkStatus, FighterAction, FighterActionState,
-        FighterAimState, FighterGrabState, FighterInventory, FighterMotor, FighterSpecialState,
-        FighterStats, FighterUltimateState, LocalInputAssignment, ParticipantKind, SimPosition,
+        FighterAimState, FighterContactState, FighterGrabState, FighterInventory, FighterMotor,
+        FighterSpecialState, FighterStats, FighterUltimateState, LocalInputAssignment,
+        ParticipantKind, SimPosition,
     };
     use crate::determinism::{SimEntityId, SimEntityKind};
     use crate::ecs_identity::{SIM_ENTITY_POOL_CAPACITIES, SimulationIdentityAllocator};
@@ -1025,33 +1026,35 @@ mod tests {
         crate::arena::bootstrap_canonical_arena_runtime(app.world_mut(), active_arena.index());
 
         for index in order {
-            app.world_mut().spawn((
-                Fighter {
-                    id: index,
-                    name: NAMES[index],
-                    color: Color::WHITE,
-                    spawn: Vec3::new(index as f32, 0.0, 0.0),
-                },
-                SimPosition::new(Vec3::new(index as f32, 0.0, 0.0)),
-                FighterInput::default(),
-                FighterStats::default(),
-                FighterMotor::default(),
-                FighterActionState::default(),
-                FighterAimState::default(),
-                DrunkStatus::default(),
-                FighterInventory::default(),
-                FighterGrabState::default(),
-                FighterUltimateState::default(),
-                FighterSpecialState::default(),
-                FighterCharacter::new(CharacterKind::Cat),
-                FighterStyle {
-                    kind: FighterStyleKind::Anchor,
-                },
-                FighterEquipment {
-                    kind: EquipmentKind::DashCoil,
-                    cooldown: crate::simulation::TickTimer::ZERO,
-                },
-            ));
+            app.world_mut()
+                .spawn((
+                    Fighter {
+                        id: index,
+                        name: NAMES[index],
+                        color: Color::WHITE,
+                        spawn: Vec3::new(index as f32, 0.0, 0.0),
+                    },
+                    SimPosition::new(Vec3::new(index as f32, 0.0, 0.0)),
+                    FighterInput::default(),
+                    FighterStats::default(),
+                    FighterMotor::default(),
+                    FighterActionState::default(),
+                    FighterAimState::default(),
+                    DrunkStatus::default(),
+                    FighterInventory::default(),
+                    FighterGrabState::default(),
+                    FighterUltimateState::default(),
+                    FighterSpecialState::default(),
+                    FighterCharacter::new(CharacterKind::Cat),
+                    FighterStyle {
+                        kind: FighterStyleKind::Anchor,
+                    },
+                    FighterEquipment {
+                        kind: EquipmentKind::DashCoil,
+                        cooldown: crate::simulation::TickTimer::ZERO,
+                    },
+                ))
+                .insert(FighterContactState::default());
         }
         app
     }

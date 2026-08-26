@@ -13,6 +13,7 @@ use crate::authority_input::{
     AuthorityInputConfig, AuthorityInputOrigin, AuthorityInputRecord, AuthorityInputStatus,
     CommittedTickInputs,
 };
+use crate::bot::BotRuntimeStore;
 use crate::dedicated_server::DedicatedLaunchOptions;
 use crate::game_state::{DEFAULT_REPLAY_SEED, MatchState};
 use crate::headless::{HeadlessMatchConfig, build_headless_simulation, build_predicted_simulation};
@@ -27,6 +28,7 @@ use crate::rollback::{
 
 pub const AUTHORITY_P99_BUDGET_NS: u64 = 1_000_000;
 pub const ROLLBACK_P99_BUDGET_NS: u64 = 4_000_000;
+pub const BOT_PLANNER_P95_BUDGET_NS: u64 = 100_000;
 pub const PROFILE_ROLLBACK_DEPTH_TICKS: u64 = 12;
 
 const DEFAULT_AUTHORITY_WARMUP_TICKS: u32 = 256;
@@ -304,10 +306,12 @@ pub struct AllocationMeasurement {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuthorityProfileResult {
     pub timing: TimingDistribution,
+    pub bot_planner_timing: TimingDistribution,
     pub allocations: AllocationMeasurement,
     pub snapshot_history_high_water: usize,
     pub snapshot_history_capacity: usize,
     pub timing_pass: bool,
+    pub bot_planner_timing_pass: bool,
     pub steady_state_allocation_pass: bool,
     pub history_pass: bool,
     pub pass: bool,
@@ -363,12 +367,17 @@ impl MultiplayerProfileResult {
                 "\"authority_warmup_ticks\":{authority_warmup_ticks},",
                 "\"rollback_warmup_bursts\":{rollback_warmup_bursts},",
                 "\"budgets\":{{\"authority_p99_ns\":{authority_budget},",
+                "\"bot_planner_p95_ns\":{bot_planner_budget},",
                 "\"rollback_p99_ns\":{rollback_budget},",
                 "\"steady_state_allocations\":0,",
                 "\"rollback_depth_ticks\":{rollback_depth}}},",
                 "\"authority\":{{\"samples\":{authority_samples},",
                 "\"p50_ns\":{authority_p50},\"p95_ns\":{authority_p95},",
                 "\"p99_ns\":{authority_p99},\"max_ns\":{authority_max},",
+                "\"bot_planner\":{{\"samples\":{bot_planner_samples},",
+                "\"p50_ns\":{bot_planner_p50},\"p95_ns\":{bot_planner_p95},",
+                "\"p99_ns\":{bot_planner_p99},\"max_ns\":{bot_planner_max},",
+                "\"timing_pass\":{bot_planner_timing_pass}}},",
                 "\"allocation_count\":{authority_allocations},",
                 "\"allocated_bytes\":{authority_allocated_bytes},",
                 "\"snapshot_history_high_water\":{authority_history_high_water},",
@@ -405,6 +414,7 @@ impl MultiplayerProfileResult {
             authority_warmup_ticks = self.authority_warmup_ticks,
             rollback_warmup_bursts = self.rollback_warmup_bursts,
             authority_budget = AUTHORITY_P99_BUDGET_NS,
+            bot_planner_budget = BOT_PLANNER_P95_BUDGET_NS,
             rollback_budget = ROLLBACK_P99_BUDGET_NS,
             rollback_depth = PROFILE_ROLLBACK_DEPTH_TICKS,
             authority_samples = self.authority.timing.samples,
@@ -412,6 +422,12 @@ impl MultiplayerProfileResult {
             authority_p95 = self.authority.timing.p95_ns,
             authority_p99 = self.authority.timing.p99_ns,
             authority_max = self.authority.timing.maximum_ns,
+            bot_planner_samples = self.authority.bot_planner_timing.samples,
+            bot_planner_p50 = self.authority.bot_planner_timing.p50_ns,
+            bot_planner_p95 = self.authority.bot_planner_timing.p95_ns,
+            bot_planner_p99 = self.authority.bot_planner_timing.p99_ns,
+            bot_planner_max = self.authority.bot_planner_timing.maximum_ns,
+            bot_planner_timing_pass = self.authority.bot_planner_timing_pass,
             authority_allocations = self.authority.allocations.allocation_count,
             authority_allocated_bytes = self.authority.allocations.allocated_bytes,
             authority_history_high_water = self.authority.snapshot_history_high_water,
@@ -891,6 +907,11 @@ fn profile_authority(
             .map_err(|error| runtime_error(format!("authority warmup: {error:?}")))?;
         ensure_match_continues(report.final_result_id, "authority warmup")?;
     }
+    authority
+        .simulation_mut()
+        .world_mut()
+        .resource_mut::<BotRuntimeStore>()
+        .clear_planner_timings();
 
     let mut timings = Vec::with_capacity(config.samples);
     let mut allocations = AllocationMeasurement::default();
@@ -915,20 +936,33 @@ fn profile_authority(
     }
 
     let timing = TimingDistribution::from_samples(&mut timings);
+    let mut bot_planner_timings = authority
+        .simulation()
+        .world()
+        .resource::<BotRuntimeStore>()
+        .planner_timing_ns();
+    let bot_planner_timing = TimingDistribution::from_samples(&mut bot_planner_timings);
     let metrics = authority.metrics();
     let snapshot_history_high_water = usize::from(metrics.snapshot_history_high_water);
     let timing_pass = timing.p99_ns < AUTHORITY_P99_BUDGET_NS;
+    let bot_planner_timing_pass =
+        bot_planner_timing.samples > 0 && bot_planner_timing.p95_ns < BOT_PLANNER_P95_BUDGET_NS;
     let steady_state_allocation_pass = allocations.allocation_count == 0;
     let history_pass = snapshot_history_high_water <= AUTHORITY_SNAPSHOT_HISTORY_TICKS;
     Ok(AuthorityProfileResult {
         timing,
+        bot_planner_timing,
         allocations,
         snapshot_history_high_water,
         snapshot_history_capacity: AUTHORITY_SNAPSHOT_HISTORY_TICKS,
         timing_pass,
+        bot_planner_timing_pass,
         steady_state_allocation_pass,
         history_pass,
-        pass: timing_pass && steady_state_allocation_pass && history_pass,
+        pass: timing_pass
+            && bot_planner_timing_pass
+            && steady_state_allocation_pass
+            && history_pass,
     })
 }
 
@@ -1254,7 +1288,15 @@ mod tests {
                     p99_ns: 30,
                     maximum_ns: 40,
                 },
+                bot_planner_timing: TimingDistribution {
+                    samples: 25,
+                    p50_ns: 11,
+                    p95_ns: 21,
+                    p99_ns: 31,
+                    maximum_ns: 41,
+                },
                 timing_pass: true,
+                bot_planner_timing_pass: true,
                 steady_state_allocation_pass: true,
                 history_pass: true,
                 pass: true,
@@ -1283,6 +1325,10 @@ mod tests {
         assert!(record.starts_with("AFC_MULTIPLAYER_PERF_RESULT {"));
         assert!(record.contains("\"hardware\":\"CPU \\\"A\\\"\\nmacOS\""));
         assert!(record.contains("\"run_id\":\"run\\\\1\""));
+        assert!(record.contains("\"bot_planner_p95_ns\":100000"));
+        assert!(record.contains(
+            "\"bot_planner\":{\"samples\":25,\"p50_ns\":11,\"p95_ns\":21,\"p99_ns\":31,\"max_ns\":41,\"timing_pass\":true}"
+        ));
         assert!(record.contains("\"steady_state_allocation_pass\":true"));
         assert!(record.ends_with("\"acceptance_pass\":true}"));
     }

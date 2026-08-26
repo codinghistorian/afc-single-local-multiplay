@@ -298,6 +298,14 @@ impl SplitCausewayDoorState {
         self.doors[door_index].target_open = !self.doors[door_index].target_open;
         Some((door_index, self.doors[door_index].target_open))
     }
+
+    #[cfg(test)]
+    pub(crate) fn open_all_for_navigation_test(&mut self) {
+        for door in &mut self.doors {
+            door.target_open = true;
+            door.progress_ticks = SPLIT_CAUSEWAY_DOOR_ANIMATION_TICKS;
+        }
+    }
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -7731,9 +7739,7 @@ pub(crate) fn resolve_platform_side_collision_with_doors(
     doors: &SplitCausewayDoorState,
 ) -> Vec3 {
     let mut resolved = resolve_platform_side_collision_for_arena(arena, position, radius);
-    if doors.arena_index != SPLIT_CAUSEWAY_ARENA_INDEX
-        || arena.name != arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].name
-    {
+    if arena.name != arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].name {
         return resolved;
     }
     for (door_index, door) in doors.doors.iter().copied().enumerate() {
@@ -7745,6 +7751,66 @@ pub(crate) fn resolve_platform_side_collision_with_doors(
         );
     }
     resolved
+}
+
+/// Returns whether a fighter-sized horizontal sweep is clear of immutable,
+/// match-owned arena collision. The fixed probe budget and canonical collision
+/// helpers keep route construction identical across native and WASM builds.
+pub(crate) fn navigation_segment_clear_for_arena(
+    arena: &ArenaDefinition,
+    from: Vec3,
+    to: Vec3,
+    radius: f32,
+) -> bool {
+    const MAX_PROBES: usize = 128;
+    const POSITION_EPSILON_SQUARED: f32 = 0.000_001;
+
+    let horizontal = Vec2::new(to.x - from.x, to.z - from.z);
+    let horizontal_distance = crate::canonical_math::vec2_length(horizontal);
+    let probe_spacing = (radius * 0.5).clamp(0.1, 0.3);
+    let probe_count = ((horizontal_distance / probe_spacing).ceil() as usize).clamp(1, MAX_PROBES);
+
+    (0..=probe_count).all(|probe| {
+        let position = from.lerp(to, probe as f32 / probe_count as f32);
+        let resolved = resolve_platform_side_collision_for_arena(arena, position, radius);
+        crate::canonical_math::vec2_length_squared(Vec2::new(
+            resolved.x - position.x,
+            resolved.z - position.z,
+        )) <= POSITION_EPSILON_SQUARED
+    })
+}
+
+/// Extends the immutable sweep with the rollback-owned Split Causeway gates.
+/// Callers supply the match-local door resource; navigation never consults a
+/// process-global arena or renderer transform.
+pub(crate) fn navigation_segment_clear_with_doors_for_arena(
+    arena: &ArenaDefinition,
+    from: Vec3,
+    to: Vec3,
+    radius: f32,
+    doors: &SplitCausewayDoorState,
+) -> bool {
+    if !navigation_segment_clear_for_arena(arena, from, to, radius) {
+        return false;
+    }
+    if arena.name != arena_definitions()[SPLIT_CAUSEWAY_ARENA_INDEX].name {
+        return true;
+    }
+
+    const MAX_PROBES: usize = 128;
+    const POSITION_EPSILON_SQUARED: f32 = 0.000_001;
+    let horizontal = Vec2::new(to.x - from.x, to.z - from.z);
+    let horizontal_distance = crate::canonical_math::vec2_length(horizontal);
+    let probe_spacing = (radius * 0.5).clamp(0.1, 0.3);
+    let probe_count = ((horizontal_distance / probe_spacing).ceil() as usize).clamp(1, MAX_PROBES);
+    (0..=probe_count).all(|probe| {
+        let position = from.lerp(to, probe as f32 / probe_count as f32);
+        let resolved = resolve_platform_side_collision_with_doors(arena, position, radius, doors);
+        crate::canonical_math::vec2_length_squared(Vec2::new(
+            resolved.x - position.x,
+            resolved.z - position.z,
+        )) <= POSITION_EPSILON_SQUARED
+    })
 }
 
 fn is_authored_platform(arena: &ArenaDefinition, candidate: &PlatformDefinition) -> bool {

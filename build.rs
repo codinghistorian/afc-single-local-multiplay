@@ -25,6 +25,10 @@ pub(crate) const GAMEPLAY_SOURCES: &[&str] = &[
     "src/bee_skills.rs",
     "src/body_collision.rs",
     "src/bot.rs",
+    "src/bot/intelligence.rs",
+    "src/bot/navigation.rs",
+    "src/bot/tactics.rs",
+    "src/bot_profiles.rs",
     "src/canonical_math.rs",
     "src/canonical_state.rs",
     "src/characters.rs",
@@ -50,6 +54,7 @@ pub(crate) const GAMEPLAY_SOURCES: &[&str] = &[
     "src/tutorial.rs",
     "arts/champions_court.ron",
     "assets/camera/single_player_camera.ron",
+    "assets/bots/bot_profiles.ron",
     "assets/characters/character_move_sets.ron",
     "assets/feel/combat_overrides.ron",
     "assets/maps/overlays/arena_0.ron",
@@ -63,6 +68,7 @@ pub(crate) const GAMEPLAY_SOURCES: &[&str] = &[
     "assets/maps/overlays/arena_8.ron",
     "assets/maps/overlays/arena_9.ron",
     "assets/maps/overlays/arena_10.ron",
+    "assets/maps/split_causeway.ron",
     "assets/maps/training_ground.ron",
 ];
 

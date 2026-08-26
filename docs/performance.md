@@ -242,7 +242,9 @@ without it, the executable exits nonzero if an acceptance budget is missed.
 
 The profiler drives the production `AuthorityMatch::step` path, including bot
 input commit, the canonical fixed schedule, canonical snapshot capture, and
-state hashing. Its rollback sample is one real late-input correction at exactly
+state hashing. Tactical planner calls are timed individually from the same
+measured authority window, after the warmup samples have been discarded. Its
+rollback sample is one real late-input correction at exactly
 12 ticks of depth through the production predicted `LiveSimulationDriver`; the
 twelve prediction ticks used to establish each fixture are outside the timed
 and allocation-counted correction window. Duration storage is preallocated, and
@@ -252,6 +254,7 @@ allocation counts/bytes, configured rollback depth, and history high-water
 marks. The acceptance gates are:
 
 - authority p99 below 1,000,000 ns;
+- tactical bot-planner p95 below 100,000 ns with at least one observed call;
 - exact 12-tick rollback p99 below 4,000,000 ns;
 - zero allocations in measured steady-state authority steps;
 - normal rollback never above the manifest's 12-tick cap; and
@@ -282,9 +285,10 @@ and fault details.
 
 | Multiplayer budget | Executable evidence | Current same-hardware status |
 | --- | --- | --- |
-| Authority 60 Hz step p99 below 1 ms | `afc-multiplayer-profile` production headless authority sample | Canonical-pose developer reference accepted at 58,667 ns median-of-nine p99; minimum-supported-CPU capture remains pending |
-| Exact 12-tick rollback p99 below 4 ms | `afc-multiplayer-profile` production correction/resimulation sample | Canonical-pose developer reference accepted at 403,791 ns median-of-nine p99 and exact depth 12; minimum-supported-CPU capture remains pending |
-| Zero steady-state simulation allocations | Counting-allocator deltas around each authority sample | Canonical-pose developer reference accepted at zero allocations in all nine 1,000-step runs |
+| Authority 60 Hz step p99 below 1 ms | `afc-multiplayer-profile` production headless authority sample | Current tactical-bot developer reference accepted at 870,291 ns median-of-three p99; minimum-supported-CPU capture remains pending |
+| Tactical bot planner p95 below 0.1 ms | Per-invocation timing inside the measured production authority sample | Current developer reference accepted at 36,666 ns median-of-three p95 |
+| Exact 12-tick rollback p99 below 4 ms | `afc-multiplayer-profile` production correction/resimulation sample | Current tactical-bot developer reference accepted at 385,416 ns median-of-three p99 and exact depth 12; minimum-supported-CPU capture remains pending |
+| Zero steady-state simulation allocations | Counting-allocator deltas around each authority sample | Current tactical-bot developer reference accepted at zero allocations in all three 1,000-step runs |
 | High-frequency packet below about 1,200 bytes | `network_codec` fixed-buffer encode/decode limits and tests | Executable, hardware-independent contract |
 | Upstream/downstream averages at most 16/64 KiB/s | `network_lab_tests` metered encoded datagrams | Executable scenario evidence; rerun for release artifacts |
 | Bounded history and queues | Profiler history high-water plus network lab and production-live queue bounds | Executable bounds; no monotonic-growth claim without a completed run |
@@ -314,6 +318,7 @@ only after the same executable and seed reproduce the result.
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, battery power, High Power mode, no fixed affinity | Simulation-v7 retired shared-special action, immutable simulation-v6/v7 `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs | Median p99 changed from 67,083 to 62,500 ns for authority (-6.8%) and 437,084 to 448,917 ns for exact 12-tick rollback (+2.7%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and every depth/history gate was unchanged. | Accepted same-hardware preservation evidence for a functional workload change, not an optimization claim. Both paths remain far inside the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains the accepted baseline; minimum-supported-CPU evidence remains required. |
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, Automatic energy mode, no fixed affinity | Additive Training Ground/content-identity integration, immutable pre-`dc2ef84` and final `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs ([raw JSON](performance-evidence/2026-08-26-training-ground.jsonl)) | Median p99 changed from 58,583 to 59,375 ns for authority (+1.4%) and 402,959 to 402,667 ns for exact 12-tick rollback (-0.1%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and depth/history gates stayed at 12 and 128/64/64. Executable SHA-256 values were `542c08e7937f500aef3b93c4335989dea29e6cfc92ab41bd77ce1decc275b143` before and `da870d5451dcc6d71aedd926bbd50335ab75466a9f039af66875f4b67771df52` after. | Accepted same-hardware preservation evidence for additive arena content, not an optimization claim. The changes are immaterial against the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains accepted; minimum-supported-CPU evidence remains required. |
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, battery power, High Power mode, no fixed affinity | Simulation-v8 Crown Ring/Split Causeway flow and rollback-owned gate integration, immutable pre/post `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs ([raw JSON](performance-evidence/2026-08-26-arena-flow.jsonl)) | Median p99 changed from 67,667 to 103,750 ns for authority (+53.3%) and 504,583 to 507,125 ns for exact 12-tick rollback (+0.5%). All six captures passed; authority stayed allocation-free after a one-time bounded Bevy command-queue reserve, rollback diagnostics improved from 120,083 allocations / 142,279,564 bytes to 118,660 / 142,150,280, and depth/history gates stayed at 12 and 128/64/64. Executable SHA-256 values were `da870d5451dcc6d71aedd926bbd50335ab75466a9f039af66875f4b67771df52` before and `0de0ebade98d24bf3cc0d206185e62b9cf4462a91a0b899f74871321f4f89f1d` after. | Accepted same-hardware preservation evidence for a functional arena and snapshot workload change, not an optimization claim. Authority remains at 0.104 ms against 1 ms and rollback at 0.507 ms against 4 ms, so the canonical-pose nine-pair developer baseline remains accepted; minimum-supported-CPU evidence remains required. |
+| 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1 (25F80), AC power, `pmset powermode=2`, no fixed affinity | Simulation-v9 tactical-bot integration, immutable pre/post `afc-multiplayer-profile` executables, three alternating 1,000-sample pairs ([raw JSON](performance-evidence/2026-08-26-bot-intelligence.jsonl)) | Median p99 changed from 87,167 to 870,291 ns for authority (+898.4%) and 380,125 to 385,416 ns for exact 12-tick rollback (+1.4%). The new bounded planner's median p95 was 36,666 ns against its strict 100,000 ns gate. All six captures passed; authority stayed allocation-free, post-change rollback diagnostics were 118,586 allocations / 142,135,996 bytes, and depth/history gates stayed at 12 and 128/64/64. Executable SHA-256 values were `a52b808b28b764eb1bbe880003366b0721548f80b24259b2a2e147c63c3cce70` before and `286b54934b1aa4889d582a1cc1baeb4ffb7fd0e44b27ee78d268ac6f1b787181` after. | Accepted current same-hardware functional baseline. The authority workload now includes bounded tactical forecasting and retains 13.0% p99 headroom on this developer machine; minimum-supported-CPU evidence remains required before claiming broader hardware acceptance. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 pre-backport `MapCycle100`, immutable timing triplicate plus one allocation run | Timing frame/CPU p99 medians 8.992834/2.439333 ms. Allocation run aligned RSS range/slope 2.125000 MiB / 1.402960 MiB/min passed, but aligned live range/slope 1.570396 MiB / 1.052623 MiB/min and +5,752,718 live bytes failed. | Accepted timing evidence; rejected allocation baseline. This same-hardware result identified the render-pass name leak corrected below. External GPU was not evaluated for the failed allocation run. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 post-backport full local matrix: timing and allocation `FourBotStress`/`MapCycle100`/`Soak10Minutes` | All 14 admissible captures passed fixture/canonical-mode and every applicable local timing, RSS/live, stale-owner, presentation, and exact-resource gate. Maximum reported frame/CPU p99, including diagnostic allocator timing, was 10.060500/3.847458 ms. Detailed exact values and hashes follow. | Accepted Apple M2 Max local baseline. Every result remains `external_gpu_evidence_required`; minimum-supported-CPU and external GPU captures remain pending. |
 | Pending | Minimum native target and Apple M2 Max | Schema-v6 external GPU trace and minimum-supported-CPU capture | Repeat the canonical matrix on the minimum CPU and attach platform GPU-completion evidence for stress and soak. | Required for release acceptance; the local JSON explicitly does not measure GPU completion. |
@@ -323,6 +328,44 @@ only after the same executable and seed reproduce the result.
 
 The post-backport matrix used one immutable timing executable and one immutable
 allocation executable:
+
+For historical source-branch context only, before the deterministic multiplayer
+adaptation and its new same-hardware measurements:
+
+The tactical bot-planner change was checked with three before and three clean after
+`FourBotStress` runs on 2026-08-06. All runs used the same Apple M2 Max, macOS,
+profiling profile with `perf`, `FFC00001` seed, Split Causeway setup, 30-second
+warmup, and 300-second sample. The rows below are the middle runs when ordered by
+frame median. The planner timer was introduced by this change, so no directly
+comparable before-planner percentile is available.
+
+| Build | Samples | Frame median / p95 / p99 | Render CPU span median / p95 / p99 | Planner median / p95 / p99 | Process CPU | RSS peak / end | Entities peak / end | Mesh allocations peak / end | Assets: meshes / materials / images / scenes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Before median: move-aware combat, run 2 of 3 | 52,694 | 4.3857 / 16.2729 / 21.5136 ms | 0.0695 / 0.1054 / 0.1254 ms | Not instrumented | 180.39% total; 15.03% normalized | 0.4997 / 0.4489 GiB | 1,117 / 1,034 | 126 / 126 | 126 / 130 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+| After median: tactical planner, run 2 of 3 | 18,001 | 16.6667 / 18.5027 / 19.2957 ms | 0.1180 / 0.1977 / 0.2258 ms | 0.0323 / 0.0785 / 0.0938 ms | 96.38% total; 8.03% normalized | 0.4484 / 0.4484 GiB | 1,082 / 1,033 | 126 / 126 | 126 / 137 / 54 / 40 peak; 126 / 130 / 54 / 40 end |
+
+The frame results mix presentation regimes and therefore cannot establish a
+whole-frame speedup or regression. The three before frame medians were 4.2933,
+4.3857, and 16.1193 ms, while the three clean final after medians were 16.6569,
+16.6667, and 16.6752 ms. The bounded planner's direct p95 values were 0.0826,
+0.0785, and 0.0693 ms; every run passed the strict `< 0.10 ms` gate, and the
+median run retained 0.0215 ms (1.27x) headroom. Its p99 was 0.0938 ms.
+
+Mesh allocations remained fixed at 126, and all ending mesh, material, image,
+and scene counts matched the before build. Up to fourteen peak-only materials were
+transient combat effects, with every run ending at the baseline count of 130.
+RSS was stable within the first two clean captures and fell before the end of the
+third; the median ended 0.0005 GiB below the before median. Ending entities
+differed by one because the deterministic match was observed at a different
+presentation cadence; there was no monotonic entity or asset growth. This is an
+accepted functional baseline for the new planner, not an optimization claim.
+
+The move-aware bot-combat change was checked with three `FourBotStress` runs on
+2026-08-06 against the accepted bot-intelligence baseline below. All runs used the
+same Apple M2 Max, macOS, profiling profile, `FFC00001` seed, Split Causeway setup,
+30-second warmup, and 300-second sample. Presentation remained paced near 60 Hz in
+all three runs. The reported after row is run 1, the middle run when ordered by frame
+median.
 
 - timing SHA-256:
   `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd`;
