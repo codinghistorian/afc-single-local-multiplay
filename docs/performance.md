@@ -308,6 +308,7 @@ only after the same executable and seed reproduce the result.
 | 2026-07-24 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Canonical `SimPosition` ownership and render-only `Transform` projection, interleaved immutable v5/canonical-pose `afc-multiplayer-profile` executables, nine 1,000-sample pairs | Accepted canonical-pose median p99: authority 58,667 ns, exact 12-tick rollback 403,791 ns; respectively -1.9% and -1.3% versus the same-power v5 values 59,833/409,292 ns. Zero authority allocations; rollback diagnostics improved from 121,083 allocations / 142,311,564 bytes to 120,083 / 142,279,564; all history/depth gates retained. | Accepted same-hardware canonical-pose hot-path baseline. Both paths remain far inside the 1/4 ms budgets; minimum-supported-CPU evidence remains required. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1; local verification invocation whose power edges were not recorded by the profiler | Three `afc-multiplayer-profile` runs (`final-local-01` through `03`), 1,000 authority samples and 1,000 exact 12-tick rollback samples each | Authority p99 66,916–73,166 ns (median 67,292 ns); rollback p99 370,417–376,958 ns (median 376,750 ns). Authority remained allocation-free; rollback diagnostics were identical at 120,083 allocations / 142,279,564 bytes; every timing, depth, and history gate passed. | Accepted local verification, not a new controlled before/after baseline and not minimum-supported-CPU evidence. |
 | 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Tutorial/controller integration, immutable mechanically buildable pre/post `afc-multiplayer-profile` executables, three interleaved 1,000-sample pairs | Median p99 changed from 54,666 to 54,458 ns for authority (-0.4%) and 377,667 to 370,917 ns for exact 12-tick rollback (-1.8%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and every depth/history gate was unchanged. | Accepted same-hardware preservation evidence. The change is immaterial, so the canonical-pose nine-pair developer baseline remains the accepted baseline; minimum-supported-CPU evidence remains required. |
+| 2026-08-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, AC power, High Power mode, no fixed affinity | Simulation-v6 canonical manual aim, immutable v5/v6 `afc-multiplayer-profile` executables, three interleaved 1,000-sample pairs | Median p99 changed from 56,166 to 55,917 ns for authority (-0.4%) and 369,458 to 375,167 ns for exact 12-tick rollback (+1.5%). All six captures passed; authority stayed allocation-free, rollback diagnostics remained 120,083 allocations / 142,279,564 bytes, and every depth/history gate was unchanged. | Accepted same-hardware preservation evidence. Both changes are immaterial against the 1/4 ms budgets, so the canonical-pose nine-pair developer baseline remains the accepted baseline; minimum-supported-CPU evidence remains required. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 pre-backport `MapCycle100`, immutable timing triplicate plus one allocation run | Timing frame/CPU p99 medians 8.992834/2.439333 ms. Allocation run aligned RSS range/slope 2.125000 MiB / 1.402960 MiB/min passed, but aligned live range/slope 1.570396 MiB / 1.052623 MiB/min and +5,752,718 live bytes failed. | Accepted timing evidence; rejected allocation baseline. This same-hardware result identified the render-pass name leak corrected below. External GPU was not evaluated for the failed allocation run. |
 | 2026-07-26 | Mac14,6, Apple M2 Max (12-core CPU, 32 GiB), macOS 26.5.1, Metal, 1280x720, AC power, native arm64 | Schema-v6 post-backport full local matrix: timing and allocation `FourBotStress`/`MapCycle100`/`Soak10Minutes` | All 14 admissible captures passed fixture/canonical-mode and every applicable local timing, RSS/live, stale-owner, presentation, and exact-resource gate. Maximum reported frame/CPU p99, including diagnostic allocator timing, was 10.060500/3.847458 ms. Detailed exact values and hashes follow. | Accepted Apple M2 Max local baseline. Every result remains `external_gpu_evidence_required`; minimum-supported-CPU and external GPU captures remain pending. |
 | Pending | Minimum native target and Apple M2 Max | Schema-v6 external GPU trace and minimum-supported-CPU capture | Repeat the canonical matrix on the minimum CPU and attach platform GPU-completion evidence for stress and soak. | Required for release acceptance; the local JSON explicitly does not measure GPU completion. |
@@ -545,6 +546,35 @@ the after executable SHA-256 is
 `da1649d6a9971c060ce278774800151bdeb47b9b63475a857b5e0f92cff52e3b`.
 All six raw result lines are retained under
 `target/perf-captures/tutorial-batch/results/`.
+
+### Simulation-v6 manual-aim preservation capture
+
+This comparison covers the fixed-tick manual-aim target selection and its
+schema-v3 rollback extension. The detached before source was the accepted
+simulation-v5 tutorial batch at `f5110c7`; the after executable contains the
+canonical stable-ID aim state while marker placement remains presentation-only.
+Both immutable arm64 executables used rustc 1.94.1, the profiling profile, seed
+`0x00000000ffc00001`, 256 authority warmup ticks, 16 rollback warmup bursts,
+1,000 timed samples, and exact rollback depth 12. The machine remained on AC
+power under High Power mode with no fixed affinity.
+
+| Pair | Before authority p99 (ns) | After authority p99 (ns) | Before rollback p99 (ns) | After rollback p99 (ns) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 67,667 | 65,667 | 376,666 | 375,167 |
+| 2 | 56,166 | 55,917 | 366,083 | 385,542 |
+| 3 | 54,375 | 55,208 | 369,458 | 370,250 |
+| Median | 56,166 | 55,917 | 369,458 | 375,167 |
+
+All six captures passed the executable acceptance gate. Authority allocated zero
+times in every run. Every rollback run retained 120,083 allocations /
+142,279,564 requested bytes, exact depth 12, authority history high-water 128,
+and rollback snapshot/input high-water 64/64. The immutable before executable
+SHA-256 is
+`c3c8f0dc233a44c8709515ab081fba5ad54fe20111bdb8a634346ef3abe94055`;
+the after executable SHA-256 is
+`c185f42020c24909e8b353f2fbc3b4300343ef98c774fa464febfa0439a3c9e0`.
+All six raw result lines are retained under
+`target/perf-captures/manual-aim/results/`.
 
 ### Superseded v1 FourBotStress evidence
 

@@ -80,6 +80,14 @@ light/heavy staging are explicit in focused raw-accumulator and action-frame
 tests. Exact v4/v5 handshake mismatch fails closed before simulation, while
 protocol 1, snapshot schema 2, and replay schema 1 remain unchanged.
 
+Simulation version 6 adds manual aim as fixed-step rollback state. Candidate
+selection reads `SimPosition`, filters team/opponent eligibility, and orders by
+alignment, squared distance, then stable `FighterId`; retained targets are stable
+IDs rather than ECS entities. Snapshot schema 3 stores direction, optional target,
+held-edge memory, and manual-unlock count. Floating-crosshair transforms,
+materials, opacity, smoothing, and pulse are presentation-only and cannot feed
+the simulation. Protocol 1 and replay schema 1 remain unchanged.
+
 Rollback/presentation purity was re-audited at the fighter snapshot boundary:
 
 - `FighterStats::hud_flash` is written/decayed for HUD feedback but is never read
@@ -91,6 +99,9 @@ Rollback/presentation purity was re-audited at the fighter snapshot boundary:
   and snapshot decode re-derive it from the complete canonical aftermath tuple;
   unknown or ambiguous tuples fail snapshot restore instead of retaining a
   future-side cue.
+- `FighterAimPresentationState` and `FighterAimMarker` own only crosshair visuals.
+  Tutorial settlement observes canonical Aim release and fixed ticks, never marker
+  opacity.
 - Already-presented IDs remain in `PresentationEventRouter` across rollback, so
   identical irreversible presentation events are suppressed during resimulation.
 
@@ -201,6 +212,8 @@ reaction, guard, status, claim, source-lifecycle, and event-order behavior;
 simulation version 4 preserves it while changing the deterministic math contract.
 Simulation version 5 preserves both contact arbitration and the v4 math contract
 while changing only the versioned local aim/grab interpretation described above.
+Simulation version 6 preserves those rules while adding the stable-ID manual-aim
+contract described above.
 
 Focused fixtures cover fighter trades/reaction/guard/grab permutations, reversed
 generic-special, Bee, Chick, Penguin, and item multi-target sources, cannon

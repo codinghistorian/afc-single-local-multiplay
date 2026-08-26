@@ -833,8 +833,8 @@ mod tests {
     use crate::combat_sfx::CombatSfxKind;
     use crate::components::{
         BotBehaviorMode, BotBrain, BotMovementPlan, DrunkStatus, FighterAction, FighterActionState,
-        FighterGrabState, FighterInventory, FighterMotor, FighterSpecialState, FighterStats,
-        FighterUltimateState, LocalInputAssignment, ParticipantKind, SimPosition,
+        FighterAimState, FighterGrabState, FighterInventory, FighterMotor, FighterSpecialState,
+        FighterStats, FighterUltimateState, LocalInputAssignment, ParticipantKind, SimPosition,
     };
     use crate::determinism::{SimEntityId, SimEntityKind};
     use crate::ecs_identity::{SIM_ENTITY_POOL_CAPACITIES, SimulationIdentityAllocator};
@@ -1043,6 +1043,7 @@ mod tests {
                 FighterStats::default(),
                 FighterMotor::default(),
                 FighterActionState::default(),
+                FighterAimState::default(),
                 DrunkStatus::default(),
                 FighterInventory::default(),
                 FighterGrabState::default(),

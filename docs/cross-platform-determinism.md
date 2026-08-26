@@ -2,7 +2,7 @@
 
 The repository contains one frozen, production-headless simulation tape at
 `headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result`.
-It boots a version-5 match manifest, commits bounded AFC `InputFrame` values for
+It boots a version-6 match manifest, commits bounded AFC `InputFrame` values for
 both occupied seats, runs the real canonical fixed schedule, and ends through
 the normal stock/result rules. It does not use the small input-harness probe.
 
@@ -10,17 +10,17 @@ The checked-in contract is:
 
 | Tick | Canonical hash |
 | ---: | ---: |
-| 1 | `5cb79acd3a8477b9` |
-| 120 | `fb2fbbca96e50ed0` |
-| 240 | `bbee3e67295a0e73` |
-| 360 | `8735f2051de7af5a` |
-| 480 | `436a842feaed79f0` |
-| 600 | `34201466fca40adc` |
-| 709 (final) | `dea5b6eb6275a281` |
+| 1 | `9121c43e31abfcec` |
+| 120 | `623cd71e898d9101` |
+| 240 | `b0a73164b760488c` |
+| 360 | `e26f3d2d60956aa3` |
+| 480 | `393d614e1de67563` |
+| 600 | `c5ccf9a12cfbf003` |
+| 709 (final) | `825ae049f62c0244` |
 
 The final canonical result is team 1 winning at tick 709. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
-all 17 checked-in read-only versioned behavior tapes, and the compact
+all 18 checked-in read-only versioned behavior tapes, and the compact
 authored-content matrix on Linux, Windows, and macOS in both Cargo debug and
 release profiles. Changes under `tests/` trigger the same matrix. Workflow
 configuration is not a claim that the current release candidate has passed:
@@ -42,16 +42,16 @@ frozen hashes.
 
 | Arena | Special/hazard final hash | Item final hash |
 | --- | ---: | ---: |
-| Crown Ring | `e210c31779aa8715` | `0cea48c846365c7e` |
-| Split Causeway | `1c7cddaa5d78d085` | `042421e2fd13c809` |
-| Sunstone Steps | `107a0d21ef6a1ee5` | `36baeb3710df9e64` |
-| Crank Yard | `64ba5b47f0a15c66` | `ec86de29dfc8f4bd` |
-| Vent Spiral | `2d7c86bd46e7ae5d` | `4b0d50bdb65cc76d` |
-| Bumper Alley | `763bf0767aef3d90` | `fff3a5f4003634f3` |
-| Feast Market | `a438d82d1c479e3b` | `69817e7dd7ab1c81` |
-| Snare Garden | `515e09efdf42281d` | `0c6c1b2aa670c364` |
-| Sky Steps | `54fdd40e3e45aa68` | `6c18f183855266da` |
-| Powder Keg Court | `6ca7d27cfb69210b` | `6097f41c536425a2` |
+| Crown Ring | `fee483d14a6bbf62` | `f765a6907968e7b1` |
+| Split Causeway | `bc82c7b17fb957f5` | `0b1bce2e1c749e01` |
+| Sunstone Steps | `27f881aa782af719` | `a9b3c8730f2df5cc` |
+| Crank Yard | `4dbf526a23c16be3` | `e513eb2dedd2d0b7` |
+| Vent Spiral | `7f54a4614aa93a65` | `9815b3d216f954c1` |
+| Bumper Alley | `029aa4e722a90216` | `150e524b56303295` |
+| Feast Market | `972b67d04138a842` | `97a12707175d5176` |
+| Snare Garden | `7da564385137b28f` | `3ff203a1c3f42d74` |
+| Sky Steps | `1ba90da898658abc` | `81a391db0f15fba0` |
+| Powder Keg Court | `65fa7657f35922ce` | `1ea6fa7301edb60e` |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -61,20 +61,31 @@ this production-state release gate.
 
 The 2026-07-24 arena hierarchy correction was presentation-only, but it changed a
 source path included by `build.rs::GAMEPLAY_SOURCES`. The compiled content
-identity in all 17 production-builder behavior tapes therefore changed and their
-hashes were deliberately refreshed after semantic review. Their checkpoint
+identity in all 17 production-builder behavior tapes then present therefore
+changed, and their hashes were deliberately refreshed after semantic review. Their checkpoint
 observations, event ticks, final ticks, and results did not change. The stock-tape
 and compact-matrix tables in this document use fixed synthetic compatibility
 identities, so that content-identity-only refresh does not alter the literals
 above.
 
-The v5 refresh first diverges from the v4 tape at tick 1 because the snapshot
+The v6 refresh changes both the simulation discriminator and the fixed-width
+fighter payload because snapshot schema 3 adds rollback-owned manual aim state.
+BF029 freezes the new acquire/break/release behavior and restores from an active
+lock. The other 17 tapes retained identical normalized checkpoints, ordered
+events, final ticks, and final results. Debug and release produced the same new
+BF001 tick-1 hash (`c50b6cd168b8e793`) before the corpus was refreshed. The
+compiled gameplay-content digest is
+`5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`.
+
+The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The
 stock tape contains no `AIM_GRAB` input, so it is not expected to exercise the
 v5 gesture change. The fixture proves that review mechanically: at every
-checkpoint and the final state it rewrites only that discriminator to 4 and must
-recover the exact historical v4 hashes below. The final tick and team result are
-also asserted independently.
+checkpoint and the final state, the then-current fixture rewrote only that
+discriminator to recover the historical v4 hashes below. Snapshot schema 3 makes
+that old mechanical rewrite inapplicable to v6, so the table is retained as
+historical release evidence rather than a current test assertion. The final tick
+and team result remain asserted independently.
 
 | Historical v4 tick | Canonical hash |
 | ---: | ---: |

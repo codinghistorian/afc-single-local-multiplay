@@ -735,6 +735,7 @@ pub fn build_app() -> App {
                         not(target_arch = "wasm32")
                     ))]
                     hud::update_dev_arena_label.run_if(user_mode::gameplay_scene_loaded),
+                    fighter::update_aim_markers.run_if(user_mode::gameplay_scene_loaded),
                     #[cfg(all(
                         feature = "dev-hot-reload",
                         not(feature = "shipping"),

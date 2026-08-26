@@ -25,11 +25,11 @@ use crate::combat::{
 };
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, ground_impact_priority};
 use crate::components::{
-    Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterBody,
-    FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory, FighterMarker,
-    FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState, FighterStats,
-    FighterUltimateState, FighterVisualRoot, LocalInputAssignment, PlayerControlBindings,
-    PlayerKeyBindings, PlayerSlotId, SimPosition,
+    Controller, DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState,
+    FighterBody, FighterGrabState, FighterHand, FighterHead, FighterInput, FighterInventory,
+    FighterMarker, FighterMotor, FighterPoseRoot, FighterSceneModel, FighterSpecialState,
+    FighterStats, FighterUltimateState, FighterVisualRoot, LocalInputAssignment,
+    PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SimPosition,
 };
 use crate::constants::*;
 use crate::determinism::{DEFAULT_F32_QUANTIZATION, FighterId, canonicalize_f32};
@@ -417,6 +417,17 @@ fn fighter_elapsed_reached(elapsed: ElapsedTicks, seconds: f32) -> bool {
     elapsed >= fighter_elapsed_from_seconds(seconds)
 }
 
+const AIM_ACQUIRE_DISTANCE: f32 = 7.5;
+const AIM_RETAIN_DISTANCE: f32 = 9.0;
+const AIM_ACQUIRE_COS: f32 = 0.866_025_4;
+const AIM_BREAK_COS: f32 = 0.5;
+const AIM_FREE_DISTANCE: f32 = 2.4;
+const AIM_TORSO_HEIGHT: f32 = 1.05;
+const AIM_MARKER_SMOOTHING: f32 = 22.0;
+const AIM_MARKER_FADE_IN: f32 = 0.06;
+const AIM_MARKER_FADE_OUT: f32 = 0.14;
+const AIM_MARKER_BASE_SCALE: f32 = 0.72;
+
 #[derive(Component)]
 pub(crate) struct FighterStyleAccent {
     fighter_id: usize,
@@ -500,6 +511,7 @@ pub(crate) struct FighterSimulationBundle {
     stats: FighterStats,
     motor: FighterMotor,
     input: FighterInput,
+    aim: FighterAimState,
     inventory: FighterInventory,
     grab: FighterGrabState,
     special: FighterSpecialState,
@@ -540,6 +552,14 @@ fn fighter_simulation_bundle(spawn: ConfiguredFighterSpawn) -> FighterSimulation
             ..default()
         },
         input: FighterInput::default(),
+        aim: FighterAimState {
+            direction: if spawn.id % 2 == 0 {
+                Vec3::X
+            } else {
+                Vec3::NEG_X
+            },
+            ..default()
+        },
         inventory: FighterInventory::default(),
         grab: FighterGrabState::default(),
         special: FighterSpecialState::default(),
@@ -605,6 +625,18 @@ pub(crate) fn spawn_canonical_fighters(
 
 /// Rendered-client startup wrapper: canonical simulation roots are created
 /// first, then their mesh/scene presentation hierarchies are attached.
+#[derive(Component)]
+pub(crate) struct FighterAimMarker {
+    fighter_id: usize,
+    material: Handle<StandardMaterial>,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct FighterAimPresentationState {
+    marker_position: Vec3,
+    marker_opacity: f32,
+}
+
 pub fn spawn_fighters(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -623,6 +655,8 @@ pub fn spawn_fighters(
     let equipment_chip_mesh = meshes.add(Cuboid::new(0.18, 0.16, 0.09));
     let guard_shield_mesh = meshes.add(Cuboid::new(1.28, 1.05, 0.045));
     let light_punch_corner_mesh = meshes.add(light_punch_corner_tint_mesh());
+    let aim_ring_mesh = meshes.add(Torus::new(0.32, 0.025));
+    let aim_tick_mesh = meshes.add(Cuboid::new(0.16, 0.035, 0.025));
 
     let arena = active_arena.definition();
     for id in 0..spawned_fighter_count() {
@@ -674,12 +708,19 @@ pub fn spawn_fighters(
         });
         let light_punch_corner_material =
             materials.add(light_punch_corner_tint_material(character_kind));
+        let aim_marker_material = materials.add(aim_marker_material(color));
 
         let entity_id = spawn_canonical_fighter(&mut commands, configured);
         let mut entity = commands.entity(entity_id);
         entity.insert((
             FighterVisualRoot,
             Transform::from_translation(configured.spawn),
+            FighterAimPresentationState {
+                marker_position: configured.spawn
+                    + Vec3::Y * AIM_TORSO_HEIGHT
+                    + if id % 2 == 0 { Vec3::X } else { Vec3::NEG_X } * AIM_FREE_DISTANCE,
+                marker_opacity: 0.0,
+            },
             if configured.active {
                 Visibility::Visible
             } else {
@@ -799,6 +840,35 @@ pub fn spawn_fighters(
                 Name::new(format!("{} guard shield", FIGHTER_NAMES[id])),
             ));
         });
+        commands
+            .spawn((
+                FighterAimMarker {
+                    fighter_id: id,
+                    material: aim_marker_material.clone(),
+                },
+                Transform::from_translation(arena.spawn_points[id]),
+                Visibility::Hidden,
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    Mesh3d(aim_ring_mesh.clone()),
+                    MeshMaterial3d(aim_marker_material.clone()),
+                    Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                ));
+                for (translation, rotation) in [
+                    (Vec3::new(0.0, 0.42, 0.0), 0.0),
+                    (Vec3::new(0.0, -0.42, 0.0), 0.0),
+                    (Vec3::new(0.42, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                    (Vec3::new(-0.42, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                ] {
+                    parent.spawn((
+                        Mesh3d(aim_tick_mesh.clone()),
+                        MeshMaterial3d(aim_marker_material.clone()),
+                        Transform::from_translation(translation)
+                            .with_rotation(Quat::from_rotation_z(rotation)),
+                    ));
+                }
+            });
     }
 }
 
@@ -886,6 +956,18 @@ fn light_punch_corner_tint_material(character: CharacterKind) -> StandardMateria
         depth_bias: 80.0,
         unlit: true,
         perceptual_roughness: 0.42,
+        ..default()
+    }
+}
+
+fn aim_marker_material(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color.with_alpha(0.0),
+        emissive: LinearRgba::from(color.to_linear()) * 0.8,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        depth_bias: 90.0,
+        unlit: true,
         ..default()
     }
 }
@@ -1931,6 +2013,14 @@ fn movement_input_direction(movement: Vec2) -> Option<Vec3> {
     })
 }
 
+fn update_facing_from_movement(motor: &mut FighterMotor, input: &FighterInput) {
+    if !input.aim {
+        if let Some(direction) = movement_input_direction(input.movement) {
+            motor.facing = direction;
+        }
+    }
+}
+
 fn dash_finisher_for_input(
     input: &FighterInput,
     loadout: LoadoutContext,
@@ -2350,26 +2440,80 @@ fn slide_cancel_requested(input: &FighterInput) -> bool {
         || input.dash
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AimTargetSnapshot {
+    fighter_id: FighterId,
+    position: Vec3,
+    valid: bool,
+}
+
+fn planar_aim_direction(from: Vec3, to: Vec3) -> Option<Vec3> {
+    let direction = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+    (crate::canonical_math::vec3_length_squared(direction) > f32::EPSILON)
+        .then(|| crate::canonical_math::vec3_normalize_or_zero(direction))
+}
+
+fn planar_aim_dot(first: Vec3, second: Vec3) -> f32 {
+    first.x * second.x + first.z * second.z
+}
+
+fn aim_target_is_opponent(state: &MatchState, owner_id: FighterId, target_id: FighterId) -> bool {
+    owner_id != target_id
+        && (!state.rules.team_scoring
+            || !state.fighters_share_team(owner_id.index(), target_id.index()))
+}
+
+fn select_aim_target(
+    owner_id: FighterId,
+    owner_position: Vec3,
+    aim_direction: Vec3,
+    state: &MatchState,
+    snapshots: &[Option<AimTargetSnapshot>; FIGHTER_COUNT],
+) -> Option<FighterId> {
+    let aim_direction = normalized_planar_or_forward(aim_direction);
+    let mut best: Option<(FighterId, f32, f32)> = None;
+    for snapshot in snapshots.iter().flatten().filter(|snapshot| {
+        snapshot.valid && aim_target_is_opponent(state, owner_id, snapshot.fighter_id)
+    }) {
+        let distance_squared =
+            crate::canonical_math::vec3_distance_squared(owner_position, snapshot.position);
+        if distance_squared > AIM_ACQUIRE_DISTANCE * AIM_ACQUIRE_DISTANCE {
+            continue;
+        }
+        let Some(direction) = planar_aim_direction(owner_position, snapshot.position) else {
+            continue;
+        };
+        let alignment = planar_aim_dot(aim_direction, direction);
+        if alignment < AIM_ACQUIRE_COS {
+            continue;
+        }
+        let replace = best.is_none_or(|(best_id, best_alignment, best_distance_squared)| {
+            alignment > best_alignment
+                || (alignment == best_alignment && distance_squared < best_distance_squared)
+                || (alignment == best_alignment
+                    && distance_squared == best_distance_squared
+                    && snapshot.fighter_id < best_id)
+        });
+        if replace {
+            best = Some((snapshot.fighter_id, alignment, distance_squared));
+        }
+    }
+    best.map(|(fighter_id, _, _)| fighter_id)
+}
+
 pub fn apply_aim_assist(
     state: Res<MatchState>,
     mut fighters: Query<(
         &Fighter,
         &FighterInput,
         &mut FighterMotor,
+        &mut FighterAimState,
         &SimPosition,
         &FighterActionState,
     )>,
 ) {
-    let mut snapshots = ArrayVec::<_, FIGHTER_COUNT>::new();
-    for (fighter, _, _, transform, action) in fighters.iter() {
-        if !state.fighter_active(fighter.id)
-            || matches!(
-                action.action,
-                FighterAction::RingOut | FighterAction::Respawning
-            )
-        {
-            continue;
-        }
+    let mut snapshots = [None; FIGHTER_COUNT];
+    for (fighter, _, _, _, position, action) in fighters.iter() {
         let Some(fighter_id) = FighterId::from_index(fighter.id) else {
             error!(
                 fighter_id = fighter.id,
@@ -2377,64 +2521,243 @@ pub fn apply_aim_assist(
             );
             return;
         };
-        if snapshots
-            .iter()
-            .any(|(existing, _)| *existing == fighter_id)
-        {
+        if snapshots[fighter_id.index()].is_some() {
             error!(
                 ?fighter_id,
                 "duplicate aim-assist fighter slot; collection failed closed"
             );
             return;
         }
-        if let Err(error) = try_push_fixed_fighter(
-            &mut snapshots,
-            (fighter_id, transform.translation),
-            "aim-assist fighters",
-        ) {
-            error!(?error, "aim-assist snapshot collection failed closed");
-            return;
-        }
+        snapshots[fighter_id.index()] = Some(AimTargetSnapshot {
+            fighter_id,
+            position: position.translation,
+            valid: state.fighter_can_participate(fighter.id)
+                && !matches!(
+                    action.action,
+                    FighterAction::RingOut | FighterAction::Respawning
+                ),
+        });
     }
-    snapshots.sort_unstable_by_key(|(fighter_id, _)| *fighter_id);
 
-    for (fighter, input, mut motor, transform, action) in &mut fighters {
-        if !input.aim
-            || !state.fighter_active(fighter.id)
-            || matches!(
+    for (fighter, input, mut motor, mut aim, position, action) in &mut fighters {
+        let Some(owner_id) = FighterId::from_index(fighter.id) else {
+            error!(fighter_id = fighter.id, "aim-assist update failed closed");
+            return;
+        };
+        let owner_valid = state.fighter_can_participate(fighter.id)
+            && !matches!(
+                action.action,
+                FighterAction::RingOut | FighterAction::Respawning
+            );
+        if !owner_valid || !input.aim {
+            aim.locked_target = None;
+            aim.aim_pressed = false;
+            continue;
+        }
+
+        let movement_direction = movement_input_direction(input.movement);
+        let just_pressed = !aim.aim_pressed;
+        aim.aim_pressed = true;
+        if just_pressed {
+            aim.direction = normalized_planar_or_forward(motor.facing);
+        }
+
+        let mut broke_lock = false;
+        if let Some(target_id) = aim.locked_target {
+            let retained = snapshots.iter().flatten().find(|snapshot| {
+                snapshot.fighter_id == target_id
+                    && snapshot.valid
+                    && aim_target_is_opponent(&state, owner_id, snapshot.fighter_id)
+                    && crate::canonical_math::vec3_distance_squared(
+                        position.translation,
+                        snapshot.position,
+                    ) <= AIM_RETAIN_DISTANCE * AIM_RETAIN_DISTANCE
+            });
+            if let Some(target) = retained {
+                let target_direction = planar_aim_direction(position.translation, target.position)
+                    .unwrap_or(aim.direction);
+                if movement_direction.is_some_and(|movement| {
+                    planar_aim_dot(movement, target_direction) < AIM_BREAK_COS
+                }) {
+                    aim.locked_target = None;
+                    aim.manual_unlock_count = aim.manual_unlock_count.saturating_add(1);
+                    aim.direction = movement_direction.unwrap();
+                    broke_lock = true;
+                } else {
+                    aim.direction = target_direction;
+                }
+            } else {
+                aim.locked_target = None;
+            }
+        }
+
+        if aim.locked_target.is_none() {
+            if let Some(movement) = movement_direction {
+                aim.direction = movement;
+            }
+            if !broke_lock {
+                aim.locked_target = select_aim_target(
+                    owner_id,
+                    position.translation,
+                    aim.direction,
+                    &state,
+                    &snapshots,
+                );
+                if let Some(target) = aim.locked_target.and_then(|target_id| {
+                    snapshots
+                        .iter()
+                        .flatten()
+                        .find(|item| item.fighter_id == target_id)
+                }) {
+                    aim.direction = planar_aim_direction(position.translation, target.position)
+                        .unwrap_or(aim.direction);
+                }
+            }
+        }
+        motor.facing = aim.direction;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AimMarkerSnapshot {
+    color: Color,
+    human: bool,
+    valid: bool,
+    locked: bool,
+    opacity: f32,
+    position: Vec3,
+}
+
+fn advance_aim_marker_opacity(opacity: f32, held: bool, dt: f32) -> f32 {
+    if held {
+        (opacity + dt / AIM_MARKER_FADE_IN).min(1.0)
+    } else {
+        (opacity - dt / AIM_MARKER_FADE_OUT).max(0.0)
+    }
+}
+
+fn aim_marker_smoothing(dt: f32) -> f32 {
+    1.0 - (-AIM_MARKER_SMOOTHING * dt).exp()
+}
+
+pub fn update_aim_markers(
+    time: Res<Time>,
+    state: Res<MatchState>,
+    camera: Query<&GlobalTransform, With<crate::camera::ArenaCamera>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fighters: Query<
+        (
+            &Fighter,
+            &Controller,
+            &FighterInput,
+            &FighterActionState,
+            &SimPosition,
+            &FighterAimState,
+            &mut FighterAimPresentationState,
+        ),
+        Without<FighterAimMarker>,
+    >,
+    mut markers: Query<(&FighterAimMarker, &mut Transform, &mut Visibility), Without<Fighter>>,
+) {
+    let dt = time.delta_secs();
+    let mut target_positions = [None; FIGHTER_COUNT];
+    for (fighter, _, _, action, position, _, _) in fighters.iter() {
+        let Some(fighter_id) = FighterId::from_index(fighter.id) else {
+            error!(
+                fighter_id = fighter.id,
+                "aim-marker target collection ignored an invalid fighter slot"
+            );
+            continue;
+        };
+        if state.fighter_can_participate(fighter.id)
+            && !matches!(
                 action.action,
                 FighterAction::RingOut | FighterAction::Respawning
             )
         {
-            continue;
+            target_positions[fighter_id.index()] = Some(position.translation);
         }
-        let Some(fighter_id) = FighterId::from_index(fighter.id) else {
-            error!(fighter_id = fighter.id, "aim-assist update failed closed");
-            return;
-        };
+    }
 
-        let Some((_, target_position)) = snapshots
-            .iter()
-            .filter(|(target_id, _)| *target_id != fighter_id)
-            .min_by(|(a_id, a), (b_id, b)| {
-                crate::canonical_math::vec3_distance_squared(transform.translation, *a)
-                    .total_cmp(&crate::canonical_math::vec3_distance_squared(
-                        transform.translation,
-                        *b,
-                    ))
-                    .then_with(|| a_id.cmp(b_id))
-            })
-        else {
+    let mut visual_snapshots = [None; FIGHTER_COUNT];
+    for (fighter, controller, input, action, position, aim, mut presentation) in &mut fighters {
+        let Some(fighter_id) = FighterId::from_index(fighter.id) else {
+            error!(
+                fighter_id = fighter.id,
+                "aim-marker update ignored an invalid fighter slot"
+            );
             continue;
         };
+        let valid = state.is_fighting()
+            && state.fighter_can_participate(fighter.id)
+            && controller.is_human()
+            && !matches!(
+                action.action,
+                FighterAction::RingOut | FighterAction::Respawning
+            );
+        if !valid {
+            presentation.marker_opacity = 0.0;
+        } else {
+            let target_position = aim
+                .locked_target
+                .and_then(|target_id| target_positions[target_id.index()])
+                .unwrap_or(position.translation + aim.direction * AIM_FREE_DISTANCE);
+            if input.aim {
+                presentation.marker_opacity =
+                    advance_aim_marker_opacity(presentation.marker_opacity, true, dt);
+                let smoothing = aim_marker_smoothing(dt);
+                presentation.marker_position = presentation
+                    .marker_position
+                    .lerp(target_position + Vec3::Y * AIM_TORSO_HEIGHT, smoothing);
+            } else {
+                presentation.marker_opacity =
+                    advance_aim_marker_opacity(presentation.marker_opacity, false, dt);
+            }
+        }
+        visual_snapshots[fighter_id.index()] = Some(AimMarkerSnapshot {
+            color: fighter.color,
+            human: controller.is_human(),
+            valid,
+            locked: aim.locked_target.is_some(),
+            opacity: presentation.marker_opacity,
+            position: presentation.marker_position,
+        });
+    }
 
-        let direction = crate::canonical_math::vec3_normalize_or_zero(Vec3::new(
-            target_position.x - transform.translation.x,
-            0.0,
-            target_position.z - transform.translation.z,
-        ));
-        if crate::canonical_math::vec3_length_squared(direction) > 0.01 {
-            motor.facing = direction;
+    let camera_position = camera.single().ok().map(GlobalTransform::translation);
+    let pulse = 0.88 + (time.elapsed_secs() * 8.0).sin() * 0.12;
+    for (marker, mut transform, mut visibility) in &mut markers {
+        let Some(snapshot) = visual_snapshots.get(marker.fighter_id).copied().flatten() else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let visible = snapshot.human && snapshot.valid && snapshot.opacity > 0.001;
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        transform.translation = snapshot.position;
+        let scale = AIM_MARKER_BASE_SCALE
+            * snapshot.opacity
+            * if snapshot.locked {
+                1.0 + pulse * 0.08
+            } else {
+                1.0
+            };
+        transform.scale = Vec3::splat(scale);
+        if let Some(camera_position) = camera_position {
+            transform.look_at(camera_position, Vec3::Y);
+        }
+        if let Some(material) = materials.get_mut(&marker.material) {
+            let brightness = if snapshot.locked {
+                1.0 + pulse * 0.55
+            } else {
+                0.8
+            };
+            material.base_color = snapshot.color.lighter(0.25).with_alpha(snapshot.opacity);
+            material.emissive =
+                LinearRgba::from(snapshot.color.to_linear()) * brightness * snapshot.opacity;
         }
     }
 }
@@ -3009,13 +3332,7 @@ pub fn update_fighter_state(
             continue;
         }
 
-        if crate::canonical_math::vec2_length_squared(input.movement) > 0.01 {
-            motor.facing = crate::canonical_math::vec3_normalize_or_zero(Vec3::new(
-                input.movement.x,
-                0.0,
-                input.movement.y,
-            ));
-        }
+        update_facing_from_movement(&mut motor, &input);
 
         if !motor.grounded {
             if input.jump && can_start_ground_jump(&motor) {
@@ -7946,13 +8263,18 @@ mod tests {
         );
     }
 
-    fn aim_assist_facing_for_spawn_order(order: [usize; 3]) -> Vec3 {
+    fn aim_assist_target_for_spawn_order(order: [usize; 3]) -> Option<FighterId> {
         let mut state = MatchState::default();
         state.set_active_slots([true, true, true, false]);
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
         let mut app = App::new();
         app.insert_resource(state)
-            .add_systems(Update, apply_aim_assist);
-        let positions = [Vec3::ZERO, Vec3::X, Vec3::NEG_X];
+            .add_systems(FixedUpdate, apply_aim_assist);
+        let positions = [
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.5),
+            Vec3::new(1.0, 0.0, -0.5),
+        ];
         for fighter_id in order {
             app.world_mut().spawn((
                 Fighter {
@@ -7965,28 +8287,34 @@ mod tests {
                     aim: fighter_id == 0,
                     ..default()
                 },
-                FighterMotor::default(),
+                FighterMotor {
+                    facing: Vec3::X,
+                    ..default()
+                },
+                FighterAimState {
+                    direction: Vec3::X,
+                    ..default()
+                },
                 FighterActionState::default(),
                 SimPosition::new(positions[fighter_id]),
             ));
         }
 
-        app.update();
+        app.world_mut().run_schedule(FixedUpdate);
         let world = app.world_mut();
-        let mut fighters = world.query::<(&Fighter, &FighterMotor)>();
+        let mut fighters = world.query::<(&Fighter, &FighterAimState)>();
         fighters
             .iter(world)
             .find(|(fighter, _)| fighter.id == 0)
-            .map(|(_, motor)| motor.facing)
-            .unwrap()
+            .and_then(|(_, aim)| aim.locked_target)
     }
 
     #[test]
     fn aim_assist_equal_distance_tie_uses_fighter_id_when_entity_order_is_reversed() {
-        let forward = aim_assist_facing_for_spawn_order([0, 1, 2]);
-        let reversed = aim_assist_facing_for_spawn_order([2, 1, 0]);
+        let forward = aim_assist_target_for_spawn_order([0, 1, 2]);
+        let reversed = aim_assist_target_for_spawn_order([2, 1, 0]);
 
-        assert_eq!(forward, Vec3::X);
+        assert_eq!(forward, Some(FighterId::ALL[1]));
         assert_eq!(reversed, forward);
     }
 
@@ -13422,5 +13750,353 @@ mod tests {
         tick_practice_health_refill(&mut stats, &action);
         assert_eq!(stats.health, MAX_HEALTH * 0.5);
         assert_eq!(stats.health_refill_timer, TickTimer::ZERO);
+    }
+
+    fn aim_test_snapshot(fighter_id: usize, position: Vec3) -> Option<AimTargetSnapshot> {
+        Some(AimTargetSnapshot {
+            fighter_id: FighterId::from_index(fighter_id).unwrap(),
+            position,
+            valid: true,
+        })
+    }
+
+    #[test]
+    fn aim_acquisition_uses_thirty_degree_cone_and_distance_limit() {
+        let state = MatchState::default();
+        let angle_29 = 29.0_f32.to_radians();
+        let angle_31 = 31.0_f32.to_radians();
+        let snapshots = [
+            None,
+            aim_test_snapshot(1, Vec3::new(angle_29.cos(), 0.0, angle_29.sin()) * 7.49),
+            aim_test_snapshot(2, Vec3::new(angle_31.cos(), 0.0, angle_31.sin()) * 4.0),
+            aim_test_snapshot(3, Vec3::X * 7.51),
+        ];
+
+        assert_eq!(
+            select_aim_target(FighterId::ZERO, Vec3::ZERO, Vec3::X, &state, &snapshots,),
+            Some(FighterId::ALL[1])
+        );
+    }
+
+    #[test]
+    fn aim_acquisition_prefers_angle_then_distance_and_filters_invalid_opponents() {
+        let mut state = MatchState::default();
+        state.active_slots = [true; FIGHTER_COUNT];
+        state.rules.team_scoring = false;
+        let snapshots = [
+            None,
+            aim_test_snapshot(1, Vec3::new(2.0, 0.0, 0.3)),
+            aim_test_snapshot(2, Vec3::X * 7.0),
+            aim_test_snapshot(3, Vec3::X * 3.0),
+        ];
+
+        assert_eq!(
+            select_aim_target(FighterId::ZERO, Vec3::ZERO, Vec3::X, &state, &snapshots,),
+            Some(FighterId::ALL[3]),
+            "equal angular error must use nearest distance"
+        );
+
+        let mut invalid_snapshots = snapshots;
+        invalid_snapshots[3].as_mut().unwrap().valid = false;
+        assert_eq!(
+            select_aim_target(
+                FighterId::ZERO,
+                Vec3::ZERO,
+                Vec3::X,
+                &state,
+                &invalid_snapshots,
+            ),
+            Some(FighterId::ALL[2]),
+            "a smaller angular error wins even when farther away"
+        );
+    }
+
+    fn spawn_aim_test_fighter(
+        world: &mut World,
+        id: usize,
+        position: Vec3,
+        facing: Vec3,
+        input: FighterInput,
+    ) -> Entity {
+        world
+            .spawn((
+                Fighter {
+                    id,
+                    name: "Aim test",
+                    color: Color::WHITE,
+                    spawn: position,
+                },
+                input,
+                FighterMotor {
+                    facing,
+                    ..default()
+                },
+                FighterAimState {
+                    direction: facing,
+                    ..default()
+                },
+                FighterActionState::default(),
+                SimPosition {
+                    translation: position,
+                    ..default()
+                },
+            ))
+            .id()
+    }
+
+    #[test]
+    fn aim_lock_retains_to_nine_meters_then_cleans_up() {
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .add_systems(FixedUpdate, apply_aim_assist);
+        let owner = spawn_aim_test_fighter(
+            app.world_mut(),
+            0,
+            Vec3::ZERO,
+            Vec3::X,
+            FighterInput {
+                aim: true,
+                ..default()
+            },
+        );
+        let target = spawn_aim_test_fighter(
+            app.world_mut(),
+            1,
+            Vec3::X * 7.0,
+            Vec3::NEG_X,
+            FighterInput::default(),
+        );
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(FighterId::ALL[1])
+        );
+
+        app.world_mut()
+            .entity_mut(target)
+            .get_mut::<SimPosition>()
+            .unwrap()
+            .translation = Vec3::X * 8.9;
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(FighterId::ALL[1])
+        );
+
+        app.world_mut()
+            .entity_mut(target)
+            .get_mut::<SimPosition>()
+            .unwrap()
+            .translation = Vec3::X * 9.1;
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            None
+        );
+    }
+
+    #[test]
+    fn aim_movement_retains_toward_target_and_breaks_beyond_sixty_degrees() {
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .add_systems(FixedUpdate, apply_aim_assist);
+        let owner = spawn_aim_test_fighter(
+            app.world_mut(),
+            0,
+            Vec3::ZERO,
+            Vec3::X,
+            FighterInput {
+                aim: true,
+                movement: Vec2::X,
+                ..default()
+            },
+        );
+        let _target = spawn_aim_test_fighter(
+            app.world_mut(),
+            1,
+            Vec3::X * 4.0,
+            Vec3::NEG_X,
+            FighterInput::default(),
+        );
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(
+            app.world()
+                .get::<FighterAimState>(owner)
+                .unwrap()
+                .locked_target,
+            Some(FighterId::ALL[1])
+        );
+
+        app.world_mut()
+            .entity_mut(owner)
+            .get_mut::<FighterInput>()
+            .unwrap()
+            .movement = Vec2::Y;
+        app.world_mut().run_schedule(FixedUpdate);
+        let aim = app.world().get::<FighterAimState>(owner).unwrap();
+        assert_eq!(aim.locked_target, None);
+        assert_eq!(aim.manual_unlock_count, 1);
+        assert_vec3_close(aim.direction, Vec3::Z, 0.001);
+        assert_vec3_close(
+            app.world().get::<FighterMotor>(owner).unwrap().facing,
+            Vec3::Z,
+            0.001,
+        );
+    }
+
+    #[test]
+    fn ordinary_movement_facing_does_not_overwrite_aim_owned_facing() {
+        let mut motor = FighterMotor {
+            facing: Vec3::X,
+            ..default()
+        };
+        update_facing_from_movement(
+            &mut motor,
+            &FighterInput {
+                aim: true,
+                movement: Vec2::Y,
+                ..default()
+            },
+        );
+        assert_eq!(motor.facing, Vec3::X);
+    }
+
+    #[test]
+    fn aim_marker_transitions_are_frame_rate_independent_reversible_and_pause_safe() {
+        let half_faded = advance_aim_marker_opacity(1.0, false, AIM_MARKER_FADE_OUT * 0.5);
+        assert!((half_faded - 0.5).abs() < 0.001);
+        let reversed = advance_aim_marker_opacity(half_faded, true, AIM_MARKER_FADE_IN * 0.25);
+        assert!((reversed - 0.75).abs() < 0.001);
+        assert_eq!(advance_aim_marker_opacity(reversed, true, 0.0), reversed);
+
+        let one_frame = aim_marker_smoothing(1.0 / 60.0);
+        let two_half_frames = 1.0 - (1.0 - aim_marker_smoothing(1.0 / 120.0)).powi(2);
+        assert!((one_frame - two_half_frames).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn aim_markers_are_human_only_player_colored_and_clean_up_outside_fighting() {
+        use crate::components::ParticipantKind;
+        use crate::game_state::MatchPhase;
+
+        let mut app = App::new();
+        let mut state = MatchState::default();
+        state.phase = MatchPhase::Fighting;
+        state.active_slots = [true, true, false, false];
+        state.stocks = [STOCK_LIVES; FIGHTER_COUNT];
+        app.insert_resource(state)
+            .insert_resource(Time::<()>::default())
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, update_aim_markers);
+
+        let red = Color::srgb(0.9, 0.1, 0.2);
+        let blue = Color::srgb(0.1, 0.3, 0.9);
+        for (id, color, participant) in [
+            (0, red, ParticipantKind::Human),
+            (1, blue, ParticipantKind::Bot),
+        ] {
+            app.world_mut().spawn((
+                Fighter {
+                    id,
+                    name: "Marker test",
+                    color,
+                    spawn: Vec3::ZERO,
+                },
+                Controller::new(
+                    PlayerSlotId::new(id).unwrap(),
+                    participant,
+                    LocalInputAssignment::Unassigned,
+                ),
+                FighterInput {
+                    aim: true,
+                    ..default()
+                },
+                FighterActionState::default(),
+                SimPosition {
+                    translation: Vec3::X * id as f32,
+                    ..default()
+                },
+                FighterAimState {
+                    direction: Vec3::X,
+                    aim_pressed: true,
+                    ..default()
+                },
+                FighterAimPresentationState {
+                    marker_position: Vec3::X * id as f32,
+                    marker_opacity: 1.0,
+                },
+            ));
+        }
+
+        let handles: Vec<_> = [0usize, 1]
+            .into_iter()
+            .map(|id| {
+                let color = if id == 0 { red } else { blue };
+                let handle = app
+                    .world_mut()
+                    .resource_mut::<Assets<StandardMaterial>>()
+                    .add(aim_marker_material(color));
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        FighterAimMarker {
+                            fighter_id: id,
+                            material: handle.clone(),
+                        },
+                        Transform::default(),
+                        Visibility::Hidden,
+                    ))
+                    .id();
+                (entity, handle)
+            })
+            .collect();
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(handles[0].0),
+            Some(&Visibility::Visible)
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(handles[1].0),
+            Some(&Visibility::Hidden),
+            "bots must never display an aim marker"
+        );
+        let human_material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handles[0].1)
+            .unwrap();
+        let tint = human_material.base_color.to_srgba();
+        assert!(tint.red > tint.blue, "the marker must retain P1's red tint");
+
+        app.world_mut().resource_mut::<MatchState>().phase = MatchPhase::Results;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(handles[0].0),
+            Some(&Visibility::Hidden)
+        );
+        let mut presentations = app
+            .world_mut()
+            .query_filtered::<&FighterAimPresentationState, With<Fighter>>();
+        assert!(
+            presentations
+                .iter(app.world())
+                .all(|presentation| presentation.marker_opacity == 0.0)
+        );
     }
 }

@@ -16,7 +16,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"AFCS";
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 2;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 3;
 pub const SNAPSHOT_QUANTIZATION_UNITS: u32 = 4_096;
 
 pub const DYNAMIC_PAYLOAD_BYTES: usize = 128;
@@ -40,9 +40,9 @@ pub const SIM_ENTITY_KIND_COUNT: usize = SimEntityKind::ALL.len();
 ///
 /// This is deliberately fixed: adding a field requires a schema-version bump,
 /// and decoding never allocates or follows an attacker-controlled length.
-pub const FIGHTER_ROLLBACK_EXTENSION_BYTES: usize = 243;
+pub const FIGHTER_ROLLBACK_EXTENSION_BYTES: usize = 266;
 
-/// Stable schema-v2 discriminant counts. The ECS bridge must map the gameplay
+/// Stable schema-v3 discriminant counts. The ECS bridge must map the gameplay
 /// enums explicitly rather than relying on Rust's unspecified enum layout.
 pub const FIGHTER_ACTION_CODE_COUNT: u16 = 36;
 pub const TECHNIQUE_CODE_COUNT: u16 = 95;
@@ -422,14 +422,25 @@ pub struct FighterActionRollbackSnapshot {
 ///   re-derived before a landing presentation intent is emitted.
 /// - Fighter `Transform` rotation and scale are render pose/size outputs derived
 ///   from facing and status; translation is retained exactly below.
+/// - Floating aim-marker position, opacity, smoothing, mesh, and material live in
+///   rendered-client components; only [`FighterAimRollbackSnapshot`] is canonical.
 ///
 /// Dash trails and drunk bubbles have no mutable presentation cadence fields:
 /// their event ticks/phases derive from rollback-canonical
 /// `FighterActionState::elapsed` and `DrunkStatus::remaining`, respectively.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FighterAimRollbackSnapshot {
+    pub direction: F32Vec3BitsSnapshot,
+    pub locked_target: OptionalU8CodeSnapshot,
+    pub aim_pressed: bool,
+    pub manual_unlock_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FighterRollbackExtensionSnapshot {
     pub position: F32Vec3BitsSnapshot,
     pub input_movement: F32Vec2BitsSnapshot,
+    pub aim: FighterAimRollbackSnapshot,
     pub spawn: F32Vec3BitsSnapshot,
     pub stats: FighterStatsRollbackSnapshot,
     pub motor: FighterMotorRollbackSnapshot,
@@ -977,6 +988,19 @@ fn validate_fighter_rollback(
         ["fighter input movement X", "fighter input movement Y"],
     )?;
     validate_f32_vec3(
+        rollback.aim.direction,
+        [
+            "fighter aim direction X",
+            "fighter aim direction Y",
+            "fighter aim direction Z",
+        ],
+    )?;
+    validate_optional_u8_code(
+        rollback.aim.locked_target,
+        FIGHTER_CAPACITY,
+        "fighter aim locked-target code or absent padding",
+    )?;
+    validate_f32_vec3(
         rollback.spawn,
         ["fighter spawn X", "fighter spawn Y", "fighter spawn Z"],
     )?;
@@ -1281,6 +1305,20 @@ impl CanonicalSnapshot {
         }
 
         for fighter in self.fighters.iter().filter(|fighter| fighter.occupied) {
+            let aim_target = fighter.rollback.aim.locked_target.present.then(|| {
+                FighterId::new(fighter.rollback.aim.locked_target.code)
+                    .expect("fighter rollback validation bounded the aim target")
+            });
+            if aim_target == Some(fighter.id) {
+                return Err(SnapshotError::InvariantViolation(
+                    "fighter aim lock points at its owner",
+                ));
+            }
+            validate_optional_fighter_relationship(
+                aim_target,
+                &self.fighters,
+                "fighter aim lock points at an unoccupied slot",
+            )?;
             if let Some(held_item) = fighter.relationships.held_item {
                 if held_item.kind() != SimEntityKind::Item {
                     return Err(SnapshotError::InvariantViolation(
@@ -1757,6 +1795,10 @@ fn encode_fighter_rollback(
     encode_f32_vec3_bits(encoder, rollback.position)?;
     encoder.write_u32(rollback.input_movement.x)?;
     encoder.write_u32(rollback.input_movement.y)?;
+    encode_f32_vec3_bits(encoder, rollback.aim.direction)?;
+    encode_optional_u8_code(encoder, rollback.aim.locked_target)?;
+    encoder.write_bool(rollback.aim.aim_pressed)?;
+    encoder.write_u64(rollback.aim.manual_unlock_count)?;
     encode_f32_vec3_bits(encoder, rollback.spawn)?;
 
     let stats = rollback.stats;
@@ -2372,6 +2414,12 @@ fn decode_fighter_rollback(
         x: decoder.read_u32()?,
         y: decoder.read_u32()?,
     };
+    let aim = FighterAimRollbackSnapshot {
+        direction: decode_f32_vec3_bits(decoder)?,
+        locked_target: decode_optional_u8_code(decoder, "aim locked-target presence tag")?,
+        aim_pressed: decoder.read_bool("aim-pressed flag")?,
+        manual_unlock_count: decoder.read_u64()?,
+    };
     let spawn = decode_f32_vec3_bits(decoder)?;
     let stats = FighterStatsRollbackSnapshot {
         health_bits: decoder.read_u32()?,
@@ -2443,6 +2491,7 @@ fn decode_fighter_rollback(
     let rollback = FighterRollbackExtensionSnapshot {
         position,
         input_movement,
+        aim,
         spawn,
         stats,
         motor,
@@ -3044,6 +3093,15 @@ mod tests {
                 input_movement: F32Vec2BitsSnapshot {
                     x: (-0.75_f32).to_bits(),
                     y: 0.4_f32.to_bits(),
+                },
+                aim: FighterAimRollbackSnapshot {
+                    direction: vec3_bits(0.875, 0.0, -0.5),
+                    locked_target: OptionalU8CodeSnapshot {
+                        present: true,
+                        code: fighter_1.get(),
+                    },
+                    aim_pressed: true,
+                    manual_unlock_count: 37,
                 },
                 spawn: vec3_bits(-13.25, 1.5, 42.75),
                 stats: FighterStatsRollbackSnapshot {

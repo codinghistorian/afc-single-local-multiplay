@@ -180,8 +180,9 @@ mod tests {
     use crate::chick_skills::{ActiveChickSkill, ChickSkillKind};
     use crate::combat::ImpactSource;
     use crate::components::{
-        DrunkStatus, Fighter, FighterActionState, FighterGrabState, FighterInput, FighterInventory,
-        FighterMotor, FighterSpecialState, FighterStats, FighterUltimateState, Hitbox, SimPosition,
+        DrunkStatus, Fighter, FighterActionState, FighterAimState, FighterGrabState, FighterInput,
+        FighterInventory, FighterMotor, FighterSpecialState, FighterStats, FighterUltimateState,
+        Hitbox, SimPosition,
     };
     use crate::determinism::{
         DEFAULT_F32_QUANTIZATION, FighterHitMask, FighterId, SimEntityId, canonicalize_f32,
@@ -262,6 +263,7 @@ mod tests {
                     FighterStats::default(),
                     FighterMotor::default(),
                     FighterActionState::default(),
+                    FighterAimState::default(),
                     DrunkStatus::default(),
                     FighterInventory::default(),
                     FighterGrabState::default(),
@@ -723,7 +725,9 @@ mod tests {
 
     #[test]
     fn full_production_pool_snapshot_has_resync_headroom() {
-        const FULL_POOL_FIXTURE_ENCODED_BYTES: usize = 91_921;
+        // Snapshot schema 3 adds a fixed 23-byte aim payload to each of the
+        // four fighter slots: 91,921 + (4 * 23) = 92,013 bytes.
+        const FULL_POOL_FIXTURE_ENCODED_BYTES: usize = 92_013;
         const DYNAMIC_OPTIONAL_FIELD_MAX_GROWTH: usize = 11;
         const CONSERVATIVE_NON_DYNAMIC_HEADROOM: usize = 1_024;
 

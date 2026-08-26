@@ -218,6 +218,30 @@ pub struct FighterInput {
     pub special: bool,
 }
 
+/// Rollback-owned manual aim lock state.
+///
+/// Targets use the stable fighter domain rather than Bevy entities. Marker
+/// position, opacity, and materials are presentation state held separately by
+/// rendered clients.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct FighterAimState {
+    pub direction: Vec3,
+    pub locked_target: Option<FighterId>,
+    pub aim_pressed: bool,
+    pub manual_unlock_count: u64,
+}
+
+impl Default for FighterAimState {
+    fn default() -> Self {
+        Self {
+            direction: Vec3::Z,
+            locked_target: None,
+            aim_pressed: false,
+            manual_unlock_count: 0,
+        }
+    }
+}
+
 /// Refresh-only directional input modifier applied after every input producer.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct DrunkStatus {

@@ -18,7 +18,7 @@ stock result. Its Linux/Windows/macOS gate and frozen literals are documented in
 also cover the central contact and batched life-loss permutations named later in
 this document.
 
-The simulation-v5 fixture tranche is checked in under
+The simulation-v6 fixture tranche is checked in under
 `tests/fixtures/behavior/v1` and runs through the crate-internal production
 headless harness in `tests/support/behavior_fixtures.rs`:
 
@@ -41,6 +41,7 @@ headless harness in `tests/support/behavior_fixtures.rs`:
 | BF026 | `grab_escape_lockout_timeout` | Escape, rejected regrab during lockout, lockout expiry, a second grab, timeout cleanup, and resulting credit |
 | BF027 | `quick_directional_heavy_throw` | Same-tick quick and directional-heavy throws with stable order, damage, reaction, knockback, attribution, and relationship cleanup |
 | BF028 | `item_use_throw_impact_respawn` | Pickup, apple use, turkey throw/impact, ownership, durability, telemetry, and respawn lifecycle |
+| BF029 | `manual_aim_lock_break_release` | **AcceptedChange:** stable-ID lock acquisition, fixed-tick 60-degree manual break, rollback-owned unlock count, release, and restore from an active lock |
 
 Every tape stores a hash for every tick, bounded normalized checkpoints, ordered
 semantic events, and final result. The runner compares two clean runs, a
@@ -48,6 +49,13 @@ same-world snapshot restore replay, and a fresh presentation-perturbed world. Ra
 gesture scripts are compiled before all four runs. The explicit ignored updater
 is documented in [current-simulation-contract.md](current-simulation-contract.md);
 ordinary tests are read-only.
+
+The v6 refresh adds BF029 and snapshot-schema-3 aim state. The other 17 tapes
+retained identical normalized checkpoints, ordered events, final ticks, and final
+results. Debug and release agreed on BF001's new tick-1 hash
+`c50b6cd168b8e793` before all 18 goldens were refreshed. The reviewed compiled
+gameplay-content digest is
+`5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from

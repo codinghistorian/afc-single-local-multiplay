@@ -9,9 +9,9 @@ use bevy::prelude::*;
 
 use crate::characters::{CharacterKind, FighterCharacter};
 use crate::components::{
-    DrunkStatus, Fighter, FighterAction, FighterActionState, FighterGrabState, FighterInput,
-    FighterInventory, FighterMotor, FighterSpecialState, FighterStats, FighterUltimateState,
-    SimPosition,
+    DrunkStatus, Fighter, FighterAction, FighterActionState, FighterAimState, FighterGrabState,
+    FighterInput, FighterInventory, FighterMotor, FighterSpecialState, FighterStats,
+    FighterUltimateState, SimPosition,
 };
 use crate::determinism::{
     DEFAULT_F32_QUANTIZATION, FIGHTER_CAPACITY, FighterId, SimEntityKind, canonicalize_f32,
@@ -29,12 +29,12 @@ use crate::snapshot::{
     FIGHTER_MOTOR_BEE_AIR_DASH_SHOT_AVAILABLE, FIGHTER_MOTOR_GUARD_COUNTER_BUFFERED,
     FIGHTER_MOTOR_GUARD_WAS_REQUESTED, FIGHTER_MOTOR_JUMP_ATTACK_LANDING_RECOVERY,
     FIGHTER_MOTOR_KNOCKDOWN_ON_LAND, FighterActionRollbackSnapshot, FighterActionSnapshot,
-    FighterCooldownSnapshot, FighterInputSnapshot, FighterLoadoutSnapshot,
-    FighterMotorRollbackSnapshot, FighterPoseSnapshot, FighterRelationshipsSnapshot,
-    FighterRollbackExtensionSnapshot, FighterSnapshot, FighterStatsRollbackSnapshot,
-    FighterStatusSnapshot, OptionalF32Vec3BitsSnapshot, OptionalU8CodeSnapshot,
-    OptionalU16CodeSnapshot, OptionalU32Snapshot, QuantizedVec2, QuantizedVec3,
-    QueuedAftermathSnapshot, REACTION_FAMILY_CODE_COUNT, STATUS_TIMER_SLOTS,
+    FighterAimRollbackSnapshot, FighterCooldownSnapshot, FighterInputSnapshot,
+    FighterLoadoutSnapshot, FighterMotorRollbackSnapshot, FighterPoseSnapshot,
+    FighterRelationshipsSnapshot, FighterRollbackExtensionSnapshot, FighterSnapshot,
+    FighterStatsRollbackSnapshot, FighterStatusSnapshot, OptionalF32Vec3BitsSnapshot,
+    OptionalU8CodeSnapshot, OptionalU16CodeSnapshot, OptionalU32Snapshot, QuantizedVec2,
+    QuantizedVec3, QueuedAftermathSnapshot, REACTION_FAMILY_CODE_COUNT, STATUS_TIMER_SLOTS,
     TECHNIQUE_BUTTON_CODE_COUNT, TECHNIQUE_CODE_COUNT,
 };
 use crate::snapshot_ecs::{FighterSnapshotCodec, SnapshotCodecError};
@@ -356,6 +356,7 @@ struct PreparedFighter {
     transform_translation: Vec3,
     spawn: Vec3,
     input: FighterInput,
+    aim: FighterAimState,
     stats: FighterStats,
     motor: FighterMotor,
     action: FighterActionState,
@@ -480,6 +481,7 @@ fn ensure_required_components(world: &World, entity: Entity) -> Result<(), Snaps
     required::<Fighter>(world, entity)?;
     required::<SimPosition>(world, entity)?;
     required::<FighterInput>(world, entity)?;
+    required::<FighterAimState>(world, entity)?;
     required::<FighterStats>(world, entity)?;
     required::<FighterMotor>(world, entity)?;
     required::<FighterActionState>(world, entity)?;
@@ -502,6 +504,7 @@ fn capture_fighter(
     let fighter = required::<Fighter>(world, entity)?;
     let position = required::<SimPosition>(world, entity)?;
     let input = required::<FighterInput>(world, entity)?;
+    let aim = required::<FighterAimState>(world, entity)?;
     let stats = required::<FighterStats>(world, entity)?;
     let motor = required::<FighterMotor>(world, entity)?;
     let action = required::<FighterActionState>(world, entity)?;
@@ -594,6 +597,12 @@ fn capture_fighter(
         input_movement: F32Vec2BitsSnapshot {
             x: input.movement.x.to_bits(),
             y: input.movement.y.to_bits(),
+        },
+        aim: FighterAimRollbackSnapshot {
+            direction: vec3_bits(aim.direction),
+            locked_target: optional_u8(aim.locked_target.map(FighterId::get)),
+            aim_pressed: aim.aim_pressed,
+            manual_unlock_count: aim.manual_unlock_count,
         },
         spawn: vec3_bits(fighter.spawn),
         stats: stats_rollback,
@@ -820,6 +829,19 @@ fn validate_relationships(
                 "live fighter has no component mapping for linked_entity",
             ));
         }
+        let aim_target = decode_optional_fighter_id(fighter.rollback.aim.locked_target)?;
+        if aim_target == Some(id) {
+            return Err(SnapshotCodecError::new(
+                ERR_INVALID_RELATIONSHIP,
+                "snapshot fighter aim lock points at its owner",
+            ));
+        }
+        if aim_target.is_some_and(|target| !active_slots[target.index()]) {
+            return Err(SnapshotCodecError::new(
+                ERR_INVALID_RELATIONSHIP,
+                "snapshot fighter aim lock points at an inactive slot",
+            ));
+        }
         if fighter
             .relationships
             .held_item
@@ -901,6 +923,14 @@ fn prepare_inactive_fighter(
         transform_translation: fighter.spawn,
         spawn: fighter.spawn,
         input: FighterInput::default(),
+        aim: FighterAimState {
+            direction: if fighter.id % 2 == 0 {
+                Vec3::X
+            } else {
+                Vec3::NEG_X
+            },
+            ..default()
+        },
         stats,
         motor: FighterMotor {
             facing: if fighter.id % 2 == 0 {
@@ -1059,12 +1089,19 @@ fn prepare_fighter(
         cooldown: TickTimer::from_ticks(snapshot.cooldowns.ticks[EQUIPMENT_COOLDOWN_SLOT]),
     };
     let input = decode_input(snapshot)?;
+    let aim = FighterAimState {
+        direction: decode_vec3(snapshot.rollback.aim.direction),
+        locked_target: decode_optional_fighter_id(snapshot.rollback.aim.locked_target)?,
+        aim_pressed: snapshot.rollback.aim.aim_pressed,
+        manual_unlock_count: snapshot.rollback.aim.manual_unlock_count,
+    };
 
     let prepared = PreparedFighter {
         entity,
         transform_translation: position,
         spawn,
         input,
+        aim,
         stats,
         motor,
         action,
@@ -1106,6 +1143,7 @@ fn validate_canonical_rollback(
     require_canonical_vec3(rollback.position)?;
     require_canonical_bits(rollback.input_movement.x)?;
     require_canonical_bits(rollback.input_movement.y)?;
+    require_canonical_vec3(rollback.aim.direction)?;
     require_canonical_vec3(rollback.spawn)?;
 
     require_canonical_bits(rollback.stats.health_bits)?;
@@ -1197,6 +1235,21 @@ fn decode_optional_technique_button(
             .ok_or(SnapshotCodecError::new(
                 ERR_INVALID_ENUM,
                 "invalid TechniqueButton snapshot code",
+            ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn decode_optional_fighter_id(
+    value: OptionalU8CodeSnapshot,
+) -> Result<Option<FighterId>, SnapshotCodecError> {
+    if value.present {
+        FighterId::new(value.code)
+            .map(Some)
+            .ok_or(SnapshotCodecError::new(
+                ERR_INVALID_ENUM,
+                "invalid FighterId snapshot code",
             ))
     } else {
         Ok(None)
@@ -1362,6 +1415,7 @@ fn commit_fighter(world: &mut World, prepared: PreparedFighter) {
         transform_translation,
         spawn,
         input,
+        aim,
         stats,
         motor,
         action,
@@ -1391,6 +1445,9 @@ fn commit_fighter(world: &mut World, prepared: PreparedFighter) {
     *world
         .get_mut::<FighterInput>(entity)
         .expect("restore preflight checked FighterInput") = input;
+    *world
+        .get_mut::<FighterAimState>(entity)
+        .expect("restore preflight checked FighterAimState") = aim;
 
     {
         let mut live = world
@@ -1602,6 +1659,12 @@ mod tests {
                         cooldown: TickTimer::from_ticks(230 + index as u32),
                     },
                 ))
+                .insert(FighterAimState {
+                    direction: Vec3::new(0.75, 0.0, -0.5),
+                    locked_target: Some(FighterId::from_index(index ^ 1).unwrap()),
+                    aim_pressed: index % 2 == 0,
+                    manual_unlock_count: 250 + index as u64,
+                })
                 .id();
             entities[index] = Some(entity);
         }
@@ -1645,6 +1708,7 @@ mod tests {
                 transform.scale = Vec3::splat(2.25);
             }
             *world.get_mut::<FighterInput>(entity).unwrap() = FighterInput::default();
+            *world.get_mut::<FighterAimState>(entity).unwrap() = FighterAimState::default();
             world.get_mut::<FighterStats>(entity).unwrap().health = -100.0;
             world.get_mut::<FighterStats>(entity).unwrap().hud_flash = 0.777;
             world.get_mut::<FighterMotor>(entity).unwrap().velocity = Vec3::splat(-50.0);
@@ -1793,6 +1857,11 @@ mod tests {
                     Vec3::NEG_X
                 }
             );
+            let aim = world.get::<FighterAimState>(entity).unwrap();
+            assert_eq!(aim.direction, motor.facing);
+            assert_eq!(aim.locked_target, None);
+            assert!(!aim.aim_pressed);
+            assert_eq!(aim.manual_unlock_count, 0);
             let action = world.get::<FighterActionState>(entity).unwrap();
             assert_eq!(action.action, FighterAction::RingOut);
             assert_eq!(action.reaction_visual_side, -0.875);
@@ -1838,6 +1907,31 @@ mod tests {
             before_rejected_restore,
             "relationship validation must finish before any live component mutation"
         );
+
+        let mut invalid_aim_target = snapshots;
+        invalid_aim_target[0].rollback.aim.locked_target = OptionalU8CodeSnapshot {
+            present: true,
+            code: 2,
+        };
+        assert_eq!(
+            codec
+                .prepare_restore(&world, &invalid_aim_target)
+                .err()
+                .unwrap()
+                .code,
+            ERR_INVALID_RELATIONSHIP
+        );
+        invalid_aim_target[0].rollback.aim.locked_target.code = 0;
+        assert_eq!(
+            codec
+                .prepare_restore(&world, &invalid_aim_target)
+                .err()
+                .unwrap()
+                .code,
+            ERR_INVALID_RELATIONSHIP,
+            "an aim lock may not point back at its owner"
+        );
+        assert_eq!(codec.capture_fighters(&world).unwrap(), snapshots);
 
         world
             .resource_mut::<MatchState>()

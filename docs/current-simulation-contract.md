@@ -1,14 +1,14 @@
 # Current Simulation Contract
 
-- Status: Implemented simulation-v5 contract with historical WP0 provenance
+- Status: Implemented simulation-v6 contract with historical WP0 provenance
 - Historical audited source: `d33ceff65065e18d0928820892bb24bfb5c845ae`
-- Current audit date: 2026-07-24
+- Current audit date: 2026-08-26
 - Scope: current deterministic combat contract plus the preserved pre-WP1 inventory
 - Target specification: [multiplayer-architecture.md](multiplayer-architecture.md)
 
 This document originally froze local behavior before the fixed-tick,
 stable-identity, snapshot, and rollback migration. It now records the implemented
-simulation-v5 contract while retaining the original execution inventory as
+simulation-v6 contract while retaining the original execution inventory as
 migration provenance. Sections explicitly labelled **historical WP0** describe
 the old source above and are not claims about the current runtime.
 
@@ -43,13 +43,41 @@ version bump or authorize a different semantic result.
 
 Inside a section labelled historical WP0, **current** and **legacy** mean the
 audited pre-cutover commit above. Elsewhere, **current** means simulation version
-5 in this repository. **Target** refers to the multiplayer specification.
+6 in this repository. **Target** refers to the multiplayer specification.
 
-## Simulation v5 aim/grab input addendum
+## Simulation v6 manual-aim addendum
 
-The current online compatibility boundary is simulation version 5. Protocol
-version 1, snapshot schema 2, replay schema 1, and the 60 Hz tick rate are
-unchanged. Version 5 intentionally changes the canonical local gesture compiler:
+The current online compatibility boundary is simulation version 6. Protocol
+version 1, replay schema 1, and the 60 Hz tick rate are unchanged. Snapshot
+schema 3 adds the rollback-owned aim direction, optional locked `FighterId`,
+held-state edge memory, and monotonic manual-unlock count.
+
+- Holding Aim acquires only an active opponent within 7.5 metres and a 30-degree
+  cone. Candidate order is canonical: greatest alignment, then shortest squared
+  distance, then lowest `FighterId`.
+- A lock remains through 9 metres. While Aim stays held, movement more than 60
+  degrees away breaks the lock, preserves the requested direction, and increments
+  the manual-unlock count exactly once.
+- Team rules filter allies, every target relationship uses stable `FighterId`, and
+  authoritative position comes from `SimPosition`. No ECS entity or render
+  transform participates in aim selection.
+- Facing chosen by aim is consumed by the existing fixed-step action/movement
+  systems. The floating crosshair's position, opacity, material, smoothing, and
+  pulse remain frame-driven presentation state and are excluded from snapshots.
+- BF029 freezes acquisition at tick 1, a manual break at tick 4, release at tick
+  7, and restore/replay from an active lock. Before v6 these inputs produced no
+  canonical aim relationship or unlock count; v6 intentionally adds both.
+
+Simulation-v6 lobbies reject simulation-v5 clients before countdown, and v5
+replays are incompatible with v6 playback even though replay schema 1 remains
+decodable for diagnostics. This gameplay change and its schema/version boundary
+are approved by the browser-multiplayer integration scope.
+
+## Historical simulation v5 aim/grab input addendum
+
+At the v5 boundary, protocol version 1, snapshot schema 2, replay schema 1, and
+the 60 Hz tick rate were unchanged. Version 5 intentionally changed the
+canonical local gesture compiler:
 
 - Holding `AIM_GRAB` is aim-only.
 - Releasing at or before the inclusive five-tick grace boundary emits exactly one
@@ -979,3 +1007,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-07-24 | 5 (unchanged) | All 17 behavior tapes; powder-cannon bomb render-parent visibility | **ContentIdentityOnly:** the bomb's logical render parent now receives inherited visibility before its mesh child is attached. The presentation fix is co-located in `arena.rs`, which is conservatively included in `GAMEPLAY_SOURCES`, so the gameplay-content digest changed from `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629` to `b0962f667795d7f2d530bdf3b7606b4a361f9f81c11172f6c3c021983efd9d9c`. All 17 tapes received new per-tick hashes, while checkpoint counts, semantic-event ticks, final ticks, and final results remained unchanged. This changes content compatibility only; simulation version 5 remains unchanged. |
 | 2026-08-26 | 5 (unchanged) | All 17 behavior tapes; controller input and canonical-event haptic presentation boundary | **ContentIdentityOnly:** browser/native gamepad sampling now compiles into the existing fixed-tick input and predicted wire vocabulary, and combat haptics are derived only from rollback-routed canonical action/contact/lifecycle events. These boundary changes touch conservatively classified `GAMEPLAY_SOURCES` (`combat.rs`, `components.rs`, `fighter.rs`, `game_state.rs`, `live_input.rs`, `sim_event.rs`, and `tick_input.rs`), so the gameplay-content digest changed from `b0962f667795d7f2d530bdf3b7606b4a361f9f81c11172f6c3c021983efd9d9c` to `8e45acb03e57d34f3b4398be916393d47490adf443ebfa45191bfacadf8c693b`. Debug and release produced the same first new BF001 hash (`e05028fbcb9da14b`). All semantic checkpoints, ordered event ticks, final ticks, and final results remained unchanged across all 17 tapes; only source-bound per-tick hashes changed. This changes content compatibility only; simulation version 5 remains unchanged. |
 | 2026-08-26 | 5 (unchanged) | All 17 behavior tapes; additive local tutorial, tutorial-scoped bot difficulty, HUD, controls, and pause ownership | **ContentIdentityOnly:** the new tutorial is a local mode whose fixed-tick objective observer and scripted dummy use canonical state, stable IDs, and existing input/event vocabulary. Its slower bot behavior is present only when the new `BotDifficulty::Tutorial` marker is explicitly installed; existing standard bots and every previously supported match manifest retain their rules. Presentation, control-help, persistence, and pause-owner changes do not feed canonical simulation. `tutorial.rs` is conservatively classified in `GAMEPLAY_SOURCES`, and the other boundary changes touch existing classified sources, so the gameplay-content digest changed from `8e45acb03e57d34f3b4398be916393d47490adf443ebfa45191bfacadf8c693b` to `3811091d85eb57f521706db16f4da1823ab1cef71b3f5c2263096d6d8cabbf16`. Debug and release produced the same first new BF001 hash (`11b6d8e6f8fb0fcf`). All 17 tapes received identity-derived per-tick hashes; their checkpoint counts and values, ordered semantic-event ticks and payloads, final ticks, and final results remained unchanged. This is an additive content-compatibility change only; simulation version 5 remains unchanged. |
+| 2026-08-26 | 6 | BF029 `manual_aim_lock_break_release`; all prior behavior tapes; v5/v6 lobby and replay compatibility; snapshot schema 3 round trip | **AcceptedChange:** holding Aim now deterministically acquires an opponent by alignment, squared distance, and `FighterId`; movement beyond the 60-degree retention boundary breaks the lock and increments a rollback-owned counter. Previously the BF029 tape had no canonical lock or unlock counter. The new tape freezes lock at tick 1, break at tick 4, release at tick 7, and active-lock restore at tick 2. Crosshair animation remains presentation-only. Simulation version 6 and snapshot schema 3 own the new state; protocol and replay schemas remain unchanged. The compiled gameplay-content digest is `5ba689783932ee2cd23cfd0dee6fd7e5fdf366ce3b07f07724c00ae643f21fed`; debug and release agreed on BF001 tick-1 hash `c50b6cd168b8e793`. All 17 pre-existing tapes retained identical normalized checkpoints, ordered events, final ticks, and final results before their hash refresh. Approved by the browser-multiplayer integration scope. |

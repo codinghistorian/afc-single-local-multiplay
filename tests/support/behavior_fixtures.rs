@@ -50,7 +50,7 @@ use crate::tick_input::{
 };
 
 const FIXTURE_SCHEMA_VERSION: u16 = 1;
-const CONTRACT_VERSION: u16 = 5;
+const CONTRACT_VERSION: u16 = 6;
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/behavior/v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +156,8 @@ struct FixtureObservations {
     #[serde(default, skip_serializing_if = "is_false")]
     extended_fighters: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    aim_state: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     match_stats: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     item_ordinals: Vec<u8>,
@@ -163,7 +165,10 @@ struct FixtureObservations {
 
 impl FixtureObservations {
     fn is_empty(&self) -> bool {
-        !self.extended_fighters && !self.match_stats && self.item_ordinals.is_empty()
+        !self.extended_fighters
+            && !self.aim_state
+            && !self.match_stats
+            && self.item_ordinals.is_empty()
     }
 }
 
@@ -286,6 +291,14 @@ struct SemanticFighter {
     regrab_lockout_ticks: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_attacker: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aim_direction: Option<[i32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aim_locked_target: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aim_pressed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aim_manual_unlock_count: Option<u64>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1065,6 +1078,31 @@ fn semantic_checkpoint(
                 .extended_fighters
                 .then(|| fighter.relationships.last_attacker.map(FighterId::get))
                 .flatten(),
+            aim_direction: observations.aim_state.then(|| {
+                let direction = fighter.rollback.aim.direction;
+                [
+                    DEFAULT_F32_QUANTIZATION.quantize(f32::from_bits(direction.x)),
+                    DEFAULT_F32_QUANTIZATION.quantize(f32::from_bits(direction.y)),
+                    DEFAULT_F32_QUANTIZATION.quantize(f32::from_bits(direction.z)),
+                ]
+            }),
+            aim_locked_target: observations
+                .aim_state
+                .then(|| {
+                    fighter
+                        .rollback
+                        .aim
+                        .locked_target
+                        .present
+                        .then_some(fighter.rollback.aim.locked_target.code)
+                })
+                .flatten(),
+            aim_pressed: observations
+                .aim_state
+                .then_some(fighter.rollback.aim.aim_pressed),
+            aim_manual_unlock_count: observations
+                .aim_state
+                .then_some(fighter.rollback.aim.manual_unlock_count),
         })
         .collect();
     let items = snapshot
@@ -1916,6 +1954,30 @@ fn assert_fixture_is_meaningful(
             assert_eq!((respawned.durability, respawned.max_durability), (1, 1));
             assert_eq!(respawned.respawn_ticks, 0);
             assert_eq!(respawned.position, [-21_914, 3_809, 0]);
+        }
+        "BF029_manual_aim_lock_break_release" => {
+            let acquired = fighter_at(trace, 0, 0);
+            assert_eq!(acquired.aim_locked_target, Some(1));
+            assert_eq!(acquired.aim_direction, Some([4_096, 0, 0]));
+            assert_eq!(acquired.aim_pressed, Some(true));
+            assert_eq!(acquired.aim_manual_unlock_count, Some(0));
+
+            let broken = fighter_at(trace, 3, 0);
+            assert_eq!(broken.aim_locked_target, None);
+            assert_eq!(broken.aim_direction, Some([0, 0, 4_096]));
+            assert_eq!(broken.aim_pressed, Some(true));
+            assert_eq!(broken.aim_manual_unlock_count, Some(1));
+
+            let released = fighter_at(trace, 6, 0);
+            assert_eq!(released.aim_locked_target, None);
+            assert_eq!(released.aim_direction, Some([0, 0, 4_096]));
+            assert_eq!(released.aim_pressed, Some(false));
+            assert_eq!(released.aim_manual_unlock_count, Some(1));
+            assert_eq!(
+                event_count(trace, "Aim"),
+                0,
+                "aim has no synthetic event side effects"
+            );
         }
         name => panic!("fixture {name} has no semantic coverage assertion"),
     }
