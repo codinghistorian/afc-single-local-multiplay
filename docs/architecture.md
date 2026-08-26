@@ -23,8 +23,15 @@ The Controls hub owns local device setup, family-aware menu conventions, live
 input testing, and keyboard configuration. Device assignments are session state;
 versioned keyboard and vibration preferences are stored in the platform
 application-data directory on native builds and `localStorage` on web builds.
-Disconnected combat seats pause virtual time until each seat is reclaimed, then
-resume after a one-frame input gate.
+Single Player bypasses device setup, preserves an explicit P1 session assignment,
+and otherwise starts on Keyboard 1. On eligible single-player screens, an
+unassigned controller can request P1 through a controller-locked, two-press
+confirmation. The reconnect state owns that modal, consumes its confirm/cancel
+inputs, blocks underlying UI or gameplay, and synchronizes accepted assignments
+to both session state and the live local setup. Disconnected eligible seats pause
+combat or block menu input until the original or an unassigned replacement
+controller reclaims them; both reconnect and takeover paths resume through a
+one-frame input gate.
 
 Native macOS input uses Apple's GameController framework to expose normalized
 controller profiles as Bevy `Gamepad` components. This avoids the raw HID profile

@@ -76,6 +76,16 @@ release agreed on BF001 tick-1 hash `cf49d1dde67d32a9`; the reviewed content
 digest is
 `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`.
 
+The subsequent local controller-setup cleanup changes only frame-driven menu
+copy, device assignment, and the pause-owned reconnect/takeover boundary. The
+fixed-tick sampler and predicted input vocabulary are unchanged. Explicit debug
+and fat-LTO release regeneration reported all 18 fixture files unchanged,
+including normalized checkpoints, stable-ID relationships, ordered semantic
+events, final ticks/results, and per-tick hashes. The compiled digest therefore
+remains
+`cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6`,
+and BF001 tick 1 remains `cf49d1dde67d32a9`.
+
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
 `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629`

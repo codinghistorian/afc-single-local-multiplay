@@ -54,14 +54,6 @@ impl ControllerFamily {
         }
     }
 
-    pub const fn back_label(self) -> &'static str {
-        match self {
-            Self::Xbox | Self::Nintendo => "B",
-            Self::PlayStation => "Circle",
-            Self::Generic => "Right",
-        }
-    }
-
     pub const fn face_button_label(self, button: GamepadButton) -> &'static str {
         match (self, button) {
             (Self::Xbox, GamepadButton::South) => "A",

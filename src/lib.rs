@@ -479,20 +479,16 @@ pub fn build_app() -> App {
                 native_online_app::handle_overlay_unavailable_notice_dismiss,
                 (
                     user_mode::sync_user_mode_pointer_hover,
+                    user_mode::handle_local_controller_reconnect,
                     tutorial::handle_tutorial_input
                         .run_if(simulation::local_simulation_drive_enabled),
                     user_mode::handle_user_mode_input
                         .run_if(simulation::local_simulation_drive_enabled),
                     user_mode::sync_user_mode_controllers,
-                    user_mode::handle_local_controller_reconnect,
                 )
                     .chain(),
-                (
-                    combat_sfx::handle_sfx_preview_requests,
-                    audio_settings::sync_audio_playback_gains,
-                    user_mode::announce_haptic_test_results,
-                )
-                    .chain(),
+                combat_sfx::handle_sfx_preview_requests,
+                audio_settings::sync_audio_playback_gains,
                 (
                     game_state::handle_global_input,
                     tutorial::advance_tutorial_success,
@@ -808,7 +804,7 @@ pub fn build_app() -> App {
             Update,
             (
                 user_mode::update_user_mode_controls_ui,
-                user_mode::update_control_settings_ui,
+                user_mode::update_key_settings_ui,
                 user_mode::update_sound_settings_ui,
             )
                 .in_set(GameSet::Presentation),
