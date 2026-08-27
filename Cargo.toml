@@ -43,7 +43,16 @@ bot-quality = []
 trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
 steam-net = ["native-net", "dep:steamworks"]
-web-server = ["dep:axum", "dep:futures-util", "dep:tokio", "dep:wtransport"]
+web-server = [
+    "dep:axum",
+    "dep:base64",
+    "dep:futures-util",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:tokio",
+    "dep:wtransport",
+    "dep:zeroize",
+]
 # Compile-time opt-in for private debug builds that use Valve's shared
 # Spacewar App ID. build.rs rejects this feature outside guarded App ID 480
 # development builds, so it cannot be carried into a shipping client.
@@ -100,7 +109,10 @@ lightyear = { version = "=0.26.4", default-features = false, optional = true, fe
 ] }
 steamworks = { version = "=0.12.2", optional = true, default-features = false }
 axum = { version = "=0.8.9", optional = true, features = ["ws"] }
+base64 = { version = "=0.22.1", optional = true }
 futures-util = { version = "=0.3.32", optional = true, features = ["sink"] }
+hmac = { version = "=0.12.1", optional = true }
+sha2 = { version = "=0.10.9", optional = true }
 tokio = { version = "=1.53.1", optional = true, features = [
     "macros",
     "net",
@@ -110,6 +122,7 @@ tokio = { version = "=1.53.1", optional = true, features = [
     "time",
 ] }
 wtransport = { version = "=0.7.2", optional = true }
+zeroize = { version = "=1.9.0", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
