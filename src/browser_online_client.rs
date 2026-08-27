@@ -47,7 +47,11 @@ use crate::remote_online_client::{
     RemotePresentationTick, RemoteProjectionFrame, WorkerRollbackHooks, discard_projection_after,
     install_presentation_tick, projection_source_world,
 };
-use crate::rollback::{InstantRollbackTiming, RollbackMetrics};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rollback::InstantRollbackTiming;
+#[cfg(target_arch = "wasm32")]
+use crate::rollback::NoopRollbackTiming;
+use crate::rollback::RollbackMetrics;
 use crate::session::ConfirmedSessionResult;
 use crate::sim_event::{SIM_EVENT_HISTORY_TICKS, SimEventJournal};
 use crate::tick_input::{LocalSeatId, LocalTickInputState};
@@ -56,11 +60,16 @@ pub const DEFAULT_BROWSER_FIXED_STEPS_PER_SERVICE: u16 = 8;
 pub const MAX_BROWSER_FIXED_STEPS_PER_SERVICE: u16 = 64;
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
+#[cfg(not(target_arch = "wasm32"))]
+type BrowserRollbackTiming = InstantRollbackTiming;
+#[cfg(target_arch = "wasm32")]
+type BrowserRollbackTiming = NoopRollbackTiming;
+
 type LiveBrowserProtocol<E> = RemotePredictedClientProtocol<
     E,
     LiveSimulationDriver,
     WorkerRollbackHooks,
-    InstantRollbackTiming,
+    BrowserRollbackTiming,
 >;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +223,7 @@ impl From<OnlineFailure> for BrowserClientFailure {
 #[derive(Clone, Copy, Debug, Default)]
 struct BrowserSeatInput {
     latest: Option<RemoteLocalInputSample>,
+    last_input_tick: Option<SimTick>,
     next_sequence: InputSequence,
 }
 
@@ -243,6 +253,15 @@ impl BrowserSeatInput {
             seat,
             ..RemoteLocalInputSample::default()
         });
+        if let Some(last_tick) = self.last_input_tick {
+            // A repair snapshot may advance prediction past ticks for which this
+            // browser never authored an input frame. The authority retains the
+            // existing sequence epoch across repairs, so preserve the invariant
+            // that sequence distance exactly matches canonical tick distance.
+            let skipped_ticks = tick.0.saturating_sub(last_tick.0).saturating_sub(1);
+            self.next_sequence =
+                InputSequence(self.next_sequence.0.wrapping_add(skipped_ticks as u16));
+        }
         let frame = InputFrame {
             tick,
             seat,
@@ -253,6 +272,7 @@ impl BrowserSeatInput {
             released_buttons: sample.released_buttons,
             sequence: self.next_sequence,
         };
+        self.last_input_tick = Some(tick);
         self.next_sequence = InputSequence(self.next_sequence.0.wrapping_add(1));
         if let Some(latest) = self.latest.as_mut() {
             latest.pressed_buttons = InputButtons::default();
@@ -392,7 +412,7 @@ where
             match_config.manifest.match_id,
             usize::from(match_config.manifest.snapshot_history_ticks),
             rollback.clone(),
-            InstantRollbackTiming::default(),
+            BrowserRollbackTiming::default(),
         )
         .map_err(BrowserOnlineClientStartError::Prediction)?;
         let initial_time = ClientProtocolTime::default();
@@ -1553,6 +1573,32 @@ mod tests {
         assert_eq!(following.held_buttons.bits(), InputButtons::LIGHT);
         assert_eq!(following.pressed_buttons.bits(), 0);
         assert_eq!(following.sequence.0, accepted.sequence.0.wrapping_add(1));
+    }
+
+    #[test]
+    fn repair_tick_gap_advances_the_existing_input_sequence_epoch() {
+        let seat = SeatId::new(0).unwrap();
+        let mut input = BrowserSeatInput::default();
+        let before_repair = input.frame_for_tick(SimTick(119), seat);
+        input.merge(RemoteLocalInputSample {
+            seat,
+            pressed_buttons: InputButtons::new(InputButtons::LIGHT).unwrap(),
+            ..RemoteLocalInputSample::default()
+        });
+
+        let after_repair = input.frame_for_tick(SimTick(133), seat);
+        assert_eq!(
+            after_repair.sequence.0,
+            before_repair.sequence.0.wrapping_add(14)
+        );
+        assert_eq!(after_repair.pressed_buttons.bits(), InputButtons::LIGHT);
+
+        let following = input.frame_for_tick(SimTick(134), seat);
+        assert_eq!(
+            following.sequence.0,
+            after_repair.sequence.0.wrapping_add(1)
+        );
+        assert_eq!(following.pressed_buttons.bits(), 0);
     }
 
     #[test]
