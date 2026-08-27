@@ -7,6 +7,7 @@ on:
       - "Cargo.toml"
       - "build.rs"
       - "src/**"
+      - "scripts/run_wasm_determinism_probe.cjs"
       - "tests/**"
       - ".github/workflows/cross-platform-determinism.yml"
   push:
@@ -17,6 +18,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  linux-wasm-equivalence:
+    name: Linux ↔ browser WASM production tape
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.94.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install Linux and WebAssembly prerequisites
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libasound2-dev libudev-dev libwayland-dev libx11-dev libxi-dev
+          libxkbcommon-dev pkg-config
+      - name: Install matching wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.121 --locked
+      - name: Run Linux production-simulation probe
+        run: |
+          mkdir -p target/cross-target-determinism
+          cargo run --locked --no-default-features --bin afc-determinism-probe --quiet \
+            > target/cross-target-determinism/linux.json
+      - name: Build and run browser-target WASM production-simulation probe
+        run: |
+          cargo build --locked --target wasm32-unknown-unknown \
+            --no-default-features --features web --lib
+          wasm-bindgen target/wasm32-unknown-unknown/debug/ffc_prototype.wasm \
+            --target nodejs --out-dir target/cross-target-determinism/wasm-bindgen
+          node scripts/run_wasm_determinism_probe.cjs \
+            target/cross-target-determinism/wasm-bindgen/ffc_prototype.js \
+            > target/cross-target-determinism/wasm.json
+      - name: Require byte-identical Linux and WASM reports
+        run: |
+          diff --unified \
+            target/cross-target-determinism/linux.json \
+            target/cross-target-determinism/wasm.json
+          cat target/cross-target-determinism/linux.json
+
   frozen-determinism-contracts:
     name: Frozen contracts (${{ matrix.os }})
     strategy:

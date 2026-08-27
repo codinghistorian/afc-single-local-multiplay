@@ -5,6 +5,9 @@ edition = "2024"
 default-run = "ffc-prototype"
 autobins = false
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [[bin]]
 name = "ffc-prototype"
 path = "src/main.rs"
@@ -17,6 +20,10 @@ path = "src/bin/afc-dedicated.rs"
 name = "afc-multiplayer-profile"
 path = "src/bin/afc-multiplayer-profile.rs"
 required-features = ["perf-alloc"]
+
+[[bin]]
+name = "afc-determinism-probe"
+path = "src/bin/afc-determinism-probe.rs"
 
 [features]
 default = ["native", "dev-hot-reload"]

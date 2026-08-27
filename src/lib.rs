@@ -33,6 +33,7 @@ mod control_settings;
 mod controller_haptics;
 pub mod dedicated_server;
 pub mod determinism;
+pub mod determinism_probe;
 pub mod ecs_identity;
 mod effects;
 mod equipment;
@@ -114,6 +115,13 @@ mod techniques;
 pub mod tick_input;
 mod tutorial;
 mod user_mode;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn afc_determinism_probe_json() -> Result<String, wasm_bindgen::JsValue> {
+    determinism_probe::run_cross_target_probe_json()
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
 
 #[cfg(target_arch = "wasm32")]
 use bevy::asset::{AssetMetaCheck, AssetPlugin};

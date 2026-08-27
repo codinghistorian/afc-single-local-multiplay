@@ -21,10 +21,19 @@ The checked-in contract is:
 | 934 (final) | `275c66311d2da33d` |
 
 The final canonical result is team 1 winning at tick 934. The GitHub Actions
-workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
-all 21 checked-in read-only versioned behavior tapes, and the compact
-authored-content matrix on Linux, Windows, and macOS in both Cargo debug and
-release profiles. Changes under `tests/` trigger the same matrix. Workflow
+workflow `cross-platform-determinism.yml` first runs this same production tape
+through `afc-determinism-probe` as Linux native code and through the exported
+`afc_determinism_probe_json` function in an actual
+`wasm32-unknown-unknown` module under Node. The synthetic manifest, 8
+checkpoints, final tick/hash, and winner are serialized as
+`afc-linux-wasm-determinism-v1`; CI requires the two JSON files to be
+byte-identical. This is executable browser-target simulation evidence, not a
+compile-only WASM check or a reduced math surrogate.
+
+The workflow also runs this exact fixture, all 21 checked-in read-only versioned
+behavior tapes, and the compact authored-content matrix on Linux, Windows, and
+macOS in both Cargo debug and release profiles. Changes under `src/`, `tests/`,
+the probe runner, Cargo identity, or the workflow trigger the gate. Workflow
 configuration is not a claim that the current release candidate has passed:
 attach its successful run before acceptance. The headless test composition itself
 creates no window, renderer, audio output, or UI. A mismatch fails at the first

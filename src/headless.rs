@@ -555,18 +555,14 @@ mod tests {
         MatchBuildOptions, build_headless_match_config, canonical_manifest_hash,
     };
     use crate::network_protocol::{
-        AuthorityKind, BuildId, CompatibilityId, DefinitionId, FighterSlotConfig,
-        GameplayContentHash, InputButtons, InputFrame, InputSequence, MAX_FIGHTERS,
-        MAX_NORMAL_ROLLBACK_TICKS, MIN_SNAPSHOT_HISTORY_TICKS, ManifestHash, MatchId, PeerId,
-        ProtocolVersion, QuantizedAxis, ReplayFormatVersion, SIMULATION_HZ, SeatAssignment, SeatId,
-        SeatOwnership, SimulationVersion, TeamId as ProtocolTeamId,
+        AuthorityKind, BuildId, GameplayContentHash, InputButtons, InputFrame, InputSequence,
+        MAX_FIGHTERS, MatchId, PeerId, QuantizedAxis,
     };
     use crate::sim_event::{
         AbilityLifecycleEvent, FighterLifecycleEvent, PresentationEventCursor,
         PresentationEventRouter, PresentationPolicy, SimEvent, SimEventKind, SimEventSource,
     };
     use crate::simulation::{ElapsedTicks, TickTimer, seconds_to_ticks_ceil};
-    use crate::snapshot::MatchResultSnapshot;
     use crate::styles::{FIGHTER_STYLE_KINDS, FighterStyle};
 
     const SEED: u64 = 0xAFC0_5EED_1234_5678;
@@ -576,72 +572,7 @@ mod tests {
     }
 
     fn fixture_for_arena(arena_index: usize) -> HeadlessMatchConfig {
-        let peer = PeerId::new(77).unwrap();
-        let ownership = SeatOwnership::from_assignments(&[
-            SeatAssignment {
-                seat: SeatId::new(0).unwrap(),
-                fighter: FighterId::new(0).unwrap(),
-                owner: SeatOwner::Peer(peer),
-            },
-            SeatAssignment {
-                seat: SeatId::new(1).unwrap(),
-                fighter: FighterId::new(1).unwrap(),
-                owner: SeatOwner::AuthorityBot,
-            },
-        ])
-        .unwrap();
-        let mut slots = [FighterSlotConfig::default(); MAX_FIGHTERS];
-        let mut setup = LocalSetup::default();
-        setup.arena_index = arena_index;
-        for index in 0..2 {
-            slots[index] = FighterSlotConfig {
-                occupied: true,
-                fighter: FighterId::from_index(index).unwrap(),
-                team: ProtocolTeamId::new(team_definition_id(setup.slots[index].team)).unwrap(),
-                character: DefinitionId::new(
-                    CHARACTER_KINDS
-                        .iter()
-                        .position(|kind| *kind == setup.slots[index].character)
-                        .unwrap() as u16,
-                )
-                .unwrap(),
-                style: DefinitionId::new(style_definition_id(setup.slots[index].style)).unwrap(),
-                equipment: DefinitionId::new(equipment_definition_id(setup.slots[index].equipment))
-                    .unwrap(),
-            };
-        }
-        let manifest = MatchManifest {
-            compatibility: CompatibilityId {
-                protocol: ProtocolVersion::new(1).unwrap(),
-                simulation: SimulationVersion::new(crate::match_config::CURRENT_SIMULATION_VERSION)
-                    .unwrap(),
-                replay: ReplayFormatVersion::new(1).unwrap(),
-                build: BuildId::new([0xB1; 16]).unwrap(),
-                gameplay_content: GameplayContentHash::new([0xC7; 32]).unwrap(),
-            },
-            manifest_hash: ManifestHash(0xAFC0),
-            match_id: MatchId::new(*b"headless-fixture").unwrap(),
-            authority: AuthorityKind::Dedicated,
-            trusted_results: true,
-            arena: DefinitionId::new(setup.arena_index as u16).unwrap(),
-            rules: DefinitionId::new(setup.rule_index as u16).unwrap(),
-            slots,
-            ownership,
-            master_gameplay_seed: SEED,
-            rng_scheme_version: 1,
-            tick_rate_hz: SIMULATION_HZ,
-            input_delay_ticks: 2,
-            rollback_limit_ticks: MAX_NORMAL_ROLLBACK_TICKS,
-            snapshot_history_ticks: MIN_SNAPSHOT_HISTORY_TICKS,
-            agreed_start_tick: SimTick(120),
-        };
-        let mut local_setup = setup;
-        local_setup.replay_seed = SEED;
-        HeadlessMatchConfig {
-            snapshot_contract: snapshot_contract_for_manifest(&manifest),
-            manifest,
-            local_setup,
-        }
+        crate::determinism_probe::stock_probe_config_for_arena(arena_index)
     }
 
     fn compact_content_fixture(arena_index: usize) -> HeadlessMatchConfig {
@@ -715,18 +646,6 @@ mod tests {
                 status: AuthorityInputStatus::Committed,
             });
         }
-        committed
-    }
-
-    fn outward_ringout_inputs(config: &HeadlessMatchConfig, tick: SimTick) -> CommittedTickInputs {
-        let mut committed = neutral_inputs(config, tick);
-        let record = committed.by_seat[0]
-            .as_mut()
-            .expect("golden fixture owns the first active seat");
-        // Crown Ring's rebuilt side wings are intentionally bounded. Route the
-        // red fighter through the unobstructed camera-near apron instead.
-        record.frame.movement_y = QuantizedAxis::new(127).unwrap();
-        record.frame.held_buttons = InputButtons::default();
         committed
     }
 
@@ -1345,50 +1264,30 @@ mod tests {
 
     #[test]
     fn cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result() {
-        const EXPECTED_CHECKPOINTS: [(u64, u64); 8] = [
-            (1, 0x12e0_2721_5d80_758b),
-            (120, 0xbed3_89b6_27bc_18a0),
-            (240, 0xad15_7a8b_1aa6_3457),
-            (360, 0x8e47_d2ab_fa4f_1120),
-            (480, 0xe94d_ca2a_0b78_cf30),
-            (600, 0xe686_3f85_6d24_34b7),
-            (720, 0xaa3e_6a52_f98b_6238),
-            (840, 0x78c6_457e_49b8_ee34),
+        const EXPECTED_CHECKPOINTS: [(u64, &str); 8] = [
+            (1, "12e027215d80758b"),
+            (120, "bed389b627bc18a0"),
+            (240, "ad157a8b1aa63457"),
+            (360, "8e47d2abfa4f1120"),
+            (480, "e94dca2a0b78cf30"),
+            (600, "e6863f856d2434b7"),
+            (720, "aa3e6a52f98b6238"),
+            (840, "78c6457e49b8ee34"),
         ];
-        const EXPECTED_FINAL_TICK: SimTick = SimTick(934);
-        const EXPECTED_FINAL_HASH: u64 = 0x275c_6631_1d2d_a33d;
-
-        let config = fixture();
+        let report = crate::determinism_probe::run_cross_target_probe().unwrap();
+        let checkpoints = report
+            .checkpoints
+            .iter()
+            .map(|checkpoint| (checkpoint.tick, checkpoint.canonical_hash.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoints, EXPECTED_CHECKPOINTS);
         assert_eq!(
-            config.manifest.compatibility.simulation.get(),
+            report.simulation_version,
             crate::match_config::CURRENT_SIMULATION_VERSION
         );
-        let mut driver = build_headless_simulation(config.clone()).unwrap();
-        let mut checkpoints = Vec::new();
-
-        for raw_tick in 1..=2_400 {
-            let tick = SimTick(raw_tick);
-            AuthoritySimulation::step(&mut driver, &outward_ringout_inputs(&config, tick)).unwrap();
-            if raw_tick == 1 || raw_tick % 120 == 0 {
-                let current = driver.capture_live_snapshot().unwrap();
-                checkpoints.push((raw_tick, current.canonical_hash().unwrap()));
-            }
-            if driver.world().resource::<MatchState>().phase == MatchPhase::Results {
-                break;
-            }
-        }
-
-        let snapshot = driver.capture_live_snapshot().unwrap();
-        assert_eq!(checkpoints, EXPECTED_CHECKPOINTS);
-        assert_eq!(snapshot.header.tick, EXPECTED_FINAL_TICK);
-        assert_eq!(snapshot.canonical_hash().unwrap(), EXPECTED_FINAL_HASH);
-        assert_eq!(
-            snapshot.match_state.result,
-            MatchResultSnapshot::TeamWinner {
-                team: 1,
-                decided_tick: EXPECTED_FINAL_TICK,
-            }
-        );
+        assert_eq!(report.final_tick, 934);
+        assert_eq!(report.final_hash, "275c66311d2da33d");
+        assert_eq!(report.winning_team, 1);
     }
 
     #[test]
