@@ -144,6 +144,14 @@ corpus contains only `hash:` line changes; normalized checkpoints, stable-ID
 relationships, canonical event ticks and payloads, final ticks, and results are
 identical. Debug and fat-LTO release reproduce the checked-in corpus.
 
+The responsive browser/settings follow-up changes only `lib.rs`, `user_mode.rs`,
+and a menu image, all outside the conservative gameplay-content list. WASM uses
+a 1024×576 initial canvas with presentation-only UI scale; Backspace navigation,
+reconnect cancellation, and hover styling run at frame rate. All 20 read-only
+behavior tapes and digest
+`94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a`
+remain unchanged.
+
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
 `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629`

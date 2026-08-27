@@ -2491,6 +2491,7 @@ fn user_mode_back_button() -> impl Bundle {
             height: Val::Percent(5.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(1.0)),
             ..default()
         },
         BackgroundColor(Color::NONE),
@@ -4350,7 +4351,7 @@ pub fn handle_user_mode_input(
                 .unwrap_or(false),
             _ => false,
         };
-        if keys.just_pressed(KeyCode::Escape)
+        if user_mode_back_key_pressed(&keys)
             || p1_requested_exit
             || pointer_action == Some(UserModeUiAction::Back)
         {
@@ -4505,7 +4506,7 @@ pub fn handle_user_mode_input(
 
     if user_mode.key_capture.is_some() {
         if pointer_action == Some(UserModeUiAction::Back)
-            || keys.just_pressed(KeyCode::Escape)
+            || user_mode_back_key_pressed(&keys)
             || controller_action == Some(UserModeUiAction::Back)
         {
             route_user_mode_action(&mut user_mode, UserModeUiAction::Back);
@@ -4579,8 +4580,7 @@ pub fn handle_user_mode_input(
                         .then_some(UserModeUiAction::ConfirmKeyReset)
                 })
                 .or_else(|| {
-                    keys.just_pressed(KeyCode::Escape)
-                        .then_some(UserModeUiAction::CancelKeyReset)
+                    user_mode_back_key_pressed(&keys).then_some(UserModeUiAction::CancelKeyReset)
                 });
             match action {
                 Some(UserModeUiAction::ConfirmKeyReset) => {
@@ -4611,7 +4611,10 @@ pub fn handle_user_mode_input(
         }
     }
 
-    if pointer_action.is_none() && user_mode.screen == UserModeScreen::CharacterSelect {
+    if pointer_action.is_none()
+        && user_mode.screen == UserModeScreen::CharacterSelect
+        && !user_mode_back_key_pressed(&keys)
+    {
         if let Some(outcome) = handle_character_device_actions(
             &mut user_mode,
             &keys,
@@ -4684,11 +4687,16 @@ pub fn handle_user_mode_input(
             &mut menu_navigation.seats[0],
         )
     };
-    let keyboard_action = before_device_join
-        .then(|| keyboard_user_mode_action(&user_mode, &keys))
-        .flatten()
+    let keyboard_action = user_mode_back_key_pressed(&keys)
+        .then_some(UserModeUiAction::Back)
+        .or_else(|| {
+            before_device_join
+                .then(|| keyboard_user_mode_action(&user_mode, &keys))
+                .flatten()
+        })
         .or_else(|| keyboard_menu_confirm_action(&user_mode, &keys));
     let action = pointer_action
+        .or_else(|| user_mode_back_key_pressed(&keys).then_some(UserModeUiAction::Back))
         .or(device_action)
         .or(keyboard_action)
         .or(controller_action);
@@ -5300,8 +5308,8 @@ pub fn handle_local_controller_reconnect(
             return;
         }
 
-        let escape_pressed = keys.just_pressed(KeyCode::Escape);
-        let (back_pressed, confirm_pressed) = gamepads
+        let user_back_pressed = user_mode_back_key_pressed(&keys);
+        let (gamepad_back_pressed, confirm_pressed) = gamepads
             .get(pending.entity)
             .map(|(_, gamepad)| {
                 (
@@ -5311,11 +5319,11 @@ pub fn handle_local_controller_reconnect(
             })
             .unwrap_or_default();
 
-        if escape_pressed || back_pressed {
-            if escape_pressed {
-                keys.clear_just_pressed(KeyCode::Escape);
+        if user_back_pressed || gamepad_back_pressed {
+            if user_back_pressed {
+                clear_user_mode_back_key_pressed(&mut keys);
             }
-            if back_pressed {
+            if gamepad_back_pressed {
                 let Ok((_, mut gamepad)) = gamepads.get_mut(pending.entity) else {
                     return;
                 };
@@ -6201,8 +6209,19 @@ pub fn update_user_mode_button_styles(
         &mut buttons
     {
         if back_button.is_some() {
-            *background = BackgroundColor(Color::NONE);
-            *border = BorderColor::all(Color::NONE);
+            let (background_color, border_color) = match interaction {
+                Interaction::Pressed => (
+                    Color::srgba(0.42, 0.31, 0.13, 0.92),
+                    Color::srgb(1.0, 0.86, 0.48),
+                ),
+                Interaction::Hovered => (
+                    Color::srgba(0.19, 0.16, 0.1, 0.88),
+                    Color::srgb(0.94, 0.78, 0.42),
+                ),
+                Interaction::None => (Color::NONE, Color::NONE),
+            };
+            *background = BackgroundColor(background_color);
+            *border = BorderColor::all(border_color);
             continue;
         }
         let selected = user_mode_action_selected(&user_mode, *action);
@@ -6607,6 +6626,15 @@ fn user_mode_pressed(keys: &ButtonInput<KeyCode>) -> bool {
         && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight))
 }
 
+fn user_mode_back_key_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace)
+}
+
+fn clear_user_mode_back_key_pressed(keys: &mut ButtonInput<KeyCode>) {
+    keys.clear_just_pressed(KeyCode::Escape);
+    keys.clear_just_pressed(KeyCode::Backspace);
+}
+
 fn vertical_previous_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW)
 }
@@ -6619,7 +6647,7 @@ fn keyboard_user_mode_action(
     user_mode: &UserModeState,
     keys: &ButtonInput<KeyCode>,
 ) -> Option<UserModeUiAction> {
-    if keys.just_pressed(KeyCode::Escape) {
+    if user_mode_back_key_pressed(keys) {
         return Some(UserModeUiAction::Back);
     }
 
@@ -8094,6 +8122,19 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_backspace_maps_to_back_action() {
+        let mut user_mode = UserModeState::default();
+        user_mode.enter_mode_select();
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Backspace);
+
+        assert_eq!(
+            keyboard_user_mode_action(&user_mode, &keys),
+            Some(UserModeUiAction::Back)
+        );
+    }
+
+    #[test]
     fn character_select_keyboard_and_controller_directions_map_to_grid_actions() {
         let mut user_mode = UserModeState::default();
         user_mode.enter_character_select();
@@ -9272,6 +9313,42 @@ mod tests {
     }
 
     #[test]
+    fn takeover_backspace_cancel_and_retain_keyboard_one() {
+        let mut app = takeover_test_app(UserModeScreen::BattleResult);
+        let controller = app
+            .world_mut()
+            .spawn((
+                pressed_a_gamepad(),
+                connected_controller_info(ControllerFamily::Xbox),
+            ))
+            .id();
+        app.update();
+        release_and_clear_gamepad(&mut app, controller, GamepadButton::South);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Backspace);
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<UserModeState>().input_assignments[0],
+            LocalInputAssignment::Keyboard(0)
+        );
+        assert!(
+            app.world()
+                .resource::<LocalControllerReconnect>()
+                .pending_takeover
+                .is_none()
+        );
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .just_pressed(KeyCode::Backspace),
+            "Backspace cancellation should be consumed"
+        );
+    }
+
+    #[test]
     fn disconnected_takeover_candidate_cancels_without_changing_p1() {
         let mut app = takeover_test_app(UserModeScreen::CharacterSelect);
         let controller = app
@@ -9844,6 +9921,28 @@ mod tests {
         assert_eq!(
             app.world().resource::<UserModeState>().selected_character(),
             CharacterKind::Cat
+        );
+    }
+
+    #[test]
+    fn hovering_back_button_highlights_it() {
+        let mut app = App::new();
+        app.insert_resource(UserModeState::default())
+            .add_systems(Update, update_user_mode_button_styles);
+        let back = app
+            .world_mut()
+            .spawn((user_mode_back_button(), Interaction::Hovered))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<BackgroundColor>(back).unwrap().0,
+            Color::srgba(0.19, 0.16, 0.1, 0.88)
+        );
+        assert_eq!(
+            app.world().get::<BorderColor>(back).unwrap().top,
+            Color::srgb(0.94, 0.78, 0.42)
         );
     }
 

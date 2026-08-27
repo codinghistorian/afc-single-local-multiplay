@@ -121,7 +121,15 @@ use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, PresentMode, WindowResolution};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::constants::{WINDOW_HEIGHT, WINDOW_WIDTH};
+
+#[cfg(target_arch = "wasm32")]
+const WEB_WINDOW_WIDTH: u32 = 1024;
+#[cfg(target_arch = "wasm32")]
+const WEB_WINDOW_HEIGHT: u32 = 576;
+#[cfg(target_arch = "wasm32")]
+const WEB_UI_SCALE: f32 = 0.8;
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 enum GameSet {
@@ -166,7 +174,7 @@ fn primary_window_config() -> Window {
     {
         let mut window = Window {
             title: "Animal Fighter Club".to_string(),
-            resolution: WindowResolution::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+            resolution: WindowResolution::new(WEB_WINDOW_WIDTH, WEB_WINDOW_HEIGHT),
             present_mode: primary_present_mode(),
             ..default()
         };
@@ -224,6 +232,10 @@ pub fn build_app() -> App {
     app.add_plugins(LogPlugin::default());
     let native_online_runtime = native_online::NativeOnlineRuntime::default();
     app.add_plugins(default_plugins);
+
+    #[cfg(target_arch = "wasm32")]
+    app.insert_resource(UiScale(WEB_UI_SCALE));
+
     app.add_plugins(controller_haptics::ControllerHapticsPlugin);
     app.insert_non_send_resource(online_client::EmbeddedOnlineClientController::default());
     app.insert_non_send_resource(native_online_runtime);
