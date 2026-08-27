@@ -43,6 +43,7 @@ bot-quality = []
 trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
 steam-net = ["native-net", "dep:steamworks"]
+web-server = ["dep:axum", "dep:futures-util", "dep:tokio", "dep:wtransport"]
 # Compile-time opt-in for private debug builds that use Valve's shared
 # Spacewar App ID. build.rs rejects this feature outside guarded App ID 480
 # development builds, so it cannot be carried into a shipping client.
@@ -98,12 +99,34 @@ lightyear = { version = "=0.26.4", default-features = false, optional = true, fe
     "crossbeam",
 ] }
 steamworks = { version = "=0.12.2", optional = true, default-features = false }
+axum = { version = "=0.8.9", optional = true, features = ["ws"] }
+futures-util = { version = "=0.3.32", optional = true, features = ["sink"] }
+tokio = { version = "=1.53.1", optional = true, features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+wtransport = { version = "=0.7.2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Storage", "Window"] }
+web-sys = { version = "0.3", features = [
+    "BinaryType",
+    "Event",
+    "MessageEvent",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Storage",
+    "WebSocket",
+    "Window",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

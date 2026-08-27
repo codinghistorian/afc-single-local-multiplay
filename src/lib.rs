@@ -116,6 +116,7 @@ mod techniques;
 pub mod tick_input;
 mod tutorial;
 mod user_mode;
+pub mod web_endpoint_adapters;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]

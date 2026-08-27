@@ -1,8 +1,8 @@
 # Multiplayer Architecture and Delivery Plan
 
 - Status: Implemented architecture; release-candidate acceptance still pending
-- Last updated: 2026-07-26
-- Target platform: Steam native client, with local/offline play retained
+- Last updated: 2026-08-27
+- Target platforms: Steam native and itch.io browser, with local/offline play retained
 - Initial match size: four fighter slots
 
 This document is the implementation authority for Animal Fighter Club multiplayer.
@@ -34,6 +34,8 @@ bounded client rollback.
   but do not participate in rollback.
 - Steam lobbies provide discovery and invitations. Steam Networking Sockets and
   Steam Datagram Relay provide the native gameplay connection.
+- The browser client uses WebTransport datagrams when available and a binary
+  WebSocket fallback to a hosted authority running the same AFC protocol.
 - Private and friends-only matches may use an embedded listen authority. Ranked,
   leaderboard, or reward-bearing matches must use a dedicated authority.
 
@@ -53,8 +55,9 @@ implementation if any of them change materially.
 - A disconnected player may reclaim the same slot during a bounded grace period.
 - Offline single-player and local multiplayer continue to use the same simulation
   as online matches.
-- The Steam release is the primary online target. The browser build may remain
-  offline/local until a separate WebTransport-backed service is justified.
+- Steam and browser clients share compatibility IDs, manifests, snapshots,
+  canonical events, prediction, rollback, and authority behavior. Platform
+  identity and transport admission remain adapters outside the simulation.
 - Online couch co-op is representable: one Steam peer may own multiple local seats,
   while the match still contains no more than four fighter slots.
 
@@ -102,6 +105,9 @@ The migration gaps that motivated this plan are now closed in repository code:
 - AFC's bounded protocol runs over in-process and ordinary UDP test transports; the
   native build provides Steam lobby, authentication, P2P/SDR, reconnect, rematch,
   and player-facing application composition behind platform adapters.
+- The main-thread-only browser client and bounded WebTransport/WebSocket endpoint
+  adapters are implemented. Hosted room/admission orchestration is tracked as a
+  separate deployment boundary and must attach peers to `AuthorityPeerHub`.
 
 This is not a Steam release-approval claim. Real two-machine Steam/SDR behavior,
 physical controller and Steam Deck coverage, supported-OS determinism,
