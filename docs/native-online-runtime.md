@@ -55,11 +55,13 @@ validated values as release identity. The App ID contributes to
 cannot advertise the same multiplayer build identity. A verified depot then
 launches through Steam without custom AFC environment variables.
 
-Compatibility digest v2 is an intentional one-time incompatibility with earlier
+Compatibility digest v3 is an intentional one-time incompatibility with earlier
 development binaries. It hashes normalized paths and LF-normalized bytes for every
 Rust source, Cargo manifests/lockfile, enabled Cargo features, and `PROFILE`, in
 addition to the configured release label and Steam App ID. A debug client compiled
 with the real App ID therefore cannot advertise a release client's build identity.
+The `web` and `web-server` delivery-role features are the sole normalized pair so
+the browser client and its hosted authority can share that identity.
 The separate gameplay-content v2 digest remains presentation-independent and now
 covers all embedded authored simulation data, including
 `arts/champions_court.ron`.

@@ -27,8 +27,17 @@ through `afc-determinism-probe` as Linux native code and through the exported
 `wasm32-unknown-unknown` module under Node. The synthetic manifest, 8
 checkpoints, final tick/hash, and winner are serialized as
 `afc-linux-wasm-determinism-v1`; CI requires the two JSON files to be
-byte-identical. This is executable browser-target simulation evidence, not a
-compile-only WASM check or a reduced math surrogate.
+byte-identical. Both probes and the hosted-authority comparison use the Cargo
+release profile and the same immutable commit label as the deployable artifacts.
+This is executable browser-target simulation evidence, not a compile-only WASM
+check or a reduced math surrogate.
+
+The same job also compares the complete deterministic release-identity JSON
+from the native probe and the browser module. Compatibility digest v3
+normalizes only the mutually exclusive `web` and `web-server` delivery roles;
+this executable comparison proves a browser artifact can accept its matching
+authority while source, profile, label, content, protocol, and every unrelated
+feature boundary remain strict.
 
 The workflow also runs this exact fixture, all 21 checked-in read-only versioned
 behavior tapes, and the compact authored-content matrix on Linux, Windows, and

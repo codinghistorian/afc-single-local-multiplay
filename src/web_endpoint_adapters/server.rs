@@ -1,6 +1,7 @@
 use core::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -11,6 +12,11 @@ use super::{WebEndpointConfig, WebEndpointConfigError, WebEndpointMetrics};
 use crate::network_io::{
     AfcDatagram, MAX_AFC_DATAGRAM_BYTES, NonBlockingDatagramEndpoint, ReceiveOutcome, SendOutcome,
 };
+use crate::web_admission::{
+    ADMISSION_ACCEPTED_FRAME, MAX_ADMISSION_FRAME_BYTES, decode_admission_request,
+};
+
+pub const DEFAULT_WEB_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct ServerEndpointShared {
@@ -230,6 +236,10 @@ impl Drop for ServerDatagramBridge {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerWebAdapterError {
+    AdmissionTimeout,
+    AdmissionReceive,
+    AdmissionSend,
+    MalformedAdmissionFrame,
     WebSocketReceive,
     WebSocketSend,
     NonBinaryWebSocketFrame,
@@ -249,6 +259,92 @@ impl fmt::Display for ServerWebAdapterError {
 }
 
 impl std::error::Error for ServerWebAdapterError {}
+
+/// Receives the one reliable pre-protocol WebSocket message. The returned
+/// ticket is still untrusted and must be verified and consumed before the
+/// socket is acknowledged or attached to an authority.
+pub async fn receive_websocket_admission(
+    socket: &mut WebSocket,
+    timeout: Duration,
+) -> Result<String, ServerWebAdapterError> {
+    let message = tokio::time::timeout(timeout, socket.recv())
+        .await
+        .map_err(|_| ServerWebAdapterError::AdmissionTimeout)?
+        .ok_or(ServerWebAdapterError::AdmissionReceive)?
+        .map_err(|_| ServerWebAdapterError::AdmissionReceive)?;
+    let Message::Binary(frame) = message else {
+        return Err(ServerWebAdapterError::MalformedAdmissionFrame);
+    };
+    decode_admission_request(&frame)
+        .map(str::to_owned)
+        .map_err(|_| ServerWebAdapterError::MalformedAdmissionFrame)
+}
+
+pub async fn acknowledge_websocket_admission(
+    socket: &mut WebSocket,
+) -> Result<(), ServerWebAdapterError> {
+    socket
+        .send(Message::binary(ADMISSION_ACCEPTED_FRAME.to_vec()))
+        .await
+        .map_err(|_| ServerWebAdapterError::AdmissionSend)
+}
+
+/// Reliable WebTransport stream retained until the caller has atomically
+/// consumed the join ticket and attached the bridge endpoint.
+pub struct WebTransportAdmissionResponder {
+    sender: wtransport::SendStream,
+}
+
+impl WebTransportAdmissionResponder {
+    pub async fn acknowledge(mut self) -> Result<(), ServerWebAdapterError> {
+        self.sender
+            .write_all(&ADMISSION_ACCEPTED_FRAME)
+            .await
+            .map_err(|_| ServerWebAdapterError::AdmissionSend)?;
+        self.sender
+            .finish()
+            .await
+            .map_err(|_| ServerWebAdapterError::AdmissionSend)
+    }
+}
+
+/// Accepts exactly one bounded, client-initiated bidirectional stream for the
+/// admission frame. AFC gameplay remains on unreliable datagrams afterward.
+pub async fn receive_webtransport_admission(
+    connection: &wtransport::Connection,
+    timeout: Duration,
+) -> Result<(String, WebTransportAdmissionResponder), ServerWebAdapterError> {
+    tokio::time::timeout(timeout, async {
+        let (sender, mut receiver) = connection
+            .accept_bi()
+            .await
+            .map_err(|_| ServerWebAdapterError::AdmissionReceive)?;
+        let mut frame = Vec::with_capacity(MAX_ADMISSION_FRAME_BYTES);
+        let mut chunk = [0_u8; MAX_ADMISSION_FRAME_BYTES + 1];
+        loop {
+            let Some(read) = receiver
+                .read(&mut chunk)
+                .await
+                .map_err(|_| ServerWebAdapterError::AdmissionReceive)?
+            else {
+                break;
+            };
+            if read == 0 {
+                continue;
+            }
+            if frame.len().saturating_add(read) > MAX_ADMISSION_FRAME_BYTES {
+                return Err(ServerWebAdapterError::MalformedAdmissionFrame);
+            }
+            frame.extend_from_slice(&chunk[..read]);
+        }
+        let ticket = decode_admission_request(&frame)
+            .map(str::to_owned)
+            .map_err(|_| ServerWebAdapterError::MalformedAdmissionFrame)?;
+        Ok((ticket, WebTransportAdmissionResponder { sender }))
+    })
+    .await
+    .map_err(|_| ServerWebAdapterError::AdmissionTimeout)?
+}
 
 pub async fn run_websocket_datagram_adapter(
     socket: WebSocket,

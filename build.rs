@@ -121,6 +121,7 @@ fn main() {
     .unwrap_or_else(|error| panic!("{error}"));
 
     println!("cargo:rustc-env=AFC_COMPILED_RELEASE_LABEL={configured}");
+    println!("cargo:rustc-env=AFC_COMPILED_PROFILE={profile}");
     println!(
         "cargo:rustc-env=AFC_COMPILED_SHIPPING={}",
         u8::from(release_shipping)
@@ -129,7 +130,7 @@ fn main() {
         println!("cargo:rustc-env=AFC_COMPILED_STEAM_APP_ID={app_id}");
     }
 
-    let enabled_features = enabled_cargo_features();
+    let enabled_features = compatibility_cargo_features(enabled_cargo_features());
     let mut build_inputs = build_source_inputs(&project_root)
         .unwrap_or_else(|error| panic!("failed to read build compatibility inputs: {error}"));
     build_inputs.extend(build_metadata_inputs(
@@ -145,7 +146,7 @@ fn main() {
 
     println!(
         "cargo:rustc-env=AFC_COMPILED_BUILD_ID={}",
-        hex(&expanded_digest("afc-build-v2", &build_inputs, 16))
+        hex(&expanded_digest("afc-build-v3", &build_inputs, 16))
     );
     println!(
         "cargo:rustc-env=AFC_COMPILED_GAMEPLAY_CONTENT_HASH={}",
@@ -450,6 +451,17 @@ fn enabled_cargo_features() -> Vec<String> {
         .filter_map(|(name, _)| name.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
         .collect::<Vec<_>>();
     features.sort_unstable();
+    features
+}
+
+/// `web` and `web-server` are two delivery roles for one multiplayer build.
+/// Their source tree, profile, release label, and gameplay digest must agree,
+/// but the mutually exclusive endpoint feature itself cannot split the
+/// compatibility identity that the browser validates against its authority.
+pub(crate) fn compatibility_cargo_features(mut features: Vec<String>) -> Vec<String> {
+    features.retain(|feature| !matches!(feature.as_str(), "WEB" | "WEB_SERVER"));
+    features.sort_unstable();
+    features.dedup();
     features
 }
 

@@ -21,6 +21,8 @@ use crate::network_io::{
     AfcDatagram, MAX_AFC_DATAGRAM_BYTES, NonBlockingDatagramEndpoint, ReceiveOutcome, SendOutcome,
 };
 
+const BROWSER_ADMISSION_TIMEOUT_MS: i32 = 10_000;
+
 // web-sys still gates WebTransport itself behind its unstable-API cfg even
 // though the browser API is shipping. Keep the small stable surface used here
 // explicit while using web-sys's stable Streams bindings.
@@ -42,8 +44,20 @@ extern "C" {
     #[wasm_bindgen(method, getter)]
     fn datagrams(this: &JsWebTransport) -> JsWebTransportDatagrams;
 
+    #[wasm_bindgen(method, js_name = createBidirectionalStream)]
+    fn create_bidirectional_stream(this: &JsWebTransport) -> Promise;
+
     #[wasm_bindgen(method)]
     fn close(this: &JsWebTransport);
+
+    #[derive(Clone)]
+    type JsWebTransportBidirectionalStream;
+
+    #[wasm_bindgen(method, getter)]
+    fn readable(this: &JsWebTransportBidirectionalStream) -> ReadableStream;
+
+    #[wasm_bindgen(method, getter)]
+    fn writable(this: &JsWebTransportBidirectionalStream) -> WritableStream;
 
     #[derive(Clone)]
     type JsWebTransportDatagrams;
@@ -73,15 +87,19 @@ enum BrowserConnectionState {
 struct BrowserInboundState {
     config: WebEndpointConfig,
     connection: BrowserConnectionState,
+    admission_pending: bool,
+    admission_timeout_handle: Option<i32>,
     inbound: VecDeque<AfcDatagram>,
     metrics: WebEndpointMetrics,
 }
 
 impl BrowserInboundState {
-    fn new(config: WebEndpointConfig) -> Self {
+    fn new(config: WebEndpointConfig, admission_pending: bool) -> Self {
         Self {
             config,
             connection: BrowserConnectionState::Connecting,
+            admission_pending,
+            admission_timeout_handle: None,
             inbound: VecDeque::with_capacity(config.inbound_capacity_packets),
             metrics: WebEndpointMetrics::default(),
         }
@@ -142,6 +160,8 @@ pub enum BrowserTransportPreference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserWebEndpointBuildError {
     InvalidConfig(WebEndpointConfigError),
+    InvalidAdmissionTicket,
+    AdmissionRejected,
     WebSocketUnavailable,
     WebTransportUnavailable,
     WebTransportConnection,
@@ -169,6 +189,7 @@ pub struct BrowserWebSocketEndpoint {
     _on_message: Closure<dyn FnMut(MessageEvent)>,
     _on_error: Closure<dyn FnMut(Event)>,
     _on_close: Closure<dyn FnMut(Event)>,
+    _admission_timeout: Option<Closure<dyn FnMut()>>,
 }
 
 impl BrowserWebSocketEndpoint {
@@ -176,17 +197,72 @@ impl BrowserWebSocketEndpoint {
         url: &str,
         config: WebEndpointConfig,
     ) -> Result<Self, BrowserWebEndpointBuildError> {
+        Self::connect_inner(url, config, None)
+    }
+
+    pub fn connect_admitted(
+        url: &str,
+        ticket: &str,
+        config: WebEndpointConfig,
+    ) -> Result<Self, BrowserWebEndpointBuildError> {
+        let admission = crate::web_admission::encode_admission_request(ticket)
+            .map_err(|_| BrowserWebEndpointBuildError::InvalidAdmissionTicket)?;
+        Self::connect_inner(url, config, Some(admission))
+    }
+
+    fn connect_inner(
+        url: &str,
+        config: WebEndpointConfig,
+        admission: Option<Vec<u8>>,
+    ) -> Result<Self, BrowserWebEndpointBuildError> {
         config
             .validate()
             .map_err(BrowserWebEndpointBuildError::InvalidConfig)?;
         let socket = WebSocket::new_with_str(url, AFC_WEBSOCKET_SUBPROTOCOL)
             .map_err(|_| BrowserWebEndpointBuildError::WebSocketUnavailable)?;
         socket.set_binary_type(BinaryType::Arraybuffer);
-        let state = Rc::new(RefCell::new(BrowserInboundState::new(config)));
+        let state = Rc::new(RefCell::new(BrowserInboundState::new(
+            config,
+            admission.is_some(),
+        )));
+        let admission_timeout = if admission.is_some() {
+            let timeout_state = Rc::clone(&state);
+            let timeout_socket = socket.clone();
+            let callback = Closure::wrap(Box::new(move || {
+                let mut state = timeout_state.borrow_mut();
+                state.admission_timeout_handle = None;
+                if state.admission_pending {
+                    state.fail(io::ErrorKind::TimedOut);
+                    drop(state);
+                    let _ = timeout_socket.close_with_code(1008);
+                }
+            }) as Box<dyn FnMut()>);
+            let handle = web_sys::window()
+                .ok_or(BrowserWebEndpointBuildError::WebSocketUnavailable)?
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    callback.as_ref().unchecked_ref(),
+                    BROWSER_ADMISSION_TIMEOUT_MS,
+                )
+                .map_err(|_| BrowserWebEndpointBuildError::WebSocketUnavailable)?;
+            state.borrow_mut().admission_timeout_handle = Some(handle);
+            Some(callback)
+        } else {
+            None
+        };
 
         let open_state = Rc::clone(&state);
+        let open_socket = socket.clone();
         let on_open = Closure::wrap(Box::new(move |_event: Event| {
-            open_state.borrow_mut().connection = BrowserConnectionState::Open;
+            let Some(admission) = admission.as_ref() else {
+                open_state.borrow_mut().connection = BrowserConnectionState::Open;
+                return;
+            };
+            if open_socket.send_with_u8_array(admission).is_err() {
+                open_state
+                    .borrow_mut()
+                    .fail(io::ErrorKind::PermissionDenied);
+                let _ = open_socket.close_with_code(1008);
+            }
         }) as Box<dyn FnMut(Event)>);
         socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
@@ -205,6 +281,22 @@ impl BrowserWebSocketEndpoint {
             let view = Uint8Array::new(&buffer);
             let mut bytes = vec![0; view.length() as usize];
             view.copy_to(&mut bytes);
+            if message_state.borrow().admission_pending {
+                let mut state = message_state.borrow_mut();
+                if crate::web_admission::is_admission_accepted(&bytes) {
+                    state.admission_pending = false;
+                    state.connection = BrowserConnectionState::Open;
+                    clear_admission_timeout(&mut state);
+                } else {
+                    state.metrics.malformed_frames =
+                        state.metrics.malformed_frames.saturating_add(1);
+                    state.fail(io::ErrorKind::PermissionDenied);
+                    clear_admission_timeout(&mut state);
+                    drop(state);
+                    let _ = message_socket.close_with_code(1008);
+                }
+                return;
+            }
             if message_state.borrow_mut().push_bytes(&bytes).is_err() {
                 let _ = message_socket.close_with_code(1009);
             }
@@ -213,9 +305,9 @@ impl BrowserWebSocketEndpoint {
 
         let error_state = Rc::clone(&state);
         let on_error = Closure::wrap(Box::new(move |_event: Event| {
-            error_state
-                .borrow_mut()
-                .fail(io::ErrorKind::ConnectionAborted);
+            let mut state = error_state.borrow_mut();
+            state.fail(io::ErrorKind::ConnectionAborted);
+            clear_admission_timeout(&mut state);
         }) as Box<dyn FnMut(Event)>);
         socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
@@ -228,6 +320,7 @@ impl BrowserWebSocketEndpoint {
             ) {
                 state.connection = BrowserConnectionState::Disconnected;
             }
+            clear_admission_timeout(&mut state);
         }) as Box<dyn FnMut(Event)>);
         socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
@@ -238,6 +331,7 @@ impl BrowserWebSocketEndpoint {
             _on_message: on_message,
             _on_error: on_error,
             _on_close: on_close,
+            _admission_timeout: admission_timeout,
         })
     }
 
@@ -307,7 +401,17 @@ impl Drop for BrowserWebSocketEndpoint {
         self.socket.set_onerror(None);
         self.socket.set_onclose(None);
         let _ = self.socket.close_with_code(1000);
-        self.state.borrow_mut().connection = BrowserConnectionState::Disconnected;
+        let mut state = self.state.borrow_mut();
+        clear_admission_timeout(&mut state);
+        state.connection = BrowserConnectionState::Disconnected;
+    }
+}
+
+fn clear_admission_timeout(state: &mut BrowserInboundState) {
+    if let Some(handle) = state.admission_timeout_handle.take()
+        && let Some(window) = web_sys::window()
+    {
+        window.clear_timeout_with_handle(handle);
     }
 }
 
@@ -323,10 +427,58 @@ pub struct BrowserWebTransportEndpoint {
     state: Rc<RefCell<WebTransportState>>,
 }
 
+struct WebTransportConnectDeadline {
+    handle: i32,
+    callback: Closure<dyn FnMut()>,
+}
+
+impl WebTransportConnectDeadline {
+    fn arm(transport: JsWebTransport) -> Result<Self, BrowserWebEndpointBuildError> {
+        let callback_transport = transport;
+        let callback =
+            Closure::wrap(Box::new(move || callback_transport.close()) as Box<dyn FnMut()>);
+        let handle = web_sys::window()
+            .ok_or(BrowserWebEndpointBuildError::WebTransportUnavailable)?
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                BROWSER_ADMISSION_TIMEOUT_MS,
+            )
+            .map_err(|_| BrowserWebEndpointBuildError::WebTransportUnavailable)?;
+        Ok(Self { handle, callback })
+    }
+}
+
+impl Drop for WebTransportConnectDeadline {
+    fn drop(&mut self) {
+        if let Some(window) = web_sys::window() {
+            window.clear_timeout_with_handle(self.handle);
+        }
+        let _ = &self.callback;
+    }
+}
+
 impl BrowserWebTransportEndpoint {
     pub async fn connect(
         url: &str,
         config: WebEndpointConfig,
+    ) -> Result<Self, BrowserWebEndpointBuildError> {
+        Self::connect_inner(url, config, None).await
+    }
+
+    pub async fn connect_admitted(
+        url: &str,
+        ticket: &str,
+        config: WebEndpointConfig,
+    ) -> Result<Self, BrowserWebEndpointBuildError> {
+        let admission = crate::web_admission::encode_admission_request(ticket)
+            .map_err(|_| BrowserWebEndpointBuildError::InvalidAdmissionTicket)?;
+        Self::connect_inner(url, config, Some(admission)).await
+    }
+
+    async fn connect_inner(
+        url: &str,
+        config: WebEndpointConfig,
+        admission: Option<Vec<u8>>,
     ) -> Result<Self, BrowserWebEndpointBuildError> {
         config
             .validate()
@@ -336,9 +488,18 @@ impl BrowserWebTransportEndpoint {
         }
         let transport = JsWebTransport::new(url)
             .map_err(|_| BrowserWebEndpointBuildError::WebTransportUnavailable)?;
+        let _deadline = WebTransportConnectDeadline::arm(transport.clone())?;
         if JsFuture::from(transport.ready()).await.is_err() {
             transport.close();
             return Err(BrowserWebEndpointBuildError::WebTransportConnection);
+        }
+        if let Some(admission) = admission
+            && perform_webtransport_admission(&transport, &admission)
+                .await
+                .is_err()
+        {
+            transport.close();
+            return Err(BrowserWebEndpointBuildError::AdmissionRejected);
         }
         let datagrams = transport.datagrams();
         let negotiated = datagrams.max_datagram_size();
@@ -368,7 +529,7 @@ impl BrowserWebTransportEndpoint {
                 return Err(BrowserWebEndpointBuildError::WebTransportStream);
             }
         };
-        let mut inbound = BrowserInboundState::new(config);
+        let mut inbound = BrowserInboundState::new(config, false);
         inbound.connection = BrowserConnectionState::Open;
         let state = Rc::new(RefCell::new(WebTransportState {
             inbound,
@@ -385,6 +546,55 @@ impl BrowserWebTransportEndpoint {
     pub fn metrics(&self) -> WebEndpointMetrics {
         self.state.borrow().inbound.metrics
     }
+}
+
+async fn perform_webtransport_admission(
+    transport: &JsWebTransport,
+    admission: &[u8],
+) -> Result<(), ()> {
+    let stream = JsFuture::from(transport.create_bidirectional_stream())
+        .await
+        .map_err(|_| ())?
+        .dyn_into::<JsWebTransportBidirectionalStream>()
+        .map_err(|_| ())?;
+    let reader = ReadableStreamDefaultReader::new(&stream.readable()).map_err(|_| ())?;
+    let writer = WritableStreamDefaultWriter::new(&stream.writable()).map_err(|_| ())?;
+    JsFuture::from(writer.ready()).await.map_err(|_| ())?;
+    let request = Uint8Array::from(admission);
+    JsFuture::from(writer.write_with_chunk(request.as_ref()))
+        .await
+        .map_err(|_| ())?;
+    JsFuture::from(writer.close()).await.map_err(|_| ())?;
+
+    let mut response = Vec::with_capacity(crate::web_admission::ADMISSION_ACCEPTED_FRAME.len());
+    while response.len() < crate::web_admission::ADMISSION_ACCEPTED_FRAME.len() {
+        let value = JsFuture::from(reader.read()).await.map_err(|_| ())?;
+        let done = Reflect::get(&value, &JsValue::from_str("done"))
+            .ok()
+            .and_then(|done| done.as_bool())
+            .unwrap_or(true);
+        if done {
+            reader.release_lock();
+            return Err(());
+        }
+        let chunk = Reflect::get(&value, &JsValue::from_str("value")).map_err(|_| ())?;
+        let view = Uint8Array::new(&chunk);
+        let old_len = response.len();
+        let chunk_len = view.length() as usize;
+        if chunk_len == 0
+            || old_len.saturating_add(chunk_len)
+                > crate::web_admission::ADMISSION_ACCEPTED_FRAME.len()
+        {
+            reader.release_lock();
+            return Err(());
+        }
+        response.resize(old_len + chunk_len, 0);
+        view.copy_to(&mut response[old_len..]);
+    }
+    let accepted = crate::web_admission::is_admission_accepted(&response);
+    let _ = JsFuture::from(reader.cancel()).await;
+    reader.release_lock();
+    accepted.then_some(()).ok_or(())
 }
 
 impl NonBlockingDatagramEndpoint for BrowserWebTransportEndpoint {
@@ -602,6 +812,46 @@ pub async fn connect_browser_datagram_endpoint(
                 return Ok(BrowserDatagramEndpoint::WebTransport(endpoint));
             }
             BrowserWebSocketEndpoint::connect(websocket_url, config)
+                .map(BrowserDatagramEndpoint::WebSocket)
+                .map_err(|_| BrowserWebEndpointBuildError::NoSupportedTransport)
+        }
+    }
+}
+
+pub async fn connect_browser_admitted_datagram_endpoint(
+    preference: BrowserTransportPreference,
+    webtransport_url: &str,
+    websocket_url: &str,
+    ticket: &str,
+    config: WebEndpointConfig,
+) -> Result<BrowserDatagramEndpoint, BrowserWebEndpointBuildError> {
+    config
+        .validate()
+        .map_err(BrowserWebEndpointBuildError::InvalidConfig)?;
+    match preference {
+        BrowserTransportPreference::WebSocketOnly => {
+            BrowserWebSocketEndpoint::connect_admitted(websocket_url, ticket, config)
+                .map(BrowserDatagramEndpoint::WebSocket)
+        }
+        BrowserTransportPreference::WebTransportOnly => {
+            BrowserWebTransportEndpoint::connect_admitted(webtransport_url, ticket, config)
+                .await
+                .map(BrowserDatagramEndpoint::WebTransport)
+        }
+        BrowserTransportPreference::WebTransportPreferred => {
+            let webtransport =
+                BrowserWebTransportEndpoint::connect_admitted(webtransport_url, ticket, config)
+                    .await;
+            match webtransport {
+                Ok(endpoint) => return Ok(BrowserDatagramEndpoint::WebTransport(endpoint)),
+                // These failures happen before the one-time ticket is placed
+                // on an admission stream, so trying WebSocket cannot replay a
+                // ticket that the authority may already have consumed.
+                Err(BrowserWebEndpointBuildError::WebTransportUnavailable)
+                | Err(BrowserWebEndpointBuildError::WebTransportConnection) => {}
+                Err(error) => return Err(error),
+            }
+            BrowserWebSocketEndpoint::connect_admitted(websocket_url, ticket, config)
                 .map(BrowserDatagramEndpoint::WebSocket)
                 .map_err(|_| BrowserWebEndpointBuildError::NoSupportedTransport)
         }

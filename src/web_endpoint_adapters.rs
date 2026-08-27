@@ -97,7 +97,9 @@ pub enum WebEndpointKind {
 mod server;
 #[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
 pub use server::{
-    ServerDatagramBridge, ServerDatagramEndpoint, ServerIngressOutcome, ServerWebAdapterError,
+    DEFAULT_WEB_ADMISSION_TIMEOUT, ServerDatagramBridge, ServerDatagramEndpoint,
+    ServerIngressOutcome, ServerWebAdapterError, WebTransportAdmissionResponder,
+    acknowledge_websocket_admission, receive_websocket_admission, receive_webtransport_admission,
     run_websocket_datagram_adapter, run_webtransport_datagram_adapter,
 };
 
@@ -106,7 +108,8 @@ mod browser;
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
     BrowserDatagramEndpoint, BrowserTransportPreference, BrowserWebEndpointBuildError,
-    BrowserWebSocketEndpoint, BrowserWebTransportEndpoint, connect_browser_datagram_endpoint,
+    BrowserWebSocketEndpoint, BrowserWebTransportEndpoint,
+    connect_browser_admitted_datagram_endpoint, connect_browser_datagram_endpoint,
 };
 
 #[cfg(test)]

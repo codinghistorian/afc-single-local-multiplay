@@ -1102,7 +1102,7 @@ pub fn consume_local_player_input(
     }
 }
 
-fn sample_bound_tick_input(
+pub(crate) fn sample_bound_tick_input(
     keys: &ButtonInput<KeyCode>,
     camera_yaw: f32,
     bindings: PlayerControlBindings,
@@ -1162,7 +1162,7 @@ fn sample_bound_tick_input(
     }
 }
 
-fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputSample {
+pub(crate) fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputSample {
     let bindings = CONTROLLER_GAMEPLAY_BINDINGS;
     // Read digital buttons directly: browser and macOS drivers can expose a
     // button-only D-pad even when Bevy's axis-backed convenience value is zero.

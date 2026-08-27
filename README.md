@@ -143,6 +143,17 @@ python3 -m http.server 8000 --directory web_dist
 
 Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
 
+Browser Online uses the hosted `afc-web-server`, not Steam. Before packaging,
+build both the browser and `afc-web-server` release image with the same
+immutable `AFC_BUILD_ID`; production mode rejects debug or
+`development`-labelled authority binaries. Set the `afc-web-api-url` meta value
+in `web/index.html` to the server's public
+HTTPS origin (for example `https://play.example.com`). An empty value uses the
+page origin, which is convenient behind a same-origin development proxy. A
+temporary `?afc_server=https%3A%2F%2F...` override is also supported for draft
+acceptance builds. The browser verifies the API version, WebSocket subprotocol,
+release identity, and manifest compatibility before consuming a join ticket.
+
 For itch.io, create an **HTML Game**, upload the ZIP, and select
 **Click to launch in fullscreen**. The launch click supplies the browser
 interaction needed before audio playback and controller joining. Test Xbox and
@@ -154,6 +165,7 @@ draft upload in current Chrome; also test Safari on macOS before publishing.
 - [Development workflow](docs/development.md)
 - [Runtime architecture](docs/architecture.md)
 - [Multiplayer architecture and delivery plan](docs/multiplayer-architecture.md)
+- [Hosted browser server](docs/afc-web-server.md)
 - [Performance budgets and profiling](docs/performance.md)
 - [Native release packaging](docs/release-packaging.md)
 - [Steam release acceptance record](docs/steam-release-acceptance.md)

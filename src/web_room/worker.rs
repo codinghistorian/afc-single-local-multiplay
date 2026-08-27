@@ -19,6 +19,7 @@ use crate::web_endpoint_adapters::ServerDatagramEndpoint;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const AUTHORITY_HZ: u128 = 60;
+const SERVER_TICK_METRICS_PUBLISH_INTERVAL: u64 = 60;
 const MAX_COMMAND_CAPACITY: usize = 1_024;
 const MIN_STARTUP_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -134,9 +135,7 @@ enum WebRoomCommand {
         endpoint: ServerDatagramEndpoint,
         response: oneshot::Sender<Result<AuthorityConnectionId, WebRoomWorkerError>>,
     },
-    Shutdown {
-        response: Option<oneshot::Sender<Result<(), WebRoomWorkerError>>>,
-    },
+    Shutdown,
 }
 
 struct WebRoomWorkerInner {
@@ -262,18 +261,7 @@ impl WebRoomWorkerHandle {
     }
 
     pub(super) fn request_shutdown(&self) -> Result<(), WebRoomWorkerError> {
-        self.try_send(WebRoomCommand::Shutdown { response: None })
-    }
-
-    pub(super) async fn shutdown(&self) -> Result<(), WebRoomWorkerError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.try_send(WebRoomCommand::Shutdown {
-            response: Some(response_tx),
-        })?;
-        response_rx
-            .await
-            .map_err(|_| WebRoomWorkerError::WorkerStopped)??;
-        Ok(())
+        self.try_send(WebRoomCommand::Shutdown)
     }
 
     pub(super) fn join_if_stopped(&self) {
@@ -332,15 +320,21 @@ fn run_worker_loop(
 
         let deadline = authority_deadline(epoch, next_network_tick)?;
         if commands_open {
-            match commands.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(command) => {
-                    handle_command(hub, command, &mut shutting_down);
-                    continue;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    commands_open = false;
-                    begin_shutdown(hub, &mut shutting_down, None);
+            let now = Instant::now();
+            // Never consume another command after the fixed-tick deadline.
+            // A sustained stream of admission/reconnect commands therefore
+            // cannot starve canonical authority execution.
+            if now < deadline {
+                match commands.recv_timeout(deadline.duration_since(now)) {
+                    Ok(command) => {
+                        handle_command(hub, command, &mut shutting_down)?;
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        commands_open = false;
+                        begin_shutdown(hub, &mut shutting_down)?;
+                    }
                 }
             }
         } else {
@@ -388,7 +382,11 @@ fn run_worker_loop(
     }
 }
 
-fn handle_command(hub: &mut HostedAuthorityHub, command: WebRoomCommand, shutting_down: &mut bool) {
+fn handle_command(
+    hub: &mut HostedAuthorityHub,
+    command: WebRoomCommand,
+    shutting_down: &mut bool,
+) -> Result<(), WebRoomWorkerError> {
     match command {
         WebRoomCommand::AttachInitial {
             peer_id,
@@ -403,6 +401,7 @@ fn handle_command(hub: &mut HostedAuthorityHub, command: WebRoomCommand, shuttin
                     .map_err(|error| WebRoomWorkerError::Authority(format!("{error:?}")))
             };
             let _ = response.send(result);
+            Ok(())
         }
         WebRoomCommand::AttachReconnect {
             user_id,
@@ -417,27 +416,20 @@ fn handle_command(hub: &mut HostedAuthorityHub, command: WebRoomCommand, shuttin
                     .map_err(|error| WebRoomWorkerError::Authority(format!("{error:?}")))
             };
             let _ = response.send(result);
+            Ok(())
         }
-        WebRoomCommand::Shutdown { response } => {
-            begin_shutdown(hub, shutting_down, response);
-        }
+        WebRoomCommand::Shutdown => begin_shutdown(hub, shutting_down),
     }
 }
 
 fn begin_shutdown(
     hub: &mut HostedAuthorityHub,
     shutting_down: &mut bool,
-    response: Option<oneshot::Sender<Result<(), WebRoomWorkerError>>>,
-) {
-    let result = hub
-        .begin_dedicated_shutdown()
-        .map_err(|error| WebRoomWorkerError::Authority(format!("{error:?}")));
-    if result.is_ok() {
-        *shutting_down = true;
-    }
-    if let Some(response) = response {
-        let _ = response.send(result);
-    }
+) -> Result<(), WebRoomWorkerError> {
+    hub.begin_dedicated_shutdown()
+        .map_err(|error| WebRoomWorkerError::Authority(format!("{error:?}")))?;
+    *shutting_down = true;
+    Ok(())
 }
 
 fn publish_snapshot(
@@ -456,7 +448,14 @@ fn publish_snapshot(
     published.connected_peer_mask = connected_peer_mask;
     published.connected_peers = connected_peer_mask.count_ones() as u8;
     published.confirmed_result = hub.confirmed_result();
-    published.server_ticks = hub.server_tick_distribution();
+    if published.server_ticks.samples == 0
+        || hub.network_tick().get() % SERVER_TICK_METRICS_PUBLISH_INTERVAL == 0
+    {
+        // Building percentiles sorts the bounded rolling sample. One-second
+        // publication keeps operational data fresh without putting that sort
+        // on every room's 60 Hz service path.
+        published.server_ticks = hub.server_tick_distribution();
+    }
     published.error = None;
     published.phase = if hub.confirmed_result().is_some() {
         WebRoomWorkerPhase::Finished

@@ -17,6 +17,9 @@ pub const PRODUCT_NAME: &str = "Animal Fighter Club";
 const BUILD_ID_HEX: &str = env!("AFC_COMPILED_BUILD_ID");
 const GAMEPLAY_CONTENT_HASH_HEX: &str = env!("AFC_COMPILED_GAMEPLAY_CONTENT_HASH");
 const RELEASE_LABEL: &str = env!("AFC_COMPILED_RELEASE_LABEL");
+#[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
+const BUILD_PROFILE: &str = env!("AFC_COMPILED_PROFILE");
+pub const DEVELOPMENT_RELEASE_LABEL: &str = "development";
 const SHORT_DIGEST_HEX_BYTES: usize = 12;
 
 /// Ordered release metadata serialized verbatim by `--release-identity`.
@@ -101,6 +104,13 @@ pub fn current_release_identity() -> ReleaseIdentity {
         compatibility_build_id: BUILD_ID_HEX,
         gameplay_content_hash: GAMEPLAY_CONTENT_HASH_HEX,
     }
+}
+
+/// Compile profile used by the compatibility digest. Hosted production mode
+/// rejects non-release binaries even when an operator supplies a release label.
+#[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
+pub(crate) fn compiled_build_profile() -> &'static str {
+    BUILD_PROFILE
 }
 
 fn compiled_shipping() -> bool {

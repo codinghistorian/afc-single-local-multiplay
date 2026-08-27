@@ -1,0 +1,7 @@
+.git
+.github
+target
+web_dist
+packaging
+*.log
+.DS_Store

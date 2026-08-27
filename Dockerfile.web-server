@@ -1,0 +1,37 @@
+FROM rust:1.94.1-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        clang \
+        libasound2-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+ARG AFC_BUILD_ID
+RUN test -n "${AFC_BUILD_ID}" \
+    && test "${AFC_BUILD_ID}" != "development" \
+    && AFC_BUILD_ID="${AFC_BUILD_ID}" cargo build --locked --release --no-default-features \
+    --features web-server --bin afc-web-server
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        libasound2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 afc \
+    && useradd --system --uid 10001 --gid afc --no-create-home afc
+
+COPY --from=builder /build/target/release/afc-web-server /usr/local/bin/afc-web-server
+
+USER 10001:10001
+EXPOSE 8080/tcp
+EXPOSE 4433/udp
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/afc-web-server"]

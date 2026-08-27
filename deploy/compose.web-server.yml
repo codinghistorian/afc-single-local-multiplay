@@ -1,0 +1,50 @@
+services:
+  afc-web-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile.web-server
+      args:
+        AFC_BUILD_ID: ${AFC_BUILD_ID:?set immutable release label}
+    image: afc-web-server:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AFC_WEB_DEPLOYMENT: production
+      AFC_WEB_HTTP_BIND: 0.0.0.0:8080
+      AFC_WEBTRANSPORT_BIND: 0.0.0.0:4433
+      AFC_WEBTRANSPORT_CERT_PEM: /run/tls/fullchain.pem
+      AFC_WEBTRANSPORT_KEY_PEM: /run/tls/privkey.pem
+      AFC_WEB_SIGNING_KEY_ID: ${AFC_WEB_SIGNING_KEY_ID:?set current key id}
+      AFC_WEB_SIGNING_KEY_FILE: /run/secrets/afc_web_signing_key
+      AFC_WEB_ALLOWED_ORIGINS: ${AFC_WEB_ALLOWED_ORIGINS:?set exact itch origins}
+      AFC_WEB_TRUSTED_PROXY_IPS: ${AFC_WEB_TRUSTED_PROXY_IPS:-}
+      AFC_WEB_PUBLIC_WEBSOCKET_URL: ${AFC_WEB_PUBLIC_WEBSOCKET_URL:?set public wss URL}
+      AFC_WEB_PUBLIC_WEBTRANSPORT_URL: ${AFC_WEB_PUBLIC_WEBTRANSPORT_URL:?set public https URL}
+      RUST_LOG: ${RUST_LOG:-info}
+    secrets:
+      - afc_web_signing_key
+    volumes:
+      - ${AFC_WEB_TLS_DIRECTORY:?set TLS directory}:/run/tls:ro
+    ports:
+      # Keep the HTTP/WebSocket listener on the host loopback interface by
+      # default; only the TLS reverse proxy should be publicly reachable.
+      - "${AFC_WEB_HTTP_HOST_IP:-127.0.0.1}:${AFC_WEB_HTTP_PORT:-8080}:8080/tcp"
+      - "${AFC_WEBTRANSPORT_PORT:-4433}:4433/udp"
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  afc_web_signing_key:
+    file: ${AFC_WEB_SIGNING_KEY_FILE:?set signing-key file}

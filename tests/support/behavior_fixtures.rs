@@ -29,17 +29,19 @@ use crate::determinism::{
 use crate::ecs_identity::StableSimEntity;
 use crate::equipment::EquipmentKind;
 use crate::game_state::{Hitstop, LocalSetup, TeamId};
-use crate::headless::{HeadlessMatchConfig, build_headless_simulation};
+use crate::headless::{
+    HeadlessMatchConfig, build_headless_simulation, snapshot_contract_for_manifest,
+};
 use crate::items::{ArenaItem, ItemKind, ItemState};
 use crate::live_authority::LiveSimulationDriver;
 use crate::live_input::local_tick_to_network_input;
 use crate::match_config::{
     DEFAULT_INPUT_DELAY_TICKS, DEFAULT_ROLLBACK_LIMIT_TICKS, DEFAULT_SNAPSHOT_HISTORY_TICKS,
-    MatchBuildOptions, build_headless_match_config,
+    MatchBuildOptions, build_headless_match_config, canonical_manifest_hash,
 };
 use crate::network_protocol::{
-    AuthorityKind, InputButtons, InputFrame, InputSequence as NetworkInputSequence, MatchId,
-    PeerId, SeatOwner,
+    AuthorityKind, BuildId, GameplayContentHash, InputButtons, InputFrame,
+    InputSequence as NetworkInputSequence, MatchId, PeerId, SeatOwner,
 };
 use crate::sim_event::{SimEvent, SimEventJournal, SimEventKind, SimEventSource};
 use crate::simulation::{ElapsedTicks, SimulationSet, TickTimer};
@@ -52,6 +54,16 @@ use crate::tick_input::{
 const FIXTURE_SCHEMA_VERSION: u16 = 1;
 const CONTRACT_VERSION: u16 = 8;
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/behavior/v1";
+// Frozen at the last accepted simulation-v10 behavior corpus. Build/profile,
+// feature, presentation, and transport edits must not rewrite canonical
+// behavior hashes when the production simulation state itself is unchanged.
+const FIXTURE_BUILD_ID: [u8; 16] = [
+    0x70, 0xe8, 0xce, 0x79, 0x77, 0x71, 0x33, 0x6b, 0x65, 0x11, 0x26, 0xf8, 0xde, 0xd2, 0xa5, 0x22,
+];
+const FIXTURE_GAMEPLAY_CONTENT_HASH: [u8; 32] = [
+    0xac, 0x2b, 0x1a, 0xca, 0x00, 0xc9, 0x03, 0xd1, 0x65, 0x08, 0x66, 0x52, 0x6c, 0x3e, 0xf2, 0x4c,
+    0x0a, 0x24, 0x70, 0xe5, 0x81, 0x40, 0x36, 0x86, 0xd3, 0xe1, 0xa1, 0x6c, 0x2e, 0xc0, 0xde, 0xc2,
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -646,12 +658,19 @@ fn compile_fixture(fixture: &BehaviorFixture) -> CompiledFixture {
     };
     // This production builder owns manifest hashing, compatibility, ownership,
     // loadout mapping, and snapshot-contract construction.
-    let config = build_headless_match_config(&setup, options).unwrap_or_else(|error| {
+    let mut config = build_headless_match_config(&setup, options).unwrap_or_else(|error| {
         panic!(
             "fixture {} failed production config build: {error}",
             fixture.name
         )
     });
+    config.manifest.compatibility.build =
+        BuildId::new(FIXTURE_BUILD_ID).expect("the frozen fixture build ID is non-zero");
+    config.manifest.compatibility.gameplay_content =
+        GameplayContentHash::new(FIXTURE_GAMEPLAY_CONTENT_HASH)
+            .expect("the frozen fixture content ID is non-zero");
+    config.manifest.manifest_hash = canonical_manifest_hash(&config.manifest);
+    config.snapshot_contract = snapshot_contract_for_manifest(&config.manifest);
 
     let mut gestures: [SeatGestureTrackers; crate::network_protocol::MAX_FIGHTERS] =
         std::array::from_fn(|_| SeatGestureTrackers::default());

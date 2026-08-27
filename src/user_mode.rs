@@ -696,9 +696,11 @@ pub fn should_spawn_web_gameplay_scene(
     user_mode: Res<UserModeState>,
     scene: Res<UserModeGameplayScene>,
     state: Res<MatchState>,
+    browser_online: Res<crate::browser_online_app::BrowserOnlineUiSnapshot>,
 ) -> bool {
     !scene.loaded
-        && (user_mode.screen == UserModeScreen::ArenaSelect
+        && (browser_online.scene_requested
+            || user_mode.screen == UserModeScreen::ArenaSelect
             || user_mode.battle_music_pending
             || user_mode.battle_active
             || state.reset_requested

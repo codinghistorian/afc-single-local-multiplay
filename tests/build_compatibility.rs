@@ -6,8 +6,8 @@ use std::path::Path;
 
 use build_script::{
     GAMEPLAY_SOURCES, NamedInput, ReleaseBuildInputs, build_metadata_inputs, build_source_inputs,
-    canonical_text_bytes, collect_rust_source_paths, expanded_digest, gameplay_source_inputs,
-    parse_steam_app_id, validate_build_label, validate_release_build,
+    canonical_text_bytes, collect_rust_source_paths, compatibility_cargo_features, expanded_digest,
+    gameplay_source_inputs, parse_steam_app_id, validate_build_label, validate_release_build,
 };
 
 fn project_root() -> &'static Path {
@@ -51,12 +51,12 @@ fn rust_source_discovery_is_recursive_sorted_and_covers_shipping_boundaries() {
 #[test]
 fn build_digest_is_path_stable_and_sensitive_to_each_critical_boundary() {
     let inputs = build_source_inputs(project_root()).unwrap();
-    let baseline = expanded_digest("afc-build-v2", &inputs, 16);
+    let baseline = expanded_digest("afc-build-v3", &inputs, 16);
 
     let mut reordered = inputs.clone();
     reordered.reverse();
     assert_eq!(
-        expanded_digest("afc-build-v2", &reordered, 16),
+        expanded_digest("afc-build-v3", &reordered, 16),
         baseline,
         "filesystem enumeration order must not affect identity"
     );
@@ -73,7 +73,7 @@ fn build_digest_is_path_stable_and_sensitive_to_each_critical_boundary() {
     ] {
         let changed = mutate_named_input(&inputs, required);
         assert_ne!(
-            expanded_digest("afc-build-v2", &changed, 16),
+            expanded_digest("afc-build-v3", &changed, 16),
             baseline,
             "{required} did not affect build identity"
         );
@@ -82,8 +82,8 @@ fn build_digest_is_path_stable_and_sensitive_to_each_critical_boundary() {
     let renamed = vec![NamedInput::new("src/renamed.rs", b"same bytes".to_vec())];
     let original = vec![NamedInput::new("src/original.rs", b"same bytes".to_vec())];
     assert_ne!(
-        expanded_digest("afc-build-v2", &renamed, 16),
-        expanded_digest("afc-build-v2", &original, 16),
+        expanded_digest("afc-build-v3", &renamed, 16),
+        expanded_digest("afc-build-v3", &original, 16),
         "relative paths are part of build identity"
     );
 }
@@ -99,7 +99,7 @@ fn every_release_metadata_boundary_changes_build_identity() {
         features: &[String],
     ) -> Vec<u8> {
         expanded_digest(
-            "afc-build-v2",
+            "afc-build-v3",
             &build_metadata_inputs(package, version, profile, label, app_id, features),
             16,
         )
@@ -185,6 +185,27 @@ fn every_release_metadata_boundary_changes_build_identity() {
         ),
         baseline,
         "Cargo feature enumeration order must not affect build identity"
+    );
+}
+
+#[test]
+fn browser_and_hosted_authority_roles_share_one_compatibility_feature_set() {
+    let shared = vec!["PERF".to_owned()];
+    let mut browser = shared.clone();
+    browser.push("WEB".to_owned());
+    let mut authority = shared.clone();
+    authority.push("WEB_SERVER".to_owned());
+    assert_eq!(
+        compatibility_cargo_features(browser),
+        compatibility_cargo_features(authority)
+    );
+
+    let mut incompatible = shared;
+    incompatible.push("BOT_QUALITY".to_owned());
+    assert_ne!(
+        compatibility_cargo_features(vec!["WEB".to_owned(), "PERF".to_owned()]),
+        compatibility_cargo_features(incompatible),
+        "unrelated feature boundaries must remain exact"
     );
 }
 

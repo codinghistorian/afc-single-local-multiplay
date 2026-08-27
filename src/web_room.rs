@@ -207,6 +207,21 @@ pub struct WebPrivateRoomView {
     pub worker: Option<WebRoomWorkerSnapshot>,
 }
 
+/// Privacy-safe process snapshot for readiness dashboards and alerting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebRoomOperationalSnapshot {
+    pub total_rooms: u64,
+    pub open_rooms: u64,
+    pub starting_rooms: u64,
+    pub active_rooms: u64,
+    pub finished_rooms: u64,
+    pub failed_rooms: u64,
+    pub connected_peers: u64,
+    pub maximum_worker_tick_p99_ns: u64,
+    pub maximum_worker_tick_ns: u64,
+    pub worker_over_budget_observations: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebJoinTicketResponse {
     pub ticket: String,
@@ -299,6 +314,56 @@ impl WebRoomService {
         self.keyring
             .issue_guest_session(now_unix_seconds)
             .map_err(Into::into)
+    }
+
+    pub fn operational_snapshot(&self) -> WebRoomOperationalSnapshot {
+        let registry = lock_recover(&self.registry);
+        let mut operational = WebRoomOperationalSnapshot {
+            total_rooms: registry.rooms.len() as u64,
+            ..WebRoomOperationalSnapshot::default()
+        };
+        for room in registry.rooms.values() {
+            match &room.lifecycle {
+                RoomLifecycle::Open => {
+                    operational.open_rooms = operational.open_rooms.saturating_add(1);
+                }
+                RoomLifecycle::Starting { .. } => {
+                    operational.starting_rooms = operational.starting_rooms.saturating_add(1);
+                }
+                RoomLifecycle::Active { worker, .. } => {
+                    let snapshot = worker.snapshot();
+                    operational.connected_peers = operational
+                        .connected_peers
+                        .saturating_add(u64::from(snapshot.connected_peers));
+                    operational.maximum_worker_tick_p99_ns = operational
+                        .maximum_worker_tick_p99_ns
+                        .max(snapshot.server_ticks.p99_ns);
+                    operational.maximum_worker_tick_ns = operational
+                        .maximum_worker_tick_ns
+                        .max(snapshot.server_ticks.maximum_ns);
+                    operational.worker_over_budget_observations = operational
+                        .worker_over_budget_observations
+                        .saturating_add(snapshot.server_ticks.over_budget);
+                    match snapshot.phase {
+                        WebRoomWorkerPhase::Finished | WebRoomWorkerPhase::Stopped => {
+                            operational.finished_rooms =
+                                operational.finished_rooms.saturating_add(1);
+                        }
+                        WebRoomWorkerPhase::Failed => {
+                            operational.failed_rooms = operational.failed_rooms.saturating_add(1);
+                        }
+                        WebRoomWorkerPhase::Starting
+                        | WebRoomWorkerPhase::WaitingForPeers
+                        | WebRoomWorkerPhase::Countdown
+                        | WebRoomWorkerPhase::Fighting
+                        | WebRoomWorkerPhase::Draining => {
+                            operational.active_rooms = operational.active_rooms.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        operational
     }
 
     pub fn create_private_room(
@@ -428,6 +493,56 @@ impl WebRoomService {
         Ok(room.view(guest.guest_id))
     }
 
+    /// Leaves an open lobby. A host departure closes the private room; a
+    /// non-host departure removes only that member. Peer identifiers are never
+    /// reused, preserving the stable identity boundary if another guest joins.
+    pub fn leave_private_room(
+        &self,
+        guest_session: &str,
+        room_code: &str,
+        now_unix_seconds: u64,
+    ) -> Result<(), WebRoomError> {
+        let guest = self
+            .keyring
+            .verify_guest_session(guest_session, now_unix_seconds)?;
+        let room_code = PrivateRoomCode::from_str(room_code)?;
+        let mut registry = lock_recover(&self.registry);
+        registry.maintain(now_unix_seconds, self.config);
+        let room_id = *registry
+            .codes
+            .get(&room_code)
+            .ok_or(WebRoomError::RoomNotFound)?;
+        let (member_index, is_host) = {
+            let room = registry
+                .rooms
+                .get(&room_id)
+                .ok_or(WebRoomError::RoomNotFound)?;
+            if !matches!(room.lifecycle, RoomLifecycle::Open) {
+                return Err(WebRoomError::RoomNotOpen);
+            }
+            let member_index = room
+                .members
+                .iter()
+                .position(|member| {
+                    member.guest_id == guest.guest_id && member.user_id == guest.user_id
+                })
+                .ok_or(WebRoomError::GuestNotMember)?;
+            (member_index, room.members[member_index].is_host)
+        };
+        if is_host {
+            registry.rooms.remove(&room_id);
+            registry.codes.remove(&room_code);
+        } else {
+            let room = registry
+                .rooms
+                .get_mut(&room_id)
+                .ok_or(WebRoomError::RoomNotFound)?;
+            room.members.remove(member_index);
+            room.last_activity_unix_seconds = now_unix_seconds;
+        }
+        Ok(())
+    }
+
     pub async fn start_private_room(
         &self,
         guest_session: &str,
@@ -446,11 +561,17 @@ impl WebRoomService {
         let worker_config = self.config.worker;
         let match_config = prepared.match_config.clone();
         let roster = prepared.roster.clone();
-        let built = tokio::task::spawn_blocking(move || {
+        let built = match tokio::task::spawn_blocking(move || {
             WebRoomWorkerHandle::spawn(match_config, roster, worker_config)
         })
         .await
-        .map_err(|_| WebRoomError::WorkerTaskCancelled)?;
+        {
+            Ok(built) => built,
+            Err(_) => {
+                lock_recover(&self.registry).cancel_start(prepared.room_id, prepared.startup_id);
+                return Err(WebRoomError::WorkerTaskCancelled);
+            }
+        };
         let worker = match built {
             Ok(worker) => worker,
             Err(error) => {
@@ -547,11 +668,18 @@ impl WebRoomService {
             let mut registry = lock_recover(&self.registry);
             registry.take_all_workers()
         };
-        for worker in &workers {
-            let _ = worker.shutdown().await;
-        }
+        let mut requested = vec![false; workers.len()];
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
+            for (worker, requested) in workers.iter().zip(&mut requested) {
+                if !*requested {
+                    *requested = match worker.request_shutdown() {
+                        Ok(()) | Err(WebRoomWorkerError::WorkerStopped) => true,
+                        Err(WebRoomWorkerError::CommandQueueFull) => false,
+                        Err(_) => true,
+                    };
+                }
+            }
             if workers.iter().all(|worker| {
                 matches!(
                     worker.snapshot().phase,
@@ -1091,6 +1219,14 @@ mod tests {
             .private_room_status(&host.token, &code, 10_006)
             .unwrap();
         assert_eq!(status.worker.unwrap().connected_peers, 2);
+        let operational = service.operational_snapshot();
+        assert_eq!(operational.total_rooms, 1);
+        assert_eq!(operational.open_rooms, 0);
+        assert_eq!(operational.starting_rooms, 0);
+        assert_eq!(operational.active_rooms, 1);
+        assert_eq!(operational.finished_rooms, 0);
+        assert_eq!(operational.failed_rooms, 0);
+        assert_eq!(operational.connected_peers, 2);
 
         let (replay_endpoint, _replay_bridge) =
             ServerDatagramBridge::pair(WebEndpointConfig::default()).unwrap();
@@ -1130,6 +1266,59 @@ mod tests {
         assert_eq!(
             service.join_private_room(&third.token, &code, 20_004),
             Err(WebRoomError::RoomFull)
+        );
+    }
+
+    #[test]
+    fn open_lobby_leave_never_reuses_peer_ids_and_host_leave_closes_room() {
+        let service = service();
+        let host = service.issue_guest_session(30_000).unwrap();
+        let second = service.issue_guest_session(30_000).unwrap();
+        let third = service.issue_guest_session(30_000).unwrap();
+        let created = service
+            .create_private_room(
+                &host.token,
+                WebPrivateRoomOptions {
+                    maximum_players: 3,
+                    ..WebPrivateRoomOptions::default()
+                },
+                30_001,
+            )
+            .unwrap();
+        let code = created.room_code.to_string();
+        let second_view = service
+            .join_private_room(&second.token, &code, 30_002)
+            .unwrap();
+        assert_eq!(
+            second_view
+                .members
+                .iter()
+                .find(|member| member.is_self)
+                .map(|member| member.peer_id.get()),
+            Some(2)
+        );
+
+        service
+            .leave_private_room(&second.token, &code, 30_003)
+            .unwrap();
+        let third_view = service
+            .join_private_room(&third.token, &code, 30_004)
+            .unwrap();
+        assert_eq!(
+            third_view
+                .members
+                .iter()
+                .find(|member| member.is_self)
+                .map(|member| member.peer_id.get()),
+            Some(3)
+        );
+
+        service
+            .leave_private_room(&host.token, &code, 30_005)
+            .unwrap();
+        assert_eq!(
+            service.private_room_status(&third.token, &code, 30_006),
+            Err(WebRoomError::RoomNotFound)
         );
     }
 }

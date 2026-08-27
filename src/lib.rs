@@ -17,6 +17,8 @@ mod bot_profiles;
     not(target_arch = "wasm32")
 ))]
 mod bot_quality;
+#[cfg(target_arch = "wasm32")]
+pub mod browser_online_app;
 pub mod browser_online_client;
 mod camera;
 mod canonical_math;
@@ -116,17 +118,30 @@ mod techniques;
 pub mod tick_input;
 mod tutorial;
 mod user_mode;
+pub mod web_admission;
+pub mod web_api;
 pub mod web_endpoint_adapters;
 #[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
 pub mod web_identity;
 #[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
 pub mod web_room;
+#[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
+pub mod web_server;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn afc_determinism_probe_json() -> Result<String, wasm_bindgen::JsValue> {
     determinism_probe::run_cross_target_probe_json()
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
+
+/// Exposes the exact compiled multiplayer identity to the browser-target CI
+/// harness. Production browser bootstrap compares the human-readable version
+/// line, while this export lets CI compare every identity field byte-for-byte.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn afc_release_identity_json() -> String {
+    release_identity::current_release_identity().to_deterministic_json()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -244,6 +259,7 @@ pub fn build_app() -> App {
     // for Steam startup diagnostics, but defer every graphics-bearing default
     // plugin until after the native runtime owns the Steam client.
     app.add_plugins(LogPlugin::default());
+    #[cfg(not(target_arch = "wasm32"))]
     let native_online_runtime = native_online::NativeOnlineRuntime::default();
     app.add_plugins(default_plugins);
 
@@ -252,8 +268,14 @@ pub fn build_app() -> App {
 
     app.add_plugins(controller_haptics::ControllerHapticsPlugin);
     app.insert_non_send_resource(online_client::EmbeddedOnlineClientController::default());
+    #[cfg(not(target_arch = "wasm32"))]
     app.insert_non_send_resource(native_online_runtime);
+    #[cfg(not(target_arch = "wasm32"))]
     app.insert_non_send_resource(native_online_app::NativeOnlineApplication::default());
+    #[cfg(target_arch = "wasm32")]
+    app.insert_non_send_resource(browser_online_app::BrowserOnlineApplication::default());
+    #[cfg(target_arch = "wasm32")]
+    app.init_resource::<browser_online_app::BrowserOnlineUiSnapshot>();
     app.add_message::<combat_sfx::SfxPreviewRequest>();
 
     #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
@@ -362,10 +384,20 @@ pub fn build_app() -> App {
             PreUpdate,
             (
                 online_client::reconcile_embedded_online_client,
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::drive_native_online_application,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::drive_browser_online_application,
+                #[cfg(not(target_arch = "wasm32"))]
                 fighter::sample_local_player_input
                     .run_if(native_online_app::offline_local_input_enabled),
+                #[cfg(target_arch = "wasm32")]
+                fighter::sample_local_player_input
+                    .run_if(browser_online_app::offline_local_input_enabled),
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::sample_native_online_render_input,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::sample_browser_online_render_input,
                 #[cfg(all(
                     feature = "dev-hot-reload",
                     not(feature = "shipping"),
@@ -381,13 +413,22 @@ pub fn build_app() -> App {
         .add_systems(
             FixedUpdate,
             (
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::submit_native_online_inputs,
                 online_client::drive_embedded_online_client,
             )
                 .chain()
                 .before(simulation::SimulationSet::TickStart),
         )
-        .add_systems(Last, native_online_app::teardown_native_online_on_exit)
+        .add_systems(
+            Last,
+            (
+                #[cfg(not(target_arch = "wasm32"))]
+                native_online_app::teardown_native_online_on_exit,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::teardown_browser_online_on_exit,
+            ),
+        )
         .add_systems(
             FixedUpdate,
             (
@@ -466,7 +507,10 @@ pub fn build_app() -> App {
                 ))]
                 map_editor::setup_map_editor_ui,
                 user_mode::setup_user_mode_ui,
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::setup_native_online_ui,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::setup_browser_online_ui,
             )
                 .chain(),
         )
@@ -490,7 +534,10 @@ pub fn build_app() -> App {
         .add_systems(
             Update,
             (
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::derive_match_presentation_policy,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::derive_match_presentation_policy,
                 user_mode::sync_online_match_presentation_audio,
             )
                 .chain()
@@ -538,9 +585,14 @@ pub fn build_app() -> App {
                     not(target_arch = "wasm32")
                 ))]
                 bot_profiles::reload_bot_profile_catalog,
+                #[cfg(not(target_arch = "wasm32"))]
                 user_mode::sample_user_mode_steam_input,
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::handle_native_online_ui_input,
+                #[cfg(not(target_arch = "wasm32"))]
                 native_online_app::handle_overlay_unavailable_notice_dismiss,
+                #[cfg(target_arch = "wasm32")]
+                browser_online_app::handle_browser_online_ui_input,
                 (
                     user_mode::sync_user_mode_pointer_hover,
                     user_mode::handle_local_controller_reconnect,
@@ -829,8 +881,14 @@ pub fn build_app() -> App {
                         user_mode::update_user_mode_character_select_cards,
                         user_mode::update_user_mode_character_profile,
                         user_mode::update_user_mode_button_styles,
+                        #[cfg(not(target_arch = "wasm32"))]
                         native_online_app::update_native_online_ui,
+                        #[cfg(not(target_arch = "wasm32"))]
                         native_online_app::update_native_online_button_styles,
+                        #[cfg(target_arch = "wasm32")]
+                        browser_online_app::update_browser_online_ui,
+                        #[cfg(target_arch = "wasm32")]
+                        browser_online_app::update_browser_online_button_styles,
                         user_mode::update_controller_reconnect_overlay,
                         tutorial::update_tutorial_ui,
                         tutorial::update_tutorial_button_styles,

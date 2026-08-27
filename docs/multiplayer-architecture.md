@@ -575,7 +575,7 @@ Authority and prediction worlds construct character moves and combat tuning only
 from validated bytes embedded in the executable; native loose files and their file
 watchers belong only to the rendered developer sandbox.
 
-The compiled v2 compatibility digests are deliberately path-aware. Build identity
+The compiled v3 compatibility digests are deliberately path-aware. Build identity
 hashes normalized relative paths and LF-normalized bytes for every `src/**/*.rs`
 file, the Cargo manifests/lockfile, enabled features, build profile, configured
 release label, and Steam App ID. Gameplay-content identity remains a narrower,
@@ -585,7 +585,10 @@ Presentation and test modules outside that canonical source set may change the
 conservative exact build identity, but never the gameplay-content hash. Inline
 tests or presentation helpers that still share a canonical module intentionally
 receive that module's conservative content identity until the source boundary is
-split.
+split. The mutually exclusive `web` browser-client and `web-server` hosted-
+authority role features are normalized out of the feature list: those artifacts
+must advertise one build identity when every other input agrees, or the browser
+could never validate the authority that hosts its match.
 
 ## Authority deployment
 

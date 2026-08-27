@@ -27,16 +27,11 @@ const GUEST_TOKEN_BYTES: usize = GUEST_PAYLOAD_BYTES + HMAC_BYTES;
 const JOIN_PAYLOAD_BYTES: usize = 114;
 const JOIN_TOKEN_BYTES: usize = JOIN_PAYLOAD_BYTES + HMAC_BYTES;
 const MAX_ENCODED_TOKEN_BYTES: usize = 512;
-const ADMISSION_MAGIC: [u8; 4] = *b"AFCA";
-const ADMISSION_VERSION: u8 = 1;
-const ADMISSION_HEADER_BYTES: usize = 7;
-
 pub const DEFAULT_GUEST_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 pub const DEFAULT_JOIN_TICKET_TTL_SECONDS: u64 = 30;
 pub const DEFAULT_TOKEN_CLOCK_SKEW_SECONDS: u64 = 5;
 pub const DEFAULT_REPLAY_CACHE_ENTRIES: usize = 8_192;
-pub const MAX_ADMISSION_TICKET_BYTES: usize = 384;
-pub const ADMISSION_ACCEPTED_FRAME: [u8; 5] = *b"AFCO\x01";
+pub use crate::web_admission::{ADMISSION_ACCEPTED_FRAME, MAX_ADMISSION_TICKET_BYTES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WebTokenLifetimes {
@@ -547,38 +542,12 @@ impl Default for TicketReplayGuard {
 }
 
 pub fn encode_admission_request(ticket: &str) -> Result<Vec<u8>, WebIdentityError> {
-    if ticket.is_empty() || ticket.len() > MAX_ADMISSION_TICKET_BYTES {
-        return Err(WebIdentityError::MalformedAdmissionFrame);
-    }
-    let ticket_len =
-        u16::try_from(ticket.len()).map_err(|_| WebIdentityError::MalformedAdmissionFrame)?;
-    let mut frame = Vec::with_capacity(ADMISSION_HEADER_BYTES + ticket.len());
-    frame.extend_from_slice(&ADMISSION_MAGIC);
-    frame.push(ADMISSION_VERSION);
-    frame.extend_from_slice(&ticket_len.to_be_bytes());
-    frame.extend_from_slice(ticket.as_bytes());
-    Ok(frame)
+    crate::web_admission::encode_admission_request(ticket)
+        .map_err(|_| WebIdentityError::MalformedAdmissionFrame)
 }
 
 pub fn decode_admission_request(frame: &[u8]) -> Result<&str, WebIdentityError> {
-    if frame.len() < ADMISSION_HEADER_BYTES
-        || frame.get(..4) != Some(ADMISSION_MAGIC.as_slice())
-        || frame.get(4).copied() != Some(ADMISSION_VERSION)
-    {
-        return Err(WebIdentityError::MalformedAdmissionFrame);
-    }
-    let ticket_len = usize::from(u16::from_be_bytes(
-        frame[5..7]
-            .try_into()
-            .map_err(|_| WebIdentityError::MalformedAdmissionFrame)?,
-    ));
-    if ticket_len == 0
-        || ticket_len > MAX_ADMISSION_TICKET_BYTES
-        || frame.len() != ADMISSION_HEADER_BYTES + ticket_len
-    {
-        return Err(WebIdentityError::MalformedAdmissionFrame);
-    }
-    std::str::from_utf8(&frame[ADMISSION_HEADER_BYTES..])
+    crate::web_admission::decode_admission_request(frame)
         .map_err(|_| WebIdentityError::MalformedAdmissionFrame)
 }
 

@@ -21,6 +21,8 @@ jobs:
   linux-wasm-equivalence:
     name: Linux ↔ browser WASM production tape
     runs-on: ubuntu-24.04
+    env:
+      AFC_BUILD_ID: ci-${{ github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
@@ -38,23 +40,48 @@ jobs:
       - name: Run Linux production-simulation probe
         run: |
           mkdir -p target/cross-target-determinism
-          cargo run --locked --no-default-features --bin afc-determinism-probe --quiet \
+          cargo run --locked --release --no-default-features \
+            --bin afc-determinism-probe --quiet \
             > target/cross-target-determinism/linux.json
+          cargo run --locked --release --no-default-features \
+            --bin afc-determinism-probe --quiet \
+            -- --release-identity \
+            > target/cross-target-determinism/linux-release-identity.json
+          cargo run --locked --release --no-default-features --features web-server \
+            --bin afc-determinism-probe --quiet \
+            > target/cross-target-determinism/linux-web-server.json
+          cargo run --locked --release --no-default-features --features web-server \
+            --bin afc-web-server --quiet -- --release-identity \
+            > target/cross-target-determinism/linux-web-server-release-identity.json
       - name: Build and run browser-target WASM production-simulation probe
         run: |
-          cargo build --locked --target wasm32-unknown-unknown \
+          cargo build --locked --release --target wasm32-unknown-unknown \
             --no-default-features --features web --lib
-          wasm-bindgen target/wasm32-unknown-unknown/debug/ffc_prototype.wasm \
+          wasm-bindgen target/wasm32-unknown-unknown/release/ffc_prototype.wasm \
             --target nodejs --out-dir target/cross-target-determinism/wasm-bindgen
           node scripts/run_wasm_determinism_probe.cjs \
             target/cross-target-determinism/wasm-bindgen/ffc_prototype.js \
             > target/cross-target-determinism/wasm.json
+          node scripts/run_wasm_determinism_probe.cjs \
+            target/cross-target-determinism/wasm-bindgen/ffc_prototype.js \
+            --release-identity \
+            > target/cross-target-determinism/wasm-release-identity.json
       - name: Require byte-identical Linux and WASM reports
         run: |
           diff --unified \
             target/cross-target-determinism/linux.json \
             target/cross-target-determinism/wasm.json
+          diff --unified \
+            target/cross-target-determinism/linux.json \
+            target/cross-target-determinism/linux-web-server.json
+          diff --unified \
+            target/cross-target-determinism/linux-release-identity.json \
+            target/cross-target-determinism/wasm-release-identity.json
+          diff --unified \
+            target/cross-target-determinism/linux-release-identity.json \
+            target/cross-target-determinism/linux-web-server-release-identity.json
           cat target/cross-target-determinism/linux.json
+          cat target/cross-target-determinism/linux-release-identity.json
 
   frozen-determinism-contracts:
     name: Frozen contracts (${{ matrix.os }})
