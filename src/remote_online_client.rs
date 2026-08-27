@@ -409,12 +409,12 @@ fn merge_local_sample(
 }
 
 #[derive(Clone, Debug, Default)]
-struct WorkerRollbackHooks {
+pub(crate) struct WorkerRollbackHooks {
     pending_retain_through: Rc<Cell<Option<SimTick>>>,
 }
 
 impl WorkerRollbackHooks {
-    fn take(&self) -> Option<SimTick> {
+    pub(crate) fn take(&self) -> Option<SimTick> {
         self.pending_retain_through.take()
     }
 }
@@ -444,13 +444,13 @@ struct RemotePresentationEvent {
 }
 
 #[derive(Debug)]
-struct RemotePresentationTick {
-    tick: SimTick,
+pub(crate) struct RemotePresentationTick {
+    pub(crate) tick: SimTick,
     events: Vec<RemotePresentationEvent>,
 }
 
 impl RemotePresentationTick {
-    fn capture(source: &World, tick: SimTick) -> Result<Option<Self>, OnlineFailure> {
+    pub(crate) fn capture(source: &World, tick: SimTick) -> Result<Option<Self>, OnlineFailure> {
         let journal = source
             .get_resource::<SimEventJournal>()
             .ok_or_else(internal_failure)?;
@@ -490,11 +490,11 @@ impl RemotePresentationTick {
 }
 
 #[derive(Debug)]
-struct RemoteProjectionFrame {
-    snapshot: CanonicalSnapshot,
-    confirmed_through: Option<SimTick>,
+pub(crate) struct RemoteProjectionFrame {
+    pub(crate) snapshot: CanonicalSnapshot,
+    pub(crate) confirmed_through: Option<SimTick>,
     /// Present only on the exact authority-confirmed final snapshot.
-    confirmed_result: Option<ConfirmedSessionResult>,
+    pub(crate) confirmed_result: Option<ConfirmedSessionResult>,
 }
 
 struct RemoteMailboxState {
@@ -1984,7 +1984,7 @@ where
     Ok(())
 }
 
-fn projection_source_world() -> World {
+pub(crate) fn projection_source_world() -> World {
     let mut world = World::new();
     world.insert_resource(SimEventJournal::default());
     world.insert_resource(CombatPresentationIntentJournal::default());
@@ -1998,7 +1998,7 @@ fn projection_source_world() -> World {
     world
 }
 
-fn discard_projection_after(
+pub(crate) fn discard_projection_after(
     source: &mut World,
     projector: &mut LivePresentationProjector,
     retained_through: SimTick,
@@ -2033,7 +2033,7 @@ fn discard_projection_after(
     projector.rollback_hooks().discard_after(retained_through);
 }
 
-fn install_presentation_tick(
+pub(crate) fn install_presentation_tick(
     source: &mut World,
     events: RemotePresentationTick,
 ) -> Result<(), RemoteOnlinePresentationError> {

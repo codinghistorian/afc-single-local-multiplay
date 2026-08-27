@@ -17,6 +17,7 @@ mod bot_profiles;
     not(target_arch = "wasm32")
 ))]
 mod bot_quality;
+pub mod browser_online_client;
 mod camera;
 mod canonical_math;
 mod canonical_state;
