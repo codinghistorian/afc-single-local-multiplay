@@ -986,13 +986,27 @@ where
         &mut self,
         excluded_peer: PeerId,
     ) -> Result<(), AuthorityPeerHubError<S::Error>> {
+        self.begin_shutdown_with_exemption(Some(excluded_peer))
+    }
+
+    /// Irreversibly drains every remote generation owned by a dedicated
+    /// authority. Unlike [`Self::begin_shutdown`], there is no in-process
+    /// listen host to retain while terminal messages are acknowledged.
+    pub fn begin_dedicated_shutdown(&mut self) -> Result<(), AuthorityPeerHubError<S::Error>> {
+        self.begin_shutdown_with_exemption(None)
+    }
+
+    fn begin_shutdown_with_exemption(
+        &mut self,
+        excluded_peer: Option<PeerId>,
+    ) -> Result<(), AuthorityPeerHubError<S::Error>> {
         match self.shutdown {
             AuthorityShutdownState::Running => {
                 self.shutdown = AuthorityShutdownState::Draining;
-                self.shutdown_exempt_peer = Some(excluded_peer);
+                self.shutdown_exempt_peer = excluded_peer;
             }
             AuthorityShutdownState::Draining | AuthorityShutdownState::Drained
-                if self.shutdown_exempt_peer == Some(excluded_peer) =>
+                if self.shutdown_exempt_peer == excluded_peer =>
             {
                 return Ok(());
             }
@@ -1006,7 +1020,7 @@ where
             let Some(link) = self.peers[index].as_ref() else {
                 continue;
             };
-            if link.peer_id == excluded_peer || link.phase == AuthorityPeerPhase::Closing {
+            if Some(link.peer_id) == excluded_peer || link.phase == AuthorityPeerPhase::Closing {
                 continue;
             }
             if has_confirmed_result {
@@ -3981,6 +3995,33 @@ mod tests {
             hub.metrics().typed_disconnects_timed_out,
             (MAX_AUTHORITY_PEERS - 1) as u64
         );
+    }
+
+    #[test]
+    fn dedicated_shutdown_drains_every_peer_without_a_listen_host_exemption() {
+        let mut config = AuthorityPeerHubConfig::default();
+        config.runtime.reliable_retry_interval_ticks = 1;
+        let (mut hub, mut clients) = make_hub(None, 64, config);
+        force_fighting(&mut hub);
+
+        hub.begin_dedicated_shutdown().unwrap();
+        assert_eq!(hub.shutdown_state(), AuthorityShutdownState::Draining);
+        for tick in hub.network_tick().next().get()..hub.network_tick().get() + 30 {
+            for client in &mut clients {
+                client.pump(SimTick(tick));
+            }
+            hub.pump_network(SimTick(tick)).unwrap();
+            if hub.shutdown_drained() {
+                break;
+            }
+        }
+
+        assert!(hub.shutdown_drained());
+        assert!(
+            (0..MAX_AUTHORITY_PEERS).all(|index| hub.connection_for_peer(peer(index)).is_none())
+        );
+        let drained = std::iter::from_fn(|| hub.try_next_drain_event()).count();
+        assert_eq!(drained, MAX_AUTHORITY_PEERS);
     }
 
     #[test]

@@ -106,8 +106,9 @@ The migration gaps that motivated this plan are now closed in repository code:
   native build provides Steam lobby, authentication, P2P/SDR, reconnect, rematch,
   and player-facing application composition behind platform adapters.
 - The main-thread-only browser client and bounded WebTransport/WebSocket endpoint
-  adapters are implemented. Hosted room/admission orchestration is tracked as a
-  separate deployment boundary and must attach peers to `AuthorityPeerHub`.
+  adapters are implemented. Hosted private rooms seal an immutable guest roster
+  before constructing one fixed-tick `AuthorityPeerHub` worker; signed,
+  one-time join admission remains outside the canonical protocol.
 
 This is not a Steam release-approval claim. Real two-machine Steam/SDR behavior,
 physical controller and Steam Deck coverage, supported-OS determinism,

@@ -119,6 +119,8 @@ mod user_mode;
 pub mod web_endpoint_adapters;
 #[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
 pub mod web_identity;
+#[cfg(all(feature = "web-server", not(target_arch = "wasm32")))]
+pub mod web_room;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
