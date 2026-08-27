@@ -20,8 +20,6 @@ use crate::online_roster::{
 };
 use crate::reconnect::AuthenticatedUserId;
 use crate::steam_control::STEAM_LOBBY_SCHEMA_VERSION;
-#[cfg(all(feature = "steam-net", not(target_arch = "wasm32")))]
-use crate::tick_input::RawInputButton;
 use crate::tick_input::{InputMask, QuantizedMovement};
 
 pub const SPACEWAR_APP_ID: u32 = 480;
@@ -5893,8 +5891,19 @@ mod real {
     const STEAM_INPUT_GAMEPLAY_ACTION_SET: &str = "Gameplay";
     const STEAM_INPUT_MENU_ACTION_SET: &str = "Menu";
     const STEAM_INPUT_MOVE_ACTION: &str = "Move";
-    const STEAM_INPUT_GAMEPLAY_ACTIONS: [&str; RawInputButton::ALL.len()] = [
-        "Left", "Right", "Up", "Down", "AimGrab", "Heavy", "Light", "Jump",
+    const STEAM_INPUT_GAMEPLAY_ACTIONS: [(&str, InputMask); 12] = [
+        ("Left", InputMask::LEFT),
+        ("Right", InputMask::RIGHT),
+        ("Up", InputMask::UP),
+        ("Down", InputMask::DOWN),
+        ("Aim", InputMask::DIRECT_AIM),
+        ("Grab", InputMask::DIRECT_GRAB),
+        ("Heavy", InputMask::HEAVY),
+        ("Light", InputMask::LIGHT),
+        ("Jump", InputMask::JUMP),
+        ("Guard", InputMask::DIRECT_GUARD),
+        ("Ultimate", InputMask::DIRECT_ULTIMATE),
+        ("Dash", InputMask::DIRECT_DASH),
     ];
     const STEAM_INPUT_MENU_ACTIONS: [&str; SteamMenuAction::ALL.len()] = [
         "MenuAccept",
@@ -6499,7 +6508,7 @@ mod real {
         menu_action_set: u64,
         desired_action_set: SteamInputActionSet,
         movement_action: u64,
-        gameplay_actions: [u64; RawInputButton::ALL.len()],
+        gameplay_actions: [u64; STEAM_INPUT_GAMEPLAY_ACTIONS.len()],
         menu_actions: [u64; SteamMenuAction::ALL.len()],
         assignments: SteamInputAssignments,
         snapshot: SteamInputSnapshot,
@@ -6526,7 +6535,7 @@ mod real {
             let menu_action_set = input.get_action_set_handle(STEAM_INPUT_MENU_ACTION_SET);
             let movement_action = input.get_analog_action_handle(STEAM_INPUT_MOVE_ACTION);
             let gameplay_actions = std::array::from_fn(|index| {
-                input.get_digital_action_handle(STEAM_INPUT_GAMEPLAY_ACTIONS[index])
+                input.get_digital_action_handle(STEAM_INPUT_GAMEPLAY_ACTIONS[index].0)
             });
             let menu_actions = std::array::from_fn(|index| {
                 input.get_digital_action_handle(STEAM_INPUT_MENU_ACTIONS[index])
@@ -7384,13 +7393,13 @@ mod real {
                 };
 
                 let mut gameplay_held = InputMask::NONE;
-                for (button, action) in RawInputButton::ALL
+                for ((_, mask), action) in STEAM_INPUT_GAMEPLAY_ACTIONS
                     .into_iter()
                     .zip(steam_input.gameplay_actions)
                 {
                     let data = input.get_digital_action_data(raw, action);
                     if data.bActive && data.bState {
-                        gameplay_held.insert(button.mask());
+                        gameplay_held.insert(mask);
                     }
                 }
 
@@ -7518,7 +7527,7 @@ mod real {
             STEAM_INPUT_MOVE_ACTION,
         ]
         .into_iter()
-        .chain(STEAM_INPUT_GAMEPLAY_ACTIONS)
+        .chain(STEAM_INPUT_GAMEPLAY_ACTIONS.map(|(name, _)| name))
         .chain(STEAM_INPUT_MENU_ACTIONS)
         {
             let quoted = format!("\"{required}\"");
@@ -7557,7 +7566,12 @@ mod real {
             "\"Menu\"",
             "\"gameactions\"",
             "\"Move\"",
+            "game_action Gameplay Aim",
+            "game_action Gameplay Grab",
             "game_action Gameplay Jump",
+            "game_action Gameplay Guard",
+            "game_action Gameplay Ultimate",
+            "game_action Gameplay Dash",
             "game_action Menu MenuAccept",
             "game_action Menu MenuBack",
             "game_action Menu MenuBindings",

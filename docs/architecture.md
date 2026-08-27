@@ -23,6 +23,13 @@ The Controls hub owns local device setup, family-aware menu conventions, live
 input testing, and keyboard configuration. Device assignments are session state;
 versioned keyboard and vibration preferences are stored in the platform
 application-data directory on native builds and `localStorage` on web builds.
+Unassigned setup cards use family-neutral Confirm/Back language. Once a controller
+is identified, prompts use its physical labels, including DualSense Cross, Circle,
+Square, Triangle, L1/L2, R1/R2, and Options.
+Menu direction state is locked to one active controller until it returns to
+neutral or disconnects, so another connected controller cannot reset its repeat
+timer. Stick navigation emits once per neutral deflection with hysteresis; D-pad
+navigation repeats only after the menu delay.
 Single Player bypasses device setup, preserves an explicit P1 session assignment,
 and otherwise starts on Keyboard 1. On eligible single-player screens, an
 unassigned controller can request P1 through a controller-locked, two-press
@@ -33,11 +40,28 @@ combat or block menu input until the original or an unassigned replacement
 controller reclaims them; both reconnect and takeover paths resume through a
 one-frame input gate.
 
-Native macOS input uses Apple's GameController framework to expose normalized
-controller profiles as Bevy `Gamepad` components. This avoids the raw HID profile
-used by some wired Xbox Series controllers, which macOS can enumerate without
-providing usable Gilrs button or axis elements. Other native platforms and web
-builds continue to use Bevy Gilrs.
+Controller identification runs only when a device connects or reconnects. Sony
+vendor `0x054C`, standard DualSense product `0x0CE6`, DualSense Edge product
+`0x0DF2`, and known native/browser names select the PlayStation family. The family
+changes physical labels and menu conventions, while gameplay consumes one shared
+normalized layout: LT/L2 aim, RT/R2 guard, RB/R1 dash, LB/L1 ultimate, and the
+standard face buttons for jump, grab, light, and heavy attacks.
+
+Windows and Linux use Bevy/Gilrs normalized gamepad mappings. Native macOS uses
+Apple's extended GameController profile to expose controllers as Bevy `Gamepad`
+components; this also avoids the raw HID profile used by some wired Xbox Series
+controllers that macOS can enumerate without usable Gilrs elements. Web builds
+consume standard Gamepad API mappings through Bevy. There is no custom HID or
+Windows GameInput backend.
+
+Controller haptics remain capability-based. Windows/Linux use Bevy rumble and web
+uses a Gamepad haptic actuator only when the browser exposes one. Native macOS
+uses Core Haptics: PlayStation prefers separate left/right handles, while Xbox,
+Nintendo, and generic controllers use Apple's whole-controller default locality.
+Missing or failed haptics update presentation metadata but never reject input,
+joining, or reconnecting. Every assigned controller is mixed independently;
+disconnect and replacement paths stop active requests and remove the old
+controller before feedback can route to its replacement.
 
 Inactive match states and map-specific behavior are gated with run conditions.
 Systems should not retain unused query parameters or overlapping mutable queries,

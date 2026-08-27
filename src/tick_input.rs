@@ -106,12 +106,20 @@ impl InputMask {
     pub const DIRECT_ULTIMATE: Self = Self(1 << 9);
     pub const DIRECT_SPECIAL: Self = Self(1 << 10);
     pub const DIRECT_DASH: Self = Self(1 << 11);
+    /// Client-local direct grab. This folds into the existing action-level
+    /// `AIM_GRAB` pressed lane and therefore does not expand the wire format.
+    pub const DIRECT_GRAB: Self = Self(1 << 12);
+    /// Client-local direct aim. This folds into the existing action-level
+    /// `AIM_GRAB` held lane without creating a grab press edge.
+    pub const DIRECT_AIM: Self = Self(1 << 13);
     pub const DIRECTIONS: Self = Self(Self::LEFT.0 | Self::RIGHT.0 | Self::UP.0 | Self::DOWN.0);
     pub const DIRECT_ACTIONS: Self = Self(
         Self::DIRECT_GUARD.0
             | Self::DIRECT_ULTIMATE.0
             | Self::DIRECT_SPECIAL.0
-            | Self::DIRECT_DASH.0,
+            | Self::DIRECT_DASH.0
+            | Self::DIRECT_GRAB.0
+            | Self::DIRECT_AIM.0,
     );
     pub const CURRENT_BINDINGS: Self = Self((1_u16 << RawInputButton::ALL.len()) - 1);
     pub const SUPPORTED_DEVICE_INPUTS: Self =
@@ -926,7 +934,7 @@ mod tests {
         mask.remove(InputMask::LEFT);
         assert!(!mask.intersects(InputMask::DIRECTIONS));
         assert_eq!(InputMask::CURRENT_BINDINGS.bits(), 0xff);
-        assert_eq!(InputMask::SUPPORTED_DEVICE_INPUTS.bits(), 0x0fff);
+        assert_eq!(InputMask::SUPPORTED_DEVICE_INPUTS.bits(), 0x3fff);
     }
 
     #[test]

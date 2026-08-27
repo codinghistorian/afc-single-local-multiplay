@@ -31,7 +31,7 @@ pub fn local_tick_to_network_input(
     set(
         &mut held,
         InputButtons::AIM_GRAB,
-        frame.held.contains(InputMask::AIM_GRAB),
+        frame.held.contains(InputMask::AIM_GRAB) || frame.held.contains(InputMask::DIRECT_AIM),
     );
     set(
         &mut held,
@@ -64,7 +64,11 @@ pub fn local_tick_to_network_input(
     );
     set(&mut pressed, InputButtons::LIGHT, chord.light);
     set(&mut pressed, InputButtons::HEAVY, chord.heavy);
-    set(&mut pressed, InputButtons::AIM_GRAB, chord.grab);
+    set(
+        &mut pressed,
+        InputButtons::AIM_GRAB,
+        chord.grab || frame.pressed.contains(InputMask::DIRECT_GRAB),
+    );
     set(
         &mut pressed,
         InputButtons::GUARD,
@@ -474,7 +478,8 @@ mod tests {
         let direct_presses = InputMask::DIRECT_GUARD
             | InputMask::DIRECT_ULTIMATE
             | InputMask::DIRECT_SPECIAL
-            | InputMask::DIRECT_DASH;
+            | InputMask::DIRECT_DASH
+            | InputMask::DIRECT_GRAB;
         let frame = local_tick_to_network_input(
             local(77, InputMask::DIRECT_GUARD, direct_presses, InputMask::NONE),
             &mut gestures,
@@ -487,10 +492,11 @@ mod tests {
                 | InputButtons::ULTIMATE
                 | InputButtons::SPECIAL
                 | InputButtons::DASH
+                | InputButtons::AIM_GRAB
         );
 
         let live = network_input_to_fighter_input(frame);
-        assert!(live.guard && live.ultimate && live.special && live.dash);
+        assert!(live.guard && live.ultimate && live.special && live.dash && live.grab);
     }
 
     #[test]

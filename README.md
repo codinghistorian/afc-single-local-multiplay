@@ -145,9 +145,9 @@ Open `http://127.0.0.1:8000`, then click or press Enter to start user mode.
 
 For itch.io, create an **HTML Game**, upload the ZIP, and select
 **Click to launch in fullscreen**. The launch click supplies the browser
-interaction needed before audio playback and controller joining. Test Xbox
-controller detection on a draft upload in both Chrome and Safari before
-publishing.
+interaction needed before audio playback and controller joining. Test Xbox and
+standard DualSense discovery, reconnect, replacement, and gameplay input on a
+draft upload in current Chrome; also test Safari on macOS before publishing.
 
 ## Development documentation
 
@@ -185,15 +185,19 @@ Player:
 User Mode Local Multiplayer:
 - Single Player opens character select immediately and uses Keyboard 1 unless P1
   already has an explicit session assignment.
-- On character select, arena select, the controls briefing, combat, or results,
+- On character select, arena select, combat, or results,
   press an unassigned controller's family-specific Confirm button twice to
   transfer P1 from Keyboard 1. Back or Esc cancels the confirmation.
 - Choose two, three, or four local players from the Multiplayer mode screen.
-- Join in P1-P4 order with Xbox A or any keyboard layout's Jump/Aim key; Xbox B leaves.
+- Join in P1-P4 order with a controller's family-specific Confirm button or any
+  keyboard layout's Jump/Aim key. Use the controller's Back button to leave.
 - If an assigned controller disconnects, reclaim its seat with the original or
   another unassigned controller before play continues.
-- Xbox: Left stick/D-pad move; A jump; X light; Y heavy; B aim/grab; RT dash;
-  LB guard; LT ultimate.
+- Xbox: Left stick/D-pad move; A jump; X light; Y heavy; B grab/back; LT aim;
+  RT guard; RB dash; LB ultimate.
+- DualSense: Left stick/D-pad move; Cross jump/confirm; Square light; Triangle
+  heavy; Circle grab/back; L2 aim; R2 guard; R1 dash; L1 ultimate; Options is the
+  menu/pause control where available.
 - Open **Settings → Controls**. Controller opens registration; Keyboard edits or
   restores all four layouts; Sound controls audio preferences.
   Controller order is retained for the current session, while keyboard bindings
@@ -204,9 +208,27 @@ User Mode Local Multiplayer:
 - P4: J/L/O/K move; 7/8/9/0 actions.
 - Key Settings shows one complete eight-action layout at a time and swaps duplicate assignments safely.
 
+### Controller support
+
+The standard PlayStation 5 DualSense is supported over USB and Bluetooth on
+Windows 10/11, Linux, and macOS, and through the standard Gamepad API in current
+Chrome on those operating systems and Safari on macOS. DualSense Edge uses the
+same normalized controls, but its extra controls are not bound or part of the
+hardware acceptance target. Linux requires a current kernel with
+`hid-playstation` and suitable input/force-feedback permissions.
+
+Windows and Linux use Bevy/Gilrs normalized mappings, macOS uses Apple's extended
+GameController profile, and browsers use standard Gamepad mappings. Vibration is
+capability-based: the game uses the existing platform haptic route when one is
+exposed, while unsupported vibration never blocks input, joining, or reconnecting.
+On macOS, DualSense uses its separate handle actuators when available, while Xbox
+and other controllers use Apple's whole-controller default haptic route.
+Touchpad input, motion, adaptive-trigger effects, light-bar control, speaker,
+microphone, and DualSense Edge extra controls are out of scope.
+
 Native Dev Hotkeys:
 - Shift+U: enter user mode from the dev setup screen.
-- In user mode, choose player count, one character per player, and an arena before the controls briefing.
+- In user mode, choose player count, one character per player, and an arena before starting the match.
 - F2: toggle map editor while in setup.
 - H: toggle hitbox, hurtbox, item, impact-source, reaction, technique-window, and feedback-cue debug overlays.
 - Shift+Up/Down: pan the gameplay camera forward/back.

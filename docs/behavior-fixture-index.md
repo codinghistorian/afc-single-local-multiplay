@@ -133,6 +133,17 @@ Authority/local bot seed repeatability remains covered by the named production
 headless test, while the versioned tapes continue to freeze the human-input
 gameplay contract independently of planner-private memory.
 
+The mixed-controller integration keeps simulation version 9 and snapshot schema
+5. Browser/native Gamepad and Steam Input now separate controller aim and grab
+before folding them into the existing held/pressed action-level wire lanes. The
+conservatively classified input/tutorial sources change the gameplay-content
+digest to
+`94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a` and
+BF001 tick 1 to `c54f4e8d05713cb1`. A mechanical diff of the complete regenerated
+corpus contains only `hash:` line changes; normalized checkpoints, stable-ID
+relationships, canonical event ticks and payloads, final ticks, and results are
+identical. Debug and fat-LTO release reproduce the checked-in corpus.
+
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from
 `940ffd1093dd6b02df5413b80aa8b8447e0987821fe585c0297ae0c514a8b629`

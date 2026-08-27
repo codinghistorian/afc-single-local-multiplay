@@ -1,13 +1,13 @@
 "controller_mappings"
 {
     "version"         "3"
-    "revision"        "0"
+    "revision"        "1"
     "title"           "Animal Fighter Club — Steam Deck"
     "description"     "Official gameplay and menu layout"
     "creator"         "0"
     "controller_type" "controller_neptune"
     "major_revision"  "1"
-    "minor_revision"  "0"
+    "minor_revision"  "1"
 
     "group"
     {
@@ -21,7 +21,7 @@
             }
             "button_B"
             {
-                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay AimGrab, Aim / Grab" } } }
+                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay Grab, Grab" } } }
             }
             "button_X"
             {
@@ -66,6 +66,38 @@
             "button_menu"
             {
                 "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay MenuBindings, Controller Layout" } } }
+            }
+            "left_bumper"
+            {
+                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay Ultimate, Ultimate" } } }
+            }
+            "right_bumper"
+            {
+                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay Dash, Dash" } } }
+            }
+        }
+    }
+    "group"
+    {
+        "id"   "7"
+        "mode" "trigger"
+        "inputs"
+        {
+            "edge"
+            {
+                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay Aim, Aim" } } }
+            }
+        }
+    }
+    "group"
+    {
+        "id"   "8"
+        "mode" "trigger"
+        "inputs"
+        {
+            "edge"
+            {
+                "activators" { "Full_Press" { "bindings" { "binding" "game_action Gameplay Guard, Guard" } } }
             }
         }
     }
@@ -128,6 +160,8 @@
             "1" "dpad active"
             "2" "joystick active"
             "3" "switch active"
+            "7" "left_trigger active"
+            "8" "right_trigger active"
         }
     }
     "preset"

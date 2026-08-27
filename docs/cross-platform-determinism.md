@@ -140,6 +140,18 @@ the checked-in corpus, whose BF001 now begins at
 The stock tape and eleven-arena matrix above freeze the corresponding synthetic
 v9 compatibility identity independently of the production content digest.
 
+The subsequent mixed-controller batch keeps simulation v9, snapshot schema 5,
+and the action-level wire format unchanged. Direct controller aim and grab are
+separate client-local mask bits that fold into the existing held and pressed
+`AIM_GRAB` lanes; controller guard, dash, and ultimate likewise use existing
+action-level bits. Conservative source classification changes the production
+content digest to
+`94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a` and
+BF001 tick 1 to `c54f4e8d05713cb1`. All 20 tapes retain identical normalized
+checkpoints, stable-ID relationships, ordered canonical events, final ticks, and
+results, and debug plus fat-LTO release reproduce the checked-in corpus. The
+synthetic stock and arena-matrix literals above remain unchanged.
+
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The
 stock tape contains no `AIM_GRAB` input, so it is not expected to exercise the

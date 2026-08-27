@@ -32,6 +32,7 @@ use crate::components::{
     LocalInputAssignment, PlayerControlBindings, PlayerKeyBindings, PlayerSlotId, SimPosition,
 };
 use crate::constants::*;
+use crate::control_settings::CONTROLLER_GAMEPLAY_BINDINGS;
 use crate::determinism::{DEFAULT_F32_QUANTIZATION, FighterId, canonicalize_f32};
 use crate::effects::{
     EffectAssets, spawn_aftermath_pulse, spawn_dash_trail, spawn_drunk_bubble, spawn_dust_puff,
@@ -1162,6 +1163,7 @@ fn sample_bound_tick_input(
 }
 
 fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputSample {
+    let bindings = CONTROLLER_GAMEPLAY_BINDINGS;
     // Read digital buttons directly: browser and macOS drivers can expose a
     // button-only D-pad even when Bevy's axis-backed convenience value is zero.
     let mut dpad = Vec2::ZERO;
@@ -1193,22 +1195,12 @@ fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputS
         (InputMask::RIGHT, GamepadButton::DPadRight, true),
         (InputMask::UP, GamepadButton::DPadUp, true),
         (InputMask::DOWN, GamepadButton::DPadDown, true),
-        (InputMask::AIM_GRAB, GamepadButton::East, true),
-        (InputMask::HEAVY, GamepadButton::North, true),
-        (InputMask::LIGHT, GamepadButton::West, true),
-        (InputMask::JUMP, GamepadButton::South, true),
-        (InputMask::DIRECT_GUARD, GamepadButton::LeftTrigger, true),
-        (
-            InputMask::DIRECT_ULTIMATE,
-            GamepadButton::LeftTrigger2,
-            true,
-        ),
-        (
-            InputMask::DIRECT_SPECIAL,
-            GamepadButton::RightTrigger,
-            SHARED_SPECIALS_ENABLED,
-        ),
-        (InputMask::DIRECT_DASH, GamepadButton::RightTrigger2, true),
+        (InputMask::HEAVY, bindings.heavy, true),
+        (InputMask::LIGHT, bindings.light, true),
+        (InputMask::JUMP, bindings.jump, true),
+        (InputMask::DIRECT_GUARD, bindings.guard, true),
+        (InputMask::DIRECT_ULTIMATE, bindings.ultimate, true),
+        (InputMask::DIRECT_DASH, bindings.dash, true),
     ] {
         if !enabled {
             continue;
@@ -1222,6 +1214,21 @@ fn sample_gamepad_tick_input(gamepad: &Gamepad, camera_yaw: f32) -> RenderInputS
         if gamepad.just_released(button) {
             released.insert(mask);
         }
+    }
+
+    // Aim and grab share one action-level wire bit, but its held and pressed
+    // lanes have distinct meanings. Keep L2/LT out of the raw press lane so an
+    // aim press cannot synthesize a grab; the face-button grab uses the
+    // client-local direct bit above and is folded into the canonical pressed
+    // lane by `local_tick_to_network_input`.
+    if gamepad.pressed(bindings.aim) {
+        held.insert(InputMask::DIRECT_AIM);
+    }
+    if gamepad.just_released(bindings.aim) {
+        released.insert(InputMask::DIRECT_AIM);
+    }
+    if gamepad.just_pressed(bindings.grab) {
+        pressed.insert(InputMask::DIRECT_GRAB);
     }
 
     RenderInputSample {
@@ -1418,6 +1425,7 @@ fn keyboard_action_sample(
 
 #[cfg(test)]
 fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
+    let bindings = CONTROLLER_GAMEPLAY_BINDINGS;
     let dpad = gamepad.dpad();
     let stick = apply_gamepad_movement_deadzone(gamepad.left_stick());
     let movement = if dpad.length_squared() > 0.0 {
@@ -1425,8 +1433,6 @@ fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
     } else {
         Vec2::new(stick.x, -stick.y)
     };
-    let special_just = SHARED_SPECIALS_ENABLED && gamepad.just_pressed(GamepadButton::RightTrigger);
-
     DeviceActionSample {
         movement,
         movement_just: [
@@ -1435,19 +1441,19 @@ fn gamepad_action_sample(gamepad: &Gamepad) -> DeviceActionSample {
             gamepad.just_pressed(GamepadButton::DPadDown),
             gamepad.just_pressed(GamepadButton::DPadUp),
         ],
-        aim_held: gamepad.pressed(GamepadButton::East),
-        jump_just: gamepad.just_pressed(GamepadButton::South),
-        dash_just: gamepad.just_pressed(GamepadButton::RightTrigger2),
-        light_just: gamepad.just_pressed(GamepadButton::West),
-        light_held: gamepad.pressed(GamepadButton::West),
-        heavy_just: gamepad.just_pressed(GamepadButton::North),
-        heavy_held: gamepad.pressed(GamepadButton::North),
-        heavy_released: gamepad.just_released(GamepadButton::North),
-        grab_just: gamepad.just_pressed(GamepadButton::East),
-        grab_held: gamepad.pressed(GamepadButton::East),
-        guard_held: gamepad.pressed(GamepadButton::LeftTrigger),
-        ultimate_just: gamepad.just_pressed(GamepadButton::LeftTrigger2),
-        special_just,
+        aim_held: gamepad.pressed(bindings.aim),
+        jump_just: gamepad.just_pressed(bindings.jump),
+        dash_just: gamepad.just_pressed(bindings.dash),
+        light_just: gamepad.just_pressed(bindings.light),
+        light_held: gamepad.pressed(bindings.light),
+        heavy_just: gamepad.just_pressed(bindings.heavy),
+        heavy_held: gamepad.pressed(bindings.heavy),
+        heavy_released: gamepad.just_released(bindings.heavy),
+        grab_just: gamepad.just_pressed(bindings.grab),
+        grab_held: gamepad.pressed(bindings.grab),
+        guard_held: gamepad.pressed(bindings.guard),
+        ultimate_just: gamepad.just_pressed(bindings.ultimate),
+        special_just: false,
     }
 }
 
@@ -8142,7 +8148,7 @@ mod tests {
     }
 
     #[test]
-    fn xbox_buttons_map_to_fixed_actions() {
+    fn xbox_and_dualsense_normalized_buttons_map_to_trigger_layout() {
         let gamepad = gamepad_with_buttons(&[
             GamepadButton::South,
             GamepadButton::West,
@@ -8158,8 +8164,8 @@ mod tests {
         assert!(sample.jump_just);
         assert!(sample.light_just);
         assert!(sample.heavy_just);
-        assert!(sample.grab_just);
         assert!(sample.aim_held);
+        assert!(sample.grab_just);
         assert!(sample.dash_just);
         assert!(sample.guard_held);
         assert!(sample.ultimate_just);
@@ -8167,7 +8173,20 @@ mod tests {
     }
 
     #[test]
-    fn xbox_right_bumper_and_all_former_modifiers_produce_no_special_request() {
+    fn aim_and_grab_use_distinct_controller_buttons() {
+        let aim = gamepad_action_sample(&gamepad_with_buttons(&[GamepadButton::LeftTrigger2]));
+        assert!(aim.aim_held);
+        assert!(!aim.grab_just);
+        assert!(!aim.grab_held);
+
+        let grab = gamepad_action_sample(&gamepad_with_buttons(&[GamepadButton::East]));
+        assert!(!grab.aim_held);
+        assert!(grab.grab_just);
+        assert!(grab.grab_held);
+    }
+
+    #[test]
+    fn controller_dash_and_all_former_modifiers_produce_no_special_request() {
         let modifiers = [
             GamepadButton::East,
             GamepadButton::North,
@@ -8891,6 +8910,42 @@ mod tests {
         assert!(!sample.released.contains(InputMask::DIRECT_SPECIAL));
         assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.held));
         assert!(InputMask::SUPPORTED_DEVICE_INPUTS.contains(sample.pressed));
+    }
+
+    #[test]
+    fn gamepad_sampler_keeps_aim_hold_and_grab_press_distinct_on_the_wire() {
+        let aim = sample_gamepad_tick_input(
+            &gamepad_with_buttons(&[CONTROLLER_GAMEPLAY_BINDINGS.aim]),
+            0.0,
+        );
+        assert!(aim.held.contains(InputMask::DIRECT_AIM));
+        assert!(!aim.held.contains(InputMask::AIM_GRAB));
+        assert!(!aim.pressed.contains(InputMask::AIM_GRAB));
+        assert!(!aim.pressed.contains(InputMask::DIRECT_GRAB));
+
+        let grab = sample_gamepad_tick_input(
+            &gamepad_with_buttons(&[CONTROLLER_GAMEPLAY_BINDINGS.grab]),
+            0.0,
+        );
+        assert!(!grab.held.contains(InputMask::AIM_GRAB));
+        assert!(grab.pressed.contains(InputMask::DIRECT_GRAB));
+
+        let both = sample_gamepad_tick_input(
+            &gamepad_with_buttons(&[
+                CONTROLLER_GAMEPLAY_BINDINGS.aim,
+                CONTROLLER_GAMEPLAY_BINDINGS.grab,
+            ]),
+            0.0,
+        );
+        let seat = LocalSeatId::new(0).unwrap();
+        let mut local = LocalTickInputState::default();
+        local.merge_render_sample(seat, both);
+        let frame = local.drain_for_tick(seat, 77);
+        let network =
+            crate::live_input::local_tick_to_network_input(frame, local.gestures_mut(seat));
+        let decoded = crate::live_input::network_input_to_fighter_input(network);
+        assert!(decoded.aim);
+        assert!(decoded.grab);
     }
 
     #[test]

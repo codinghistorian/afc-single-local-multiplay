@@ -22,7 +22,7 @@ most four stable local controller ordinals. Each controller contains only:
 - a process-local controller ID used to preserve its couch ordinal;
 - a presentation-only device kind;
 - quantized `Move` axes;
-- the current held mask for the eight existing gameplay actions; and
+- the current held mask for the twelve gameplay actions; and
 - the current held mask for menu accept, back, navigation, and binding-panel
   actions.
 
@@ -43,7 +43,7 @@ accept at the same time.
 
 | Set | Analog actions | Digital actions |
 | --- | --- | --- |
-| `Gameplay` | `Move` | `Left`, `Right`, `Up`, `Down`, `AimGrab`, `Heavy`, `Light`, `Jump`, `MenuBack`, `MenuBindings` |
+| `Gameplay` | `Move` | `Left`, `Right`, `Up`, `Down`, `Aim`, `Grab`, `Heavy`, `Light`, `Jump`, `Guard`, `Ultimate`, `Dash`, `MenuBack`, `MenuBindings` |
 | `Menu` | none | `MenuAccept`, `MenuBack`, `MenuUp`, `MenuDown`, `MenuLeft`, `MenuRight`, `MenuBindings` |
 
 The application selects `Gameplay` only during an offline fight or an online
@@ -60,9 +60,13 @@ Gameplay defaults:
 - left stick: move;
 - D-pad: directional move/dash actions;
 - A / Cross: jump;
-- B / Circle: aim/grab;
+- B / Circle: grab;
 - X / Square: light attack;
 - Y / Triangle: heavy attack;
+- LT / L2: aim;
+- RT / R2: guard;
+- LB / L1: ultimate;
+- RB / R1: dash;
 - menu/start: back/leave action; and
 - view/select: open the Steam controller-layout panel.
 
@@ -99,9 +103,11 @@ still held by the other device.
 
 Steam exposes current action state rather than Bevy-style edges. The accumulator
 derives per-source transitions and union-latches them until the next fixed tick,
-using the same `LocalTickInputState` drain as keyboard input. This preserves taps
-when a render frame has no fixed step and exposes edges only to the first fixed
-step during catch-up.
+using the same `LocalTickInputState` drain as keyboard input. Direct aim and grab
+remain separate client-local mask bits: aim folds into the existing held
+`AIM_GRAB` wire lane and grab folds into its pressed lane. This preserves taps
+when a render frame has no fixed step, prevents aiming from synthesizing a grab,
+and exposes edges only to the first fixed step during catch-up.
 
 The Steam-enabled shipping build samples controllers in offline fights as well as
 online fights. Builds without `steam-net`, including web builds, return an empty

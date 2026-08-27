@@ -45,6 +45,27 @@ Inside a section labelled historical WP0, **current** and **legacy** mean the
 audited pre-cutover commit above. Elsewhere, **current** means simulation version
 9 in this repository. **Target** refers to the multiplayer specification.
 
+## Simulation v9 mixed-controller input addendum
+
+The current simulation discriminator remains version 9 and snapshot schema 5.
+Browser/native Gamepad input now uses one normalized physical layout: LT/L2 aim,
+B/Circle grab, RT/R2 guard, RB/R1 dash, and LB/L1 ultimate. Aim and grab remain
+separate in the client-local fixed-tick mask, then fold into the existing held
+and pressed lanes of the action-level `AIM_GRAB` wire bit. Steam Input exposes
+the same distinct action set. No wire field, protocol version, replay schema,
+canonical event, stable ID, or authoritative behavior changes.
+
+`fighter.rs`, `live_input.rs`, `tick_input.rs`, and the family-aware tutorial
+source are conservatively classified gameplay inputs. Their content-only change
+therefore refreshes the compiled gameplay digest to
+`94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a` and
+BF001 tick 1 to `c54f4e8d05713cb1`. Mechanical review of all 20 tapes found only
+per-tick hash-line changes: normalized checkpoints, stable-ID relationships,
+ordered canonical event ticks and payloads, final ticks, and results are
+identical, and debug plus fat-LTO release reproduce the checked-in corpus. The
+production stock tape and eleven-arena matrix retain their frozen synthetic v9
+compatibility hashes.
+
 ## Simulation v9 tactical-bot and contact-state addendum
 
 The current online compatibility boundary is simulation version 9. Protocol
@@ -76,8 +97,8 @@ All 20 checked-in behavior tapes retain identical normalized checkpoints,
 stable-ID relationships, canonical event sequences, final ticks, and final
 results; debug and fat-LTO release reproduce the same checked-in corpus. Their
 hashes change at tick 1 for the simulation/schema/content
-identity. BF001 now begins at `0ff0f4a42dcc0fa3`. The current compiled gameplay
-content digest is
+identity. BF001 now begins at `0ff0f4a42dcc0fa3`. The bot tranche's compiled
+gameplay content digest was
 `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`.
 The production stock tape still ends with team 1 at tick 934, and the complete
 v9 literals are frozen in
@@ -1153,3 +1174,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-08-26 | 7 (unchanged) | BF030 `training_ground_perimeter`; all 18 prior behavior tapes; eleven-arena compact content matrix | **ContentIdentityOnly/additive content:** Training Ground adds arena index 10 and a presentation-authored court while authoritative collision uses four exact-bit static barriers selected through per-world `ActiveArena`. BF030 freezes east-wall contact at Q12 `(34488, 1843, 0)`, zero velocity, grounded/no-stock-loss state, no events, and tick-60 restore replay. The preceding 18 tapes retain identical normalized checkpoints, stable-ID relationships, ordered events, final ticks, and results before their identity-only refresh. The gameplay-content digest changes from `cde86290adda4918440199f9f5cdb25da3b7ded616dc9b89224f7d7c5ac7bdf6` to `aaf26de55b1f43e4b5a20ac3e50ee39fbc8da9d91317d3403f4bff6f16673b1a`; debug and fat-LTO release agree on all 19 files and BF001 tick-1 hash `b6e166cd6feadfa6`. Protocol 1, simulation 7, replay 1, and snapshot schema 3 remain unchanged. Approved by the browser-multiplayer integration scope. |
 | 2026-08-26 | 8 | BF021 `last_stock_match_completion`, BF031 `split_causeway_gate_toggle`, all prior tapes, production stock tape, eleven-arena compact matrix, v7/v8 compatibility and snapshot-schema-4 round trips | **AcceptedChange:** Champion's Court adopts its final 35-barrier topology and front-apron ring-out route; BF021 preserves team 1 as winner while its deciding tick changes from 709 to 934. Split Causeway adds two fixed-tick gates whose target/progress state is rollback-owned, whose interaction winner is selected by `FighterId`, and whose toggle is the canonical `ArenaDeviceToggled` event keyed by stable arena/device indices. BF031 freezes the 18-tick motion and tick-10 restore. BF024/BF025/BF028 move only their synthetic setups clear of the final topology and retain their named semantics; all other normalized semantic observations remain preserved. Snapshot schema 4 expands the bounded arena payload to 80 bytes; protocol 1 and replay schema 1 remain unchanged. Debug and fat-LTO release produced byte-identical 20-file corpora with digest `11f250ab9cc50f8caee1cb34f7cb387c474996b68db84535f4d07b688b214e03` and BF001 tick-1 hash `3eae3ee94c4516d7`. Approved by the browser-multiplayer integration scope. |
 | 2026-08-26 | 9 | All 20 behavior tapes, production stock tape, eleven-arena compact matrix, authority bot seed tape, v8/v9 compatibility and snapshot-schema-5 round trips | **AcceptedChange:** Standard and Tutorial bots now share the bounded fixed-tick utility/navigation/tactical planner in local and authority compositions. Decisions use immutable embedded profiles, replay seed, integer decision ticks, canonical math, `FighterId`, and `SimEntityId`; authority commits only ordinary predicted-protocol input frames. The latest accepted action/technique/guarded contact becomes required rollback state because it controls later tactical branches, adding six fixed bytes per fighter and raising the full-pool snapshot to 92,053 bytes. All 20 existing tapes preserve identical normalized checkpoints, stable-ID relationships, canonical events, final ticks, and results; debug and fat-LTO release reproduce their v9 hashes, beginning with BF001 `0ff0f4a42dcc0fa3`. The gameplay-content digest is `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`; protocol 1 and replay schema 1 remain unchanged. Approved by the browser-multiplayer integration scope. |
+| 2026-08-27 | 9 (unchanged) | All 20 behavior tapes; fixed-tick browser/native/Steam controller sampling and family-aware prompts | **ContentIdentityOnly:** the shared physical layout separates LT/L2 aim from B/Circle grab and routes RT/R2 guard, RB/R1 dash, and LB/L1 ultimate through client-local direct bits that fold into the existing action-level predicted wire lanes. Menu direction ownership/hysteresis, controller replacement, and family labels remain frame-driven. The conservative gameplay digest changes from `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215` to `94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a`; BF001 tick 1 becomes `c54f4e8d05713cb1`. All 20 tapes retain identical normalized checkpoints, stable-ID relationships, ordered canonical event ticks/payloads, final ticks, and results. Protocol 1, replay schema 1, snapshot schema 5, simulation 9, and the stock/matrix synthetic hashes remain unchanged. Approved by the browser-multiplayer integration scope. |
