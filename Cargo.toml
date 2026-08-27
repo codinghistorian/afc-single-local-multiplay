@@ -34,7 +34,6 @@ required-features = ["web-server"]
 default = ["native", "dev-hot-reload"]
 native = [
     "bevy/bevy_gilrs",
-    "bevy/x11",
     "bevy/wayland",
 ]
 dev-hot-reload = ["native", "bevy/file_watcher"]
@@ -49,7 +48,6 @@ trace = ["perf", "bevy/trace_tracy"]
 native-net = ["dep:crossbeam-channel", "dep:lightyear"]
 steam-net = ["native-net", "dep:steamworks"]
 web-server = [
-    "bevy/x11",
     "dep:axum",
     "dep:base64",
     "dep:futures-util",
@@ -84,6 +82,11 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_picking",
     "bevy_state",
     "bevy_winit",
+    # `bevy_winit` is shared by graphical and headless library builds. Linux
+    # still requires one compiled event-loop backend even when a binary never
+    # creates a window, so keep X11 at the dependency boundary for every role.
+    # Winit's target cfg keeps these dependencies out of browser WASM builds.
+    "x11",
     "default_font",
     "reflect_auto_register",
     "serialize",
