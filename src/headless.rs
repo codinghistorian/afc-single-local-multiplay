@@ -1346,17 +1346,17 @@ mod tests {
     #[test]
     fn cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result() {
         const EXPECTED_CHECKPOINTS: [(u64, u64); 8] = [
-            (1, 0xc70e_eb0a_1615_1318),
-            (120, 0xbbe0_a608_d0e8_c527),
-            (240, 0x5870_65ba_1f15_4868),
-            (360, 0x9b30_5e71_cb01_efef),
-            (480, 0x16a6_5f95_d916_635f),
-            (600, 0xdeba_d3d6_e430_5410),
-            (720, 0xe1d1_3626_4d73_e633),
-            (840, 0x6a10_dddd_d904_eedf),
+            (1, 0x12e0_2721_5d80_758b),
+            (120, 0xbed3_89b6_27bc_18a0),
+            (240, 0xad15_7a8b_1aa6_3457),
+            (360, 0x8e47_d2ab_fa4f_1120),
+            (480, 0xe94d_ca2a_0b78_cf30),
+            (600, 0xe686_3f85_6d24_34b7),
+            (720, 0xaa3e_6a52_f98b_6238),
+            (840, 0x78c6_457e_49b8_ee34),
         ];
         const EXPECTED_FINAL_TICK: SimTick = SimTick(934);
-        const EXPECTED_FINAL_HASH: u64 = 0x2ead_7d00_af44_aaf4;
+        const EXPECTED_FINAL_HASH: u64 = 0x275c_6631_1d2d_a33d;
 
         let config = fixture();
         assert_eq!(
@@ -1412,17 +1412,17 @@ mod tests {
         // Each arena freezes the independent retired-special/hazard and item
         // branches after semantic review.
         const EXPECTED_FINAL_HASHES: [[u64; 2]; 11] = [
-            [0x0b7d_4baf_42b0_cf80, 0xda35_ffd1_6ba1_c577],
-            [0xe031_03d8_9065_f663, 0xb2ef_39aa_0d16_b002],
-            [0xce46_455e_c877_54fb, 0x2fdc_d071_124c_117a],
-            [0xa2da_26ca_5f22_e66d, 0x1e39_8318_892d_b1d4],
-            [0x8fa8_0892_11d5_7042, 0x0092_7efd_229a_cc90],
-            [0x6610_d63b_80b2_9482, 0xb39a_9da4_16ef_5960],
-            [0xd85b_8d61_6f4f_5ca2, 0x783b_b79c_6fb0_c708],
-            [0x6fab_9367_bfbb_c91b, 0x6087_6c45_b723_f33a],
-            [0x5117_853f_e639_2264, 0x9131_d7cf_e1e3_aec2],
-            [0x6704_8546_95fa_33ad, 0x6a17_dd58_4601_c561],
-            [0x338c_11bc_fae0_6b25, 0x686f_4f47_c9ae_9ce5],
+            [0xf8be_28ad_0a5f_644f, 0x84dc_ed72_a1b1_484c],
+            [0xbd9e_e5fb_d8d8_65f5, 0x5019_d42b_8cfe_2d1d],
+            [0x7268_275c_cb12_b77e, 0x2ea1_5158_c4fe_8cbf],
+            [0x5ab8_3016_a470_e0fb, 0x0cf0_bb23_85ee_2043],
+            [0x49d9_1e05_9bc9_56c1, 0xd3e0_d391_7a7d_aff3],
+            [0x2389_64bd_ad67_23e8, 0x9801_12cf_f2d3_c3c3],
+            [0x56a3_5c61_6419_70cd, 0xeca7_9158_bca7_4edf],
+            [0x4431_7b70_8e1f_a3f1, 0xfc4e_eb96_4fc3_37c7],
+            [0xead4_d45e_0f41_4db9, 0xa110_fd11_2468_7bc7],
+            [0xc2f1_9381_a8ee_e8cb, 0xf6b0_99bd_0655_5b06],
+            [0x3f4b_7e40_d56c_181a, 0x916f_7480_d4c2_7606],
         ];
 
         assert_eq!(arena_definitions().len(), 11);

@@ -1,14 +1,14 @@
 # Current Simulation Contract
 
-- Status: Implemented simulation-v9 contract with historical WP0 provenance
+- Status: Implemented simulation-v10 contract with historical WP0 provenance
 - Historical audited source: `d33ceff65065e18d0928820892bb24bfb5c845ae`
-- Current audit date: 2026-08-26
+- Current audit date: 2026-08-27
 - Scope: current deterministic combat contract plus the preserved pre-WP1 inventory
 - Target specification: [multiplayer-architecture.md](multiplayer-architecture.md)
 
 This document originally froze local behavior before the fixed-tick,
 stable-identity, snapshot, and rollback migration. It now records the implemented
-simulation-v9 contract while retaining the original execution inventory as
+simulation-v10 contract while retaining the original execution inventory as
 migration provenance. Sections explicitly labelled **historical WP0** describe
 the old source above and are not claims about the current runtime.
 
@@ -43,11 +43,40 @@ version bump or authorize a different semantic result.
 
 Inside a section labelled historical WP0, **current** and **legacy** mean the
 audited pre-cutover commit above. Elsewhere, **current** means simulation version
-9 in this repository. **Target** refers to the multiplayer specification.
+10 in this repository. **Target** refers to the multiplayer specification.
+
+## Simulation v10 Chick stamina-cost addendum
+
+The current online compatibility boundary is simulation version 10. Protocol
+version 1, replay schema 1, snapshot schema 5, the 60 Hz fixed schedule, stable
+ID formats, and canonical event vocabulary are unchanged. Chick's authored
+ultimate now costs 12.5 stamina instead of the roster-default 25, and grounded
+heavy costs 3.75 instead of 7.5. Ultimate admission and payment consume the
+selected `TechniqueDefinition` cost, with the legacy default retained only for
+zero-cost ultimate definitions.
+
+BF032 independently starts Chick ultimate on tick 1 and the delayed raw-heavy
+path on tick 6. It freezes Q12 stamina at 153,600 and 189,440 respectively,
+their authored action IDs and canonical `ActionStarted` events, and restore from
+tick 50. The other 20 tapes preserve identical normalized checkpoints,
+stable-ID relationships, canonical event sequences, final ticks, and results;
+only their identity-derived `hash:` lines change. The 21-file debug and fat-LTO
+release corpora agree, beginning with BF001 tick 1
+`9e058d015a24d53b`. The compiled gameplay-content digest is
+`ac2b1aca00c903d1650866526c3ef24c0a2470e581403686d3e1a16c2ec0dec2`.
+
+The production stock tape still ends with team 1 at tick 934, and the complete
+v10 stock/matrix literals are frozen in
+[cross-platform-determinism.md](cross-platform-determinism.md). The optimized
+same-hardware profiler comparison is recorded in
+[performance.md](performance.md): authority and exact rollback remain within
+their acceptance budgets with zero steady-state authority allocations. Version
+9 peers and replays are rejected before gameplay.
 
 ## Simulation v9 mixed-controller input addendum
 
-The current simulation discriminator remains version 9 and snapshot schema 5.
+At that compatibility boundary, the simulation discriminator remained version
+9 and snapshot schema 5.
 Browser/native Gamepad input now uses one normalized physical layout: LT/L2 aim,
 B/Circle grab, RT/R2 guard, RB/R1 dash, and LB/L1 ultimate. Aim and grab remain
 separate in the client-local fixed-tick mask, then fold into the existing held
@@ -1176,3 +1205,4 @@ Measured hot-path changes also require same-hardware before/after evidence under
 | 2026-08-26 | 9 | All 20 behavior tapes, production stock tape, eleven-arena compact matrix, authority bot seed tape, v8/v9 compatibility and snapshot-schema-5 round trips | **AcceptedChange:** Standard and Tutorial bots now share the bounded fixed-tick utility/navigation/tactical planner in local and authority compositions. Decisions use immutable embedded profiles, replay seed, integer decision ticks, canonical math, `FighterId`, and `SimEntityId`; authority commits only ordinary predicted-protocol input frames. The latest accepted action/technique/guarded contact becomes required rollback state because it controls later tactical branches, adding six fixed bytes per fighter and raising the full-pool snapshot to 92,053 bytes. All 20 existing tapes preserve identical normalized checkpoints, stable-ID relationships, canonical events, final ticks, and results; debug and fat-LTO release reproduce their v9 hashes, beginning with BF001 `0ff0f4a42dcc0fa3`. The gameplay-content digest is `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215`; protocol 1 and replay schema 1 remain unchanged. Approved by the browser-multiplayer integration scope. |
 | 2026-08-27 | 9 (unchanged) | All 20 behavior tapes; fixed-tick browser/native/Steam controller sampling and family-aware prompts | **ContentIdentityOnly:** the shared physical layout separates LT/L2 aim from B/Circle grab and routes RT/R2 guard, RB/R1 dash, and LB/L1 ultimate through client-local direct bits that fold into the existing action-level predicted wire lanes. Menu direction ownership/hysteresis, controller replacement, and family labels remain frame-driven. The conservative gameplay digest changes from `d81201c5b4a2347cb97168bddeb5ba2df237da3b0e3078ccabc206525f42c215` to `94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a`; BF001 tick 1 becomes `c54f4e8d05713cb1`. All 20 tapes retain identical normalized checkpoints, stable-ID relationships, ordered canonical event ticks/payloads, final ticks, and results. Protocol 1, replay schema 1, snapshot schema 5, simulation 9, and the stock/matrix synthetic hashes remain unchanged. Approved by the browser-multiplayer integration scope. |
 | 2026-08-27 | 9 (unchanged) | All 20 behavior tapes; responsive browser viewport, settings artwork, Backspace navigation, and back-button hover presentation | **Preservation evidence:** the WASM window starts at 1024×576, applies a presentation-only 0.8 UI scale, and still fits its canvas to the embedding parent. Backspace joins Escape at the frame-driven menu/reconnect boundary, and pointer styling plus the replacement settings image remain presentation-only. `cargo check` passes for the `wasm32-unknown-unknown` web feature set, the complete debug behavior corpus is unchanged, and the gameplay digest remains `94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a`. No fixed-tick rule, stable ID, canonical event, protocol/replay/snapshot schema, or simulation version changes. |
+| 2026-08-27 | 10 | BF032 `chick_reduced_stamina_costs`; all 20 prior tapes; production stock tape; eleven-arena compact matrix; v9/v10 lobby and replay compatibility | **AcceptedChange:** Chick's authored ultimate cost is reduced from 25 to 12.5 stamina and grounded-heavy cost from 7.5 to 3.75. Ultimate admission/payment now reads the selected technique's authored cost. BF032 freezes direct ultimate at tick 1, delayed raw-heavy at tick 6, their exact Q12 stamina/action state, canonical events, and tick-50 restore. Every prior tape preserves normalized checkpoints, stable-ID relationships, canonical events, final ticks, and results; only identity-derived hashes change. Protocol 1, replay schema 1, and snapshot schema 5 remain unchanged. Debug and fat-LTO release agree on the 21-file corpus, beginning with BF001 `9e058d015a24d53b`; the gameplay digest is `ac2b1aca00c903d1650866526c3ef24c0a2470e581403686d3e1a16c2ec0dec2`. Same-hardware optimized profiling preserves zero authority allocations and all timing/history/depth gates. Approved by the browser-multiplayer integration scope. |

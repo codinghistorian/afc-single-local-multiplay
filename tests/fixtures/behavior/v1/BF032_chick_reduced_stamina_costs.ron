@@ -1,0 +1,861 @@
+(
+    schema_version: 1,
+    contract_version: 8,
+    id: 32,
+    name: "BF032_chick_reduced_stamina_costs",
+    classification: AcceptedChange,
+    setup: (
+        arena: 0,
+        rules: 1,
+        seed: 2948636704,
+        slots: [
+            (
+                occupied: true,
+                character: 7,
+                style: 0,
+                equipment: 0,
+                team: 0,
+            ),
+            (
+                occupied: true,
+                character: 7,
+                style: 1,
+                equipment: 1,
+                team: 1,
+            ),
+            (
+                occupied: false,
+                character: 2,
+                style: 2,
+                equipment: 2,
+                team: 0,
+            ),
+            (
+                occupied: false,
+                character: 3,
+                style: 0,
+                equipment: 3,
+                team: 1,
+            ),
+        ],
+    ),
+    duration_ticks: 100,
+    restore_tick: 50,
+    stop_on_result: false,
+    checkpoint_ticks: [
+        1,
+        6,
+        20,
+        50,
+        75,
+        100,
+    ],
+    raw_spans: [
+        (
+            fighter: 1,
+            start_tick: 1,
+            end_tick: 30,
+            movement: (0, 0),
+            held: 32,
+        ),
+    ],
+    raw_edges: [
+        (
+            fighter: 1,
+            tick: 1,
+            pressed: 32,
+            released: 0,
+        ),
+        (
+            fighter: 1,
+            tick: 31,
+            pressed: 0,
+            released: 32,
+        ),
+    ],
+    action_spans: [],
+    action_edges: [
+        (
+            fighter: 0,
+            tick: 1,
+            pressed: 32,
+            released: 0,
+        ),
+    ],
+    expected: Some((
+        hashes: [
+            (
+                tick: 1,
+                hash: "dcd46ee84c2b8a66",
+            ),
+            (
+                tick: 2,
+                hash: "d79a75783fb15128",
+            ),
+            (
+                tick: 3,
+                hash: "e9a537f34061d353",
+            ),
+            (
+                tick: 4,
+                hash: "a959137f8b1712ba",
+            ),
+            (
+                tick: 5,
+                hash: "a6dfd1447a04a8d5",
+            ),
+            (
+                tick: 6,
+                hash: "72768e7a7815ccd5",
+            ),
+            (
+                tick: 7,
+                hash: "7593d30239200142",
+            ),
+            (
+                tick: 8,
+                hash: "abc0847963224457",
+            ),
+            (
+                tick: 9,
+                hash: "603138f171185b28",
+            ),
+            (
+                tick: 10,
+                hash: "fbc61ff8ec0c64e9",
+            ),
+            (
+                tick: 11,
+                hash: "610eeb0b7324eba2",
+            ),
+            (
+                tick: 12,
+                hash: "0cfbeccea731fc3b",
+            ),
+            (
+                tick: 13,
+                hash: "55fe0600b597aa32",
+            ),
+            (
+                tick: 14,
+                hash: "8158e210f046f803",
+            ),
+            (
+                tick: 15,
+                hash: "8f5c3713bad761c4",
+            ),
+            (
+                tick: 16,
+                hash: "121a1a2c28d0f4ef",
+            ),
+            (
+                tick: 17,
+                hash: "06ac19497acaad85",
+            ),
+            (
+                tick: 18,
+                hash: "7b845c599351273c",
+            ),
+            (
+                tick: 19,
+                hash: "5eb268e75541b082",
+            ),
+            (
+                tick: 20,
+                hash: "21274fb23985f877",
+            ),
+            (
+                tick: 21,
+                hash: "4d611cd3aff76fd0",
+            ),
+            (
+                tick: 22,
+                hash: "8a11e776d1fa43cf",
+            ),
+            (
+                tick: 23,
+                hash: "36903be867957441",
+            ),
+            (
+                tick: 24,
+                hash: "1074bebfdfaf31d5",
+            ),
+            (
+                tick: 25,
+                hash: "7332b9978d013f04",
+            ),
+            (
+                tick: 26,
+                hash: "db12b9ce829a1799",
+            ),
+            (
+                tick: 27,
+                hash: "ad464b2e79339ad9",
+            ),
+            (
+                tick: 28,
+                hash: "e238e07fd8945f06",
+            ),
+            (
+                tick: 29,
+                hash: "86fa4b4d4ffdf089",
+            ),
+            (
+                tick: 30,
+                hash: "922b5cc78be4b753",
+            ),
+            (
+                tick: 31,
+                hash: "0a018f2ccb675359",
+            ),
+            (
+                tick: 32,
+                hash: "a7767eed58881523",
+            ),
+            (
+                tick: 33,
+                hash: "a3246ddbf148dbaa",
+            ),
+            (
+                tick: 34,
+                hash: "8bef24096a149456",
+            ),
+            (
+                tick: 35,
+                hash: "c342ce1a4c9ae09f",
+            ),
+            (
+                tick: 36,
+                hash: "a9183a92ee5ad38b",
+            ),
+            (
+                tick: 37,
+                hash: "67741c2da7afb654",
+            ),
+            (
+                tick: 38,
+                hash: "f283bee0de7d2809",
+            ),
+            (
+                tick: 39,
+                hash: "9106480c3e1c29fd",
+            ),
+            (
+                tick: 40,
+                hash: "58a27248545a3f67",
+            ),
+            (
+                tick: 41,
+                hash: "10685f563ffba62a",
+            ),
+            (
+                tick: 42,
+                hash: "35d5413e6b01655b",
+            ),
+            (
+                tick: 43,
+                hash: "0611544dffa69f56",
+            ),
+            (
+                tick: 44,
+                hash: "462ca725bce8f3ad",
+            ),
+            (
+                tick: 45,
+                hash: "1887f437a399755f",
+            ),
+            (
+                tick: 46,
+                hash: "66de03bec38238e0",
+            ),
+            (
+                tick: 47,
+                hash: "b8beeb10ab3ca52b",
+            ),
+            (
+                tick: 48,
+                hash: "0d26d797dedf0806",
+            ),
+            (
+                tick: 49,
+                hash: "f9a40477a49c08a7",
+            ),
+            (
+                tick: 50,
+                hash: "5fbd2df0bb2bdbfe",
+            ),
+            (
+                tick: 51,
+                hash: "3a8c78a35601b73d",
+            ),
+            (
+                tick: 52,
+                hash: "757d0ccfb2468518",
+            ),
+            (
+                tick: 53,
+                hash: "53e8c8164aa57745",
+            ),
+            (
+                tick: 54,
+                hash: "303043933baaaf5e",
+            ),
+            (
+                tick: 55,
+                hash: "ab796b16c56c983b",
+            ),
+            (
+                tick: 56,
+                hash: "32d3fc48916c1f39",
+            ),
+            (
+                tick: 57,
+                hash: "be63964394db0ccd",
+            ),
+            (
+                tick: 58,
+                hash: "6456836e61ed4807",
+            ),
+            (
+                tick: 59,
+                hash: "fb8ae0a6f946d492",
+            ),
+            (
+                tick: 60,
+                hash: "b0590de04ec42ad9",
+            ),
+            (
+                tick: 61,
+                hash: "86b42c7f67500f9d",
+            ),
+            (
+                tick: 62,
+                hash: "db775ee645fe8b0d",
+            ),
+            (
+                tick: 63,
+                hash: "4ed28db0e862b6d9",
+            ),
+            (
+                tick: 64,
+                hash: "24e732fef4aaff2b",
+            ),
+            (
+                tick: 65,
+                hash: "8db271539a4b7240",
+            ),
+            (
+                tick: 66,
+                hash: "e0d00909f4e47b00",
+            ),
+            (
+                tick: 67,
+                hash: "090d47ad3ef21e1b",
+            ),
+            (
+                tick: 68,
+                hash: "61ccda291f05c728",
+            ),
+            (
+                tick: 69,
+                hash: "2a70ce9d6cf205e0",
+            ),
+            (
+                tick: 70,
+                hash: "33ef8357a261f01e",
+            ),
+            (
+                tick: 71,
+                hash: "92b46aeef93192b1",
+            ),
+            (
+                tick: 72,
+                hash: "e3190c1e6b63d461",
+            ),
+            (
+                tick: 73,
+                hash: "55394bbc073d56ab",
+            ),
+            (
+                tick: 74,
+                hash: "d74f8a6134c67c65",
+            ),
+            (
+                tick: 75,
+                hash: "3df4a59c3f966863",
+            ),
+            (
+                tick: 76,
+                hash: "357f61556e8661d3",
+            ),
+            (
+                tick: 77,
+                hash: "20d9fa8a4d2c6e77",
+            ),
+            (
+                tick: 78,
+                hash: "4aafe9742da4ff2c",
+            ),
+            (
+                tick: 79,
+                hash: "c670e5710389327f",
+            ),
+            (
+                tick: 80,
+                hash: "8e025210fd67dde9",
+            ),
+            (
+                tick: 81,
+                hash: "695676a48bc2dccb",
+            ),
+            (
+                tick: 82,
+                hash: "44aa79988295522e",
+            ),
+            (
+                tick: 83,
+                hash: "df0cdb67dd68015e",
+            ),
+            (
+                tick: 84,
+                hash: "26c3a268419dfc93",
+            ),
+            (
+                tick: 85,
+                hash: "9b7d071605214da5",
+            ),
+            (
+                tick: 86,
+                hash: "0fb2326d4e285c70",
+            ),
+            (
+                tick: 87,
+                hash: "4ee5fc5b658381bc",
+            ),
+            (
+                tick: 88,
+                hash: "b96f07e77137df84",
+            ),
+            (
+                tick: 89,
+                hash: "369abb1e494c7062",
+            ),
+            (
+                tick: 90,
+                hash: "601ca5d45b0c59aa",
+            ),
+            (
+                tick: 91,
+                hash: "ce1653bd06aa020c",
+            ),
+            (
+                tick: 92,
+                hash: "7652e177577547c6",
+            ),
+            (
+                tick: 93,
+                hash: "a007a2176768f355",
+            ),
+            (
+                tick: 94,
+                hash: "03b082dd5631d155",
+            ),
+            (
+                tick: 95,
+                hash: "53c58dfc849f44d0",
+            ),
+            (
+                tick: 96,
+                hash: "5beaa53a91aaa01d",
+            ),
+            (
+                tick: 97,
+                hash: "4f450a8af929bdfb",
+            ),
+            (
+                tick: 98,
+                hash: "d78c42cdefdfe389",
+            ),
+            (
+                tick: 99,
+                hash: "c803d76fe5a9928d",
+            ),
+            (
+                tick: 100,
+                hash: "2cb3b624c3e9eefd",
+            ),
+        ],
+        checkpoints: [
+            (
+                tick: 1,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 13,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 204800,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 6,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 8,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 13,
+                        action_ticks: 5,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 189440,
+                        stocks: 3,
+                        action_id: 11,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 20,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 25,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 13,
+                        action_ticks: 19,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 189440,
+                        stocks: 3,
+                        action_id: 11,
+                        action_ticks: 14,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 50,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 20,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14982, 1843, 11469),
+                        velocity: (177, 0, 0),
+                        grounded: true,
+                        health: 405504,
+                        stamina: 195584,
+                        stocks: 3,
+                        action_id: 28,
+                        action_ticks: 25,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 75,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 9,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14991, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 405504,
+                        stamina: 195584,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+            (
+                tick: 100,
+                phase: "fight",
+                hitstop_ticks: 0,
+                result: "Pending",
+                dynamic_objects: 9,
+                fighters: [
+                    (
+                        id: 0,
+                        active: true,
+                        position: (-14746, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 409600,
+                        stamina: 153600,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                    (
+                        id: 1,
+                        active: true,
+                        position: (14991, 1843, 11469),
+                        velocity: (0, 0, 0),
+                        grounded: true,
+                        health: 405504,
+                        stamina: 195584,
+                        stocks: 3,
+                        action_id: 0,
+                        action_ticks: 0,
+                        holding: None,
+                        held_by: None,
+                    ),
+                ],
+            ),
+        ],
+        event_ticks: [
+            (
+                tick: 1,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(1), source: Fighter(FighterId(0)), ordinal: 0 }, kind: ActionStarted { fighter: FighterId(0), action_id: 82 } }",
+                ],
+            ),
+            (
+                tick: 6,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(6), source: Fighter(FighterId(0)), ordinal: 0 }, kind: ActionStarted { fighter: FighterId(0), action_id: 82 } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(6), source: Fighter(FighterId(1)), ordinal: 1 }, kind: ActionStarted { fighter: FighterId(1), action_id: 76 } }",
+                ],
+            ),
+            (
+                tick: 7,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 0, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 0, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 1, generation: 1 }), ordinal: 1 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 1, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 2, generation: 1 }), ordinal: 2 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 2, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 3, generation: 1 }), ordinal: 3 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 3, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 4, generation: 1 }), ordinal: 4 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 4, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 5, generation: 1 }), ordinal: 5 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 5, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 6, generation: 1 }), ordinal: 6 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 6, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 7, generation: 1 }), ordinal: 7 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 7, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 8, generation: 1 }), ordinal: 8 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 8, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 9, generation: 1 }), ordinal: 9 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 9, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 10, generation: 1 }), ordinal: 10 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 10, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 11, generation: 1 }), ordinal: 11 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 11, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 12, generation: 1 }), ordinal: 12 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 12, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 13, generation: 1 }), ordinal: 13 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 13, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 14, generation: 1 }), ordinal: 14 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 14, generation: 1 }, event: Spawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(7), source: Entity(SimEntityId { kind: ChickSkill, index: 15, generation: 1 }), ordinal: 15 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 15, generation: 1 }, event: Spawned } }",
+                ],
+            ),
+            (
+                tick: 15,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(15), source: Fighter(FighterId(1)), ordinal: 0 }, kind: ActionStarted { fighter: FighterId(1), action_id: 76 } }",
+                ],
+            ),
+            (
+                tick: 17,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(17), source: Entity(SimEntityId { kind: ChickSkill, index: 16, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 16, generation: 1 }, event: Spawned } }",
+                ],
+            ),
+            (
+                tick: 23,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(23), source: Fighter(FighterId(0)), ordinal: 0 }, kind: ActionStarted { fighter: FighterId(0), action_id: 82 } }",
+                ],
+            ),
+            (
+                tick: 24,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(24), source: Entity(SimEntityId { kind: ChickSkill, index: 0, generation: 1 }), ordinal: 0 }, kind: HitConfirmed { attacker: Some(FighterId(0)), victim: FighterId(1), damage_q: 4096, reaction: ShortStandingStagger } }",
+                ],
+            ),
+            (
+                tick: 45,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(45), source: Entity(SimEntityId { kind: ChickSkill, index: 6, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 6, generation: 1 }, event: Despawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(45), source: Entity(SimEntityId { kind: ChickSkill, index: 7, generation: 1 }), ordinal: 1 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 7, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 46,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(46), source: Entity(SimEntityId { kind: ChickSkill, index: 5, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 5, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 47,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(47), source: Entity(SimEntityId { kind: ChickSkill, index: 8, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 8, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 49,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(49), source: Entity(SimEntityId { kind: ChickSkill, index: 4, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 4, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 51,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(51), source: Entity(SimEntityId { kind: ChickSkill, index: 9, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 9, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 54,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(54), source: Entity(SimEntityId { kind: ChickSkill, index: 3, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 3, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 56,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(56), source: Entity(SimEntityId { kind: ChickSkill, index: 10, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 10, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 60,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(60), source: Entity(SimEntityId { kind: ChickSkill, index: 2, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 2, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 62,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(62), source: Entity(SimEntityId { kind: ChickSkill, index: 11, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 11, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 66,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(66), source: Entity(SimEntityId { kind: ChickSkill, index: 1, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 1, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 68,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(68), source: Entity(SimEntityId { kind: ChickSkill, index: 12, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 12, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 71,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(71), source: Entity(SimEntityId { kind: ChickSkill, index: 0, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 0, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 73,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(73), source: Entity(SimEntityId { kind: ChickSkill, index: 13, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 13, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+            (
+                tick: 75,
+                events: [
+                    "SimEvent { id: SimEventId { tick: SimTick(75), source: Entity(SimEntityId { kind: ChickSkill, index: 14, generation: 1 }), ordinal: 0 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 14, generation: 1 }, event: Despawned } }",
+                    "SimEvent { id: SimEventId { tick: SimTick(75), source: Entity(SimEntityId { kind: ChickSkill, index: 15, generation: 1 }), ordinal: 1 }, kind: AbilityLifecycle { entity: SimEntityId { kind: ChickSkill, index: 15, generation: 1 }, event: Despawned } }",
+                ],
+            ),
+        ],
+        final_tick: 100,
+        final_result: "Pending",
+    )),
+)

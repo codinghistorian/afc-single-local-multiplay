@@ -28,7 +28,7 @@ use crate::styles::FighterStyleKind;
 /// changed. Source/content digests below still prevent accidentally mixing two
 /// development binaries that use the same numeric schema versions.
 pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
-pub const CURRENT_SIMULATION_VERSION: u16 = 9;
+pub const CURRENT_SIMULATION_VERSION: u16 = 10;
 pub const CURRENT_RNG_SCHEME_VERSION: u16 = 1;
 
 pub const DEFAULT_INPUT_DELAY_TICKS: u8 = 2;
@@ -612,16 +612,16 @@ mod tests {
         let second = current_compatibility();
         first.validate().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.simulation.get(), 9);
+        assert_eq!(first.simulation.get(), 10);
         assert_eq!(first.replay.get(), REPLAY_SCHEMA_VERSION);
     }
 
     #[test]
-    fn v8_client_is_rejected_by_the_v9_lobby_handshake() {
+    fn v9_client_is_rejected_by_the_v10_lobby_handshake() {
         let expected = current_compatibility();
         let request = crate::network_protocol::LobbyJoinRequest {
             compatibility: CompatibilityId {
-                simulation: SimulationVersion::new(8).unwrap(),
+                simulation: SimulationVersion::new(9).unwrap(),
                 ..expected
             },
             requested_local_seats: 1,

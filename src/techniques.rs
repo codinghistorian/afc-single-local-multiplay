@@ -8328,7 +8328,7 @@ pub fn technique_definition_by_id(id: TechniqueId) -> Option<TechniqueDefinition
                 &CHICK_ULTIMATE_STARTUP_EVENTS,
             ),
             input_buffer_ms: 0,
-            stamina_cost: ULTIMATE_STAMINA_COST,
+            stamina_cost: CHICK_ULTIMATE_STAMINA_COST,
             movement_lock: MovementLock::Locked,
             cancel_window: None,
             branch_window: None,
@@ -11053,7 +11053,7 @@ mod tests {
         );
         assert_eq!(heavy.action, FighterAction::HeavyAttack);
         assert_eq!(heavy.stamina_cost, CHICK_X_STAMINA_COST);
-        assert_eq!(heavy.stamina_cost, MAX_STAMINA * 0.15);
+        assert_eq!(heavy.stamina_cost, MAX_STAMINA * 0.075);
         assert!(light1.script.events.iter().any(|event| matches!(
             event.kind,
             MoveTimelineEventKind::SpawnChickSkill(ChickSkillId::OrbitEggLaunch)
@@ -11163,7 +11163,7 @@ mod tests {
             .collect();
 
         assert_eq!(ultimate.action, FighterAction::UltimateStartup);
-        assert_eq!(ultimate.stamina_cost, ULTIMATE_STAMINA_COST);
+        assert_eq!(ultimate.stamina_cost, CHICK_ULTIMATE_STAMINA_COST);
         assert_eq!(ultimate.script.id, "chick_egg_burst.sc");
         assert_eq!(ultimate.script.recover_ms, 560);
         assert_eq!(ultimate_skills, vec![(100, ChickSkillId::UltimateEggBurst)]);

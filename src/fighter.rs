@@ -2138,10 +2138,7 @@ fn try_start_penguin_dash_ultimate(
     character_catalog: &CharacterMoveCatalog,
 ) -> bool {
     let requested = input.ultimate || penguin_dash_ultimate_shortcut(input, loadout);
-    if loadout.character != CharacterKind::Penguin
-        || !requested
-        || !can_start_ultimate(motor, stats)
-    {
+    if loadout.character != CharacterKind::Penguin || !requested {
         return false;
     }
 
@@ -2150,6 +2147,10 @@ fn try_start_penguin_dash_ultimate(
     else {
         return false;
     };
+
+    if !can_start_ultimate(motor, stats, ultimate_stamina_cost(&technique)) {
+        return false;
+    }
 
     start_ultimate(motor, stats, action, technique);
     motor.velocity.x += motor.facing.x * DASH_ATTACK_EXTRA_IMPULSE;
@@ -2165,7 +2166,7 @@ fn try_start_ultimate_from_input(
     loadout: LoadoutContext,
     character_catalog: &CharacterMoveCatalog,
 ) -> bool {
-    if !ultimate_input_requested(input, loadout) || !can_start_ultimate(motor, stats) {
+    if !ultimate_input_requested(input, loadout) {
         return false;
     }
 
@@ -2176,6 +2177,10 @@ fn try_start_ultimate_from_input(
     ) else {
         return false;
     };
+
+    if !can_start_ultimate(motor, stats, ultimate_stamina_cost(&technique)) {
+        return false;
+    }
 
     start_ultimate(motor, stats, action, technique);
     true
@@ -3442,7 +3447,7 @@ pub fn update_fighter_state(
             )
         {
             if technique.action == FighterAction::UltimateStartup {
-                if !can_start_ultimate(&motor, &stats) {
+                if !can_start_ultimate(&motor, &stats, ultimate_stamina_cost(&technique)) {
                     continue;
                 }
                 start_ultimate(&mut motor, &mut stats, &mut action, technique);
@@ -4237,8 +4242,16 @@ fn try_start_guard_counter(
     true
 }
 
-fn can_start_ultimate(motor: &FighterMotor, stats: &FighterStats) -> bool {
-    motor.grounded && stats.stamina >= ULTIMATE_STAMINA_COST
+fn can_start_ultimate(motor: &FighterMotor, stats: &FighterStats, stamina_cost: f32) -> bool {
+    motor.grounded && stats.stamina >= stamina_cost.max(0.0)
+}
+
+fn ultimate_stamina_cost(technique: &TechniqueDefinition) -> f32 {
+    if technique.stamina_cost > f32::EPSILON {
+        technique.stamina_cost
+    } else {
+        ULTIMATE_STAMINA_COST
+    }
 }
 
 fn start_ultimate(
@@ -4247,7 +4260,7 @@ fn start_ultimate(
     action: &mut FighterActionState,
     technique: TechniqueDefinition,
 ) {
-    stats.stamina -= ULTIMATE_STAMINA_COST;
+    stats.stamina -= ultimate_stamina_cost(&technique);
     motor.guard_active_timer.reset();
     motor.guard_cooldown_timer.clear();
     motor.guard_start_buffer_timer.clear();
@@ -4327,10 +4340,10 @@ mod ultimate_mp_tests {
         let mut stats = FighterStats::default();
 
         stats.stamina = ULTIMATE_STAMINA_COST - 0.1;
-        assert!(!can_start_ultimate(&motor, &stats));
+        assert!(!can_start_ultimate(&motor, &stats, ULTIMATE_STAMINA_COST));
 
         stats.stamina = ULTIMATE_STAMINA_COST;
-        assert!(can_start_ultimate(&motor, &stats));
+        assert!(can_start_ultimate(&motor, &stats, ULTIMATE_STAMINA_COST));
     }
 
     #[test]
@@ -4387,7 +4400,12 @@ mod ultimate_mp_tests {
             let mut stats = FighterStats::default();
             let mut action = FighterActionState::default();
 
-            assert_eq!(expected.stamina_cost, ULTIMATE_STAMINA_COST);
+            let expected_cost = if character == CharacterKind::Chick {
+                CHICK_ULTIMATE_STAMINA_COST
+            } else {
+                ULTIMATE_STAMINA_COST
+            };
+            assert_eq!(expected.stamina_cost, expected_cost);
             assert!(try_start_ultimate_from_input(
                 &mut motor,
                 &mut stats,
@@ -4400,12 +4418,7 @@ mod ultimate_mp_tests {
                 &catalog,
             ));
 
-            assert_eq!(stats.stamina, MAX_STAMINA * 0.5, "{character:?}");
-            assert_eq!(
-                stats.stamina,
-                MAX_STAMINA - ULTIMATE_STAMINA_COST,
-                "{character:?}"
-            );
+            assert_eq!(stats.stamina, MAX_STAMINA - expected_cost, "{character:?}");
             assert_eq!(action.technique_id, Some(expected.id), "{character:?}");
         }
     }
@@ -11950,7 +11963,7 @@ mod tests {
         ));
         assert_eq!(action.action, FighterAction::UltimateStartup);
         assert_eq!(action.technique_id, Some(TechniqueId::ChickUltimateStartup));
-        assert_eq!(stats.stamina, MAX_STAMINA - ULTIMATE_STAMINA_COST);
+        assert_eq!(stats.stamina, MAX_STAMINA - CHICK_ULTIMATE_STAMINA_COST);
     }
 
     #[test]

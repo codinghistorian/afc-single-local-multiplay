@@ -2067,6 +2067,20 @@ fn assert_fixture_is_meaningful(
                 assert_eq!(observation.canonical.arena_device_progress, [18, 0]);
             }
         }
+        "BF032_chick_reduced_stamina_costs" => {
+            let ultimate_start = fighter_at(trace, 0, 0);
+            assert_eq!(ultimate_start.action_id, 13);
+            assert_eq!(ultimate_start.stamina, 153_600);
+
+            let heavy_start = fighter_at(trace, 5, 1);
+            assert_eq!(heavy_start.action_id, 11);
+            assert_eq!(heavy_start.stamina, 189_440);
+
+            assert!(
+                event_count(trace, "ActionStarted") >= 2,
+                "both reduced-cost Chick techniques must enter their authored timelines"
+            );
+        }
         name => panic!("fixture {name} has no semantic coverage assertion"),
     }
 }

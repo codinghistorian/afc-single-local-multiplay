@@ -18,7 +18,7 @@ stock result. Its Linux/Windows/macOS gate and frozen literals are documented in
 also cover the central contact and batched life-loss permutations named later in
 this document.
 
-The simulation-v9 fixture tranche is checked in under
+The simulation-v10 fixture tranche is checked in under
 `tests/fixtures/behavior/v1` and runs through the crate-internal production
 headless harness in `tests/support/behavior_fixtures.rs`:
 
@@ -44,6 +44,7 @@ headless harness in `tests/support/behavior_fixtures.rs`:
 | BF029 | `manual_aim_lock_break_release` | **AcceptedChange:** stable-ID lock acquisition, fixed-tick 60-degree manual break, rollback-owned unlock count, release, and restore from an active lock |
 | BF030 | `training_ground_perimeter` | Held movement into the exact-bit east barrier; exact settled Q12 pose/velocity, grounded state, no stock loss/events, and restore replay |
 | BF031 | `split_causeway_gate_toggle` | **AcceptedChange:** stable arena/device toggle event, `FighterId`-selected interaction, exact 18-tick gate progress, and restore from tick 10 |
+| BF032 | `chick_reduced_stamina_costs` | **AcceptedChange:** Chick ultimate and delayed raw-heavy start at fixed ticks with exact reduced Q12 stamina, authored actions/events, and restore from tick 50 |
 
 Every tape stores a hash for every tick, bounded normalized checkpoints, ordered
 semantic events, and final result. The runner compares two clean runs, a
@@ -151,6 +152,16 @@ reconnect cancellation, and hover styling run at frame rate. All 20 read-only
 behavior tapes and digest
 `94d32a0a9666a6f0bff8d7469324aa3b9a905052bc06aef065a95ec94df39a6a`
 remain unchanged.
+
+Simulation v10 raises the corpus to 21 tapes. BF032 freezes Chick's 12.5-stamina
+ultimate at tick 1 and 3.75-stamina grounded heavy at the delayed raw-input tick
+6, including exact Q12 stamina/action state, canonical action events, and
+tick-50 restore. A mechanical diff of the prior 20 regenerated tapes contains
+only `hash:` line changes; normalized checkpoints, stable-ID relationships,
+canonical event ticks and payloads, final ticks, and results are unchanged.
+Debug and fat-LTO release reproduce the checked-in corpus with BF001 tick 1
+`9e058d015a24d53b` and gameplay digest
+`ac2b1aca00c903d1650866526c3ef24c0a2470e581403686d3e1a16c2ec0dec2`.
 
 On 2026-07-24, a presentation-only powder-cannon bomb-parent visibility fix
 changed the conservatively defined gameplay-content digest from

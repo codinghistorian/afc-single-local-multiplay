@@ -2,7 +2,7 @@
 
 The repository contains one frozen, production-headless simulation tape at
 `headless::tests::cross_platform_golden_stock_ringout_tape_matches_frozen_hashes_and_result`.
-It boots a version-9 match manifest, commits bounded AFC `InputFrame` values for
+It boots a version-10 match manifest, commits bounded AFC `InputFrame` values for
 both occupied seats, runs the real canonical fixed schedule, and ends through
 the normal stock/result rules. It does not use the small input-harness probe.
 
@@ -10,19 +10,19 @@ The checked-in contract is:
 
 | Tick | Canonical hash |
 | ---: | ---: |
-| 1 | `c70eeb0a16151318` |
-| 120 | `bbe0a608d0e8c527` |
-| 240 | `587065ba1f154868` |
-| 360 | `9b305e71cb01efef` |
-| 480 | `16a65f95d916635f` |
-| 600 | `debad3d6e4305410` |
-| 720 | `e1d136264d73e633` |
-| 840 | `6a10ddddd904eedf` |
-| 934 (final) | `2ead7d00af44aaf4` |
+| 1 | `12e027215d80758b` |
+| 120 | `bed389b627bc18a0` |
+| 240 | `ad157a8b1aa63457` |
+| 360 | `8e47d2abfa4f1120` |
+| 480 | `e94dca2a0b78cf30` |
+| 600 | `e6863f856d2434b7` |
+| 720 | `aa3e6a52f98b6238` |
+| 840 | `78c6457e49b8ee34` |
+| 934 (final) | `275c66311d2da33d` |
 
 The final canonical result is team 1 winning at tick 934. The GitHub Actions
 workflow `cross-platform-determinism.yml` is configured to run this exact fixture,
-all 20 checked-in read-only versioned behavior tapes, and the compact
+all 21 checked-in read-only versioned behavior tapes, and the compact
 authored-content matrix on Linux, Windows, and macOS in both Cargo debug and
 release profiles. Changes under `tests/` trigger the same matrix. Workflow
 configuration is not a claim that the current release candidate has passed:
@@ -46,17 +46,17 @@ debug/release build metadata cannot enter the frozen hashes.
 
 | Arena | Retired-special/hazard final hash | Item final hash |
 | --- | ---: | ---: |
-| Crown Ring | `0b7d4baf42b0cf80` | `da35ffd16ba1c577` |
-| Split Causeway | `e03103d89065f663` | `b2ef39aa0d16b002` |
-| Sunstone Steps | `ce46455ec87754fb` | `2fdcd071124c117a` |
-| Crank Yard | `a2da26ca5f22e66d` | `1e398318892db1d4` |
-| Vent Spiral | `8fa8089211d57042` | `00927efd229acc90` |
-| Bumper Alley | `6610d63b80b29482` | `b39a9da416ef5960` |
-| Feast Market | `d85b8d616f4f5ca2` | `783bb79c6fb0c708` |
-| Snare Garden | `6fab9367bfbbc91b` | `60876c45b723f33a` |
-| Sky Steps | `5117853fe6392264` | `9131d7cfe1e3aec2` |
-| Powder Keg Court | `6704854695fa33ad` | `6a17dd584601c561` |
-| Training Ground | `338c11bcfae06b25` | `686f4f47c9ae9ce5` (item-free branch) |
+| Crown Ring | `f8be28ad0a5f644f` | `84dced72a1b1484c` |
+| Split Causeway | `bd9ee5fbd8d865f5` | `5019d42b8cfe2d1d` |
+| Sunstone Steps | `7268275ccb12b77e` | `2ea15158c4fe8cbf` |
+| Crank Yard | `5ab83016a470e0fb` | `0cf0bb2385ee2043` |
+| Vent Spiral | `49d91e059bc956c1` | `d3e0d3917a7daff3` |
+| Bumper Alley | `238964bdad6723e8` | `980112cff2d3c3c3` |
+| Feast Market | `56a35c61641970cd` | `eca79158bca74edf` |
+| Snare Garden | `44317b708e1fa3f1` | `fc4eeb964fc337c7` |
+| Sky Steps | `ead4d45e0f414db9` | `a110fd1124687bc7` |
+| Powder Keg Court | `c2f19381a8eee8cb` | `f6b099bd06555b06` |
+| Training Ground | `3f4b7e40d56c181a` | `916f7480d4c27606` (item-free branch) |
 
 The release-candidate workflow separately runs an ignored 100,000-tick soak over
 two independently built production `LiveSimulationDriver`/Bevy worlds. It
@@ -151,6 +151,16 @@ BF001 tick 1 to `c54f4e8d05713cb1`. All 20 tapes retain identical normalized
 checkpoints, stable-ID relationships, ordered canonical events, final ticks, and
 results, and debug plus fat-LTO release reproduce the checked-in corpus. The
 synthetic stock and arena-matrix literals above remain unchanged.
+
+Simulation v10 accepts Chick's lower authored stamina costs. BF032 freezes the
+ultimate start at tick 1, the delayed raw-heavy start at tick 6, exact Q12
+stamina/action state, canonical `ActionStarted` events, and restore from tick
+50. The prior 20 production-builder tapes preserve all normalized semantics and
+receive only identity-derived hash changes. Debug and fat-LTO release agree on
+the 21-file corpus, beginning with BF001 `9e058d015a24d53b`; the compiled
+gameplay-content digest is
+`ac2b1aca00c903d1650866526c3ef24c0a2470e581403686d3e1a16c2ec0dec2`.
+The stock tape and matrix above freeze the synthetic v10 compatibility identity.
 
 The historical v5 refresh first diverged from the v4 tape at tick 1 because the snapshot
 header's canonical simulation-version discriminator changes from 4 to 5. The
