@@ -131,6 +131,10 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes
           libasound2-dev libudev-dev libwayland-dev libx11-dev libxi-dev
           libxkbcommon-dev pkg-config
+      - name: Install dependency audit tool
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Audit dependency vulnerabilities
+        run: python3 scripts/audit_dependencies.py
       - name: Run production live-network acceptance
         run: >-
           cargo test --locked --release --no-default-features --lib

@@ -12,6 +12,8 @@ on:
       - "Dockerfile.web-server"
       - ".dockerignore"
       - "deploy/**"
+      - "scripts/audit_dependencies.py"
+      - "vendor/steamworks/**"
       - ".github/workflows/web-server.yml"
   push:
     branches: [main]
@@ -43,6 +45,10 @@ jobs:
           cargo fmt --all -- --check
           cargo check --locked --no-default-features \
             --features web-server --bin afc-web-server
+      - name: Install dependency audit tool
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Audit dependency vulnerabilities
+        run: python3 scripts/audit_dependencies.py
       - name: Run hosted API and real transport acceptance
         env:
           RUST_TEST_THREADS: "1"
