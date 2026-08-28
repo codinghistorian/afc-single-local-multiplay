@@ -10,10 +10,13 @@ RUN apt-get update \
 WORKDIR /build
 COPY . .
 ARG AFC_BUILD_ID
-RUN test -n "${AFC_BUILD_ID}" \
+RUN --mount=type=cache,id=afc-web-server-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=afc-web-server-target,target=/build/target,sharing=locked \
+    test -n "${AFC_BUILD_ID}" \
     && test "${AFC_BUILD_ID}" != "development" \
     && AFC_BUILD_ID="${AFC_BUILD_ID}" cargo build --locked --release --no-default-features \
-    --features web-server --bin afc-web-server
+    --features web-server --bin afc-web-server \
+    && install -D -m 0755 target/release/afc-web-server /out/afc-web-server
 
 FROM debian:bookworm-slim AS runtime
 
@@ -26,7 +29,7 @@ RUN apt-get update \
     && groupadd --system --gid 10001 afc \
     && useradd --system --uid 10001 --gid afc --no-create-home afc
 
-COPY --from=builder /build/target/release/afc-web-server /usr/local/bin/afc-web-server
+COPY --from=builder /out/afc-web-server /usr/local/bin/afc-web-server
 
 USER 10001:10001
 EXPOSE 8080/tcp
