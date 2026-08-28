@@ -11,8 +11,8 @@ Required production environment:\n\
   AFC_WEB_SIGNING_KEY_ID           Non-zero current signing-key ID\n\
   AFC_WEB_SIGNING_KEY              Base64url, unpadded 32-byte signing key\n\
   AFC_WEB_SIGNING_KEY_FILE         File alternative to AFC_WEB_SIGNING_KEY\n\
-  AFC_WEB_PUBLIC_WEBSOCKET_URL     Public wss://.../v1/connect/ws URL\n\
-  AFC_WEB_PUBLIC_WEBTRANSPORT_URL  Public https://.../v1/connect/wt URL\n\
+  AFC_WEB_PUBLIC_WEBSOCKET_URL     Public wss://.../v2/connect/ws URL\n\
+  AFC_WEB_PUBLIC_WEBTRANSPORT_URL  Public https://.../v2/connect/wt URL\n\
   AFC_WEBTRANSPORT_BIND            UDP bind address, for example 0.0.0.0:4433\n\
   AFC_WEBTRANSPORT_CERT_PEM        TLS certificate-chain PEM path\n\
   AFC_WEBTRANSPORT_KEY_PEM         TLS private-key PEM path\n\n\

@@ -87,12 +87,12 @@ impl WebServerConfig {
             &self.public_websocket_url,
             "ws",
             "wss",
-            "/v1/connect/ws",
+            "/v2/connect/ws",
             self.deployment,
         )?;
         match (&self.webtransport, &self.public_webtransport_url) {
             (Some(_), Some(url)) => {
-                validate_public_url(url, "https", "https", "/v1/connect/wt", self.deployment)?;
+                validate_public_url(url, "https", "https", "/v2/connect/wt", self.deployment)?;
             }
             (None, None) if self.deployment == WebDeploymentMode::Development => {}
             _ => return Err(WebServerConfigError::InvalidWebTransportConfiguration),
@@ -422,10 +422,10 @@ mod tests {
         assert!(validate_origin("*", WebDeploymentMode::Development).is_err());
         assert!(
             validate_public_url(
-                "wss://play.example/v1/connect/ws",
+                "wss://play.example/v2/connect/ws",
                 "ws",
                 "wss",
-                "/v1/connect/ws",
+                "/v2/connect/ws",
                 WebDeploymentMode::Production,
             )
             .is_ok()
@@ -435,17 +435,17 @@ mod tests {
                 "wss://play.example/wrong",
                 "ws",
                 "wss",
-                "/v1/connect/ws",
+                "/v2/connect/ws",
                 WebDeploymentMode::Production,
             )
             .is_err()
         );
         assert!(
             validate_public_url(
-                "wss://user@play.example/v1/connect/ws",
+                "wss://user@play.example/v2/connect/ws",
                 "ws",
                 "wss",
-                "/v1/connect/ws",
+                "/v2/connect/ws",
                 WebDeploymentMode::Production,
             )
             .is_err()

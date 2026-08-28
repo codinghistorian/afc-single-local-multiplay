@@ -17,7 +17,7 @@ use crate::web_endpoint_adapters::{
     ServerDatagramBridge, receive_webtransport_admission, run_webtransport_datagram_adapter,
 };
 
-const WEBTRANSPORT_PATH: &str = "/v1/connect/wt";
+const WEBTRANSPORT_PATH: &str = "/v2/connect/wt";
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -277,9 +277,9 @@ mod tests {
                 certificate_pem,
                 private_key_pem,
             }),
-            public_websocket_url: "ws://127.0.0.1:8080/v1/connect/ws".to_owned(),
+            public_websocket_url: "ws://127.0.0.1:8080/v2/connect/ws".to_owned(),
             public_webtransport_url: Some(format!(
-                "https://127.0.0.1:{}/v1/connect/wt",
+                "https://127.0.0.1:{}/v2/connect/wt",
                 bind.port()
             )),
             allowed_origins: vec!["https://html-classic.itch.zone".to_owned()],
@@ -308,13 +308,21 @@ mod tests {
             )
             .unwrap();
         let room_code = room.room_code.to_string();
-        state
+        let joined = state
             .rooms
             .join_private_room(&guest.token, &room_code, now)
             .unwrap();
+        let host_ready = state
+            .rooms
+            .set_ready(&host.token, &room_code, joined.revision, true, now)
+            .unwrap();
+        let guest_ready = state
+            .rooms
+            .set_ready(&guest.token, &room_code, host_ready.revision, true, now)
+            .unwrap();
         state
             .rooms
-            .start_private_room(&host.token, &room_code, now)
+            .start_private_room(&host.token, &room_code, guest_ready.revision, now)
             .await
             .unwrap();
         let ticket = state
@@ -336,7 +344,7 @@ mod tests {
             .build();
         let client = Endpoint::client(client_config).unwrap();
         let options =
-            ConnectOptions::builder(format!("https://127.0.0.1:{}/v1/connect/wt", bind.port()))
+            ConnectOptions::builder(format!("https://127.0.0.1:{}/v2/connect/wt", bind.port()))
                 .add_header("origin", "https://html-classic.itch.zone")
                 .build();
         let mut connection = None;

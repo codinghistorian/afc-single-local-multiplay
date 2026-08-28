@@ -57,6 +57,8 @@ web-server = [
     "dep:tower",
     "dep:tracing",
     "dep:tracing-subscriber",
+    "dep:unicode-normalization",
+    "dep:unicode-segmentation",
     "dep:wtransport",
     "dep:zeroize",
 ]
@@ -136,6 +138,8 @@ tokio = { version = "=1.53.1", optional = true, features = [
 tower = { version = "=0.5.3", optional = true, features = ["util"] }
 tracing = { version = "=0.1.44", optional = true }
 tracing-subscriber = { version = "=0.3.23", optional = true, features = ["env-filter"] }
+unicode-normalization = { version = "=0.1.24", optional = true }
+unicode-segmentation = { version = "=1.12.0", optional = true }
 wtransport = { version = "=0.7.2", optional = true }
 zeroize = { version = "=1.9.0", optional = true }
 

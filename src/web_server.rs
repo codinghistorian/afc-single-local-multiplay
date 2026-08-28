@@ -29,10 +29,10 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
 pub use config::{
@@ -45,9 +45,13 @@ use rate_limit::{RateBucket, RateLimited, WebRateLimiter};
 use crate::network_protocol::SimTick;
 use crate::release_identity::current_release_identity;
 use crate::web_api::{
-    ApiErrorBody, ApiErrorEnvelope, CreateRoomRequest, GuestSessionResponse, JoinRoomRequest,
-    RoomMemberResponse, RoomResponse, RoomState, RoomWorkerPhase, RoomWorkerResponse,
-    ServiceConfigResponse, TicketModeRequest, TicketRequest, TicketResponse, WEB_API_VERSION,
+    AFC_LOBBY_WEBSOCKET_SUBPROTOCOL, ApiErrorBody, ApiErrorEnvelope, CreateRoomRequest,
+    GuestSessionRequest, GuestSessionResponse, JoinRoomRequest, KickMemberRequest,
+    LobbyClientMessage, LobbyServerMessage, LobbySnapshotResponse, PublicRoomSummary,
+    ResultAckRequest, RoomMemberResponse, RoomResponse, RoomResultResponse, RoomState,
+    RoomWorkerPhase, RoomWorkerResponse, SelectCharacterRequest, ServiceConfigResponse,
+    SetReadyRequest, StartRoomRequest, TicketModeRequest, TicketRequest, TicketResponse,
+    UpdateRoomSettingsRequest, WEB_API_VERSION,
 };
 use crate::web_endpoint_adapters::{
     AFC_WEBSOCKET_SUBPROTOCOL, ServerDatagramBridge, WebEndpointConfig,
@@ -55,8 +59,9 @@ use crate::web_endpoint_adapters::{
 };
 use crate::web_identity::JoinTicketMode;
 use crate::web_room::{
-    WebPrivateRoomOptions, WebPrivateRoomState, WebPrivateRoomView, WebRoomError,
-    WebRoomMemberView, WebRoomService, WebRoomWorkerPhase, WebRoomWorkerSnapshot,
+    WebLobbyPush, WebLobbySnapshotView, WebPrivateRoomOptions, WebPrivateRoomState,
+    WebPrivateRoomView, WebPublicRoomView, WebRoomError, WebRoomMemberView, WebRoomResultView,
+    WebRoomService, WebRoomWorkerPhase, WebRoomWorkerSnapshot,
 };
 
 const MAX_BEARER_BYTES: usize = 512;
@@ -71,7 +76,14 @@ pub(super) struct WebServerMetrics {
     rooms_created: AtomicU64,
     rooms_joined: AtomicU64,
     rooms_started: AtomicU64,
+    rooms_returned: AtomicU64,
     tickets_issued: AtomicU64,
+    lobby_websocket_active: AtomicUsize,
+    lobby_websocket_admitted: AtomicU64,
+    lobby_websocket_rejected: AtomicU64,
+    chat_messages_accepted: AtomicU64,
+    chat_messages_rejected: AtomicU64,
+    chat_reports: AtomicU64,
     websocket_active: AtomicUsize,
     websocket_admitted: AtomicU64,
     websocket_rejected: AtomicU64,
@@ -90,6 +102,7 @@ pub struct WebServerState {
     admission_timeout: Duration,
     allowed_origins: Arc<[String]>,
     trusted_proxy_ips: Arc<[IpAddr]>,
+    public_lobby_websocket_url: Arc<str>,
     public_websocket_url: Arc<str>,
     public_webtransport_url: Option<Arc<str>>,
     deployment: WebDeploymentMode,
@@ -106,12 +119,18 @@ impl WebServerState {
             .map_err(|_| WebServerConfigError::InvalidRoomConfiguration)?;
         let rate_limiter = WebRateLimiter::new(config.rate_limit)
             .map_err(|_| WebServerConfigError::InvalidRateLimitConfiguration)?;
+        let public_lobby_websocket_url = config
+            .public_websocket_url
+            .strip_suffix("/v2/connect/ws")
+            .map(|base| format!("{base}/v2/lobby/ws"))
+            .ok_or(WebServerConfigError::InvalidPublicUrl)?;
         Ok(Self {
             rooms,
             endpoint: config.endpoint,
             admission_timeout: config.admission_timeout,
             allowed_origins: config.allowed_origins.clone().into(),
             trusted_proxy_ips: config.trusted_proxy_ips.clone().into(),
+            public_lobby_websocket_url: Arc::from(public_lobby_websocket_url),
             public_websocket_url: Arc::from(config.public_websocket_url.as_str()),
             public_webtransport_url: config.public_webtransport_url.as_deref().map(Arc::from),
             deployment: config.deployment,
@@ -149,24 +168,46 @@ pub fn web_router(state: WebServerState, maximum_body_bytes: usize) -> Router {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
-        .route("/v1/config", get(service_config).options(preflight))
-        .route("/v1/guests", post(issue_guest).options(preflight))
-        .route("/v1/rooms", post(create_room).options(preflight))
-        .route("/v1/rooms/join", post(join_room).options(preflight))
-        .route("/v1/rooms/{room_code}", get(room_status).options(preflight))
+        .route("/v2/config", get(service_config).options(preflight))
+        .route("/v2/guests", post(issue_guest).options(preflight))
+        .route("/v2/lobby", get(lobby_snapshot).options(preflight))
+        .route("/v2/lobby/ws", get(lobby_websocket_upgrade))
+        .route("/v2/rooms", post(create_room).options(preflight))
+        .route("/v2/rooms/join", post(join_room).options(preflight))
+        .route("/v2/rooms/{room_code}", get(room_status).options(preflight))
         .route(
-            "/v1/rooms/{room_code}/start",
+            "/v2/rooms/{room_code}/settings",
+            patch(update_room_settings).options(preflight),
+        )
+        .route(
+            "/v2/rooms/{room_code}/members/self/character",
+            patch(select_character).options(preflight),
+        )
+        .route(
+            "/v2/rooms/{room_code}/members/self/ready",
+            patch(set_ready).options(preflight),
+        )
+        .route(
+            "/v2/rooms/{room_code}/members/kick",
+            post(kick_member).options(preflight),
+        )
+        .route(
+            "/v2/rooms/{room_code}/start",
             post(start_room).options(preflight),
         )
         .route(
-            "/v1/rooms/{room_code}/leave",
+            "/v2/rooms/{room_code}/results/ack",
+            post(acknowledge_result).options(preflight),
+        )
+        .route(
+            "/v2/rooms/{room_code}/leave",
             post(leave_room).options(preflight),
         )
         .route(
-            "/v1/rooms/{room_code}/tickets",
+            "/v2/rooms/{room_code}/tickets",
             post(issue_ticket).options(preflight),
         )
-        .route("/v1/connect/ws", get(websocket_upgrade))
+        .route("/v2/connect/ws", get(gameplay_websocket_upgrade))
         .layer(DefaultBodyLimit::max(maximum_body_bytes))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -401,8 +442,32 @@ async fn metrics(State(state): State<WebServerState>) -> Response {
             metrics.rooms_started.load(Ordering::Relaxed),
         ),
         (
+            "afc_web_rooms_returned_total",
+            metrics.rooms_returned.load(Ordering::Relaxed),
+        ),
+        (
             "afc_web_join_tickets_issued_total",
             metrics.tickets_issued.load(Ordering::Relaxed),
+        ),
+        (
+            "afc_web_lobby_websocket_admitted_total",
+            metrics.lobby_websocket_admitted.load(Ordering::Relaxed),
+        ),
+        (
+            "afc_web_lobby_websocket_rejected_total",
+            metrics.lobby_websocket_rejected.load(Ordering::Relaxed),
+        ),
+        (
+            "afc_web_chat_messages_accepted_total",
+            metrics.chat_messages_accepted.load(Ordering::Relaxed),
+        ),
+        (
+            "afc_web_chat_messages_rejected_total",
+            metrics.chat_messages_rejected.load(Ordering::Relaxed),
+        ),
+        (
+            "afc_web_chat_reports_total",
+            metrics.chat_reports.load(Ordering::Relaxed),
         ),
         (
             "afc_web_websocket_admitted_total",
@@ -437,6 +502,10 @@ async fn metrics(State(state): State<WebServerState>) -> Response {
             metrics.websocket_active.load(Ordering::Relaxed) as u64,
         ),
         (
+            "afc_web_lobby_websocket_active",
+            metrics.lobby_websocket_active.load(Ordering::Relaxed) as u64,
+        ),
+        (
             "afc_web_webtransport_active",
             metrics.webtransport_active.load(Ordering::Relaxed) as u64,
         ),
@@ -448,8 +517,12 @@ async fn metrics(State(state): State<WebServerState>) -> Response {
         ("afc_web_rooms_open", rooms.open_rooms),
         ("afc_web_rooms_starting", rooms.starting_rooms),
         ("afc_web_rooms_active", rooms.active_rooms),
+        ("afc_web_rooms_results", rooms.results_rooms),
+        ("afc_web_rooms_returning", rooms.returning_rooms),
         ("afc_web_rooms_finished", rooms.finished_rooms),
         ("afc_web_rooms_failed", rooms.failed_rooms),
+        ("afc_web_lobby_online_guests", rooms.online_guests),
+        ("afc_web_chat_reports_retained", rooms.chat_reports),
         ("afc_web_connected_peers", rooms.connected_peers),
         (
             "afc_web_worker_tick_p99_nanoseconds_max",
@@ -476,12 +549,14 @@ async fn metrics(State(state): State<WebServerState>) -> Response {
 async fn service_config(State(state): State<WebServerState>) -> Json<ServiceConfigResponse> {
     Json(ServiceConfigResponse {
         api_version: WEB_API_VERSION,
-        websocket_url: state.public_websocket_url.to_string(),
+        lobby_websocket_url: state.public_lobby_websocket_url.to_string(),
+        gameplay_websocket_url: state.public_websocket_url.to_string(),
         webtransport_url: state
             .public_webtransport_url
             .as_ref()
             .map(ToString::to_string),
-        websocket_subprotocol: AFC_WEBSOCKET_SUBPROTOCOL.to_owned(),
+        lobby_websocket_subprotocol: AFC_LOBBY_WEBSOCKET_SUBPROTOCOL.to_owned(),
+        gameplay_websocket_subprotocol: AFC_WEBSOCKET_SUBPROTOCOL.to_owned(),
         release: current_release_identity().version_line(),
     })
 }
@@ -490,6 +565,7 @@ async fn issue_guest(
     State(state): State<WebServerState>,
     connect: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Json(request): Json<GuestSessionRequest>,
 ) -> Result<Json<GuestSessionResponse>, ApiError> {
     let now = unix_now()?;
     state.rate_limit(
@@ -499,17 +575,37 @@ async fn issue_guest(
     )?;
     let issued = state
         .rooms
-        .issue_guest_session(now)
+        .issue_named_guest_session(&request.nickname, now)
         .map_err(map_room_error)?;
     state
         .metrics
         .guest_sessions_issued
         .fetch_add(1, Ordering::Relaxed);
     Ok(Json(GuestSessionResponse {
-        guest_id: issued.claims.guest_id.encoded(),
-        session_token: issued.token,
-        expires_at_unix_seconds: issued.claims.expires_at_unix_seconds,
+        guest_id: issued.issued.claims.guest_id.encoded(),
+        nickname: issued.nickname,
+        display_name: issued.display_name,
+        session_token: issued.issued.token,
+        expires_at_unix_seconds: issued.issued.claims.expires_at_unix_seconds,
     }))
+}
+
+async fn lobby_snapshot(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<LobbySnapshotResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomRead,
+        now,
+    )?;
+    let snapshot = state
+        .rooms
+        .lobby_snapshot(bearer(&headers)?, now)
+        .map_err(map_room_error)?;
+    Ok(Json(snapshot.into()))
 }
 
 async fn create_room(
@@ -531,13 +627,120 @@ async fn create_room(
             token,
             WebPrivateRoomOptions {
                 maximum_players: request.maximum_players,
-                arena_index: request.arena_index,
-                rule_index: request.rule_index,
+                visibility: request.visibility,
+                ..WebPrivateRoomOptions::default()
             },
             now,
         )
         .map_err(map_room_error)?;
     state.metrics.rooms_created.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(room.into()))
+}
+
+async fn update_room_settings(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    Path(room_code): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateRoomSettingsRequest>,
+) -> Result<Json<RoomResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomMutation,
+        now,
+    )?;
+    let room = state
+        .rooms
+        .update_room_settings(
+            bearer(&headers)?,
+            &room_code,
+            request.expected_revision,
+            request.arena_index,
+            request.rule_index,
+            now,
+        )
+        .map_err(map_room_error)?;
+    Ok(Json(room.into()))
+}
+
+async fn select_character(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    Path(room_code): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SelectCharacterRequest>,
+) -> Result<Json<RoomResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomMutation,
+        now,
+    )?;
+    let room = state
+        .rooms
+        .select_character(
+            bearer(&headers)?,
+            &room_code,
+            request.expected_revision,
+            request.character,
+            now,
+        )
+        .map_err(map_room_error)?;
+    Ok(Json(room.into()))
+}
+
+async fn set_ready(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    Path(room_code): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SetReadyRequest>,
+) -> Result<Json<RoomResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomMutation,
+        now,
+    )?;
+    let room = state
+        .rooms
+        .set_ready(
+            bearer(&headers)?,
+            &room_code,
+            request.expected_revision,
+            request.ready,
+            now,
+        )
+        .map_err(map_room_error)?;
+    Ok(Json(room.into()))
+}
+
+async fn kick_member(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    Path(room_code): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<KickMemberRequest>,
+) -> Result<Json<RoomResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomMutation,
+        now,
+    )?;
+    let peer_id = crate::network_protocol::PeerId::new(request.peer_id)
+        .map_err(|_| ApiError::bad_request("invalid_peer_id"))?;
+    let room = state
+        .rooms
+        .kick_and_ban_member(
+            bearer(&headers)?,
+            &room_code,
+            request.expected_revision,
+            peer_id,
+            now,
+        )
+        .map_err(map_room_error)?;
     Ok(Json(room.into()))
 }
 
@@ -585,6 +788,7 @@ async fn start_room(
     connect: ConnectInfo<SocketAddr>,
     Path(room_code): Path<String>,
     headers: HeaderMap,
+    Json(request): Json<StartRoomRequest>,
 ) -> Result<Json<RoomResponse>, ApiError> {
     let now = unix_now()?;
     state.rate_limit(
@@ -594,10 +798,36 @@ async fn start_room(
     )?;
     let room = state
         .rooms
-        .start_private_room(bearer(&headers)?, &room_code, now)
+        .start_private_room(
+            bearer(&headers)?,
+            &room_code,
+            request.expected_revision,
+            now,
+        )
         .await
         .map_err(map_room_error)?;
     state.metrics.rooms_started.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(room.into()))
+}
+
+async fn acknowledge_result(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    Path(room_code): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ResultAckRequest>,
+) -> Result<Json<RoomResponse>, ApiError> {
+    let now = unix_now()?;
+    state.rate_limit(
+        client_ip(&state, connect, &headers)?,
+        RateBucket::RoomMutation,
+        now,
+    )?;
+    let room = state
+        .rooms
+        .acknowledge_result(bearer(&headers)?, &room_code, &request.match_id, now)
+        .map_err(map_room_error)?;
+    state.metrics.rooms_returned.fetch_add(1, Ordering::Relaxed);
     Ok(Json(room.into()))
 }
 
@@ -653,7 +883,287 @@ async fn issue_ticket(
     }))
 }
 
-async fn websocket_upgrade(
+async fn lobby_websocket_upgrade(
+    State(state): State<WebServerState>,
+    connect: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    headers
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|origin| state.origin_allowed(origin))
+        .ok_or_else(|| ApiError::forbidden("origin_rejected"))?;
+    if !websocket_protocol_offered(&headers, AFC_LOBBY_WEBSOCKET_SUBPROTOCOL) {
+        return Err(ApiError::bad_request("websocket_subprotocol_required"));
+    }
+    let now = unix_now()?;
+    let address = client_ip(&state, connect, &headers)?;
+    state.rate_limit(address, RateBucket::Admission, now)?;
+    let active =
+        OwnedLobbyConnection::try_new(Arc::clone(&state.metrics), state.maximum_transport_sessions)
+            .ok_or_else(|| ApiError::unavailable("lobby_capacity"))?;
+    Ok(upgrade
+        .protocols([AFC_LOBBY_WEBSOCKET_SUBPROTOCOL])
+        .on_upgrade(move |socket| handle_lobby_websocket(socket, state, address, active)))
+}
+
+async fn handle_lobby_websocket(
+    mut socket: WebSocket,
+    state: WebServerState,
+    address: IpAddr,
+    _active: OwnedLobbyConnection,
+) {
+    const MAX_LOBBY_MESSAGE_BYTES: usize = 4 * 1_024;
+    let first = tokio::time::timeout(state.admission_timeout, socket.recv()).await;
+    let token = match first {
+        Ok(Some(Ok(Message::Text(text)))) if text.len() <= MAX_LOBBY_MESSAGE_BYTES => {
+            match serde_json::from_str::<LobbyClientMessage>(&text) {
+                Ok(LobbyClientMessage::Authenticate { session_token })
+                    if !session_token.is_empty()
+                        && session_token.len() <= MAX_BEARER_BYTES
+                        && !session_token.bytes().any(|byte| byte.is_ascii_whitespace()) =>
+                {
+                    session_token
+                }
+                _ => {
+                    reject_lobby_socket(&mut socket).await;
+                    state
+                        .metrics
+                        .lobby_websocket_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        _ => {
+            reject_lobby_socket(&mut socket).await;
+            state
+                .metrics
+                .lobby_websocket_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let now = match unix_now() {
+        Ok(now) => now,
+        Err(_) => {
+            reject_lobby_socket(&mut socket).await;
+            return;
+        }
+    };
+    let mut connection = match state.rooms.connect_lobby(&token, now) {
+        Ok(connection) => connection,
+        Err(_) => {
+            reject_lobby_socket(&mut socket).await;
+            state
+                .metrics
+                .lobby_websocket_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    state
+        .metrics
+        .lobby_websocket_admitted
+        .fetch_add(1, Ordering::Relaxed);
+    if send_lobby_message(
+        &mut socket,
+        &LobbyServerMessage::Snapshot {
+            snapshot: Box::new(connection.snapshot.into()),
+        },
+    )
+    .await
+    .is_err()
+    {
+        state.rooms.disconnect_lobby(connection.guest_id, now);
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            inbound = socket.recv() => {
+                let Some(Ok(message)) = inbound else { break; };
+                match message {
+                    Message::Text(text) if text.len() <= MAX_LOBBY_MESSAGE_BYTES => {
+                        let parsed = serde_json::from_str::<LobbyClientMessage>(&text);
+                        let Ok(command) = parsed else {
+                            let _ = send_lobby_error(&mut socket, None, "invalid_control_message").await;
+                            continue;
+                        };
+                        let now = match unix_now() {
+                            Ok(now) => now,
+                            Err(_) => break,
+                        };
+                        match command {
+                            LobbyClientMessage::Authenticate { .. } => {
+                                let _ = send_lobby_error(&mut socket, None, "already_authenticated").await;
+                            }
+                            LobbyClientMessage::SendChat { client_nonce, scope, text } => {
+                                if state.rate_limit(address, RateBucket::RoomMutation, now).is_err() {
+                                    state.metrics.chat_messages_rejected.fetch_add(1, Ordering::Relaxed);
+                                    let _ = send_lobby_error(&mut socket, Some(client_nonce), "rate_limited").await;
+                                    continue;
+                                }
+                                match state.rooms.send_chat(&token, scope, &text, now) {
+                                    Ok(_) => {
+                                        state.metrics.chat_messages_accepted.fetch_add(1, Ordering::Relaxed);
+                                        let _ = send_lobby_message(
+                                            &mut socket,
+                                            &LobbyServerMessage::CommandAccepted { client_nonce },
+                                        ).await;
+                                    }
+                                    Err(error) => {
+                                        state.metrics.chat_messages_rejected.fetch_add(1, Ordering::Relaxed);
+                                        let _ = send_lobby_error(
+                                            &mut socket,
+                                            Some(client_nonce),
+                                            room_error_code(&error),
+                                        ).await;
+                                    }
+                                }
+                            }
+                            LobbyClientMessage::Report {
+                                client_nonce,
+                                message_id,
+                                guest_id,
+                                category,
+                            } => {
+                                if state.rate_limit(address, RateBucket::RoomMutation, now).is_err() {
+                                    let _ = send_lobby_error(&mut socket, Some(client_nonce), "rate_limited").await;
+                                    continue;
+                                }
+                                match state.rooms.report_chat(
+                                    &token,
+                                    message_id,
+                                    &guest_id,
+                                    category,
+                                    now,
+                                ) {
+                                    Ok(()) => {
+                                        state.metrics.chat_reports.fetch_add(1, Ordering::Relaxed);
+                                        let _ = send_lobby_message(
+                                            &mut socket,
+                                            &LobbyServerMessage::CommandAccepted { client_nonce },
+                                        ).await;
+                                    }
+                                    Err(error) => {
+                                        let _ = send_lobby_error(
+                                            &mut socket,
+                                            Some(client_nonce),
+                                            room_error_code(&error),
+                                        ).await;
+                                    }
+                                }
+                            }
+                            LobbyClientMessage::Resync => {
+                                match state.rooms.lobby_snapshot(&token, now) {
+                                    Ok(snapshot) => {
+                                        if send_lobby_message(
+                                            &mut socket,
+                                            &LobbyServerMessage::Snapshot { snapshot: Box::new(snapshot.into()) },
+                                        ).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = send_lobby_error(&mut socket, None, room_error_code(&error)).await;
+                                    }
+                                }
+                            }
+                            LobbyClientMessage::Ping { nonce } => {
+                                if send_lobby_message(&mut socket, &LobbyServerMessage::Pong { nonce }).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(_) => break,
+                    Message::Binary(_) | Message::Text(_) => {
+                        let _ = send_lobby_error(&mut socket, None, "invalid_control_message").await;
+                    }
+                }
+            }
+            event = connection.receiver.recv() => {
+                match event {
+                    Ok(WebLobbyPush::StateChanged { revision }) => {
+                        if send_lobby_message(
+                            &mut socket,
+                            &LobbyServerMessage::StateChanged { revision },
+                        ).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WebLobbyPush::Chat(message)) => {
+                        if state.rooms.chat_visible_to(connection.guest_id, &message)
+                            && send_lobby_message(
+                                &mut socket,
+                                &LobbyServerMessage::ChatMessage { message },
+                            ).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let now = match unix_now() { Ok(now) => now, Err(_) => break };
+                        let Ok(snapshot) = state.rooms.lobby_snapshot(&token, now) else { break; };
+                        if send_lobby_message(
+                            &mut socket,
+                            &LobbyServerMessage::Snapshot { snapshot: Box::new(snapshot.into()) },
+                        ).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+    state
+        .rooms
+        .disconnect_lobby(connection.guest_id, unix_now().unwrap_or(now));
+}
+
+async fn send_lobby_message(
+    socket: &mut WebSocket,
+    message: &LobbyServerMessage,
+) -> Result<(), ()> {
+    let encoded = serde_json::to_string(message).map_err(|_| ())?;
+    socket
+        .send(Message::Text(encoded.into()))
+        .await
+        .map_err(|_| ())
+}
+
+async fn send_lobby_error(
+    socket: &mut WebSocket,
+    client_nonce: Option<u64>,
+    code: &str,
+) -> Result<(), ()> {
+    send_lobby_message(
+        socket,
+        &LobbyServerMessage::Error {
+            client_nonce,
+            code: code.to_owned(),
+        },
+    )
+    .await
+}
+
+async fn reject_lobby_socket(socket: &mut WebSocket) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: WS_POLICY_VIOLATION,
+            reason: "lobby admission rejected".into(),
+        })))
+        .await;
+}
+
+async fn gameplay_websocket_upgrade(
     State(state): State<WebServerState>,
     connect: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -665,7 +1175,7 @@ async fn websocket_upgrade(
         .filter(|origin| state.origin_allowed(origin))
         .ok_or_else(|| ApiError::forbidden("origin_rejected"))?;
     let _ = origin;
-    if !websocket_protocol_offered(&headers) {
+    if !websocket_protocol_offered(&headers, AFC_WEBSOCKET_SUBPROTOCOL) {
         return Err(ApiError::bad_request("websocket_subprotocol_required"));
     }
     let now = unix_now()?;
@@ -748,7 +1258,7 @@ async fn security_boundary(
         .get(ORIGIN)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    if request.uri().path().starts_with("/v1/")
+    if request.uri().path().starts_with("/v2/")
         && origin
             .as_deref()
             .is_some_and(|origin| !state.origin_allowed(origin))
@@ -785,7 +1295,7 @@ async fn security_boundary(
         headers.insert(VARY, HeaderValue::from_static("Origin"));
         headers.insert(
             ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, POST, OPTIONS"),
+            HeaderValue::from_static("GET, POST, PATCH, OPTIONS"),
         );
         headers.insert(
             ACCESS_CONTROL_ALLOW_HEADERS,
@@ -799,9 +1309,24 @@ impl From<WebRoomMemberView> for RoomMemberResponse {
     fn from(member: WebRoomMemberView) -> Self {
         Self {
             peer_id: member.peer_id.get(),
+            display_name: member.display_name,
             is_host: member.is_host,
             is_self: member.is_self,
-            connected: member.connected,
+            present: member.present,
+            gameplay_connected: member.gameplay_connected,
+            character: member.character,
+            ready: member.ready,
+        }
+    }
+}
+
+impl From<WebRoomResultView> for RoomResultResponse {
+    fn from(result: WebRoomResultView) -> Self {
+        Self {
+            match_id: result.match_id,
+            result_id: result.result_id,
+            final_tick: result.final_tick,
+            final_state_hash: result.final_state_hash,
         }
     }
 }
@@ -821,12 +1346,46 @@ impl From<WebPrivateRoomView> for RoomResponse {
     fn from(room: WebPrivateRoomView) -> Self {
         Self {
             room_code: room.room_code.to_string(),
+            revision: room.revision,
+            match_epoch: room.match_epoch,
+            visibility: room.visibility,
             state: room_state(room.state),
             maximum_players: room.maximum_players,
             member_count: room.member_count,
+            arena_index: room.arena_index,
+            rule_index: room.rule_index,
             members: room.members.into_iter().map(Into::into).collect(),
+            room_chat: room.room_chat,
             manifest: room.manifest,
+            result: room.result.map(Into::into),
             worker: room.worker.map(Into::into),
+        }
+    }
+}
+
+impl From<WebPublicRoomView> for PublicRoomSummary {
+    fn from(room: WebPublicRoomView) -> Self {
+        Self {
+            room_code: room.room_code.to_string(),
+            revision: room.revision,
+            host_display_name: room.host_display_name,
+            state: room_state(room.state),
+            member_count: room.member_count,
+            maximum_players: room.maximum_players,
+            arena_index: room.arena_index,
+            rule_index: room.rule_index,
+        }
+    }
+}
+
+impl From<WebLobbySnapshotView> for LobbySnapshotResponse {
+    fn from(snapshot: WebLobbySnapshotView) -> Self {
+        Self {
+            revision: snapshot.revision,
+            online_guests: snapshot.online_guests,
+            public_rooms: snapshot.public_rooms.into_iter().map(Into::into).collect(),
+            global_chat: snapshot.global_chat,
+            active_room: snapshot.active_room.map(Into::into),
         }
     }
 }
@@ -836,7 +1395,8 @@ const fn room_state(state: WebPrivateRoomState) -> RoomState {
         WebPrivateRoomState::Open => RoomState::Open,
         WebPrivateRoomState::Starting => RoomState::Starting,
         WebPrivateRoomState::Active => RoomState::Active,
-        WebPrivateRoomState::Finished => RoomState::Finished,
+        WebPrivateRoomState::Results => RoomState::Results,
+        WebPrivateRoomState::Returning => RoomState::Returning,
         WebPrivateRoomState::Failed => RoomState::Failed,
     }
 }
@@ -917,26 +1477,44 @@ impl IntoResponse for ApiError {
 
 fn map_room_error(error: WebRoomError) -> ApiError {
     match error {
+        WebRoomError::InvalidNickname => ApiError::bad_request("invalid_nickname"),
+        WebRoomError::InvalidChatMessage => ApiError::bad_request("invalid_chat_message"),
         WebRoomError::InvalidRoomOptions
         | WebRoomError::InvalidRoomCode
         | WebRoomError::InvalidReconnectTick => ApiError::bad_request("invalid_request"),
-        WebRoomError::RoomNotFound => ApiError::new(StatusCode::NOT_FOUND, "room_not_found"),
-        WebRoomError::GuestNotMember | WebRoomError::HostOnly => {
-            ApiError::forbidden("room_access_denied")
+        WebRoomError::RoomNotFound | WebRoomError::MemberNotFound => {
+            ApiError::new(StatusCode::NOT_FOUND, "room_not_found")
         }
+        WebRoomError::GuestNotMember
+        | WebRoomError::GuestRoomBanned
+        | WebRoomError::HostOnly
+        | WebRoomError::CannotKickSelf => ApiError::forbidden("room_access_denied"),
         WebRoomError::RoomFull
         | WebRoomError::GuestIdentityConflict
+        | WebRoomError::GuestAlreadyInRoom
         | WebRoomError::RoomNotOpen
         | WebRoomError::TooFewPlayers
+        | WebRoomError::MembersNotReady
+        | WebRoomError::RevisionConflict
         | WebRoomError::RoomStarting
         | WebRoomError::RoomAlreadyActive
         | WebRoomError::RoomNoLongerStarting
+        | WebRoomError::ResultNotAvailable
+        | WebRoomError::ResultMismatch
         | WebRoomError::AlreadyConnected
         | WebRoomError::ReconnectRequired
         | WebRoomError::TicketClaimsMismatch => {
             ApiError::new(StatusCode::CONFLICT, "room_state_conflict")
         }
-        WebRoomError::Identity(_) => ApiError::unauthorized("invalid_guest_session"),
+        WebRoomError::ChatRateLimited => {
+            ApiError::new(StatusCode::TOO_MANY_REQUESTS, "chat_rate_limited")
+        }
+        WebRoomError::ChatTargetNotFound => {
+            ApiError::new(StatusCode::NOT_FOUND, "chat_target_not_found")
+        }
+        WebRoomError::GuestNotRegistered | WebRoomError::Identity(_) => {
+            ApiError::unauthorized("invalid_guest_session")
+        }
         WebRoomError::InvalidConfiguration
         | WebRoomError::RandomnessUnavailable
         | WebRoomError::RegistryFull
@@ -944,6 +1522,10 @@ fn map_room_error(error: WebRoomError) -> ApiError {
         | WebRoomError::Worker(_)
         | WebRoomError::WorkerTaskCancelled => ApiError::unavailable("service_unavailable"),
     }
+}
+
+fn room_error_code(error: &WebRoomError) -> &'static str {
+    map_room_error(error.clone()).code
 }
 
 fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -966,13 +1548,13 @@ fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
     Ok(token)
 }
 
-fn websocket_protocol_offered(headers: &HeaderMap) -> bool {
+fn websocket_protocol_offered(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
-        .any(|protocol| protocol.trim() == AFC_WEBSOCKET_SUBPROTOCOL)
+        .any(|protocol| protocol.trim() == expected)
 }
 
 fn client_ip(
@@ -1039,6 +1621,30 @@ fn unix_now() -> Result<u64, ApiError> {
 
 pub(super) fn unix_now_for_transport() -> Result<u64, ()> {
     unix_now().map_err(|_| ())
+}
+
+struct OwnedLobbyConnection {
+    metrics: Arc<WebServerMetrics>,
+}
+
+impl OwnedLobbyConnection {
+    fn try_new(metrics: Arc<WebServerMetrics>, maximum: usize) -> Option<Self> {
+        metrics
+            .lobby_websocket_active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < maximum).then_some(active.saturating_add(1))
+            })
+            .ok()?;
+        Some(Self { metrics })
+    }
+}
+
+impl Drop for OwnedLobbyConnection {
+    fn drop(&mut self) {
+        self.metrics
+            .lobby_websocket_active
+            .fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub(super) struct OwnedActiveConnection {
@@ -1117,7 +1723,7 @@ mod tests {
             deployment: WebDeploymentMode::Development,
             http_bind: "127.0.0.1:0".parse().unwrap(),
             webtransport: None,
-            public_websocket_url: "ws://127.0.0.1:8080/v1/connect/ws".to_owned(),
+            public_websocket_url: "ws://127.0.0.1:8080/v2/connect/ws".to_owned(),
             public_webtransport_url: None,
             allowed_origins: vec!["https://html-classic.itch.zone".to_owned()],
             trusted_proxy_ips: Vec::new(),
@@ -1146,9 +1752,10 @@ mod tests {
         let guest = app
             .clone()
             .oneshot(
-                Request::post("/v1/guests")
+                Request::post("/v2/guests")
                     .header(ORIGIN, origin)
-                    .body(Body::empty())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"nickname":"Host"}"#))
                     .unwrap(),
             )
             .await
@@ -1168,12 +1775,12 @@ mod tests {
         let room = app
             .clone()
             .oneshot(
-                Request::post("/v1/rooms")
+                Request::post("/v2/rooms")
                     .header(ORIGIN, origin)
                     .header(AUTHORIZATION, format!("Bearer {}", guest.session_token))
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"maximum_players":2,"arena_index":0,"rule_index":0}"#,
+                        r#"{"maximum_players":2,"visibility":"private"}"#,
                     ))
                     .unwrap(),
             )
@@ -1208,7 +1815,7 @@ mod tests {
         let left = app
             .clone()
             .oneshot(
-                Request::post(format!("/v1/rooms/{}/leave", room.room_code))
+                Request::post(format!("/v2/rooms/{}/leave", room.room_code))
                     .header(ORIGIN, origin)
                     .header(AUTHORIZATION, format!("Bearer {}", guest.session_token))
                     .body(Body::empty())
@@ -1221,9 +1828,10 @@ mod tests {
         let rejected = app
             .clone()
             .oneshot(
-                Request::post("/v1/guests")
+                Request::post("/v2/guests")
                     .header(ORIGIN, "https://attacker.example")
-                    .body(Body::empty())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"nickname":"Attacker"}"#))
                     .unwrap(),
             )
             .await
@@ -1234,7 +1842,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::OPTIONS)
-                    .uri("/v1/rooms")
+                    .uri("/v2/rooms")
                     .header(ORIGIN, origin)
                     .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .body(Body::empty())
@@ -1259,7 +1867,7 @@ mod tests {
             certificate_pem: absent.join("certificate.pem"),
             private_key_pem: absent.join("private-key.pem"),
         });
-        config.public_webtransport_url = Some("https://127.0.0.1:4433/v1/connect/wt".to_owned());
+        config.public_webtransport_url = Some("https://127.0.0.1:4433/v2/connect/wt".to_owned());
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
@@ -1381,13 +1989,21 @@ mod tests {
             )
             .unwrap();
         let room_code = created.room_code.to_string();
-        state
+        let joined = state
             .rooms
             .join_private_room(&guest.token, &room_code, now)
             .unwrap();
+        let host_ready = state
+            .rooms
+            .set_ready(&host.token, &room_code, joined.revision, true, now)
+            .unwrap();
+        let guest_ready = state
+            .rooms
+            .set_ready(&guest.token, &room_code, host_ready.revision, true, now)
+            .unwrap();
         let active = state
             .rooms
-            .start_private_room(&host.token, &room_code, now)
+            .start_private_room(&host.token, &room_code, guest_ready.revision, now)
             .await
             .unwrap();
         let manifest = active.manifest.unwrap();
@@ -1480,7 +2096,7 @@ mod tests {
         origin: &str,
         ticket: &str,
     ) -> (InProcessEndpoint, tokio::task::JoinHandle<()>) {
-        let mut request = format!("ws://{address}/v1/connect/ws")
+        let mut request = format!("ws://{address}/v2/connect/ws")
             .into_client_request()
             .unwrap();
         request
