@@ -880,6 +880,7 @@ async fn issue_ticket(
         expires_at_unix_seconds: issued.expires_at_unix_seconds,
         peer_id: issued.peer_id.get(),
         manifest: issued.manifest,
+        countdown_start_tick: issued.countdown_start_tick.map(SimTick::get),
     }))
 }
 
@@ -1337,6 +1338,7 @@ impl From<WebRoomWorkerSnapshot> for RoomWorkerResponse {
             phase: worker_phase(worker.phase),
             network_tick: worker.network_tick.get(),
             simulation_tick: worker.simulation_tick.get(),
+            countdown_start_tick: worker.countdown_start_tick.map(SimTick::get),
             connected_peers: worker.connected_peers,
         }
     }

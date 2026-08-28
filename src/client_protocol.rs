@@ -274,6 +274,9 @@ pub struct ClientProtocolMetrics {
     pub reconnect_replication_deferred: u64,
     pub clock_probes_queued: u64,
     pub clock_replies_accepted: u64,
+    /// Authenticated replies discarded because browser scheduling made the
+    /// measured round trip too stale to be a safe authority-clock sample.
+    pub clock_replies_discarded_rtt: u64,
     pub clock_synchronized_transitions: u64,
     pub periodic_clock_refreshes: u64,
     pub local_input_batches: u64,
@@ -1125,15 +1128,28 @@ where
                 "clock reply did not match the outstanding probe",
             )));
         }
-        let became_synchronized = self
-            .authority_clock
-            .observe(ClockRoundTripSample {
-                probe_id: reply.probe_id.get(),
-                sent_micros: pending.sent_micros,
-                received_micros,
-                authority_tick: reply.authority_tick,
-            })
-            .map_err(|error| Self::fatal(ClientProtocolFatalError::SessionClock(error)))?;
+        let became_synchronized = match self.authority_clock.observe(ClockRoundTripSample {
+            probe_id: reply.probe_id.get(),
+            sent_micros: pending.sent_micros,
+            received_micros,
+            authority_tick: reply.authority_tick,
+        }) {
+            Ok(became_synchronized) => became_synchronized,
+            // A browser can pause its main thread while loading assets, compiling
+            // shaders, or sitting in the background. The authenticated reply is
+            // still well formed, but its RTT is no longer a useful clock sample.
+            // Discard it and let `service_outbound` immediately replenish the
+            // single outstanding probe. Clock regression and every structural
+            // clock fault remain fail-closed.
+            Err(SessionClockError::RoundTripTooLarge { .. }) => {
+                self.metrics.clock_replies_discarded_rtt =
+                    self.metrics.clock_replies_discarded_rtt.saturating_add(1);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(Self::fatal(ClientProtocolFatalError::SessionClock(error)));
+            }
+        };
         self.metrics.clock_replies_accepted = self.metrics.clock_replies_accepted.saturating_add(1);
         if became_synchronized {
             self.metrics.clock_synchronized_transitions = self
@@ -2735,6 +2751,47 @@ mod tests {
         authority.pump(first_fighting_network_tick);
         assert_eq!(client.phase(), ConnectionPhase::Fighting);
         (client, authority, initial)
+    }
+
+    #[test]
+    fn oversized_authenticated_clock_reply_is_discarded_and_replaced() {
+        let (mut client, _authority, _) = connected_pair();
+        let stale_probe = client
+            .pending_clock_probe
+            .expect("startup retains its next authenticated clock probe");
+        let received_micros = stale_probe
+            .sent_micros
+            .saturating_add(crate::session_clock::MAX_CLOCK_RTT_MICROS)
+            .saturating_add(1);
+        let accepted_before = client.metrics().clock_replies_accepted;
+        let rejected_before = client.session_clock_metrics().rejected_samples;
+
+        client
+            .accept_clock_reply(
+                ClockReply {
+                    match_id: match_id(),
+                    peer_id: peer_id(),
+                    probe_id: stale_probe.probe_id,
+                    authority_tick: client.last_network_tick,
+                },
+                received_micros,
+            )
+            .unwrap();
+
+        assert_eq!(client.failure(), None);
+        assert_eq!(client.metrics().clock_replies_accepted, accepted_before);
+        assert_eq!(client.metrics().clock_replies_discarded_rtt, 1);
+        assert_eq!(
+            client.session_clock_metrics().rejected_samples,
+            rejected_before + 1
+        );
+        assert!(client.pending_clock_probe.is_none());
+
+        client.last_monotonic_micros = received_micros;
+        assert!(client.try_queue_clock_probe().unwrap());
+        let replacement = client.pending_clock_probe.unwrap();
+        assert_ne!(replacement.probe_id, stale_probe.probe_id);
+        assert_eq!(replacement.sent_micros, received_micros);
     }
 
     #[test]

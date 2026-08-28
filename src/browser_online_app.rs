@@ -1,9 +1,8 @@
-//! Main-thread browser lobby, admission, prediction, and presentation owner.
+//! Browser-only lobby, admission, prediction, and presentation owner.
 //!
-//! Browsers cannot run the native worker-thread topology used by Steam. This
-//! application keeps HTTP orchestration asynchronous while servicing the
-//! existing predicted protocol on the Bevy/JavaScript main thread at the
-//! canonical fixed tick rate.
+//! Lobby orchestration runs on the JavaScript/Bevy main thread. Canonical
+//! gameplay still enters the existing `BrowserOnlineClient`, which services
+//! the predicted AFC protocol at the fixed simulation cadence.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -12,15 +11,15 @@ use std::rc::Rc;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use js_sys::Reflect;
-use serde::Serialize;
+use js_sys::{Function, JSON, Reflect};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    AbortController, Headers, ReadableStreamDefaultReader, Request, RequestInit, RequestMode,
-    Response, Url, UrlSearchParams,
+    AbortController, Event, Headers, MessageEvent, ReadableStreamDefaultReader, Request,
+    RequestInit, RequestMode, Response, Url, UrlSearchParams, WebSocket,
 };
 
 use crate::arena_defs::{ActiveArena, arena_definitions};
@@ -43,9 +42,12 @@ use crate::remote_online_client::{
 use crate::tick_input::{LocalSeatId, LocalTickInputState};
 use crate::user_mode::{UserModeGameplayScene, UserModeState};
 use crate::web_api::{
-    ApiErrorEnvelope, CreateRoomRequest, GuestSessionResponse, JoinRoomRequest, RoomResponse,
-    RoomState, ServiceConfigResponse, TicketModeRequest, TicketRequest, TicketResponse,
-    WEB_API_VERSION,
+    AFC_LOBBY_WEBSOCKET_SUBPROTOCOL, ApiErrorEnvelope, ChatReportCategory, ChatScope,
+    CreateRoomRequest, GuestSessionRequest, GuestSessionResponse, JoinRoomRequest,
+    KickMemberRequest, LobbyClientMessage, LobbyServerMessage, LobbySnapshotResponse,
+    ResultAckRequest, RoomResponse, RoomState, RoomVisibility, SelectCharacterRequest,
+    ServiceConfigResponse, SetReadyRequest, StartRoomRequest, TicketModeRequest, TicketRequest,
+    TicketResponse, UpdateRoomSettingsRequest, WEB_API_VERSION, WebCharacter,
 };
 use crate::web_endpoint_adapters::{
     AFC_WEBSOCKET_SUBPROTOCOL, BrowserDatagramEndpoint, BrowserTransportPreference,
@@ -54,10 +56,15 @@ use crate::web_endpoint_adapters::{
 
 const HTTP_TIMEOUT_MS: i32 = 10_000;
 const MAX_HTTP_RESPONSE_BYTES: usize = 64 * 1_024;
-const MAX_ASYNC_EVENTS: usize = 16;
-const LOBBY_POLL_INTERVAL_MS: u64 = 750;
-const RECONNECT_BASE_DELAY_MS: u64 = 350;
-const MAX_RECONNECT_ATTEMPTS: u8 = 8;
+const MAX_ASYNC_EVENTS: usize = 32;
+const MAX_DOM_ACTIONS_PER_FRAME: usize = 16;
+const LOBBY_SYNC_INTERVAL_MS: u64 = 750;
+const CONTROL_RECONNECT_BASE_MS: u64 = 500;
+const GAMEPLAY_RECONNECT_BASE_MS: u64 = 350;
+const MAX_GAMEPLAY_RECONNECT_ATTEMPTS: u8 = 8;
+const RESULTS_PRESENTATION_MS: u64 = 6_000;
+const SESSION_STORAGE_KEY: &str = "afc.browser.session.v2";
+const DOM_BRIDGE_KEY: &str = "AFC_LOBBY_BRIDGE";
 
 type BrowserClient = BrowserOnlineClient<BrowserDatagramEndpoint>;
 type AsyncMailbox = Rc<RefCell<VecDeque<BrowserAsyncEvent>>>;
@@ -67,20 +74,22 @@ pub enum BrowserOnlineScreen {
     #[default]
     Dormant,
     Bootstrapping,
-    Menu,
+    Identity,
     Lobby,
+    Room,
     Connecting,
     Match,
+    Returning,
     Error,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingOperation {
     Bootstrap,
-    CreateRoom,
-    JoinRoom,
-    PollRoom,
-    StartRoom,
+    Guest,
+    RoomMutation,
+    LeaveRoom,
+    ResultAck,
     ConnectInitial,
     ConnectReconnect,
 }
@@ -100,7 +109,6 @@ pub struct BrowserOnlineUiSnapshot {
     pub title: String,
     pub details: String,
     pub footer: String,
-    pub room_code_symbols: String,
     pub room: Option<RoomResponse>,
     pub client_status: Option<RemoteOnlineClientStatus>,
     pub pending: bool,
@@ -118,7 +126,6 @@ impl Default for BrowserOnlineUiSnapshot {
             title: "ONLINE".to_owned(),
             details: String::new(),
             footer: String::new(),
-            room_code_symbols: String::new(),
             room: None,
             client_status: None,
             pending: false,
@@ -129,43 +136,99 @@ impl Default for BrowserOnlineUiSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Component)]
-pub enum BrowserOnlineUiAction {
-    CreateRoom,
-    JoinRoom,
-    FewerPlayers,
-    MorePlayers,
-    PreviousArena,
-    NextArena,
-    PreviousRules,
-    NextRules,
-    StartRoom,
-    Leave,
-    Back,
-    Retry,
-}
-
 struct ConnectedPayload {
     endpoint: BrowserDatagramEndpoint,
     match_config: HeadlessMatchConfig,
     peer_id: PeerId,
+    countdown_start_tick: Option<SimTick>,
+}
+
+struct BootstrapPayload {
+    service: ServiceConfigResponse,
+    restored: Option<(GuestSessionResponse, LobbySnapshotResponse)>,
+    discard_stored_session: bool,
+}
+
+#[derive(Clone, Debug)]
+enum RestCommand {
+    Create {
+        maximum_players: u8,
+        visibility: RoomVisibility,
+    },
+    Join {
+        room_code: String,
+    },
+    Settings {
+        room_code: String,
+        expected_revision: u64,
+        arena_index: usize,
+        rule_index: usize,
+    },
+    Character {
+        room_code: String,
+        expected_revision: u64,
+        character: WebCharacter,
+    },
+    Ready {
+        room_code: String,
+        expected_revision: u64,
+        ready: bool,
+    },
+    Kick {
+        room_code: String,
+        expected_revision: u64,
+        peer_id: u64,
+    },
+    Start {
+        room_code: String,
+        expected_revision: u64,
+    },
+    Leave {
+        room_code: String,
+    },
+    ResultAck {
+        room_code: String,
+        match_id: String,
+    },
+}
+
+impl RestCommand {
+    const fn pending_operation(&self) -> PendingOperation {
+        match self {
+            Self::Leave { .. } => PendingOperation::LeaveRoom,
+            Self::ResultAck { .. } => PendingOperation::ResultAck,
+            _ => PendingOperation::RoomMutation,
+        }
+    }
+}
+
+enum RestPayload {
+    Room(RoomResponse),
+    Left,
 }
 
 enum BrowserAsyncPayload {
-    Bootstrap(Result<(ServiceConfigResponse, GuestSessionResponse), BrowserOperationError>),
-    Room {
+    Bootstrap(Result<BootstrapPayload, BrowserOperationError>),
+    Guest(Result<GuestSessionResponse, BrowserOperationError>),
+    Rest {
         operation: PendingOperation,
-        result: Result<RoomResponse, BrowserOperationError>,
+        result: Result<RestPayload, BrowserOperationError>,
     },
     Connected {
         reconnect: bool,
         result: Result<ConnectedPayload, BrowserOperationError>,
     },
+    Control(LobbyControlEvent),
 }
 
 struct BrowserAsyncEvent {
     generation: u64,
     payload: BrowserAsyncPayload,
+}
+
+enum LobbyControlEvent {
+    Message(LobbyServerMessage),
+    Closed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,20 +247,41 @@ impl BrowserOperationError {
 
     fn player_message(&self) -> String {
         match self.code.as_str() {
-            "room_not_found" => "That private room was not found.".to_owned(),
-            "room_state_conflict" => "The room changed state. Please try again.".to_owned(),
-            "room_access_denied" => "This guest cannot access that room.".to_owned(),
-            "invalid_guest_session" => "The guest session expired. Re-enter Online.".to_owned(),
+            "invalid_nickname" => {
+                "Use 3–20 letters or numbers; spaces, dots, hyphens, and underscores are allowed."
+                    .to_owned()
+            }
+            "invalid_chat_message" => "That message cannot be sent.".to_owned(),
+            "chat_rate_limited" => "Chat is moving too quickly. Wait a moment.".to_owned(),
+            "room_not_found" => "That room was not found.".to_owned(),
+            "room_full" => "That room is full.".to_owned(),
+            "room_banned" => "The room host removed this guest.".to_owned(),
+            "room_not_open" | "room_state_conflict" | "revision_conflict" => {
+                "The room changed. Its latest state is being loaded.".to_owned()
+            }
+            "members_not_ready" => "Every present player must be ready.".to_owned(),
+            "too_few_players" => "At least two players are required.".to_owned(),
+            "host_only" => "Only the room host can do that.".to_owned(),
+            "invalid_guest_session" | "guest_not_registered" => {
+                "This guest session expired. Choose a nickname again.".to_owned()
+            }
             "rate_limited" => "Too many requests. Please wait a moment.".to_owned(),
-            "service_unavailable" | "transport_capacity" => {
+            "service_unavailable" | "transport_capacity" | "lobby_capacity" => {
                 "The game server is temporarily unavailable.".to_owned()
             }
             "incompatible_release" => {
-                "The browser build and server release do not match.".to_owned()
+                "The browser build and game server are different releases.".to_owned()
             }
-            "request_timeout" => "The server did not respond in time.".to_owned(),
-            _ => "Online operation failed. Please try again.".to_owned(),
+            "request_timeout" => "The game server did not respond in time.".to_owned(),
+            _ => "The online operation failed. Please try again.".to_owned(),
         }
+    }
+
+    fn invalidates_guest(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "invalid_guest_session" | "guest_not_registered"
+        ) || matches!(self.status, Some(401))
     }
 
     fn reconnect_may_retry(&self) -> bool {
@@ -211,30 +295,207 @@ impl fmt::Display for BrowserOperationError {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredBrowserSession {
+    api_base: String,
+    guest: GuestSessionResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum BrowserDomAction {
+    SubmitNickname {
+        nickname: String,
+    },
+    CreateRoom {
+        maximum_players: u8,
+        visibility: RoomVisibility,
+    },
+    JoinRoom {
+        room_code: String,
+    },
+    UpdateSettings {
+        arena_index: usize,
+        rule_index: usize,
+    },
+    SelectCharacter {
+        character: WebCharacter,
+    },
+    SetReady {
+        ready: bool,
+    },
+    KickMember {
+        peer_id: u64,
+    },
+    StartMatch,
+    LeaveRoom,
+    SendChat {
+        scope: ChatScope,
+        text: String,
+    },
+    Report {
+        message_id: Option<u64>,
+        guest_id: String,
+        category: ChatReportCategory,
+    },
+    Retry,
+    LeaveOnline,
+}
+
+struct BrowserLobbySocket {
+    socket: WebSocket,
+    _on_open: Closure<dyn FnMut(Event)>,
+    _on_message: Closure<dyn FnMut(MessageEvent)>,
+    _on_error: Closure<dyn FnMut(Event)>,
+    _on_close: Closure<dyn FnMut(Event)>,
+}
+
+impl BrowserLobbySocket {
+    fn connect(
+        url: &str,
+        subprotocol: &str,
+        session_token: &str,
+        generation: u64,
+        mailbox: AsyncMailbox,
+    ) -> Result<Self, BrowserOperationError> {
+        let socket = WebSocket::new_with_str(url, subprotocol)
+            .map_err(|_| BrowserOperationError::local("lobby_socket_unavailable"))?;
+        let authentication = serde_json::to_string(&LobbyClientMessage::Authenticate {
+            session_token: session_token.to_owned(),
+        })
+        .map_err(|_| BrowserOperationError::local("request_encoding"))?;
+
+        let open_socket = socket.clone();
+        let expected_protocol = subprotocol.to_owned();
+        let open_mailbox = Rc::clone(&mailbox);
+        let on_open = Closure::wrap(Box::new(move |_event: Event| {
+            if open_socket.protocol() != expected_protocol
+                || open_socket.send_with_str(&authentication).is_err()
+            {
+                push_async_event(
+                    &open_mailbox,
+                    BrowserAsyncEvent {
+                        generation,
+                        payload: BrowserAsyncPayload::Control(LobbyControlEvent::Closed),
+                    },
+                );
+                let _ = open_socket.close_with_code(1008);
+            }
+        }) as Box<dyn FnMut(Event)>);
+        socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+
+        let message_mailbox = Rc::clone(&mailbox);
+        let message_socket = socket.clone();
+        let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
+            let Some(text) = event.data().as_string() else {
+                let _ = message_socket.close_with_code(1003);
+                return;
+            };
+            if text.len() > MAX_HTTP_RESPONSE_BYTES {
+                let _ = message_socket.close_with_code(1009);
+                return;
+            }
+            let Ok(message) = serde_json::from_str::<LobbyServerMessage>(&text) else {
+                let _ = message_socket.close_with_code(1003);
+                return;
+            };
+            push_async_event(
+                &message_mailbox,
+                BrowserAsyncEvent {
+                    generation,
+                    payload: BrowserAsyncPayload::Control(LobbyControlEvent::Message(message)),
+                },
+            );
+        }) as Box<dyn FnMut(MessageEvent)>);
+        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        let error_mailbox = Rc::clone(&mailbox);
+        let on_error = Closure::wrap(Box::new(move |_event: Event| {
+            push_async_event(
+                &error_mailbox,
+                BrowserAsyncEvent {
+                    generation,
+                    payload: BrowserAsyncPayload::Control(LobbyControlEvent::Closed),
+                },
+            );
+        }) as Box<dyn FnMut(Event)>);
+        socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+        let close_mailbox = mailbox;
+        let on_close = Closure::wrap(Box::new(move |_event: Event| {
+            push_async_event(
+                &close_mailbox,
+                BrowserAsyncEvent {
+                    generation,
+                    payload: BrowserAsyncPayload::Control(LobbyControlEvent::Closed),
+                },
+            );
+        }) as Box<dyn FnMut(Event)>);
+        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        Ok(Self {
+            socket,
+            _on_open: on_open,
+            _on_message: on_message,
+            _on_error: on_error,
+            _on_close: on_close,
+        })
+    }
+
+    fn send(&self, message: &LobbyClientMessage) -> Result<(), BrowserOperationError> {
+        if self.socket.ready_state() != WebSocket::OPEN {
+            return Err(BrowserOperationError::local("lobby_socket_not_ready"));
+        }
+        let message = serde_json::to_string(message)
+            .map_err(|_| BrowserOperationError::local("request_encoding"))?;
+        self.socket
+            .send_with_str(&message)
+            .map_err(|_| BrowserOperationError::local("lobby_socket_closed"))
+    }
+
+    fn is_connecting(&self) -> bool {
+        self.socket.ready_state() == WebSocket::CONNECTING
+    }
+}
+
+impl Drop for BrowserLobbySocket {
+    fn drop(&mut self) {
+        self.socket.set_onopen(None);
+        self.socket.set_onmessage(None);
+        self.socket.set_onerror(None);
+        self.socket.set_onclose(None);
+        let _ = self.socket.close_with_code(1000);
+    }
+}
+
 pub struct BrowserOnlineApplication {
     screen: BrowserOnlineScreen,
     api_base: Option<String>,
     service: Option<ServiceConfigResponse>,
     guest: Option<GuestSessionResponse>,
+    lobby: Option<LobbySnapshotResponse>,
     room: Option<RoomResponse>,
+    control: Option<BrowserLobbySocket>,
     client: Option<BrowserClient>,
     mailbox: AsyncMailbox,
     generation: u64,
     pending: Option<PendingOperation>,
-    room_code_symbols: String,
-    maximum_players: u8,
-    arena_index: usize,
-    rule_index: usize,
-    next_room_poll_ms: u64,
-    reconnect_due_ms: Option<u64>,
-    reconnect_attempts: u8,
+    next_lobby_sync_ms: u64,
+    control_reconnect_due_ms: Option<u64>,
+    control_reconnect_attempts: u8,
+    gameplay_reconnect_due_ms: Option<u64>,
+    gameplay_reconnect_attempts: u8,
     content_marked: bool,
     scene_requested: bool,
     projection_active: bool,
+    results_visible_since_ms: Option<u64>,
+    acknowledged_match_id: Option<String>,
     request_exit: bool,
     notice: Option<String>,
     fatal_error: Option<String>,
     retry_plan: Option<RetryPlan>,
+    next_client_nonce: u64,
+    last_dom_json: String,
 }
 
 impl Default for BrowserOnlineApplication {
@@ -244,25 +505,29 @@ impl Default for BrowserOnlineApplication {
             api_base: None,
             service: None,
             guest: None,
+            lobby: None,
             room: None,
+            control: None,
             client: None,
             mailbox: Rc::new(RefCell::new(VecDeque::with_capacity(MAX_ASYNC_EVENTS))),
             generation: 1,
             pending: None,
-            room_code_symbols: String::with_capacity(12),
-            maximum_players: 2,
-            arena_index: 0,
-            rule_index: 0,
-            next_room_poll_ms: 0,
-            reconnect_due_ms: None,
-            reconnect_attempts: 0,
+            next_lobby_sync_ms: 0,
+            control_reconnect_due_ms: None,
+            control_reconnect_attempts: 0,
+            gameplay_reconnect_due_ms: None,
+            gameplay_reconnect_attempts: 0,
             content_marked: false,
             scene_requested: false,
             projection_active: false,
+            results_visible_since_ms: None,
+            acknowledged_match_id: None,
             request_exit: false,
             notice: None,
             fatal_error: None,
             retry_plan: None,
+            next_client_nonce: 1,
+            last_dom_json: String::new(),
         }
     }
 }
@@ -282,11 +547,13 @@ impl BrowserOnlineApplication {
         self.fatal_error = None;
         self.notice = None;
         self.retry_plan = None;
+        self.control = None;
         match resolve_api_base() {
             Ok(api_base) => {
+                let stored = load_stored_session(&api_base);
                 self.api_base = Some(api_base.clone());
                 self.pending = Some(PendingOperation::Bootstrap);
-                spawn_bootstrap(self.generation, api_base, Rc::clone(&self.mailbox));
+                spawn_bootstrap(self.generation, api_base, stored, Rc::clone(&self.mailbox));
             }
             Err(error) => self.fail(error.player_message(), RetryPlan::Bootstrap),
         }
@@ -305,88 +572,93 @@ impl BrowserOnlineApplication {
         self.retry_plan = Some(retry);
     }
 
-    fn start_room_operation(&mut self, operation: PendingOperation) {
-        let (Some(api_base), Some(guest)) = (self.api_base.clone(), self.guest.clone()) else {
-            self.fail(
-                "The guest session is unavailable.".to_owned(),
-                RetryPlan::Bootstrap,
-            );
+    fn next_nonce(&mut self) -> u64 {
+        let nonce = self.next_client_nonce;
+        self.next_client_nonce = self.next_client_nonce.saturating_add(1).max(1);
+        nonce
+    }
+
+    fn open_control_socket(&mut self, now_ms: u64) {
+        let (Some(service), Some(guest)) = (&self.service, &self.guest) else {
             return;
         };
-        self.pending = Some(operation);
+        match BrowserLobbySocket::connect(
+            &service.lobby_websocket_url,
+            &service.lobby_websocket_subprotocol,
+            &guest.session_token,
+            self.generation,
+            Rc::clone(&self.mailbox),
+        ) {
+            Ok(socket) => {
+                self.control = Some(socket);
+                self.control_reconnect_due_ms = None;
+                self.next_lobby_sync_ms = now_ms.saturating_add(LOBBY_SYNC_INTERVAL_MS);
+            }
+            Err(error) => self.schedule_control_reconnect(now_ms, error.player_message()),
+        }
+    }
+
+    fn schedule_control_reconnect(&mut self, now_ms: u64, notice: String) {
+        self.control = None;
+        let shift = u32::from(self.control_reconnect_attempts.min(5));
+        let delay = CONTROL_RECONNECT_BASE_MS.saturating_mul(1_u64 << shift);
+        self.control_reconnect_attempts = self.control_reconnect_attempts.saturating_add(1);
+        self.control_reconnect_due_ms = Some(now_ms.saturating_add(delay));
+        if self.client.is_none() {
+            self.notice = Some(notice);
+        }
+    }
+
+    fn start_guest(&mut self, nickname: String) {
+        let Some(api_base) = self.api_base.clone() else {
+            self.begin_bootstrap();
+            return;
+        };
+        if self.pending.is_some() {
+            return;
+        }
+        self.pending = Some(PendingOperation::Guest);
         self.notice = None;
         let generation = self.generation;
         let mailbox = Rc::clone(&self.mailbox);
-        let room = self.room.clone();
-        let room_code = self.room_code_symbols.clone();
-        let maximum_players = self.maximum_players;
-        let arena_index = self.arena_index;
-        let rule_index = self.rule_index;
         spawn_local(async move {
-            let result = match operation {
-                PendingOperation::CreateRoom => {
-                    post_json::<_, RoomResponse>(
-                        &api_base,
-                        "/v1/rooms",
-                        Some(&guest.session_token),
-                        &CreateRoomRequest {
-                            maximum_players,
-                            arena_index,
-                            rule_index,
-                        },
-                    )
-                    .await
-                }
-                PendingOperation::JoinRoom => {
-                    post_json::<_, RoomResponse>(
-                        &api_base,
-                        "/v1/rooms/join",
-                        Some(&guest.session_token),
-                        &JoinRoomRequest { room_code },
-                    )
-                    .await
-                }
-                PendingOperation::PollRoom => {
-                    let code = room
-                        .as_ref()
-                        .map(|room| room.room_code.as_str())
-                        .ok_or_else(|| BrowserOperationError::local("room_unavailable"));
-                    match code {
-                        Ok(code) => {
-                            get_json::<RoomResponse>(
-                                &api_base,
-                                &format!("/v1/rooms/{code}"),
-                                Some(&guest.session_token),
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                PendingOperation::StartRoom => {
-                    let code = room
-                        .as_ref()
-                        .map(|room| room.room_code.as_str())
-                        .ok_or_else(|| BrowserOperationError::local("room_unavailable"));
-                    match code {
-                        Ok(code) => {
-                            post_empty_json::<RoomResponse>(
-                                &api_base,
-                                &format!("/v1/rooms/{code}/start"),
-                                Some(&guest.session_token),
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                _ => Err(BrowserOperationError::local("invalid_room_operation")),
-            };
+            let result = post_json::<_, GuestSessionResponse>(
+                &api_base,
+                "/v2/guests",
+                None,
+                &GuestSessionRequest { nickname },
+            )
+            .await;
             push_async_event(
                 &mailbox,
                 BrowserAsyncEvent {
                     generation,
-                    payload: BrowserAsyncPayload::Room { operation, result },
+                    payload: BrowserAsyncPayload::Guest(result),
+                },
+            );
+        });
+    }
+
+    fn start_rest_command(&mut self, command: RestCommand) {
+        let (Some(api_base), Some(guest)) = (self.api_base.clone(), self.guest.clone()) else {
+            self.begin_bootstrap();
+            return;
+        };
+        if self.pending.is_some() {
+            return;
+        }
+        let operation = command.pending_operation();
+        self.pending = Some(operation);
+        self.notice = None;
+        let generation = self.generation;
+        let mailbox = Rc::clone(&self.mailbox);
+        spawn_local(async move {
+            let result = execute_rest_command(&api_base, &guest.session_token, command).await;
+            push_async_event(
+                &mailbox,
+                BrowserAsyncEvent {
+                    generation,
+                    payload: BrowserAsyncPayload::Rest { operation, result },
                 },
             );
         });
@@ -400,16 +672,13 @@ impl BrowserOnlineApplication {
             self.room.clone(),
         ) else {
             self.fail(
-                "Online session state is incomplete.".to_owned(),
+                "The online session is incomplete.".to_owned(),
                 RetryPlan::Bootstrap,
             );
             return;
         };
         let Some(expected_manifest) = room.manifest else {
-            self.fail(
-                "The room did not publish a match manifest.".to_owned(),
-                RetryPlan::InitialConnection,
-            );
+            self.notice = Some("Waiting for the authority manifest…".to_owned());
             return;
         };
         let operation = if reconnect {
@@ -458,46 +727,102 @@ impl BrowserOnlineApplication {
                     }
                     self.pending = None;
                     match result {
-                        Ok((service, guest)) => {
-                            self.service = Some(service);
-                            self.guest = Some(guest);
-                            self.screen = BrowserOnlineScreen::Menu;
+                        Ok(payload) => {
+                            if payload.discard_stored_session {
+                                clear_stored_session();
+                            }
+                            self.service = Some(payload.service);
+                            if let Some((guest, snapshot)) = payload.restored {
+                                self.guest = Some(guest);
+                                self.apply_lobby_snapshot(world, snapshot, now_ms);
+                                self.open_control_socket(now_ms);
+                            } else {
+                                self.screen = BrowserOnlineScreen::Identity;
+                            }
                             self.retry_plan = None;
                         }
                         Err(error) => self.fail(error.player_message(), RetryPlan::Bootstrap),
                     }
                 }
-                BrowserAsyncPayload::Room { operation, result } => {
+                BrowserAsyncPayload::Guest(result) => {
+                    if self.pending != Some(PendingOperation::Guest) {
+                        continue;
+                    }
+                    self.pending = None;
+                    match result {
+                        Ok(guest) => {
+                            self.guest = Some(guest);
+                            self.save_session();
+                            self.screen = BrowserOnlineScreen::Lobby;
+                            self.notice = None;
+                            self.open_control_socket(now_ms);
+                        }
+                        Err(error) => {
+                            self.screen = BrowserOnlineScreen::Identity;
+                            self.notice = Some(error.player_message());
+                        }
+                    }
+                }
+                BrowserAsyncPayload::Rest { operation, result } => {
                     if self.pending != Some(operation) {
                         continue;
                     }
                     self.pending = None;
                     match result {
-                        Ok(room) => {
-                            self.room_code_symbols = room
-                                .room_code
-                                .bytes()
-                                .filter(|byte| *byte != b'-')
-                                .map(char::from)
-                                .collect();
-                            self.room = Some(room);
-                            self.screen = BrowserOnlineScreen::Lobby;
+                        Ok(RestPayload::Room(room)) => {
+                            let was_result_ack = operation == PendingOperation::ResultAck;
+                            if was_result_ack {
+                                self.acknowledged_match_id =
+                                    room.result.as_ref().map(|result| result.match_id.clone());
+                            }
+                            self.room = Some(room.clone());
+                            if let Some(lobby) = &mut self.lobby {
+                                lobby.active_room = Some(room);
+                            }
                             self.notice = None;
-                            self.next_room_poll_ms = now_ms.saturating_add(LOBBY_POLL_INTERVAL_MS);
+                            self.request_control_resync();
+                            if was_result_ack {
+                                self.finish_match_projection(world);
+                                self.screen = BrowserOnlineScreen::Returning;
+                            } else if self.client.is_none() {
+                                self.screen = match self.room.as_ref().map(|room| room.state) {
+                                    Some(RoomState::Open) => BrowserOnlineScreen::Room,
+                                    Some(RoomState::Active | RoomState::Starting) => {
+                                        BrowserOnlineScreen::Connecting
+                                    }
+                                    Some(
+                                        RoomState::Results
+                                        | RoomState::Returning
+                                        | RoomState::Failed,
+                                    ) => BrowserOnlineScreen::Returning,
+                                    None => BrowserOnlineScreen::Lobby,
+                                };
+                            }
                         }
-                        Err(error) => match operation {
-                            PendingOperation::CreateRoom | PendingOperation::JoinRoom => {
-                                self.screen = BrowserOnlineScreen::Menu;
-                                self.notice = Some(error.player_message());
+                        Ok(RestPayload::Left) => {
+                            self.room = None;
+                            if let Some(lobby) = &mut self.lobby {
+                                lobby.active_room = None;
                             }
-                            PendingOperation::PollRoom | PendingOperation::StartRoom => {
-                                self.screen = BrowserOnlineScreen::Lobby;
-                                self.notice = Some(error.player_message());
-                                self.next_room_poll_ms =
-                                    now_ms.saturating_add(LOBBY_POLL_INTERVAL_MS);
+                            self.screen = BrowserOnlineScreen::Lobby;
+                            self.notice = Some("You left the room.".to_owned());
+                            self.request_control_resync();
+                        }
+                        Err(error) if error.invalidates_guest() => {
+                            clear_stored_session();
+                            self.guest = None;
+                            self.control = None;
+                            self.screen = BrowserOnlineScreen::Identity;
+                            self.notice = Some(error.player_message());
+                        }
+                        Err(error) => {
+                            self.notice = Some(error.player_message());
+                            self.request_control_resync();
+                            if operation == PendingOperation::ResultAck {
+                                self.screen = BrowserOnlineScreen::Returning;
+                                self.results_visible_since_ms = Some(now_ms);
                             }
-                            _ => {}
-                        },
+                        }
                     }
                 }
                 BrowserAsyncPayload::Connected { reconnect, result } => {
@@ -511,16 +836,14 @@ impl BrowserOnlineApplication {
                     }
                     self.pending = None;
                     match result {
-                        Ok(payload) if reconnect => {
+                        Ok(payload) if reconnect && self.client.is_some() => {
                             let Some(client) = &mut self.client else {
-                                self.fail(
-                                    "The reconnect target no longer exists.".to_owned(),
-                                    RetryPlan::InitialConnection,
-                                );
                                 continue;
                             };
                             if client.peer_id() != payload.peer_id
                                 || client.manifest() != &payload.match_config.manifest
+                                || client.status().countdown_start_tick
+                                    != payload.countdown_start_tick
                             {
                                 self.fail(
                                     "The reconnect ticket changed match identity.".to_owned(),
@@ -531,8 +854,8 @@ impl BrowserOnlineApplication {
                             match client.reconnect(payload.endpoint) {
                                 Ok(()) => {
                                     self.screen = BrowserOnlineScreen::Match;
-                                    self.reconnect_attempts = 0;
-                                    self.reconnect_due_ms = None;
+                                    self.gameplay_reconnect_attempts = 0;
+                                    self.gameplay_reconnect_due_ms = None;
                                     self.retry_plan = None;
                                     self.content_marked = true;
                                 }
@@ -542,35 +865,9 @@ impl BrowserOnlineApplication {
                                 ),
                             }
                         }
-                        Ok(payload) => {
-                            let setup = payload.match_config.local_setup.clone();
-                            let arena_index = setup.arena_index;
-                            match BrowserOnlineClient::new(
-                                payload.endpoint,
-                                payload.match_config,
-                                payload.peer_id,
-                                BrowserOnlineClientConfig::default(),
-                            ) {
-                                Ok(client) => {
-                                    world.insert_resource(setup);
-                                    world.resource_mut::<ActiveArena>().select(arena_index);
-                                    self.client = Some(client);
-                                    self.screen = BrowserOnlineScreen::Match;
-                                    self.scene_requested = true;
-                                    self.content_marked = false;
-                                    self.projection_active = true;
-                                    self.retry_plan = None;
-                                    self.reconnect_attempts = 0;
-                                    self.reconnect_due_ms = None;
-                                }
-                                Err(_) => self.fail(
-                                    "The predicted browser client could not start.".to_owned(),
-                                    RetryPlan::InitialConnection,
-                                ),
-                            }
-                        }
+                        Ok(payload) => self.install_fresh_client(world, payload, reconnect),
                         Err(error) if reconnect && error.reconnect_may_retry() => {
-                            self.schedule_reconnect_retry(now_ms, error.player_message());
+                            self.schedule_gameplay_reconnect(now_ms, error.player_message());
                         }
                         Err(error) => self.fail(
                             error.player_message(),
@@ -582,22 +879,179 @@ impl BrowserOnlineApplication {
                         ),
                     }
                 }
+                BrowserAsyncPayload::Control(event) => match event {
+                    LobbyControlEvent::Closed => {
+                        if self.control.is_some() {
+                            self.schedule_control_reconnect(
+                                now_ms,
+                                "Lobby connection interrupted; reconnecting…".to_owned(),
+                            );
+                        }
+                    }
+                    LobbyControlEvent::Message(message) => {
+                        self.control_reconnect_attempts = 0;
+                        self.process_control_message(world, message, now_ms);
+                    }
+                },
             }
         }
     }
 
-    fn schedule_reconnect_retry(&mut self, now_ms: u64, notice: String) {
-        if self.reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+    fn install_fresh_client(
+        &mut self,
+        world: &mut World,
+        payload: ConnectedPayload,
+        reconnect: bool,
+    ) {
+        let setup = payload.match_config.local_setup.clone();
+        let arena_index = setup.arena_index;
+        let client = match (reconnect, payload.countdown_start_tick) {
+            (true, Some(countdown_start_tick)) => BrowserOnlineClient::new_from_reconnect(
+                payload.endpoint,
+                payload.match_config,
+                payload.peer_id,
+                countdown_start_tick,
+                BrowserOnlineClientConfig::default(),
+            ),
+            (false, None) => BrowserOnlineClient::new(
+                payload.endpoint,
+                payload.match_config,
+                payload.peer_id,
+                BrowserOnlineClientConfig::default(),
+            ),
+            _ => {
+                self.fail(
+                    "The reconnect boundary changed while joining.".to_owned(),
+                    RetryPlan::Reconnect,
+                );
+                return;
+            }
+        };
+        match client {
+            Ok(client) => {
+                world.insert_resource(setup);
+                world.resource_mut::<ActiveArena>().select(arena_index);
+                self.client = Some(client);
+                self.screen = BrowserOnlineScreen::Match;
+                self.scene_requested = true;
+                self.content_marked = false;
+                self.projection_active = true;
+                self.retry_plan = None;
+                self.gameplay_reconnect_attempts = 0;
+                self.gameplay_reconnect_due_ms = None;
+                self.results_visible_since_ms = None;
+                self.acknowledged_match_id = None;
+            }
+            Err(_) => self.fail(
+                "The predicted browser client could not start.".to_owned(),
+                RetryPlan::InitialConnection,
+            ),
+        }
+    }
+
+    fn process_control_message(
+        &mut self,
+        world: &mut World,
+        message: LobbyServerMessage,
+        now_ms: u64,
+    ) {
+        match message {
+            LobbyServerMessage::Snapshot { snapshot } => {
+                self.apply_lobby_snapshot(world, *snapshot, now_ms);
+            }
+            LobbyServerMessage::StateChanged { revision } => {
+                if self
+                    .lobby
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.revision < revision)
+                {
+                    self.request_control_resync();
+                }
+            }
+            LobbyServerMessage::ChatMessage { message } => {
+                if let Some(lobby) = &mut self.lobby {
+                    match message.scope {
+                        ChatScope::Global => push_unique_chat(&mut lobby.global_chat, message),
+                        ChatScope::Room => {
+                            if let Some(room) = &mut lobby.active_room {
+                                push_unique_chat(&mut room.room_chat, message.clone());
+                            }
+                            if let Some(room) = &mut self.room {
+                                push_unique_chat(&mut room.room_chat, message);
+                            }
+                        }
+                    }
+                }
+            }
+            LobbyServerMessage::CommandAccepted { .. } => {
+                self.notice = None;
+            }
+            LobbyServerMessage::Pong { .. } => {}
+            LobbyServerMessage::Error { code, .. } => {
+                self.notice = Some(BrowserOperationError { status: None, code }.player_message());
+            }
+        }
+    }
+
+    fn apply_lobby_snapshot(
+        &mut self,
+        world: &mut World,
+        snapshot: LobbySnapshotResponse,
+        now_ms: u64,
+    ) {
+        let prior_room = self.room.as_ref().map(|room| room.room_code.clone());
+        self.room = snapshot.active_room.clone();
+        self.lobby = Some(snapshot);
+        self.save_session();
+
+        if let Some(room_state) = self.room.as_ref().map(|room| room.state) {
+            if room_state == RoomState::Open {
+                self.acknowledged_match_id = None;
+            }
+            if room_state == RoomState::Open
+                && self.client.is_some()
+                && self.results_visible_since_ms.is_some()
+            {
+                self.finish_match_projection(world);
+            }
+            if self.client.is_none() && self.pending.is_none() {
+                self.screen = match room_state {
+                    RoomState::Open => BrowserOnlineScreen::Room,
+                    RoomState::Starting | RoomState::Active => BrowserOnlineScreen::Connecting,
+                    RoomState::Results | RoomState::Returning | RoomState::Failed => {
+                        if self.results_visible_since_ms.is_none() {
+                            self.results_visible_since_ms = Some(now_ms);
+                        }
+                        BrowserOnlineScreen::Returning
+                    }
+                };
+            }
+        } else if self.client.is_none() {
+            self.screen = BrowserOnlineScreen::Lobby;
+            if prior_room.is_some() {
+                self.notice = Some("The room is no longer available.".to_owned());
+            }
+        }
+    }
+
+    fn request_control_resync(&self) {
+        if let Some(control) = &self.control {
+            let _ = control.send(&LobbyClientMessage::Resync);
+        }
+    }
+
+    fn schedule_gameplay_reconnect(&mut self, now_ms: u64, notice: String) {
+        if self.gameplay_reconnect_attempts >= MAX_GAMEPLAY_RECONNECT_ATTEMPTS {
             self.fail(
                 "The authority could not be reached after several attempts.".to_owned(),
                 RetryPlan::Reconnect,
             );
             return;
         }
-        let shift = u32::from(self.reconnect_attempts.min(4));
-        let delay = RECONNECT_BASE_DELAY_MS.saturating_mul(1_u64 << shift);
-        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
-        self.reconnect_due_ms = Some(now_ms.saturating_add(delay));
+        let shift = u32::from(self.gameplay_reconnect_attempts.min(4));
+        let delay = GAMEPLAY_RECONNECT_BASE_MS.saturating_mul(1_u64 << shift);
+        self.gameplay_reconnect_attempts = self.gameplay_reconnect_attempts.saturating_add(1);
+        self.gameplay_reconnect_due_ms = Some(now_ms.saturating_add(delay));
         self.screen = BrowserOnlineScreen::Match;
         self.notice = Some(notice);
     }
@@ -614,19 +1068,25 @@ impl BrowserOnlineApplication {
             self.content_marked = true;
         }
         let report = client.service(now_micros);
-        if scene_ready && let Err(_error) = client.project_latest(world) {
+        if scene_ready && let Err(error) = client.project_latest(world) {
+            bevy::log::warn!("browser online presentation projection failed: {error:?}");
             self.fail(
                 "The authoritative match could not be projected.".to_owned(),
                 RetryPlan::InitialConnection,
             );
             return;
         }
+        if client.status().phase == RemoteOnlineClientPhase::Results
+            && self.results_visible_since_ms.is_none()
+        {
+            self.results_visible_since_ms = Some(now_ms);
+        }
         match report.terminal {
             Some(RemoteOnlineTerminal::AuthorityDisconnected(disconnect)) => {
                 if disconnect.message.retry == RetryDisposition::ReconnectAllowed {
-                    if self.pending.is_none() && self.reconnect_due_ms.is_none() {
-                        self.reconnect_due_ms =
-                            Some(now_ms.saturating_add(RECONNECT_BASE_DELAY_MS));
+                    if self.pending.is_none() && self.gameplay_reconnect_due_ms.is_none() {
+                        self.gameplay_reconnect_due_ms =
+                            Some(now_ms.saturating_add(GAMEPLAY_RECONNECT_BASE_MS));
                     }
                 } else {
                     self.fail(
@@ -639,101 +1099,228 @@ impl BrowserOnlineApplication {
                 "The online match encountered a protocol error.".to_owned(),
                 RetryPlan::InitialConnection,
             ),
-            Some(RemoteOnlineTerminal::Stopped) => self.fail(
-                "The online match stopped.".to_owned(),
-                RetryPlan::InitialConnection,
-            ),
-            Some(RemoteOnlineTerminal::Completed(_)) | None => {}
+            Some(RemoteOnlineTerminal::Stopped) if self.results_visible_since_ms.is_none() => self
+                .fail(
+                    "The online match stopped unexpectedly.".to_owned(),
+                    RetryPlan::InitialConnection,
+                ),
+            Some(RemoteOnlineTerminal::Completed(_))
+            | Some(RemoteOnlineTerminal::Stopped)
+            | None => {}
         }
     }
 
     fn maybe_schedule_work(&mut self, now_ms: u64) {
+        if self.control.is_none()
+            && self.guest.is_some()
+            && self.service.is_some()
+            && self
+                .control_reconnect_due_ms
+                .is_none_or(|due| now_ms >= due)
+        {
+            self.open_control_socket(now_ms);
+        }
+        if self.control.is_some() && now_ms >= self.next_lobby_sync_ms {
+            if self
+                .control
+                .as_ref()
+                .is_some_and(BrowserLobbySocket::is_connecting)
+            {
+                self.next_lobby_sync_ms = now_ms.saturating_add(LOBBY_SYNC_INTERVAL_MS);
+            } else {
+                let nonce = self.next_nonce();
+                let failed = self.control.as_ref().is_some_and(|control| {
+                    control.send(&LobbyClientMessage::Ping { nonce }).is_err()
+                        || control.send(&LobbyClientMessage::Resync).is_err()
+                });
+                if failed {
+                    self.schedule_control_reconnect(
+                        now_ms,
+                        "Lobby connection interrupted; reconnecting…".to_owned(),
+                    );
+                } else {
+                    self.next_lobby_sync_ms = now_ms.saturating_add(LOBBY_SYNC_INTERVAL_MS);
+                }
+            }
+        }
         if self.pending.is_some() {
             return;
         }
-        if let Some(due) = self.reconnect_due_ms
+        if let Some(due) = self.gameplay_reconnect_due_ms
             && now_ms >= due
             && let Some(client) = &self.client
         {
             let last_confirmed = client.status().confirmed_tick.unwrap_or(SimTick::ZERO);
-            self.reconnect_due_ms = None;
-            self.start_connection(true, Some(last_confirmed));
+            let reconnect = client.status().countdown_start_tick.is_some();
+            self.gameplay_reconnect_due_ms = None;
+            self.start_connection(reconnect, reconnect.then_some(last_confirmed));
             return;
         }
         let Some(room) = &self.room else {
             return;
         };
         match room.state {
-            RoomState::Active if self.client.is_none() => self.start_connection(false, None),
-            RoomState::Open | RoomState::Starting if now_ms >= self.next_room_poll_ms => {
-                self.start_room_operation(PendingOperation::PollRoom);
+            RoomState::Active if self.client.is_none() => {
+                let reconnect = room
+                    .worker
+                    .is_some_and(|worker| worker.countdown_start_tick.is_some());
+                self.start_connection(reconnect, reconnect.then_some(SimTick::ZERO));
             }
-            RoomState::Finished | RoomState::Failed if self.client.is_none() => self.fail(
-                "The room ended before this browser connected.".to_owned(),
-                RetryPlan::InitialConnection,
-            ),
+            RoomState::Results
+                if self.results_visible_since_ms.is_some_and(|since| {
+                    now_ms.saturating_sub(since) >= RESULTS_PRESENTATION_MS
+                }) =>
+            {
+                if let Some(result) = &room.result {
+                    if self.acknowledged_match_id.as_deref() == Some(result.match_id.as_str()) {
+                        return;
+                    }
+                    self.start_rest_command(RestCommand::ResultAck {
+                        room_code: room.room_code.clone(),
+                        match_id: result.match_id.clone(),
+                    });
+                }
+            }
+            RoomState::Failed if self.client.is_none() => {
+                self.screen = BrowserOnlineScreen::Returning;
+                self.notice = Some("The match authority stopped; restoring the room…".to_owned());
+            }
             _ => {}
         }
     }
 
-    fn dispatch(&mut self, action: BrowserOnlineUiAction, now_ms: u64) {
+    fn dispatch_dom(&mut self, action: BrowserDomAction, now_ms: u64) {
         match action {
-            BrowserOnlineUiAction::CreateRoom
-                if self.screen == BrowserOnlineScreen::Menu && self.pending.is_none() =>
+            BrowserDomAction::SubmitNickname { nickname }
+                if self.screen == BrowserOnlineScreen::Identity =>
             {
-                self.start_room_operation(PendingOperation::CreateRoom);
+                self.start_guest(nickname);
             }
-            BrowserOnlineUiAction::JoinRoom
-                if self.screen == BrowserOnlineScreen::Menu
-                    && self.pending.is_none()
-                    && self.room_code_symbols.len() == 12 =>
+            BrowserDomAction::CreateRoom {
+                maximum_players,
+                visibility,
+            } if self.screen == BrowserOnlineScreen::Lobby => {
+                self.start_rest_command(RestCommand::Create {
+                    maximum_players,
+                    visibility,
+                });
+            }
+            BrowserDomAction::JoinRoom { room_code }
+                if self.screen == BrowserOnlineScreen::Lobby =>
             {
-                self.start_room_operation(PendingOperation::JoinRoom);
+                self.start_rest_command(RestCommand::Join { room_code });
             }
-            BrowserOnlineUiAction::FewerPlayers if self.screen == BrowserOnlineScreen::Menu => {
-                self.maximum_players = self.maximum_players.saturating_sub(1).max(2);
+            BrowserDomAction::UpdateSettings {
+                arena_index,
+                rule_index,
+            } => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                    && room.self_is_host()
+                {
+                    self.start_rest_command(RestCommand::Settings {
+                        room_code: room.room_code.clone(),
+                        expected_revision: room.revision,
+                        arena_index,
+                        rule_index,
+                    });
+                }
             }
-            BrowserOnlineUiAction::MorePlayers if self.screen == BrowserOnlineScreen::Menu => {
-                self.maximum_players = self.maximum_players.saturating_add(1).min(4);
+            BrowserDomAction::SelectCharacter { character } => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                {
+                    self.start_rest_command(RestCommand::Character {
+                        room_code: room.room_code.clone(),
+                        expected_revision: room.revision,
+                        character,
+                    });
+                }
             }
-            BrowserOnlineUiAction::PreviousArena if self.screen == BrowserOnlineScreen::Menu => {
-                self.arena_index = if self.arena_index == 0 {
-                    arena_definitions().len() - 1
-                } else {
-                    self.arena_index - 1
-                };
+            BrowserDomAction::SetReady { ready } => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                {
+                    self.start_rest_command(RestCommand::Ready {
+                        room_code: room.room_code.clone(),
+                        expected_revision: room.revision,
+                        ready,
+                    });
+                }
             }
-            BrowserOnlineUiAction::NextArena if self.screen == BrowserOnlineScreen::Menu => {
-                self.arena_index = (self.arena_index + 1) % arena_definitions().len();
+            BrowserDomAction::KickMember { peer_id } => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                    && room.self_is_host()
+                {
+                    self.start_rest_command(RestCommand::Kick {
+                        room_code: room.room_code.clone(),
+                        expected_revision: room.revision,
+                        peer_id,
+                    });
+                }
             }
-            BrowserOnlineUiAction::PreviousRules if self.screen == BrowserOnlineScreen::Menu => {
-                self.rule_index = if self.rule_index == 0 {
-                    RULE_PRESETS.len() - 1
-                } else {
-                    self.rule_index - 1
-                };
+            BrowserDomAction::StartMatch => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                    && room.self_is_host()
+                    && room.all_members_ready()
+                {
+                    self.start_rest_command(RestCommand::Start {
+                        room_code: room.room_code.clone(),
+                        expected_revision: room.revision,
+                    });
+                }
             }
-            BrowserOnlineUiAction::NextRules if self.screen == BrowserOnlineScreen::Menu => {
-                self.rule_index = (self.rule_index + 1) % RULE_PRESETS.len();
+            BrowserDomAction::LeaveRoom => {
+                if let Some(room) = &self.room
+                    && room.state == RoomState::Open
+                {
+                    self.start_rest_command(RestCommand::Leave {
+                        room_code: room.room_code.clone(),
+                    });
+                }
             }
-            BrowserOnlineUiAction::StartRoom
-                if self.screen == BrowserOnlineScreen::Lobby
-                    && self.pending.is_none()
-                    && self.room.as_ref().is_some_and(|room| {
-                        room.state == RoomState::Open
-                            && room.self_is_host()
-                            && room.member_count >= 2
-                    }) =>
-            {
-                self.start_room_operation(PendingOperation::StartRoom);
+            BrowserDomAction::SendChat { scope, text } => {
+                let nonce = self.next_nonce();
+                let failed = self.control.as_ref().is_none_or(|control| {
+                    control
+                        .send(&LobbyClientMessage::SendChat {
+                            client_nonce: nonce,
+                            scope,
+                            text,
+                        })
+                        .is_err()
+                });
+                if failed {
+                    self.schedule_control_reconnect(
+                        now_ms,
+                        "Chat connection interrupted; reconnecting…".to_owned(),
+                    );
+                }
             }
-            BrowserOnlineUiAction::Retry if self.screen == BrowserOnlineScreen::Error => {
+            BrowserDomAction::Report {
+                message_id,
+                guest_id,
+                category,
+            } => {
+                let nonce = self.next_nonce();
+                if let Some(control) = &self.control {
+                    let _ = control.send(&LobbyClientMessage::Report {
+                        client_nonce: nonce,
+                        message_id,
+                        guest_id,
+                        category,
+                    });
+                }
+            }
+            BrowserDomAction::Retry if self.screen == BrowserOnlineScreen::Error => {
                 self.fatal_error = None;
                 match self.retry_plan.take() {
                     Some(RetryPlan::Reconnect) if self.client.is_some() => {
                         self.screen = BrowserOnlineScreen::Match;
-                        self.reconnect_attempts = 0;
-                        self.reconnect_due_ms = Some(now_ms);
+                        self.gameplay_reconnect_attempts = 0;
+                        self.gameplay_reconnect_due_ms = Some(now_ms);
                     }
                     Some(RetryPlan::InitialConnection)
                         if self
@@ -746,9 +1333,7 @@ impl BrowserOnlineApplication {
                     _ => self.begin_bootstrap(),
                 }
             }
-            BrowserOnlineUiAction::Leave | BrowserOnlineUiAction::Back => {
-                self.request_exit = true;
-            }
+            BrowserDomAction::LeaveOnline => self.request_exit = true,
             _ => {}
         }
     }
@@ -757,7 +1342,7 @@ impl BrowserOnlineApplication {
         let Some(client) = &mut self.client else {
             return;
         };
-        if let Err(_error) = client.sample_local_inputs(inputs) {
+        if client.sample_local_inputs(inputs).is_err() {
             self.fail(
                 "Local browser input could not be submitted.".to_owned(),
                 RetryPlan::InitialConnection,
@@ -787,31 +1372,54 @@ impl BrowserOnlineApplication {
         let code = room.room_code.clone();
         spawn_local(async move {
             let _ =
-                post_no_content(&api_base, &format!("/v1/rooms/{code}/leave"), Some(&token)).await;
+                post_no_content(&api_base, &format!("/v2/rooms/{code}/leave"), Some(&token)).await;
         });
     }
 
-    fn reset_for_exit(&mut self) {
-        self.begin_best_effort_leave();
+    fn finish_match_projection(&mut self, world: &mut World) {
         if let Some(client) = &mut self.client {
             client.stop();
         }
         self.client = None;
+        if self.projection_active {
+            release_browser_projection_target(world);
+            self.projection_active = false;
+        }
+        self.scene_requested = false;
+        self.content_marked = false;
+        self.results_visible_since_ms = None;
+        self.gameplay_reconnect_due_ms = None;
+        self.gameplay_reconnect_attempts = 0;
+    }
+
+    fn reset_for_exit(&mut self, world: &mut World) {
+        self.begin_best_effort_leave();
+        self.finish_match_projection(world);
+        self.control = None;
         self.invalidate_operations();
         self.screen = BrowserOnlineScreen::Dormant;
         self.api_base = None;
         self.service = None;
         self.guest = None;
+        self.lobby = None;
         self.room = None;
-        self.room_code_symbols.clear();
         self.notice = None;
         self.fatal_error = None;
         self.retry_plan = None;
-        self.reconnect_due_ms = None;
-        self.reconnect_attempts = 0;
-        self.content_marked = false;
-        self.scene_requested = false;
+        self.acknowledged_match_id = None;
+        self.control_reconnect_due_ms = None;
+        self.control_reconnect_attempts = 0;
         self.request_exit = false;
+    }
+
+    fn save_session(&self) {
+        let (Some(api_base), Some(guest)) = (&self.api_base, &self.guest) else {
+            return;
+        };
+        save_stored_session(&StoredBrowserSession {
+            api_base: api_base.clone(),
+            guest: guest.clone(),
+        });
     }
 
     fn snapshot(&self, visible: bool) -> BrowserOnlineUiSnapshot {
@@ -837,7 +1445,6 @@ impl BrowserOnlineApplication {
             title,
             details,
             footer: self.snapshot_footer(client_status),
-            room_code_symbols: self.room_code_symbols.clone(),
             room: self.room.clone(),
             client_status,
             pending: self.pending.is_some(),
@@ -867,8 +1474,9 @@ impl BrowserOnlineApplication {
             };
             let detail = match status.phase {
                 RemoteOnlineClientPhase::Fighting => format!(
-                    "Authority tick {}  •  confirmed {}",
+                    "Client clock {}  •  predicted {}  •  authority confirmed {}",
                     status.network_tick.get(),
+                    status.predicted_tick.unwrap_or(SimTick::ZERO).get(),
                     status.confirmed_tick.unwrap_or(SimTick::ZERO).get()
                 ),
                 RemoteOnlineClientPhase::Countdown => {
@@ -878,7 +1486,7 @@ impl BrowserOnlineApplication {
                     "The authoritative result is confirmed.".to_owned()
                 }
                 RemoteOnlineClientPhase::Reconnecting => {
-                    "Restoring from an authority-retained snapshot…".to_owned()
+                    "Restoring an authority-retained snapshot…".to_owned()
                 }
                 _ => "Negotiating the authoritative match…".to_owned(),
             };
@@ -888,41 +1496,27 @@ impl BrowserOnlineApplication {
             BrowserOnlineScreen::Dormant => ("ONLINE".to_owned(), String::new()),
             BrowserOnlineScreen::Bootstrapping => (
                 "ONLINE".to_owned(),
-                "Creating a secure guest session…".to_owned(),
+                "Contacting the game server…".to_owned(),
             ),
-            BrowserOnlineScreen::Menu => (
-                "PRIVATE ONLINE".to_owned(),
-                format!(
-                    "Create: {} players  •  {}  •  {}\nJoin code: {}",
-                    self.maximum_players,
-                    arena_definitions()[self.arena_index].name,
-                    RULE_PRESETS[self.rule_index].label,
-                    formatted_room_code(&self.room_code_symbols)
-                ),
+            BrowserOnlineScreen::Identity => (
+                "CHOOSE A NICKNAME".to_owned(),
+                "Your guest identity lasts for this browser tab.".to_owned(),
             ),
-            BrowserOnlineScreen::Lobby => {
-                let Some(room) = &self.room else {
-                    return ("PRIVATE ROOM".to_owned(), "Loading room…".to_owned());
-                };
-                let connected = room
-                    .members
-                    .iter()
-                    .filter(|member| member.connected)
-                    .count();
-                (
-                    format!("ROOM {}", room.room_code),
-                    format!(
-                        "Players: {}/{}  •  connected: {}\n{}",
-                        room.member_count,
-                        room.maximum_players,
-                        connected,
-                        if room.self_is_host() {
-                            "Share the code, then start when everyone has joined."
-                        } else {
-                            "Waiting for the host to start."
-                        }
-                    ),
-                )
+            BrowserOnlineScreen::Lobby => (
+                "ONLINE LOBBY".to_owned(),
+                "Chat, join a public room, enter a private code, or create a room.".to_owned(),
+            ),
+            BrowserOnlineScreen::Room => {
+                let details = self.room.as_ref().map_or_else(
+                    || "Loading the room…".to_owned(),
+                    |room| {
+                        format!(
+                            "Room {}  •  {}/{} players",
+                            room.room_code, room.member_count, room.maximum_players
+                        )
+                    },
+                );
+                ("MATCH ROOM".to_owned(), details)
             }
             BrowserOnlineScreen::Connecting => (
                 "CONNECTING".to_owned(),
@@ -931,6 +1525,10 @@ impl BrowserOnlineApplication {
             BrowserOnlineScreen::Match => (
                 "ONLINE MATCH".to_owned(),
                 "Waiting for the predicted client…".to_owned(),
+            ),
+            BrowserOnlineScreen::Returning => (
+                "RETURNING TO ROOM".to_owned(),
+                "The authority is closing this match safely…".to_owned(),
             ),
             BrowserOnlineScreen::Error => (
                 "ONLINE ERROR".to_owned(),
@@ -942,15 +1540,177 @@ impl BrowserOnlineApplication {
     fn snapshot_footer(&self, status: Option<RemoteOnlineClientStatus>) -> String {
         if let Some(status) = status {
             return format!(
-                "generation {}  •  predicted {}  •  Esc leaves online",
+                "generation {}  •  predicted {}",
                 status.generation,
                 status.predicted_tick.unwrap_or(SimTick::ZERO).get()
             );
         }
         self.guest.as_ref().map_or_else(
-            || "Guest identity is held in memory only.".to_owned(),
-            |guest| format!("Guest {}  •  Esc returns to menu", guest.guest_id),
+            || "No guest identity is active.".to_owned(),
+            |guest| format!("{}  •  session restored in this tab", guest.display_name),
         )
+    }
+
+    fn render_dom(&mut self, visible: bool, now_ms: u64) {
+        let state = BrowserDomState::from_application(self, visible, now_ms);
+        let Ok(json) = serde_json::to_string(&state) else {
+            return;
+        };
+        if json == self.last_dom_json {
+            return;
+        }
+        if call_dom_bridge("render", &json).is_ok() {
+            self.last_dom_json = json;
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BrowserDomGuest<'a> {
+    guest_id: &'a str,
+    nickname: &'a str,
+    display_name: &'a str,
+}
+
+#[derive(Serialize)]
+struct BrowserDomClient {
+    phase: &'static str,
+    generation: u64,
+    network_tick: u64,
+    predicted_tick: Option<u64>,
+    confirmed_tick: Option<u64>,
+    countdown_start_tick: Option<u64>,
+    hard_resync_requests: u64,
+    hard_resync_snapshots_applied: u64,
+    reconnect_replication_deferred: u64,
+    committed_relays: u64,
+    state_hash_messages: u64,
+    state_delta_messages: u64,
+    stale_state_messages: u64,
+    matched_authority_states: u64,
+    rollback_corrections: u64,
+    clock_replies_accepted: u64,
+    clock_replies_discarded_rtt: u64,
+    received_datagrams: u64,
+    receive_budget_exhaustions: u64,
+    inbound_queue_overflows: u64,
+    last_hard_resync_reason: Option<String>,
+    failure_key: Option<&'static str>,
+    failure_detail_code: Option<u16>,
+}
+
+impl BrowserDomClient {
+    fn from_status(status: RemoteOnlineClientStatus) -> Self {
+        Self {
+            phase: match status.phase {
+                RemoteOnlineClientPhase::Connecting => "connecting",
+                RemoteOnlineClientPhase::Loading => "loading",
+                RemoteOnlineClientPhase::Synchronizing => "synchronizing",
+                RemoteOnlineClientPhase::Ready => "ready",
+                RemoteOnlineClientPhase::Countdown => "countdown",
+                RemoteOnlineClientPhase::Fighting => "fighting",
+                RemoteOnlineClientPhase::ConfirmingResult => "confirming_result",
+                RemoteOnlineClientPhase::Results => "results",
+                RemoteOnlineClientPhase::Reconnecting => "reconnecting",
+                RemoteOnlineClientPhase::Stopped => "stopped",
+                RemoteOnlineClientPhase::Failed => "failed",
+            },
+            generation: status.generation,
+            network_tick: status.network_tick.get(),
+            predicted_tick: status.predicted_tick.map(SimTick::get),
+            confirmed_tick: status.confirmed_tick.map(SimTick::get),
+            countdown_start_tick: status.countdown_start_tick.map(SimTick::get),
+            hard_resync_requests: status.protocol.hard_resync_requests,
+            hard_resync_snapshots_applied: status.protocol.hard_resync_snapshots_applied,
+            reconnect_replication_deferred: status.protocol.reconnect_replication_deferred,
+            committed_relays: status.protocol.committed_relays,
+            state_hash_messages: status.protocol.state_hash_messages,
+            state_delta_messages: status.protocol.state_delta_messages,
+            stale_state_messages: status.protocol.stale_state_messages,
+            matched_authority_states: status.protocol.matched_authority_states,
+            rollback_corrections: status.protocol.rollback_corrections,
+            clock_replies_accepted: status.protocol.clock_replies_accepted,
+            clock_replies_discarded_rtt: status.protocol.clock_replies_discarded_rtt,
+            received_datagrams: status.runtime.received_datagrams,
+            receive_budget_exhaustions: status.runtime.receive_budget_exhaustions,
+            inbound_queue_overflows: status.runtime.inbound_queue_overflows,
+            last_hard_resync_reason: status
+                .last_hard_resync_reason
+                .map(|reason| format!("{reason:?}")),
+            failure_key: status.failure.map(|failure| failure.message_key()),
+            failure_detail_code: status.failure.map(|failure| failure.detail_code),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BrowserDomState<'a> {
+    visible: bool,
+    screen: &'static str,
+    pending: bool,
+    notice: Option<&'a str>,
+    error: Option<&'a str>,
+    online_guests: u32,
+    guest: Option<BrowserDomGuest<'a>>,
+    client: Option<BrowserDomClient>,
+    public_rooms: &'a [crate::web_api::PublicRoomSummary],
+    global_chat: &'a [crate::web_api::ChatMessageResponse],
+    room: Option<&'a RoomResponse>,
+    arena_names: Vec<&'static str>,
+    rule_names: Vec<&'static str>,
+    characters: Vec<&'static str>,
+    result_return_ms: Option<u64>,
+}
+
+impl<'a> BrowserDomState<'a> {
+    fn from_application(
+        application: &'a BrowserOnlineApplication,
+        visible: bool,
+        now_ms: u64,
+    ) -> Self {
+        let lobby = application.lobby.as_ref();
+        let empty_rooms = &[];
+        let empty_chat = &[];
+        Self {
+            visible,
+            screen: match application.screen {
+                BrowserOnlineScreen::Dormant => "dormant",
+                BrowserOnlineScreen::Bootstrapping => "bootstrapping",
+                BrowserOnlineScreen::Identity => "identity",
+                BrowserOnlineScreen::Lobby => "lobby",
+                BrowserOnlineScreen::Room => "room",
+                BrowserOnlineScreen::Connecting => "connecting",
+                BrowserOnlineScreen::Match => "match",
+                BrowserOnlineScreen::Returning => "returning",
+                BrowserOnlineScreen::Error => "error",
+            },
+            pending: application.pending.is_some(),
+            notice: application.notice.as_deref(),
+            error: application.fatal_error.as_deref(),
+            online_guests: lobby.map_or(0, |lobby| lobby.online_guests),
+            guest: application.guest.as_ref().map(|guest| BrowserDomGuest {
+                guest_id: &guest.guest_id,
+                nickname: &guest.nickname,
+                display_name: &guest.display_name,
+            }),
+            client: application
+                .client
+                .as_ref()
+                .map(BrowserOnlineClient::status)
+                .map(BrowserDomClient::from_status),
+            public_rooms: lobby.map_or(empty_rooms, |lobby| lobby.public_rooms.as_slice()),
+            global_chat: lobby.map_or(empty_chat, |lobby| lobby.global_chat.as_slice()),
+            room: application.room.as_ref(),
+            arena_names: arena_definitions().iter().map(|arena| arena.name).collect(),
+            rule_names: RULE_PRESETS.iter().map(|rules| rules.label).collect(),
+            characters: WebCharacter::ALL
+                .iter()
+                .map(|character| character.label())
+                .collect(),
+            result_return_ms: application
+                .results_visible_since_ms
+                .map(|since| RESULTS_PRESENTATION_MS.saturating_sub(now_ms.saturating_sub(since))),
+        }
     }
 }
 
@@ -970,11 +1730,7 @@ pub(crate) fn drive_browser_online_application(world: &mut World) {
     if application.request_exit
         || (!online_visible && application.screen != BrowserOnlineScreen::Dormant)
     {
-        application.reset_for_exit();
-        if application.projection_active {
-            release_browser_projection_target(world);
-            application.projection_active = false;
-        }
+        application.reset_for_exit(world);
         if let Some(mut user_mode) = world.get_resource_mut::<UserModeState>() {
             user_mode.leave_online();
         }
@@ -988,6 +1744,7 @@ pub(crate) fn drive_browser_online_application(world: &mut World) {
         application.maybe_schedule_work(now_ms);
     }
 
+    application.render_dom(online_visible, now_ms);
     let snapshot = application.snapshot(online_visible);
     world.insert_non_send_resource(application);
     world.insert_resource(snapshot);
@@ -1072,7 +1829,7 @@ fn browser_presentation_policy(
     }
     let Some(status) = snapshot.client_status else {
         return MatchPresentationPolicy {
-            phase: if snapshot.screen == BrowserOnlineScreen::Lobby {
+            phase: if snapshot.screen == BrowserOnlineScreen::Room {
                 PresentationPhase::Lobby
             } else if snapshot.screen == BrowserOnlineScreen::Error {
                 PresentationPhase::Error
@@ -1155,6 +1912,139 @@ fn browser_presentation_policy(
     }
 }
 
+async fn execute_rest_command(
+    api_base: &str,
+    session_token: &str,
+    command: RestCommand,
+) -> Result<RestPayload, BrowserOperationError> {
+    let room = match command {
+        RestCommand::Create {
+            maximum_players,
+            visibility,
+        } => {
+            post_json(
+                api_base,
+                "/v2/rooms",
+                Some(session_token),
+                &CreateRoomRequest {
+                    maximum_players,
+                    visibility,
+                },
+            )
+            .await?
+        }
+        RestCommand::Join { room_code } => {
+            post_json(
+                api_base,
+                "/v2/rooms/join",
+                Some(session_token),
+                &JoinRoomRequest { room_code },
+            )
+            .await?
+        }
+        RestCommand::Settings {
+            room_code,
+            expected_revision,
+            arena_index,
+            rule_index,
+        } => {
+            patch_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/settings"),
+                Some(session_token),
+                &UpdateRoomSettingsRequest {
+                    expected_revision,
+                    arena_index,
+                    rule_index,
+                },
+            )
+            .await?
+        }
+        RestCommand::Character {
+            room_code,
+            expected_revision,
+            character,
+        } => {
+            patch_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/members/self/character"),
+                Some(session_token),
+                &SelectCharacterRequest {
+                    expected_revision,
+                    character,
+                },
+            )
+            .await?
+        }
+        RestCommand::Ready {
+            room_code,
+            expected_revision,
+            ready,
+        } => {
+            patch_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/members/self/ready"),
+                Some(session_token),
+                &SetReadyRequest {
+                    expected_revision,
+                    ready,
+                },
+            )
+            .await?
+        }
+        RestCommand::Kick {
+            room_code,
+            expected_revision,
+            peer_id,
+        } => {
+            post_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/members/kick"),
+                Some(session_token),
+                &KickMemberRequest {
+                    expected_revision,
+                    peer_id,
+                },
+            )
+            .await?
+        }
+        RestCommand::Start {
+            room_code,
+            expected_revision,
+        } => {
+            post_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/start"),
+                Some(session_token),
+                &StartRoomRequest { expected_revision },
+            )
+            .await?
+        }
+        RestCommand::ResultAck {
+            room_code,
+            match_id,
+        } => {
+            post_json(
+                api_base,
+                &format!("/v2/rooms/{room_code}/results/ack"),
+                Some(session_token),
+                &ResultAckRequest { match_id },
+            )
+            .await?
+        }
+        RestCommand::Leave { room_code } => {
+            post_no_content(
+                api_base,
+                &format!("/v2/rooms/{room_code}/leave"),
+                Some(session_token),
+            )
+            .await?;
+            return Ok(RestPayload::Left);
+        }
+    };
+    Ok(RestPayload::Room(room))
+}
+
 async fn issue_ticket_and_connect(
     api_base: &str,
     service: &ServiceConfigResponse,
@@ -1174,13 +2064,19 @@ async fn issue_ticket_and_connect(
     };
     let response: TicketResponse = post_json(
         api_base,
-        &format!("/v1/rooms/{room_code}/tickets"),
+        &format!("/v2/rooms/{room_code}/tickets"),
         Some(session_token),
         &request,
     )
     .await?;
     if response.manifest != expected_manifest {
         return Err(BrowserOperationError::local("manifest_identity_changed"));
+    }
+    let countdown_start_tick = response.countdown_start_tick.map(SimTick);
+    if reconnect != countdown_start_tick.is_some() {
+        return Err(BrowserOperationError::local(
+            "reconnect_boundary_unavailable",
+        ));
     }
     let match_config = headless_config_from_manifest(response.manifest)
         .map_err(|_| BrowserOperationError::local("incompatible_release"))?;
@@ -1194,7 +2090,7 @@ async fn issue_ticket_and_connect(
     let endpoint = connect_browser_admitted_datagram_endpoint(
         preference,
         service.webtransport_url.as_deref().unwrap_or(""),
-        &service.websocket_url,
+        &service.gameplay_websocket_url,
         &response.ticket,
         WebEndpointConfig::default(),
     )
@@ -1204,17 +2100,44 @@ async fn issue_ticket_and_connect(
         endpoint,
         match_config,
         peer_id,
+        countdown_start_tick,
     })
 }
 
-fn spawn_bootstrap(generation: u64, api_base: String, mailbox: AsyncMailbox) {
+fn spawn_bootstrap(
+    generation: u64,
+    api_base: String,
+    stored: Option<StoredBrowserSession>,
+    mailbox: AsyncMailbox,
+) {
     spawn_local(async move {
         let result = async {
-            let service: ServiceConfigResponse = get_json(&api_base, "/v1/config", None).await?;
+            let service: ServiceConfigResponse = get_json(&api_base, "/v2/config", None).await?;
             validate_service_config(&service)?;
-            let guest: GuestSessionResponse =
-                post_no_body_json(&api_base, "/v1/guests", None).await?;
-            Ok((service, guest))
+            let mut discard_stored_session = false;
+            let restored = if let Some(stored) = stored {
+                match get_json::<LobbySnapshotResponse>(
+                    &api_base,
+                    "/v2/lobby",
+                    Some(&stored.guest.session_token),
+                )
+                .await
+                {
+                    Ok(snapshot) => Some((stored.guest, snapshot)),
+                    Err(error) if error.invalidates_guest() => {
+                        discard_stored_session = true;
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            Ok(BootstrapPayload {
+                service,
+                restored,
+                discard_stored_session,
+            })
         }
         .await;
         push_async_event(
@@ -1229,7 +2152,8 @@ fn spawn_bootstrap(generation: u64, api_base: String, mailbox: AsyncMailbox) {
 
 fn validate_service_config(service: &ServiceConfigResponse) -> Result<(), BrowserOperationError> {
     if service.api_version != WEB_API_VERSION
-        || service.websocket_subprotocol != AFC_WEBSOCKET_SUBPROTOCOL
+        || service.lobby_websocket_subprotocol != AFC_LOBBY_WEBSOCKET_SUBPROTOCOL
+        || service.gameplay_websocket_subprotocol != AFC_WEBSOCKET_SUBPROTOCOL
         || service.release != current_release_identity().version_line()
     {
         return Err(BrowserOperationError::local("incompatible_release"));
@@ -1237,19 +2161,18 @@ fn validate_service_config(service: &ServiceConfigResponse) -> Result<(), Browse
     let page_https = web_sys::window()
         .and_then(|window| window.location().protocol().ok())
         .is_some_and(|protocol| protocol == "https:");
-    let websocket_valid = valid_transport_url(
-        &service.websocket_url,
-        if page_https {
-            &["wss:"][..]
-        } else {
-            &["ws:", "wss:"][..]
-        },
-    );
+    let websocket_protocols = if page_https {
+        &["wss:"][..]
+    } else {
+        &["ws:", "wss:"][..]
+    };
+    let lobby_valid = valid_transport_url(&service.lobby_websocket_url, websocket_protocols);
+    let gameplay_valid = valid_transport_url(&service.gameplay_websocket_url, websocket_protocols);
     let webtransport_valid = service
         .webtransport_url
         .as_deref()
         .is_none_or(|url| valid_transport_url(url, &["https:"]));
-    if !websocket_valid || !webtransport_valid {
+    if !lobby_valid || !gameplay_valid || !webtransport_valid {
         return Err(BrowserOperationError::local("invalid_transport_url"));
     }
     Ok(())
@@ -1314,6 +2237,32 @@ fn resolve_api_base() -> Result<String, BrowserOperationError> {
     Ok(parsed.origin())
 }
 
+fn load_stored_session(api_base: &str) -> Option<StoredBrowserSession> {
+    let storage = web_sys::window()?.session_storage().ok().flatten()?;
+    let encoded = storage.get_item(SESSION_STORAGE_KEY).ok().flatten()?;
+    let session: StoredBrowserSession = serde_json::from_str(&encoded).ok()?;
+    (session.api_base == api_base).then_some(session)
+}
+
+fn save_stored_session(session: &StoredBrowserSession) {
+    let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    else {
+        return;
+    };
+    if let Ok(encoded) = serde_json::to_string(session) {
+        let _ = storage.set_item(SESSION_STORAGE_KEY, &encoded);
+    }
+}
+
+fn clear_stored_session() {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.remove_item(SESSION_STORAGE_KEY);
+    }
+}
+
 fn push_async_event(mailbox: &AsyncMailbox, event: BrowserAsyncEvent) {
     let mut mailbox = mailbox.borrow_mut();
     if mailbox
@@ -1329,6 +2278,48 @@ fn push_async_event(mailbox: &AsyncMailbox, event: BrowserAsyncEvent) {
     mailbox.push_back(event);
 }
 
+fn push_unique_chat(
+    messages: &mut Vec<crate::web_api::ChatMessageResponse>,
+    message: crate::web_api::ChatMessageResponse,
+) {
+    if messages
+        .iter()
+        .any(|existing| existing.message_id == message.message_id)
+    {
+        return;
+    }
+    messages.push(message);
+    if messages.len() > 100 {
+        messages.remove(0);
+    }
+}
+
+fn call_dom_bridge(method: &str, json: &str) -> Result<JsValue, BrowserOperationError> {
+    let window = web_sys::window().ok_or_else(|| BrowserOperationError::local("window_missing"))?;
+    let bridge = Reflect::get(window.as_ref(), &JsValue::from_str(DOM_BRIDGE_KEY))
+        .map_err(|_| BrowserOperationError::local("dom_bridge_missing"))?;
+    let function = Reflect::get(&bridge, &JsValue::from_str(method))
+        .map_err(|_| BrowserOperationError::local("dom_bridge_missing"))?
+        .dyn_into::<Function>()
+        .map_err(|_| BrowserOperationError::local("dom_bridge_missing"))?;
+    function
+        .call1(&bridge, &JsValue::from_str(json))
+        .map_err(|_| BrowserOperationError::local("dom_bridge_failed"))
+}
+
+fn drain_dom_actions() -> Vec<BrowserDomAction> {
+    let Ok(value) = call_dom_bridge("drainActions", "") else {
+        return Vec::new();
+    };
+    let Ok(encoded) = JSON::stringify(&value) else {
+        return Vec::new();
+    };
+    let Some(encoded) = encoded.as_string() else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<BrowserDomAction>>(&encoded).unwrap_or_default()
+}
+
 async fn get_json<ResponseBody: DeserializeOwned>(
     base: &str,
     path: &str,
@@ -1337,23 +2328,26 @@ async fn get_json<ResponseBody: DeserializeOwned>(
     request_json("GET", base, path, bearer, None).await
 }
 
-async fn post_no_body_json<ResponseBody: DeserializeOwned>(
-    base: &str,
-    path: &str,
-    bearer: Option<&str>,
-) -> Result<ResponseBody, BrowserOperationError> {
-    request_json("POST", base, path, bearer, None).await
-}
-
-async fn post_empty_json<ResponseBody: DeserializeOwned>(
-    base: &str,
-    path: &str,
-    bearer: Option<&str>,
-) -> Result<ResponseBody, BrowserOperationError> {
-    request_json("POST", base, path, bearer, Some("{}")).await
-}
-
 async fn post_json<RequestBody: Serialize, ResponseBody: DeserializeOwned>(
+    base: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &RequestBody,
+) -> Result<ResponseBody, BrowserOperationError> {
+    request_body_json("POST", base, path, bearer, body).await
+}
+
+async fn patch_json<RequestBody: Serialize, ResponseBody: DeserializeOwned>(
+    base: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &RequestBody,
+) -> Result<ResponseBody, BrowserOperationError> {
+    request_body_json("PATCH", base, path, bearer, body).await
+}
+
+async fn request_body_json<RequestBody: Serialize, ResponseBody: DeserializeOwned>(
+    method: &str,
     base: &str,
     path: &str,
     bearer: Option<&str>,
@@ -1361,7 +2355,7 @@ async fn post_json<RequestBody: Serialize, ResponseBody: DeserializeOwned>(
 ) -> Result<ResponseBody, BrowserOperationError> {
     let body = serde_json::to_string(body)
         .map_err(|_| BrowserOperationError::local("request_encoding"))?;
-    request_json("POST", base, path, bearer, Some(&body)).await
+    request_json(method, base, path, bearer, Some(&body)).await
 }
 
 async fn post_no_content(
@@ -1502,8 +2496,7 @@ async fn read_response_text_bounded(response: &Response) -> Result<String, Brows
         let _ = JsFuture::from(reader.cancel()).await;
     }
     reader.release_lock();
-    let bytes = result?;
-    String::from_utf8(bytes).map_err(|_| BrowserOperationError::local("response_encoding"))
+    String::from_utf8(result?).map_err(|_| BrowserOperationError::local("response_encoding"))
 }
 
 fn http_status_error(status: u16, body: &str) -> BrowserOperationError {
@@ -1514,26 +2507,6 @@ fn http_status_error(status: u16, body: &str) -> BrowserOperationError {
         status: Some(status),
         code,
     }
-}
-
-fn formatted_room_code(symbols: &str) -> String {
-    if symbols.is_empty() {
-        return "____-____-____".to_owned();
-    }
-    let mut output = String::with_capacity(14);
-    for (index, symbol) in symbols.chars().enumerate() {
-        if index != 0 && index % 4 == 0 {
-            output.push('-');
-        }
-        output.push(symbol);
-    }
-    for index in symbols.len()..12 {
-        if index != 0 && index % 4 == 0 {
-            output.push('-');
-        }
-        output.push('_');
-    }
-    output
 }
 
 #[derive(Component)]
@@ -1551,35 +2524,6 @@ pub(crate) struct BrowserOnlineUiDetails;
 #[derive(Component)]
 pub(crate) struct BrowserOnlineUiFooter;
 
-fn browser_online_button(label: &'static str, action: BrowserOnlineUiAction) -> impl Bundle {
-    (
-        Button,
-        action,
-        Node {
-            display: Display::None,
-            min_width: Val::Px(152.0),
-            height: Val::Px(44.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            border: UiRect::all(Val::Px(2.0)),
-            padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.055, 0.055, 0.07, 0.97)),
-        BorderColor::all(Color::srgb(0.38, 0.42, 0.48)),
-        children![(
-            Text::new(label),
-            TextFont {
-                font_size: 17.0,
-                ..default()
-            },
-            TextColor(Color::srgb(0.93, 0.88, 0.77)),
-            TextLayout::new_with_justify(Justify::Center),
-            Pickable::IGNORE,
-        )],
-    )
-}
-
 pub(crate) fn setup_browser_online_ui(
     mut commands: Commands,
     ui_cameras: Query<Entity, With<UiCamera>>,
@@ -1593,12 +2537,11 @@ pub(crate) fn setup_browser_online_ui(
             top: Val::Px(0.0),
             width: Val::Percent(100.0),
             height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            padding: UiRect::all(Val::Px(28.0)),
+            justify_content: JustifyContent::FlexEnd,
+            align_items: AlignItems::FlexStart,
+            padding: UiRect::all(Val::Px(18.0)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.006, 0.008, 0.014, 0.96)),
         GlobalZIndex(900),
         Pickable::IGNORE,
     ));
@@ -1606,18 +2549,16 @@ pub(crate) fn setup_browser_online_ui(
         root.spawn((
             BrowserOnlineUiPanel,
             Node {
-                width: Val::Percent(86.0),
-                max_width: Val::Px(920.0),
-                min_height: Val::Px(300.0),
+                width: Val::Percent(58.0),
+                max_width: Val::Px(720.0),
                 flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(14.0),
-                padding: UiRect::all(Val::Px(22.0)),
+                row_gap: Val::Px(4.0),
+                padding: UiRect::all(Val::Px(10.0)),
                 border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.028, 0.04, 0.94)),
+            BackgroundColor(Color::srgba(0.025, 0.028, 0.04, 0.78)),
             BorderColor::all(Color::srgb(0.32, 0.38, 0.46)),
         ))
         .with_children(|panel| {
@@ -1625,69 +2566,31 @@ pub(crate) fn setup_browser_online_ui(
                 BrowserOnlineUiTitle,
                 Text::new("ONLINE"),
                 TextFont {
-                    font_size: 38.0,
+                    font_size: 24.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.93, 0.79, 0.52)),
-                TextLayout::new_with_justify(Justify::Center),
                 Pickable::IGNORE,
             ));
             panel.spawn((
                 BrowserOnlineUiDetails,
                 Text::new(""),
                 TextFont {
-                    font_size: 19.0,
+                    font_size: 15.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.82, 0.84, 0.87)),
                 TextLayout::new_with_justify(Justify::Center),
-                Node {
-                    min_height: Val::Px(76.0),
-                    ..default()
-                },
                 Pickable::IGNORE,
             ));
-            panel
-                .spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        flex_direction: FlexDirection::Row,
-                        flex_wrap: FlexWrap::Wrap,
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(8.0),
-                        row_gap: Val::Px(8.0),
-                        ..default()
-                    },
-                    Pickable::IGNORE,
-                ))
-                .with_children(|buttons| {
-                    for (label, action) in [
-                        ("CREATE PRIVATE", BrowserOnlineUiAction::CreateRoom),
-                        ("JOIN CODE", BrowserOnlineUiAction::JoinRoom),
-                        ("PLAYERS −", BrowserOnlineUiAction::FewerPlayers),
-                        ("PLAYERS +", BrowserOnlineUiAction::MorePlayers),
-                        ("ARENA −", BrowserOnlineUiAction::PreviousArena),
-                        ("ARENA +", BrowserOnlineUiAction::NextArena),
-                        ("RULES −", BrowserOnlineUiAction::PreviousRules),
-                        ("RULES +", BrowserOnlineUiAction::NextRules),
-                        ("START MATCH", BrowserOnlineUiAction::StartRoom),
-                        ("LEAVE ONLINE", BrowserOnlineUiAction::Leave),
-                        ("BACK", BrowserOnlineUiAction::Back),
-                        ("RETRY", BrowserOnlineUiAction::Retry),
-                    ] {
-                        buttons.spawn(browser_online_button(label, action));
-                    }
-                });
             panel.spawn((
                 BrowserOnlineUiFooter,
                 Text::new(""),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 12.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.62, 0.66, 0.72)),
-                TextLayout::new_with_justify(Justify::Center),
                 Pickable::IGNORE,
             ));
         });
@@ -1700,91 +2603,36 @@ pub(crate) fn setup_browser_online_ui(
 pub(crate) fn handle_browser_online_ui_input(
     time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
     user_mode: Res<UserModeState>,
-    snapshot: Res<BrowserOnlineUiSnapshot>,
-    interactions: Query<(&Interaction, &BrowserOnlineUiAction), Changed<Interaction>>,
     mut application: NonSendMut<BrowserOnlineApplication>,
 ) {
     if !user_mode.online_active() {
         return;
     }
-    if snapshot.screen == BrowserOnlineScreen::Menu && !snapshot.pending {
-        if keys.just_pressed(KeyCode::Backspace) {
-            application.room_code_symbols.pop();
-            application.notice = None;
-        } else if application.room_code_symbols.len() < 12
-            && let Some(symbol) = pressed_room_code_symbol(&keys)
-        {
-            application.room_code_symbols.push(symbol);
-            application.notice = None;
-        }
-    }
-    let pointer_action = interactions.iter().find_map(|(interaction, action)| {
-        (*interaction == Interaction::Pressed).then_some(*action)
-    });
-    let gamepad_accept = gamepads
-        .iter()
-        .any(|gamepad| gamepad.just_pressed(GamepadButton::South));
-    let gamepad_back = gamepads
-        .iter()
-        .any(|gamepad| gamepad.just_pressed(GamepadButton::East));
-    let action = pointer_action.or_else(|| {
-        if keys.just_pressed(KeyCode::Escape) || gamepad_back {
-            Some(
-                if matches!(
-                    snapshot.screen,
-                    BrowserOnlineScreen::Lobby
-                        | BrowserOnlineScreen::Connecting
-                        | BrowserOnlineScreen::Match
-                ) {
-                    BrowserOnlineUiAction::Leave
-                } else {
-                    BrowserOnlineUiAction::Back
-                },
-            )
-        } else if keys.just_pressed(KeyCode::Enter) || gamepad_accept {
-            match snapshot.screen {
-                BrowserOnlineScreen::Menu if snapshot.room_code_symbols.len() == 12 => {
-                    Some(BrowserOnlineUiAction::JoinRoom)
-                }
-                BrowserOnlineScreen::Menu => Some(BrowserOnlineUiAction::CreateRoom),
-                BrowserOnlineScreen::Lobby
-                    if snapshot.room.as_ref().is_some_and(|room| {
-                        room.state == RoomState::Open
-                            && room.self_is_host()
-                            && room.member_count >= 2
-                    }) =>
-                {
-                    Some(BrowserOnlineUiAction::StartRoom)
-                }
-                BrowserOnlineScreen::Error if snapshot.retry_available => {
-                    Some(BrowserOnlineUiAction::Retry)
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
-    });
-    if let Some(action) = action
-        && browser_action_available(&snapshot, action)
+    let now_ms = time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    for action in drain_dom_actions()
+        .into_iter()
+        .take(MAX_DOM_ACTIONS_PER_FRAME)
     {
-        let now_ms = time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        application.dispatch(action, now_ms);
+        application.dispatch_dom(action, now_ms);
     }
+    if keys.just_pressed(KeyCode::Escape) && !dom_text_entry_focused() {
+        application.dispatch_dom(BrowserDomAction::LeaveOnline, now_ms);
+    }
+}
+
+fn dom_text_entry_focused() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.active_element())
+        .is_some_and(|element| {
+            matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+        })
 }
 
 pub(crate) fn update_browser_online_ui(
     snapshot: Res<BrowserOnlineUiSnapshot>,
-    mut roots: Query<
-        (&mut Node, &mut BackgroundColor),
-        (With<BrowserOnlineUiRoot>, Without<BrowserOnlineUiPanel>),
-    >,
-    mut panels: Query<
-        (&mut Node, &mut BackgroundColor),
-        (With<BrowserOnlineUiPanel>, Without<BrowserOnlineUiRoot>),
-    >,
+    mut roots: Query<&mut Node, With<BrowserOnlineUiRoot>>,
     mut titles: Query<
         &mut Text,
         (
@@ -1809,62 +2657,13 @@ pub(crate) fn update_browser_online_ui(
             Without<BrowserOnlineUiDetails>,
         ),
     >,
-    mut buttons: Query<
-        (&BrowserOnlineUiAction, &mut Node),
-        (
-            With<Button>,
-            Without<BrowserOnlineUiRoot>,
-            Without<BrowserOnlineUiPanel>,
-        ),
-    >,
 ) {
-    for (mut node, mut background) in &mut roots {
-        node.display = if snapshot.visible {
+    for mut node in &mut roots {
+        node.display = if snapshot.visible && snapshot.compact {
             Display::Flex
         } else {
             Display::None
         };
-        node.align_items = if snapshot.compact {
-            AlignItems::FlexStart
-        } else {
-            AlignItems::Center
-        };
-        node.justify_content = if snapshot.compact {
-            JustifyContent::FlexEnd
-        } else {
-            JustifyContent::Center
-        };
-        *background = BackgroundColor(Color::srgba(
-            0.006,
-            0.008,
-            0.014,
-            if snapshot.compact { 0.08 } else { 0.96 },
-        ));
-    }
-    for (mut node, mut background) in &mut panels {
-        node.width = if snapshot.compact {
-            Val::Percent(58.0)
-        } else {
-            Val::Percent(86.0)
-        };
-        node.max_width = if snapshot.compact {
-            Val::Px(720.0)
-        } else {
-            Val::Px(920.0)
-        };
-        node.min_height = if snapshot.compact {
-            Val::Px(0.0)
-        } else {
-            Val::Px(300.0)
-        };
-        node.padding = UiRect::all(Val::Px(if snapshot.compact { 10.0 } else { 22.0 }));
-        node.row_gap = Val::Px(if snapshot.compact { 5.0 } else { 14.0 });
-        *background = BackgroundColor(Color::srgba(
-            0.025,
-            0.028,
-            0.04,
-            if snapshot.compact { 0.78 } else { 0.94 },
-        ));
     }
     for mut title in &mut titles {
         **title = snapshot.title.clone();
@@ -1875,134 +2674,6 @@ pub(crate) fn update_browser_online_ui(
     for mut footer in &mut footers {
         **footer = snapshot.footer.clone();
     }
-    for (action, mut node) in &mut buttons {
-        node.display = if !snapshot.compact && browser_action_available(&snapshot, *action) {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
 }
 
-pub(crate) fn update_browser_online_button_styles(
-    snapshot: Res<BrowserOnlineUiSnapshot>,
-    mut buttons: Query<
-        (
-            &Interaction,
-            &BrowserOnlineUiAction,
-            &mut BackgroundColor,
-            &mut BorderColor,
-        ),
-        With<Button>,
-    >,
-) {
-    for (interaction, action, mut background, mut border) in &mut buttons {
-        if !browser_action_available(&snapshot, *action) {
-            continue;
-        }
-        let (fill, outline) = match interaction {
-            Interaction::Pressed => (
-                Color::srgba(0.3, 0.2, 0.07, 0.99),
-                Color::srgb(1.0, 0.76, 0.28),
-            ),
-            Interaction::Hovered => (
-                Color::srgba(0.16, 0.12, 0.06, 0.99),
-                Color::srgb(0.9, 0.68, 0.32),
-            ),
-            Interaction::None => (
-                Color::srgba(0.055, 0.055, 0.07, 0.97),
-                Color::srgb(0.38, 0.42, 0.48),
-            ),
-        };
-        *background = BackgroundColor(fill);
-        *border = BorderColor::all(outline);
-    }
-}
-
-fn browser_action_available(
-    snapshot: &BrowserOnlineUiSnapshot,
-    action: BrowserOnlineUiAction,
-) -> bool {
-    match action {
-        BrowserOnlineUiAction::CreateRoom => {
-            snapshot.screen == BrowserOnlineScreen::Menu && !snapshot.pending
-        }
-        BrowserOnlineUiAction::JoinRoom => {
-            snapshot.screen == BrowserOnlineScreen::Menu
-                && !snapshot.pending
-                && snapshot.room_code_symbols.len() == 12
-        }
-        BrowserOnlineUiAction::FewerPlayers
-        | BrowserOnlineUiAction::MorePlayers
-        | BrowserOnlineUiAction::PreviousArena
-        | BrowserOnlineUiAction::NextArena
-        | BrowserOnlineUiAction::PreviousRules
-        | BrowserOnlineUiAction::NextRules => {
-            snapshot.screen == BrowserOnlineScreen::Menu && !snapshot.pending
-        }
-        BrowserOnlineUiAction::StartRoom => {
-            snapshot.screen == BrowserOnlineScreen::Lobby
-                && !snapshot.pending
-                && snapshot.room.as_ref().is_some_and(|room| {
-                    room.state == RoomState::Open && room.self_is_host() && room.member_count >= 2
-                })
-        }
-        BrowserOnlineUiAction::Leave => matches!(
-            snapshot.screen,
-            BrowserOnlineScreen::Lobby
-                | BrowserOnlineScreen::Connecting
-                | BrowserOnlineScreen::Match
-        ),
-        BrowserOnlineUiAction::Back => matches!(
-            snapshot.screen,
-            BrowserOnlineScreen::Bootstrapping
-                | BrowserOnlineScreen::Menu
-                | BrowserOnlineScreen::Error
-        ),
-        BrowserOnlineUiAction::Retry => {
-            snapshot.screen == BrowserOnlineScreen::Error && snapshot.retry_available
-        }
-    }
-}
-
-fn pressed_room_code_symbol(keys: &ButtonInput<KeyCode>) -> Option<char> {
-    [
-        (KeyCode::Digit0, '0'),
-        (KeyCode::Digit1, '1'),
-        (KeyCode::Digit2, '2'),
-        (KeyCode::Digit3, '3'),
-        (KeyCode::Digit4, '4'),
-        (KeyCode::Digit5, '5'),
-        (KeyCode::Digit6, '6'),
-        (KeyCode::Digit7, '7'),
-        (KeyCode::Digit8, '8'),
-        (KeyCode::Digit9, '9'),
-        (KeyCode::KeyA, 'A'),
-        (KeyCode::KeyB, 'B'),
-        (KeyCode::KeyC, 'C'),
-        (KeyCode::KeyD, 'D'),
-        (KeyCode::KeyE, 'E'),
-        (KeyCode::KeyF, 'F'),
-        (KeyCode::KeyG, 'G'),
-        (KeyCode::KeyH, 'H'),
-        (KeyCode::KeyI, '1'),
-        (KeyCode::KeyJ, 'J'),
-        (KeyCode::KeyK, 'K'),
-        (KeyCode::KeyL, '1'),
-        (KeyCode::KeyM, 'M'),
-        (KeyCode::KeyN, 'N'),
-        (KeyCode::KeyO, '0'),
-        (KeyCode::KeyP, 'P'),
-        (KeyCode::KeyQ, 'Q'),
-        (KeyCode::KeyR, 'R'),
-        (KeyCode::KeyS, 'S'),
-        (KeyCode::KeyT, 'T'),
-        (KeyCode::KeyV, 'V'),
-        (KeyCode::KeyW, 'W'),
-        (KeyCode::KeyX, 'X'),
-        (KeyCode::KeyY, 'Y'),
-        (KeyCode::KeyZ, 'Z'),
-    ]
-    .into_iter()
-    .find_map(|(key, symbol)| keys.just_pressed(key).then_some(symbol))
-}
+pub(crate) fn update_browser_online_button_styles() {}

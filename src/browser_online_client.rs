@@ -27,8 +27,8 @@ use crate::live_input::local_tick_to_network_input;
 use crate::match_presentation::ConfirmedMatchPresentation;
 use crate::network_io::NonBlockingDatagramEndpoint;
 use crate::network_protocol::{
-    ConnectionPhase, InputButtons, InputFrame, InputSequence, MAX_SEATS, MatchManifest, PeerId,
-    SeatId, SeatOwner, SimTick,
+    ConnectionPhase, InputButtons, InputFrame, InputSequence, MAX_INPUT_FRAMES_PER_WINDOW,
+    MAX_SEATS, MatchManifest, PeerId, SeatId, SeatOwner, SimTick,
 };
 use crate::network_quality::{
     NetworkQualityError, NetworkQualityMonitor, NetworkQualityPolicy, NetworkQualitySample,
@@ -83,8 +83,23 @@ pub struct BrowserOnlineClientConfig {
 
 impl Default for BrowserOnlineClientConfig {
     fn default() -> Self {
+        let mut protocol = ClientProtocolConfig::default();
+        // One committed-input relay carries exactly one redundancy window. A
+        // browser can queue several WebSocket messages while rendering or while
+        // its tab is briefly descheduled. If one runtime pump consumes more
+        // Input-channel datagrams than that window, latest-wins coalescing can
+        // skip an unrecoverable committed-input gap and force a repair loop.
+        // Bound each pump to the protocol window; the outer fixed-step catch-up
+        // loop still drains a full browser endpoint queue without skipping a
+        // canonical tick.
+        protocol.runtime.max_receive_datagrams_per_pump = MAX_INPUT_FRAMES_PER_WINDOW;
+        // Reaching the deliberately small browser drain budget is expected
+        // after a frame stall, not evidence that our authenticated authority is
+        // abusive. Queue bounds still fail closed independently.
+        protocol.runtime.abuse_warning_threshold = 64;
+        protocol.runtime.abuse_disconnect_threshold = 256;
         Self {
-            protocol: ClientProtocolConfig::default(),
+            protocol,
             quality_policy: NetworkQualityPolicy::default(),
             max_fixed_steps_per_service: DEFAULT_BROWSER_FIXED_STEPS_PER_SERVICE,
         }
@@ -307,19 +322,21 @@ impl BrowserFixedTickClock {
         Ok(total_due.saturating_sub(self.serviced_ticks))
     }
 
-    fn next_time(&self) -> Result<ClientProtocolTime, OnlineFailure> {
-        let epoch = self.epoch_micros.ok_or_else(clock_failure)?;
+    fn next_time(&self, observed_micros: u64) -> Result<ClientProtocolTime, OnlineFailure> {
+        self.epoch_micros.ok_or_else(clock_failure)?;
         let network_tick = self
             .serviced_ticks
             .checked_add(1)
             .map(SimTick)
             .ok_or_else(clock_failure)?;
-        let offset = (u128::from(self.serviced_ticks) * u128::from(MICROS_PER_SECOND)
-            / u128::from(AUTHORITY_THREAD_TICK_RATE_HZ))
-        .min(u128::from(u64::MAX)) as u64;
         Ok(ClientProtocolTime {
             network_tick,
-            monotonic_micros: epoch.checked_add(offset).ok_or_else(clock_failure)?,
+            // Network retries still advance on the client's bounded fixed-tick
+            // clock, but RTT/authority estimation must use the real browser
+            // timestamp. Synthesizing this value from catch-up ticks makes a
+            // stalled tab appear to advance wall time many times faster than
+            // the authority and schedules invalid future gameplay input.
+            monotonic_micros: observed_micros,
         })
     }
 
@@ -392,6 +409,30 @@ where
             config,
             1,
             BrowserBootstrapMode::Initial,
+        )
+    }
+
+    /// Reconstructs a browser client after the document/process that owned the
+    /// original prediction state was lost. The manifest and authority-selected
+    /// countdown boundary come from the authenticated reconnect ticket; the
+    /// canonical snapshot transfer restores simulation state before input is
+    /// admitted again.
+    pub fn new_from_reconnect(
+        endpoint: E,
+        match_config: HeadlessMatchConfig,
+        peer_id: PeerId,
+        countdown_start_tick: SimTick,
+        config: BrowserOnlineClientConfig,
+    ) -> Result<Self, BrowserOnlineClientStartError> {
+        Self::new_inner(
+            endpoint,
+            match_config,
+            peer_id,
+            config,
+            1,
+            BrowserBootstrapMode::Reconnect {
+                countdown_start_tick,
+            },
         )
     }
 
@@ -637,7 +678,7 @@ where
 
         let mut serviced = 0_u16;
         for _ in 0..fixed_steps {
-            let now = match self.clock.next_time() {
+            let now = match self.clock.next_time(monotonic_micros) {
                 Ok(now) => now,
                 Err(failure) => {
                     self.finish(BrowserClientFailure::Generic(failure));
@@ -1115,6 +1156,7 @@ where
         *pending = Some((due.first, due.last));
     }
     let mut submitted_any = false;
+    let mut submitted_this_pump = 0_usize;
     while let Some((tick, last)) = *pending {
         let manifest = protocol.manifest().ok_or_else(synchronization_failure)?;
         let peer_id = protocol.peer_id();
@@ -1133,18 +1175,36 @@ where
             Ok(_) => {
                 *inputs = staged_inputs;
                 submitted_any = true;
+                submitted_this_pump += 1;
                 metrics.input_ticks_submitted = metrics.input_ticks_submitted.saturating_add(1);
                 *pending = if tick < last {
                     Some((tick.next(), last))
                 } else {
                     None
                 };
+                // The runtime's input channel is latest-wins. Pump before more
+                // than one complete redundancy window is authored, otherwise a
+                // browser catch-up burst replaces intermediate batches and
+                // leaves permanent holes at the authority.
+                if submitted_this_pump >= MAX_INPUT_FRAMES_PER_WINDOW {
+                    break;
+                }
             }
             Err(ClientProtocolError::Recoverable(
                 ClientProtocolRecoverableError::OutboundBackpressure,
             )) => {
                 metrics.input_backpressure_retries =
                     metrics.input_backpressure_retries.saturating_add(1);
+                break;
+            }
+            Err(ClientProtocolError::Recoverable(
+                ClientProtocolRecoverableError::ResyncInFlight { .. },
+            )) => {
+                // `pump` can discover an authority mismatch and begin repair
+                // while a bounded catch-up range remains queued locally. The
+                // repair snapshot resets the scheduler, so that stale range
+                // must not cross the canonical resync boundary.
+                *pending = None;
                 break;
             }
             Err(error) => {
@@ -1231,6 +1291,16 @@ fn map_protocol_error(
     generation: u64,
     local_confirmed_tick: Option<SimTick>,
 ) -> BrowserClientFailure {
+    // This diagnostic contains only bounded protocol/simulation enums, ticks,
+    // and hashes. It deliberately never includes admission tickets, guest
+    // bearer tokens, room codes, or transport URLs.
+    bevy::log::warn!(
+        "browser online protocol failure (generation {generation}, confirmed {local_confirmed_tick:?}): {error:?}"
+    );
+    #[cfg(test)]
+    eprintln!(
+        "browser online protocol failure (generation {generation}, confirmed {local_confirmed_tick:?}): {error:?}"
+    );
     match error {
         ClientProtocolError::Recoverable(ClientProtocolRecoverableError::OutboundBackpressure) => {
             capacity_failure().into()
@@ -1544,8 +1614,9 @@ mod tests {
         clock.commit_tick();
         assert_eq!(clock.observe(1_010_000).unwrap(), 60);
         for _ in 0..8 {
-            let now = clock.next_time().unwrap();
+            let now = clock.next_time(1_010_000).unwrap();
             assert_eq!(now.network_tick, SimTick(clock.serviced_ticks + 1));
+            assert_eq!(now.monotonic_micros, 1_010_000);
             clock.commit_tick();
         }
         assert_eq!(clock.observe(1_010_000).unwrap(), 52);
@@ -1738,6 +1809,125 @@ mod tests {
         assert_eq!(after.countdown_start_tick, before.countdown_start_tick);
         assert!(after.confirmed_tick >= before.confirmed_tick);
         assert_eq!(harness.hub.metrics().reconnects_completed, 1);
+    }
+
+    #[test]
+    fn fresh_browser_process_reconnects_from_authenticated_boundary_and_snapshot() {
+        let mut harness = Harness::new();
+        harness.drive_until_fighting();
+        harness.settle(5);
+        let before = harness.client.status();
+        let countdown_start_tick = before
+            .countdown_start_tick
+            .expect("fighting has an authority-selected countdown boundary");
+        let old_connection = harness.hub.connection_for_peer(peer()).unwrap();
+        harness.hub.detach(old_connection).unwrap();
+
+        let (client_endpoint, authority_endpoint) = InProcessEndpoint::pair(512).unwrap();
+        harness
+            .hub
+            .attach_reconnect(
+                user(),
+                ReconnectClaim {
+                    match_id: harness.config.manifest.match_id,
+                    peer_id: peer(),
+                    // A restored tab may have lost its last in-memory progress.
+                    // Zero is conservative and the authenticated authority
+                    // snapshot remains the only state accepted by the client.
+                    last_confirmed_tick: SimTick::ZERO,
+                },
+                authority_endpoint,
+            )
+            .unwrap();
+
+        // A browser reload has to rebuild and instantiate the Wasm module while
+        // the authority continues to simulate substitute control. Exercise a
+        // delay longer than the bounded rollback history so reconnect cannot
+        // accidentally rely on an unrealistically fast in-process handshake.
+        for _ in 0..96 {
+            harness.network_tick = harness.network_tick.next();
+            harness.hub.pump_network(harness.network_tick).unwrap();
+            match harness.hub.try_advance(neutral_disconnected).unwrap() {
+                (AuthorityAdvanceOutcome::Advanced, Some(_)) => {}
+                (outcome, report) => {
+                    panic!("delayed reconnect did not advance: {outcome:?}: {report:?}")
+                }
+            }
+            harness.hub.pump_network(harness.network_tick).unwrap();
+        }
+        harness.client = BrowserOnlineClient::new_from_reconnect(
+            client_endpoint,
+            harness.config.clone(),
+            peer(),
+            countdown_start_tick,
+            BrowserOnlineClientConfig::default(),
+        )
+        .unwrap();
+
+        for _ in 0..512 {
+            harness.round(true);
+            if harness.client.status().phase == RemoteOnlineClientPhase::Fighting {
+                break;
+            }
+        }
+        let after = harness.client.status();
+        assert_eq!(after.phase, RemoteOnlineClientPhase::Fighting);
+        assert_eq!(after.countdown_start_tick, Some(countdown_start_tick));
+        assert!(after.confirmed_tick >= before.confirmed_tick);
+        assert_eq!(harness.hub.metrics().reconnects_completed, 1);
+
+        harness.settle(128);
+        assert_eq!(
+            harness.client.status().phase,
+            RemoteOnlineClientPhase::Fighting
+        );
+        assert_eq!(harness.client.terminal(), None);
+    }
+
+    #[test]
+    fn browser_frame_stall_drains_relay_bursts_without_a_repair_loop() {
+        let mut harness = Harness::new();
+        harness.drive_until_fighting();
+        harness.settle(8);
+        let before = harness.client.status();
+        let repairs_before = before.protocol.hard_resync_requests;
+
+        // Model a 400 ms render/main-thread stall. The dedicated authority
+        // continues at 60 Hz and queues both committed-input and state
+        // datagrams while the browser cannot pump its endpoint.
+        for _ in 0..24 {
+            harness.network_tick = harness.network_tick.next();
+            harness.hub.pump_network(harness.network_tick).unwrap();
+            match harness.hub.try_advance(neutral_disconnected).unwrap() {
+                (AuthorityAdvanceOutcome::Advanced, Some(_)) => {}
+                (outcome, report) => {
+                    panic!("stalled-browser authority did not advance: {outcome:?}: {report:?}")
+                }
+            }
+            harness.hub.pump_network(harness.network_tick).unwrap();
+            harness.monotonic_micros = harness.monotonic_micros.saturating_add(
+                MICROS_PER_SECOND.div_ceil(u64::from(AUTHORITY_THREAD_TICK_RATE_HZ)),
+            );
+        }
+
+        // One animation frame can service at most eight fixed ticks. Repeated
+        // calls at the same observed instant drain the retained fixed backlog.
+        for _ in 0..3 {
+            let report = harness.client.service(harness.monotonic_micros);
+            assert!(report.fixed_steps <= DEFAULT_BROWSER_FIXED_STEPS_PER_SERVICE);
+            assert_eq!(report.terminal, None);
+        }
+        harness.settle(32);
+
+        let after = harness.client.status();
+        assert_eq!(after.phase, RemoteOnlineClientPhase::Fighting);
+        assert_eq!(after.protocol.hard_resync_requests, repairs_before);
+        assert_eq!(
+            after.last_hard_resync_reason,
+            before.last_hard_resync_reason
+        );
+        assert!(after.confirmed_tick > before.confirmed_tick);
+        assert_eq!(harness.client.terminal(), None);
     }
 
     #[test]

@@ -159,6 +159,7 @@ pub struct TicketResponse {
     pub expires_at_unix_seconds: u64,
     pub peer_id: u64,
     pub manifest: MatchManifest,
+    pub countdown_start_tick: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +203,7 @@ pub struct RoomWorkerResponse {
     pub phase: RoomWorkerPhase,
     pub network_tick: u64,
     pub simulation_tick: u64,
+    pub countdown_start_tick: Option<u64>,
     pub connected_peers: u8,
 }
 

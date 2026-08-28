@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#050607" />
+    <meta name="theme-color" content="#080a10" />
     <link rel="icon" href="data:," />
     <!-- Set this to the public HTTPS afc-web-server origin for itch.io. -->
     <meta name="afc-web-api-url" content="" />
@@ -11,24 +11,49 @@
     <style>
       :root {
         color-scheme: dark;
-        background: #050607;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --ink: #f7f0df;
+        --muted: #a9b0bd;
+        --panel: rgba(17, 20, 30, 0.96);
+        --panel-2: rgba(27, 31, 44, 0.94);
+        --line: #48536b;
+        --gold: #efb94f;
+        --gold-2: #ffe08d;
+        --green: #75d9a0;
+        --red: #ff8e8e;
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.48);
+        background: #080a10;
       }
+
+      * {
+        box-sizing: border-box;
+      }
+
       html,
-      body {
+      body,
+      #game-root {
         width: 100%;
         height: 100%;
         margin: 0;
         overflow: hidden;
         overscroll-behavior: none;
-        background: #050607;
+        background: #080a10;
       }
 
       body {
-        display: grid;
-        place-items: stretch;
+        user-select: none;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
       }
 
       #bevy-canvas {
+        position: absolute;
+        inset: 0;
         width: 100%;
         height: 100%;
         display: block;
@@ -36,15 +61,972 @@
         background: #050607;
         touch-action: none;
       }
+
+      #afc-online-shell {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+          max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+        overflow: auto;
+        background:
+          radial-gradient(circle at 50% 0%, rgba(78, 94, 133, 0.28), transparent 52%),
+          linear-gradient(155deg, rgba(5, 7, 13, 0.98), rgba(13, 16, 25, 0.97));
+      }
+
+      #afc-online-shell[hidden] {
+        display: none;
+      }
+
+      .afc-shell {
+        width: min(1180px, 100%);
+        max-height: 100%;
+        display: grid;
+        gap: 14px;
+      }
+
+      .afc-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .afc-hero {
+        width: min(560px, 100%);
+        padding: clamp(24px, 5vw, 48px);
+        text-align: center;
+      }
+
+      .afc-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 18px;
+      }
+
+      .afc-header-copy {
+        min-width: 0;
+      }
+
+      .afc-header h1,
+      .afc-hero h1,
+      .afc-section h2 {
+        margin: 0;
+        color: var(--gold-2);
+        letter-spacing: 0.055em;
+      }
+
+      .afc-header h1 {
+        font-size: clamp(20px, 3vw, 30px);
+      }
+
+      .afc-subtitle,
+      .afc-meta,
+      .afc-empty {
+        margin: 4px 0 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .afc-layout {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(320px, 1.2fr) minmax(300px, 0.8fr);
+        gap: 14px;
+      }
+
+      .afc-column {
+        min-height: 0;
+        display: grid;
+        align-content: start;
+        gap: 14px;
+      }
+
+      .afc-section {
+        min-height: 0;
+        padding: 16px;
+      }
+
+      .afc-section h2 {
+        margin-bottom: 12px;
+        font-size: 18px;
+      }
+
+      .afc-row,
+      .afc-form-row,
+      .afc-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .afc-actions {
+        justify-content: flex-end;
+      }
+
+      .afc-stack {
+        display: grid;
+        gap: 10px;
+      }
+
+      .afc-field {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: left;
+      }
+
+      .afc-field.grow {
+        flex: 1 1 180px;
+      }
+
+      input,
+      select {
+        min-width: 0;
+        min-height: 42px;
+        border: 1px solid #59657c;
+        border-radius: 9px;
+        padding: 9px 11px;
+        color: var(--ink);
+        background: #10141f;
+        outline: none;
+      }
+
+      input:focus-visible,
+      select:focus-visible,
+      button:focus-visible {
+        outline: 3px solid rgba(239, 185, 79, 0.46);
+        outline-offset: 2px;
+        border-color: var(--gold);
+      }
+
+      button {
+        min-height: 40px;
+        border: 1px solid #66728b;
+        border-radius: 9px;
+        padding: 8px 14px;
+        color: var(--ink);
+        background: #202738;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--gold);
+        background: #2c3448;
+      }
+
+      button:active:not(:disabled) {
+        transform: translateY(1px);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+
+      button.primary {
+        border-color: #c58d2f;
+        color: #171006;
+        background: linear-gradient(#ffd36d, #dfa33a);
+        font-weight: 800;
+      }
+
+      button.danger {
+        border-color: #86545b;
+        color: #ffd4d4;
+        background: #3a2229;
+      }
+
+      button.ready {
+        border-color: #4f9d72;
+        color: #d8ffe7;
+        background: #1f4632;
+      }
+
+      .afc-notice,
+      .afc-error {
+        border-radius: 9px;
+        padding: 10px 12px;
+        line-height: 1.4;
+      }
+
+      .afc-notice {
+        border: 1px solid #6b623d;
+        color: #ffe8a7;
+        background: rgba(79, 66, 25, 0.45);
+      }
+
+      .afc-error {
+        border: 1px solid #814b54;
+        color: #ffd4d8;
+        background: rgba(85, 31, 42, 0.5);
+      }
+
+      .afc-room-list,
+      .afc-roster {
+        display: grid;
+        gap: 9px;
+      }
+
+      .afc-room-row,
+      .afc-member {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 12px;
+        border: 1px solid #3b4559;
+        border-radius: 10px;
+        padding: 11px 12px;
+        background: var(--panel-2);
+      }
+
+      .afc-member.self {
+        border-color: #977735;
+      }
+
+      .afc-member-name {
+        overflow: hidden;
+        color: var(--ink);
+        font-weight: 750;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .afc-badges {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 5px;
+      }
+
+      .afc-badge {
+        border: 1px solid #4d5a70;
+        border-radius: 999px;
+        padding: 2px 7px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .afc-badge.host {
+        border-color: #95702e;
+        color: #ffdd8b;
+      }
+
+      .afc-badge.ready {
+        border-color: #43865f;
+        color: #9ef1bd;
+      }
+
+      .afc-badge.away {
+        border-color: #744e57;
+        color: #ffacb5;
+      }
+
+      .afc-code {
+        display: inline-block;
+        margin-top: 5px;
+        color: var(--gold-2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: clamp(20px, 3vw, 30px);
+        font-weight: 850;
+        letter-spacing: 0.09em;
+      }
+
+      .afc-chat {
+        min-height: 280px;
+        display: grid;
+        grid-template-rows: minmax(160px, 1fr) auto;
+        gap: 10px;
+      }
+
+      .afc-chat-log {
+        min-height: 160px;
+        max-height: min(42vh, 420px);
+        overflow: auto;
+        border: 1px solid #343e51;
+        border-radius: 9px;
+        padding: 8px;
+        background: rgba(5, 8, 14, 0.7);
+        user-select: text;
+      }
+
+      .afc-chat-message {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 6px 5px;
+        border-bottom: 1px solid rgba(79, 90, 112, 0.28);
+      }
+
+      .afc-chat-message:last-child {
+        border-bottom: 0;
+      }
+
+      .afc-chat-name {
+        color: var(--gold-2);
+        font-weight: 700;
+      }
+
+      .afc-chat-text {
+        overflow-wrap: anywhere;
+        color: var(--ink);
+      }
+
+      .afc-chat-tools {
+        display: flex;
+        align-items: start;
+        gap: 4px;
+      }
+
+      .afc-chat-tools button {
+        min-height: 26px;
+        padding: 2px 7px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .afc-chat-form {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+
+      .afc-spinner {
+        width: 34px;
+        height: 34px;
+        margin: 18px auto;
+        border: 4px solid #394257;
+        border-top-color: var(--gold);
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (max-width: 820px) {
+        .afc-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .afc-header {
+          align-items: flex-start;
+        }
+
+        .afc-chat-log {
+          max-height: 300px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+        }
+      }
     </style>
   </head>
   <body>
-    <canvas id="bevy-canvas" tabindex="0" aria-label="Animal Fighter Club game"></canvas>
+    <main id="game-root">
+      <canvas id="bevy-canvas" tabindex="0" aria-label="Animal Fighter Club game"></canvas>
+      <section
+        id="afc-online-shell"
+        aria-label="Animal Fighter Club online lobby"
+        aria-live="polite"
+        hidden
+      ></section>
+    </main>
     <script type="module">
       import init from "./pkg/ffc_prototype.js";
 
       const canvas = document.getElementById("bevy-canvas");
+      const shell = document.getElementById("afc-online-shell");
+      const actions = [];
+      const muteStorageKey = "afc.browser.muted-guests.v1";
+      let currentState = null;
+
+      const loadMuted = () => {
+        try {
+          const value = JSON.parse(sessionStorage.getItem(muteStorageKey) || "[]");
+          return new Set(Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+        } catch {
+          return new Set();
+        }
+      };
+      const mutedGuests = loadMuted();
+
+      const persistMuted = () => {
+        try {
+          sessionStorage.setItem(muteStorageKey, JSON.stringify([...mutedGuests]));
+        } catch {
+          // Local mute remains active for this page even if storage is unavailable.
+        }
+      };
+
+      const queue = (action) => {
+        if (actions.length < 32) actions.push(action);
+      };
+
+      const captureTextEntry = () => {
+        const active = document.activeElement;
+        if (!(active instanceof HTMLInputElement) || active.type !== "text" || !shell.contains(active)) {
+          return null;
+        }
+        const selector = active.dataset.qa
+          ? `[data-qa="${CSS.escape(active.dataset.qa)}"]`
+          : active.name
+            ? `[name="${CSS.escape(active.name)}"]`
+            : null;
+        return selector
+          ? {
+              selector,
+              value: active.value,
+              selectionStart: active.selectionStart,
+              selectionEnd: active.selectionEnd,
+            }
+          : null;
+      };
+
+      const restoreTextEntry = (draft) => {
+        if (!draft) return false;
+        const replacement = shell.querySelector(draft.selector);
+        if (!(replacement instanceof HTMLInputElement) || replacement.disabled) return false;
+        replacement.value = draft.value;
+        replacement.focus({ preventScroll: true });
+        if (draft.selectionStart !== null && draft.selectionEnd !== null) {
+          replacement.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+        }
+        return true;
+      };
+
+      const node = (tag, options = {}, children = []) => {
+        const element = document.createElement(tag);
+        if (options.className) element.className = options.className;
+        if (options.text !== undefined) element.textContent = options.text;
+        if (options.id) element.id = options.id;
+        if (options.type) element.type = options.type;
+        if (options.name) element.name = options.name;
+        if (options.value !== undefined) element.value = String(options.value);
+        if (options.placeholder) element.placeholder = options.placeholder;
+        if (options.maxLength) element.maxLength = options.maxLength;
+        if (options.autocomplete) element.autocomplete = options.autocomplete;
+        if (options.disabled) element.disabled = true;
+        if (options.dataset) Object.assign(element.dataset, options.dataset);
+        if (options.ariaLabel) element.setAttribute("aria-label", options.ariaLabel);
+        if (options.role) element.setAttribute("role", options.role);
+        if (options.onClick) element.addEventListener("click", options.onClick);
+        for (const child of children.flat()) {
+          if (child !== null && child !== undefined) {
+            element.append(child instanceof Node ? child : document.createTextNode(String(child)));
+          }
+        }
+        return element;
+      };
+
+      const button = (label, onClick, options = {}) =>
+        node("button", {
+          type: options.type || "button",
+          text: label,
+          onClick,
+          disabled: options.disabled,
+          className: options.className || "",
+          dataset: options.dataset,
+          ariaLabel: options.ariaLabel,
+        });
+
+      const option = (label, value, selected) => {
+        const item = node("option", { text: label, value });
+        item.selected = selected;
+        return item;
+      };
+
+      const notice = (state) => {
+        if (state.error) return node("div", { className: "afc-error", text: state.error, role: "alert" });
+        if (state.notice) return node("div", { className: "afc-notice", text: state.notice, role: "status" });
+        return null;
+      };
+
+      const hero = (title, copy, content = []) =>
+        node("div", { className: "afc-card afc-hero" }, [
+          node("h1", { text: title }),
+          node("p", { className: "afc-subtitle", text: copy }),
+          ...content,
+        ]);
+
+      const header = (state, title, subtitle, backAction) =>
+        node("header", { className: "afc-card afc-header" }, [
+          node("div", { className: "afc-header-copy" }, [
+            node("h1", { text: title }),
+            node("p", { className: "afc-subtitle", text: subtitle }),
+          ]),
+          node("div", { className: "afc-actions" }, [
+            state.guest
+              ? node("span", { className: "afc-meta", text: state.guest.display_name })
+              : null,
+            button(backAction?.label || "Leave online", () => queue(backAction?.action || { type: "leave_online" }), {
+              dataset: { back: "true" },
+            }),
+          ]),
+        ]);
+
+      const field = (label, control, grow = false) =>
+        node("label", { className: `afc-field${grow ? " grow" : ""}` }, [
+          node("span", { text: label }),
+          control,
+        ]);
+
+      const chatPanel = (state, messages, scope, title) => {
+        const ownGuestId = state.guest?.guest_id;
+        const visibleMessages = messages.filter((message) => !mutedGuests.has(message.sender_guest_id));
+        const log = node("div", {
+          className: "afc-chat-log",
+          role: "log",
+          ariaLabel: `${title} messages`,
+          dataset: { qa: `${scope}-chat-log` },
+        });
+        if (visibleMessages.length === 0) {
+          log.append(node("p", { className: "afc-empty", text: "No messages yet." }));
+        }
+        for (const message of visibleMessages) {
+          const isSelf = message.sender_guest_id === ownGuestId;
+          const tools = node("div", { className: "afc-chat-tools" });
+          if (!isSelf) {
+            tools.append(
+              button("Mute", () => {
+                mutedGuests.add(message.sender_guest_id);
+                persistMuted();
+                renderState(currentState);
+              }, { ariaLabel: `Mute ${message.sender_display_name}` }),
+              button("Report", () => {
+                queue({
+                  type: "report",
+                  message_id: message.message_id,
+                  guest_id: message.sender_guest_id,
+                  category: "harassment",
+                });
+              }, { ariaLabel: `Report ${message.sender_display_name}` }),
+            );
+          }
+          log.append(
+            node("div", { className: "afc-chat-message", dataset: { messageId: message.message_id } }, [
+              node("div", {}, [
+                node("span", { className: "afc-chat-name", text: `${message.sender_display_name}: ` }),
+                node("span", { className: "afc-chat-text", text: message.text }),
+              ]),
+              tools,
+            ]),
+          );
+        }
+
+        const input = node("input", {
+          type: "text",
+          name: `${scope}-chat-message`,
+          placeholder: "Type a message…",
+          maxLength: 512,
+          autocomplete: "off",
+          ariaLabel: `${title} message`,
+          dataset: { qa: `${scope}-chat-input` },
+        });
+        const form = node("form", { className: "afc-chat-form", dataset: { qa: `${scope}-chat-form` } }, [
+          input,
+          button("Send", () => {}, { type: "submit", className: "primary", disabled: state.pending }),
+        ]);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const text = input.value;
+          if (!text.trim()) return;
+          queue({ type: "send_chat", scope, text });
+          input.value = "";
+          input.focus();
+        });
+        const chatHeader = node("div", { className: "afc-row" }, [
+          node("h2", { text: title }),
+          mutedGuests.size
+            ? button(`Unmute all (${mutedGuests.size})`, () => {
+                mutedGuests.clear();
+                persistMuted();
+                renderState(currentState);
+              })
+            : null,
+        ]);
+        return node("section", { className: "afc-card afc-section afc-chat" }, [
+          node("div", {}, [chatHeader, log]),
+          form,
+        ]);
+      };
+
+      const renderIdentity = (state) => {
+        const input = node("input", {
+          type: "text",
+          name: "nickname",
+          placeholder: "Fighter name",
+          maxLength: 64,
+          autocomplete: "nickname",
+          ariaLabel: "Nickname",
+          dataset: { qa: "nickname-input", autofocus: "true" },
+        });
+        const form = node("form", { className: "afc-stack", dataset: { qa: "nickname-form" } }, [
+          notice(state),
+          field("Nickname", input),
+          button(state.pending ? "Joining…" : "Enter lobby", () => {}, {
+            type: "submit",
+            className: "primary",
+            disabled: state.pending,
+          }),
+          button("Back", () => queue({ type: "leave_online" }), {
+            dataset: { back: "true" },
+          }),
+        ]);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          queue({ type: "submit_nickname", nickname: input.value });
+        });
+        return hero(
+          "ONLINE LOBBY",
+          "Choose a guest nickname. International text and IME input are supported.",
+          [form],
+        );
+      };
+
+      const renderRooms = (state) => {
+        const list = node("div", { className: "afc-room-list", dataset: { qa: "public-room-list" } });
+        if (state.public_rooms.length === 0) {
+          list.append(node("p", { className: "afc-empty", text: "No public rooms are open. Create one!" }));
+        }
+        for (const room of state.public_rooms) {
+          list.append(
+            node("div", { className: "afc-room-row", dataset: { roomCode: room.room_code } }, [
+              node("div", {}, [
+                node("div", { className: "afc-member-name", text: room.host_display_name }),
+                node("div", {
+                  className: "afc-meta",
+                  text: `${room.member_count}/${room.maximum_players} • ${state.arena_names[room.arena_index] || "Arena"} • ${state.rule_names[room.rule_index] || "Rules"}`,
+                }),
+              ]),
+              button("Join", () => queue({ type: "join_room", room_code: room.room_code }), {
+                disabled: state.pending || room.member_count >= room.maximum_players,
+                dataset: { qa: `join-${room.room_code}` },
+              }),
+            ]),
+          );
+        }
+        return node("section", { className: "afc-card afc-section" }, [
+          node("h2", { text: "Public rooms" }),
+          list,
+        ]);
+      };
+
+      const renderCreateJoin = (state) => {
+        const players = node("select", { name: "maximum-players", ariaLabel: "Room capacity" }, [
+          option("2 players", 2, true),
+          option("3 players", 3, false),
+          option("4 players", 4, false),
+        ]);
+        const visibility = node("select", { name: "visibility", ariaLabel: "Room visibility" }, [
+          option("Public", "public", true),
+          option("Private", "private", false),
+        ]);
+        const createForm = node("form", { className: "afc-form-row", dataset: { qa: "create-room-form" } }, [
+          field("Capacity", players, true),
+          field("Visibility", visibility, true),
+          button("Create room", () => {}, { type: "submit", className: "primary", disabled: state.pending }),
+        ]);
+        createForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          queue({
+            type: "create_room",
+            maximum_players: Number(players.value),
+            visibility: visibility.value,
+          });
+        });
+
+        const code = node("input", {
+          type: "text",
+          name: "room-code",
+          placeholder: "0000-0000-0000",
+          maxLength: 14,
+          autocomplete: "off",
+          ariaLabel: "Private room code",
+          dataset: { qa: "room-code-input" },
+        });
+        code.addEventListener("input", () => {
+          code.value = code.value.toUpperCase().replace(/[^0-9A-Z-]/g, "").slice(0, 14);
+        });
+        const joinForm = node("form", { className: "afc-form-row", dataset: { qa: "join-room-form" } }, [
+          field("Room code", code, true),
+          button("Join code", () => {}, { type: "submit", disabled: state.pending }),
+        ]);
+        joinForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          queue({ type: "join_room", room_code: code.value });
+        });
+        return node("section", { className: "afc-card afc-section afc-stack" }, [
+          node("h2", { text: "Create or join" }),
+          createForm,
+          joinForm,
+        ]);
+      };
+
+      const renderLobby = (state) =>
+        node("div", { className: "afc-shell", dataset: { screen: "lobby" } }, [
+          header(
+            state,
+            "ONLINE LOBBY",
+            `${state.online_guests} guest${state.online_guests === 1 ? "" : "s"} online`,
+          ),
+          notice(state),
+          node("div", { className: "afc-layout" }, [
+            node("div", { className: "afc-column" }, [renderCreateJoin(state), renderRooms(state)]),
+            chatPanel(state, state.global_chat, "global", "Lobby chat"),
+          ]),
+        ]);
+
+      const characterValue = (label) => label.toLowerCase();
+
+      const renderRoster = (state, room) => {
+        const list = node("div", { className: "afc-roster", dataset: { qa: "room-roster" } });
+        for (const member of room.members) {
+          const badges = node("div", { className: "afc-badges" }, [
+            member.is_host ? node("span", { className: "afc-badge host", text: "Host" }) : null,
+            member.ready ? node("span", { className: "afc-badge ready", text: "Ready" }) : null,
+            !member.present ? node("span", { className: "afc-badge away", text: "Reconnecting" }) : null,
+            member.gameplay_connected
+              ? node("span", { className: "afc-badge", text: "In match" })
+              : null,
+          ]);
+          const controls = node("div", { className: "afc-actions" });
+          if (member.is_self) {
+            const characters = node("select", {
+              name: "character",
+              disabled: state.pending,
+              ariaLabel: "Your character",
+              dataset: { qa: "character-select" },
+            });
+            for (const label of state.characters) {
+              characters.append(option(label, characterValue(label), characterValue(label) === member.character));
+            }
+            characters.addEventListener("change", () => {
+              queue({ type: "select_character", character: characters.value });
+            });
+            controls.append(
+              characters,
+              button(member.ready ? "Not ready" : "Ready", () => {
+                queue({ type: "set_ready", ready: !member.ready });
+              }, {
+                disabled: state.pending || !member.present,
+                className: member.ready ? "ready" : "primary",
+                dataset: { qa: "ready-button" },
+              }),
+            );
+          } else if (room.members.some((candidate) => candidate.is_self && candidate.is_host)) {
+            controls.append(
+              button("Kick", () => queue({ type: "kick_member", peer_id: member.peer_id }), {
+                className: "danger",
+                disabled: state.pending,
+                ariaLabel: `Kick ${member.display_name}`,
+              }),
+            );
+          }
+          list.append(
+            node("div", { className: `afc-member${member.is_self ? " self" : ""}`, dataset: { peerId: member.peer_id } }, [
+              node("div", {}, [
+                node("div", { className: "afc-member-name", text: member.display_name }),
+                node("div", { className: "afc-meta", text: state.characters.find((label) => characterValue(label) === member.character) || member.character }),
+                badges,
+              ]),
+              controls,
+            ]),
+          );
+        }
+        return list;
+      };
+
+      const renderRoomSettings = (state, room) => {
+        const isHost = room.members.some((member) => member.is_self && member.is_host);
+        if (!isHost) {
+          return node("p", {
+            className: "afc-meta",
+            text: `${state.arena_names[room.arena_index] || "Arena"} • ${state.rule_names[room.rule_index] || "Rules"}`,
+          });
+        }
+        const arena = node("select", { name: "arena", disabled: state.pending, ariaLabel: "Arena" });
+        state.arena_names.forEach((name, index) => arena.append(option(name, index, index === room.arena_index)));
+        const rules = node("select", { name: "rules", disabled: state.pending, ariaLabel: "Rules" });
+        state.rule_names.forEach((name, index) => rules.append(option(name, index, index === room.rule_index)));
+        const form = node("form", { className: "afc-form-row", dataset: { qa: "room-settings-form" } }, [
+          field("Arena", arena, true),
+          field("Rules", rules, true),
+          button("Apply", () => {}, { type: "submit", disabled: state.pending }),
+        ]);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          queue({
+            type: "update_settings",
+            arena_index: Number(arena.value),
+            rule_index: Number(rules.value),
+          });
+        });
+        return form;
+      };
+
+      const renderRoom = (state) => {
+        const room = state.room;
+        if (!room) return renderLobby(state);
+        const self = room.members.find((member) => member.is_self);
+        const allReady = room.member_count >= 2 && room.members.every((member) => member.present && member.ready);
+        const roomCopy = node("div", {}, [
+          node("div", { className: "afc-meta", text: room.visibility === "public" ? "Public room" : "Private room" }),
+          node("span", { className: "afc-code", text: room.room_code, dataset: { qa: "room-code" } }),
+        ]);
+        const copyButton = button("Copy code", async () => {
+          try {
+            await navigator.clipboard.writeText(room.room_code);
+            copyButton.textContent = "Copied";
+          } catch {
+            copyButton.textContent = "Copy unavailable";
+          }
+        });
+        return node("div", { className: "afc-shell", dataset: { screen: "room", roomCode: room.room_code } }, [
+          header(state, "MATCH ROOM", `${room.member_count}/${room.maximum_players} players`, {
+            label: "Leave room",
+            action: { type: "leave_room" },
+          }),
+          notice(state),
+          node("div", { className: "afc-layout" }, [
+            node("div", { className: "afc-column" }, [
+              node("section", { className: "afc-card afc-section afc-stack" }, [
+                node("div", { className: "afc-row" }, [roomCopy, copyButton]),
+                renderRoomSettings(state, room),
+              ]),
+              node("section", { className: "afc-card afc-section" }, [
+                node("h2", { text: "Fighters" }),
+                renderRoster(state, room),
+                self?.is_host
+                  ? node("div", { className: "afc-actions" }, [
+                      button(state.pending ? "Starting…" : "Start match", () => queue({ type: "start_match" }), {
+                        className: "primary",
+                        disabled: state.pending || !allReady,
+                        dataset: { qa: "start-match-button" },
+                      }),
+                    ])
+                  : node("p", {
+                      className: "afc-meta",
+                      text: self?.ready ? "Waiting for the host to start." : "Choose a character, then ready up.",
+                    }),
+              ]),
+            ]),
+            chatPanel(state, room.room_chat, "room", "Room chat"),
+          ]),
+        ]);
+      };
+
+      const renderWaiting = (state) => {
+        const room = state.room;
+        const isReturning = state.screen === "returning";
+        const result = room?.result;
+        const remaining = state.result_return_ms === null ? null : Math.ceil(state.result_return_ms / 1000);
+        return hero(
+          isReturning ? "RETURNING TO ROOM" : "CONNECTING TO MATCH",
+          isReturning
+            ? result
+              ? `Result ${result.result_id} confirmed at tick ${result.final_tick}. Returning${remaining === null ? "" : ` in ${remaining}s`}…`
+              : "The authority is closing this match safely…"
+            : "Redeeming a signed one-time ticket and synchronizing the authority.",
+          [
+            node("div", { className: "afc-spinner", ariaLabel: "Loading" }),
+            notice(state),
+            button("Leave online", () => queue({ type: "leave_online" }), {
+              dataset: { back: "true" },
+            }),
+          ],
+        );
+      };
+
+      const renderError = (state) =>
+        hero("ONLINE ERROR", state.error || "The online operation failed.", [
+          notice(state),
+          node("div", { className: "afc-actions" }, [
+            button("Retry", () => queue({ type: "retry" }), { className: "primary", dataset: { qa: "retry-button" } }),
+            button("Leave online", () => queue({ type: "leave_online" }), { dataset: { back: "true" } }),
+          ]),
+        ]);
+
+      const renderState = (state) => {
+        const textEntryDraft = captureTextEntry();
+        currentState = state;
+        const showShell = state.visible && !["dormant", "match"].includes(state.screen);
+        shell.hidden = !showShell;
+        shell.dataset.screen = state.screen;
+        shell.dataset.clientPhase = state.client?.phase || "none";
+        canvas.setAttribute("aria-hidden", showShell ? "true" : "false");
+        if (!showShell) {
+          shell.replaceChildren();
+          return;
+        }
+        let content;
+        switch (state.screen) {
+          case "bootstrapping":
+            content = hero("ONLINE", "Contacting the game server…", [node("div", { className: "afc-spinner" })]);
+            break;
+          case "identity":
+            content = renderIdentity(state);
+            break;
+          case "lobby":
+            content = renderLobby(state);
+            break;
+          case "room":
+            content = renderRoom(state);
+            break;
+          case "connecting":
+          case "returning":
+            content = renderWaiting(state);
+            break;
+          case "error":
+            content = renderError(state);
+            break;
+          default:
+            content = hero("ONLINE", "Loading…", [node("div", { className: "afc-spinner" })]);
+        }
+        shell.replaceChildren(content);
+        requestAnimationFrame(() => {
+          const autofocus = shell.querySelector("[data-autofocus='true']");
+          if (!restoreTextEntry(textEntryDraft) && autofocus && !shell.contains(document.activeElement)) {
+            autofocus.focus();
+          }
+          for (const log of shell.querySelectorAll(".afc-chat-log")) log.scrollTop = log.scrollHeight;
+        });
+      };
+
+      window.AFC_LOBBY_BRIDGE = Object.freeze({
+        render(encoded) {
+          try {
+            renderState(JSON.parse(encoded));
+          } catch (error) {
+            console.error("AFC lobby render failed", error);
+          }
+        },
+        drainActions() {
+          return actions.splice(0, actions.length);
+        },
+        snapshot() {
+          return currentState === null ? null : JSON.parse(JSON.stringify(currentState));
+        },
+      });
+
       const focusCanvas = () => {
+        if (!shell.hidden) return;
         try {
           canvas.focus({ preventScroll: true });
         } catch {
@@ -52,11 +1034,45 @@
         }
       };
 
-      window.addEventListener("pointerdown", focusCanvas, { passive: true });
-      window.addEventListener("touchstart", focusCanvas, { passive: true });
+      window.addEventListener("pointerdown", (event) => {
+        if (event.target === canvas) focusCanvas();
+      }, { passive: true });
       window.addEventListener("gamepadconnected", focusCanvas, { passive: true });
 
-      init().then(focusCanvas);
+      let priorPadButtons = [];
+      let priorAxisDirection = 0;
+      const pollGamepad = () => {
+        const pad = [...(navigator.getGamepads?.() || [])].find(
+          (candidate) => candidate && candidate.connected,
+        );
+        if (pad && !shell.hidden) {
+          const focusables = [...shell.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")];
+          const pressed = pad.buttons.map((entry) => entry.pressed);
+          const edge = (index) => pressed[index] && !priorPadButtons[index];
+          const axis = pad.axes[1] || 0;
+          const axisDirection = axis > 0.65 ? 1 : axis < -0.65 ? -1 : 0;
+          const direction = edge(13) ? 1 : edge(12) ? -1 : axisDirection && axisDirection !== priorAxisDirection ? axisDirection : 0;
+          if (direction && focusables.length) {
+            const index = Math.max(0, focusables.indexOf(document.activeElement));
+            focusables[(index + direction + focusables.length) % focusables.length].focus();
+          }
+          if (edge(0) && document.activeElement instanceof HTMLElement) document.activeElement.click();
+          if (edge(1)) shell.querySelector("[data-back='true']:not(:disabled)")?.click();
+          priorPadButtons = pressed;
+          priorAxisDirection = axisDirection;
+        } else {
+          priorPadButtons = [];
+          priorAxisDirection = 0;
+        }
+        requestAnimationFrame(pollGamepad);
+      };
+      requestAnimationFrame(pollGamepad);
+
+      init().then(focusCanvas).catch((error) => {
+        shell.hidden = false;
+        shell.replaceChildren(hero("STARTUP ERROR", "The game could not be loaded. Refresh the page to try again."));
+        console.error(error);
+      });
     </script>
   </body>
 </html>

@@ -4,6 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
+use tracing::error;
 
 use crate::authority::AuthoritySimulation;
 use crate::authority_input::AuthorityInputConfig;
@@ -78,6 +79,10 @@ pub struct WebRoomWorkerSnapshot {
     pub phase: WebRoomWorkerPhase,
     pub network_tick: SimTick,
     pub simulation_tick: SimTick,
+    /// Immutable authority-selected boundary once the initial ready gate has
+    /// completed. A replacement browser process needs this exact value to
+    /// reconstruct the reconnect session state machine.
+    pub countdown_start_tick: Option<SimTick>,
     pub connected_peers: u8,
     /// Bit `n` is set when sealed-roster member `n` has a live hub generation.
     pub connected_peer_mask: u8,
@@ -92,6 +97,7 @@ impl Default for WebRoomWorkerSnapshot {
             phase: WebRoomWorkerPhase::Starting,
             network_tick: SimTick::ZERO,
             simulation_tick: SimTick::ZERO,
+            countdown_start_tick: None,
             connected_peers: 0,
             connected_peer_mask: 0,
             confirmed_result: None,
@@ -185,12 +191,22 @@ impl WebRoomWorkerHandle {
                             &worker_snapshot,
                             manifest.master_gameplay_seed,
                         ) {
+                            error!(
+                                match_id = ?manifest.match_id,
+                                error = ?error,
+                                "hosted room worker stopped with an error"
+                            );
                             let mut snapshot = lock_recover(&worker_snapshot);
                             snapshot.phase = WebRoomWorkerPhase::Failed;
                             snapshot.error = Some(error);
                         }
                     }
                     Err(error) => {
+                        error!(
+                            match_id = ?manifest.match_id,
+                            error = ?error,
+                            "hosted room worker could not initialize"
+                        );
                         let _ = startup_tx.send(Err(error.clone()));
                         let mut snapshot = lock_recover(&worker_snapshot);
                         snapshot.phase = WebRoomWorkerPhase::Failed;
@@ -439,6 +455,7 @@ fn publish_snapshot(
 ) {
     published.network_tick = hub.network_tick();
     published.simulation_tick = hub.authority().simulation().current_tick();
+    published.countdown_start_tick = hub.countdown_start_tick();
     let mut connected_peer_mask = 0_u8;
     for (index, peer) in roster.iter().enumerate() {
         if hub.connection_for_peer(peer.peer_id).is_some() {

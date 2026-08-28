@@ -65,7 +65,8 @@ const MAX_REPORTS: usize = 256;
 const REPORT_RETENTION_SECONDS: u64 = 15 * 60;
 const MAX_LOBBY_EVENT_SUBSCRIBERS: usize = 4_096;
 
-pub const DEFAULT_MAX_PRIVATE_ROOMS: usize = 512;
+pub const DEFAULT_MAX_LOBBY_GUESTS: usize = 100;
+pub const DEFAULT_MAX_PRIVATE_ROOMS: usize = 25;
 pub const DEFAULT_OPEN_ROOM_TTL_SECONDS: u64 = 15 * 60;
 pub const DEFAULT_MAX_ROOM_LIFETIME_SECONDS: u64 = 4 * 60 * 60;
 pub const DEFAULT_TERMINAL_ROOM_RETENTION_SECONDS: u64 = 5 * 60;
@@ -74,6 +75,7 @@ pub const DEFAULT_RESULTS_RETURN_CEILING_SECONDS: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WebRoomServiceConfig {
+    pub maximum_guests: usize,
     pub maximum_rooms: usize,
     pub open_room_ttl_seconds: u64,
     pub maximum_room_lifetime_seconds: u64,
@@ -89,6 +91,7 @@ pub struct WebRoomServiceConfig {
 impl Default for WebRoomServiceConfig {
     fn default() -> Self {
         Self {
+            maximum_guests: DEFAULT_MAX_LOBBY_GUESTS,
             maximum_rooms: DEFAULT_MAX_PRIVATE_ROOMS,
             open_room_ttl_seconds: DEFAULT_OPEN_ROOM_TTL_SECONDS,
             maximum_room_lifetime_seconds: DEFAULT_MAX_ROOM_LIFETIME_SECONDS,
@@ -103,7 +106,9 @@ impl Default for WebRoomServiceConfig {
 
 impl WebRoomServiceConfig {
     pub fn validate(self) -> Result<(), WebRoomError> {
-        if self.maximum_rooms == 0
+        if self.maximum_guests == 0
+            || self.maximum_guests > MAX_ROOM_REGISTRY_CAPACITY * MAX_FIGHTERS
+            || self.maximum_rooms == 0
             || self.maximum_rooms > MAX_ROOM_REGISTRY_CAPACITY
             || !(60..=24 * 60 * 60).contains(&self.open_room_ttl_seconds)
             || !(5 * 60..=24 * 60 * 60).contains(&self.maximum_room_lifetime_seconds)
@@ -330,6 +335,7 @@ pub struct WebJoinTicketResponse {
     pub expires_at_unix_seconds: u64,
     pub peer_id: PeerId,
     pub manifest: MatchManifest,
+    pub countdown_start_tick: Option<SimTick>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +450,9 @@ impl WebRoomService {
         let issued = self.keyring.issue_guest_session(now_unix_seconds)?;
         let mut registry = lock_recover(&self.registry);
         registry.maintain(now_unix_seconds, self.config);
+        if registry.guests.len() >= self.config.maximum_guests {
+            return Err(WebRoomError::RegistryFull);
+        }
         let collision = registry.guests.values().any(|profile| {
             profile.expires_at_unix_seconds >= now_unix_seconds
                 && profile.nickname.to_lowercase() == nickname.to_lowercase()
@@ -488,18 +497,14 @@ impl WebRoomService {
             .verify_guest_session(guest_session, now_unix_seconds)?;
         let receiver = self.events.subscribe();
         let mut registry = lock_recover(&self.registry);
-        let changed = registry.maintain(now_unix_seconds, self.config);
+        registry.maintain(now_unix_seconds, self.config);
         let profile = registry.require_guest_mut(claims)?;
         profile.active_control_connections = profile.active_control_connections.saturating_add(1);
         profile.touch(now_unix_seconds, self.config.presence_grace_seconds);
         let revision = registry.bump_lobby_revision();
         let snapshot = registry.lobby_snapshot(claims.guest_id, now_unix_seconds);
         drop(registry);
-        if changed {
-            self.push_state_changed(revision);
-        } else {
-            self.push_state_changed(revision);
-        }
+        self.push_state_changed(revision);
         Ok(WebLobbyConnection {
             guest_id: claims.guest_id,
             snapshot,
@@ -1239,7 +1244,7 @@ impl WebRoomService {
             .keyring
             .verify_guest_session(guest_session, now_unix_seconds)?;
         let room_code = PrivateRoomCode::from_str(room_code)?;
-        let (grant, manifest) = {
+        let (grant, manifest, countdown_start_tick) = {
             let mut registry = lock_recover(&self.registry);
             registry.maintain(now_unix_seconds, self.config);
             registry.touch_guest(claims, now_unix_seconds, self.config.presence_grace_seconds)?;
@@ -1251,6 +1256,7 @@ impl WebRoomService {
             expires_at_unix_seconds: issued.claims.expires_at_unix_seconds,
             peer_id: grant.peer_id,
             manifest,
+            countdown_start_tick,
         })
     }
 
@@ -1831,7 +1837,7 @@ impl WebRoomRegistry {
         claims: GuestSessionClaims,
         mode: JoinTicketMode,
         now: u64,
-    ) -> Result<(JoinTicketGrant, MatchManifest), WebRoomError> {
+    ) -> Result<(JoinTicketGrant, MatchManifest, Option<SimTick>), WebRoomError> {
         let room_id = self.room_id(room_code)?;
         let room = self
             .rooms
@@ -1868,7 +1874,9 @@ impl WebRoomRegistry {
                 if connected {
                     return Err(WebRoomError::AlreadyConnected);
                 }
-                if snapshot.simulation_tick != SimTick::ZERO {
+                if snapshot.countdown_start_tick.is_some()
+                    || snapshot.simulation_tick != SimTick::ZERO
+                {
                     return Err(WebRoomError::ReconnectRequired);
                 }
             }
@@ -1894,6 +1902,7 @@ impl WebRoomRegistry {
                 mode,
             },
             **manifest,
+            snapshot.countdown_start_tick,
         ))
     }
 
@@ -1945,6 +1954,10 @@ impl WebRoomRegistry {
 
     fn maintain(&mut self, now: u64, config: WebRoomServiceConfig) -> bool {
         let mut changed = false;
+        let before_guests = self.guests.len();
+        self.guests
+            .retain(|_, profile| profile.expires_at_unix_seconds >= now);
+        changed |= self.guests.len() != before_guests;
         while self.global_chat.front().is_some_and(|message| {
             now.saturating_sub(message.sent_at_unix_seconds) >= GLOBAL_CHAT_RETENTION_SECONDS
         }) {
@@ -2408,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn host_kick_bans_rejoin_and_explicit_leave_migrates_host() {
+    fn host_kick_bans_rejoin_for_the_room_lifetime() {
         let service = service();
         let host = service
             .issue_named_guest_session("Host One", 30_000)
@@ -2437,6 +2450,58 @@ mod tests {
             service.join_private_room(&second.issued.token, &code, 30_004),
             Err(WebRoomError::GuestRoomBanned)
         );
+    }
+
+    #[test]
+    fn disconnected_host_migrates_after_grace_to_longest_present_member() {
+        let service = service();
+        let host = service
+            .issue_named_guest_session("Host Grace", 35_000)
+            .unwrap();
+        let guest = service
+            .issue_named_guest_session("Guest Grace", 35_000)
+            .unwrap();
+        let created = service
+            .create_room(&host.issued.token, WebPrivateRoomOptions::default(), 35_001)
+            .unwrap();
+        let code = created.room_code.to_string();
+        service
+            .join_private_room(&guest.issued.token, &code, 35_002)
+            .unwrap();
+        let host_connection = service.connect_lobby(&host.issued.token, 35_003).unwrap();
+        let _guest_connection = service.connect_lobby(&guest.issued.token, 35_003).unwrap();
+        service.disconnect_lobby(host_connection.guest_id, 35_004);
+
+        let snapshot = service.lobby_snapshot(&guest.issued.token, 35_035).unwrap();
+        let room = snapshot.active_room.unwrap();
+        assert_eq!(room.member_count, 1);
+        assert!(room.members[0].is_self);
+        assert!(room.members[0].is_host);
+        assert!(!room.members[0].ready);
+    }
+
+    #[test]
+    fn lobby_guest_capacity_is_bounded_and_expired_profiles_are_reclaimed() {
+        let key = WebTokenSigningKey::new(8, [0x6b; 32]).unwrap();
+        let keyring = WebTokenKeyring::new(key, None, WebTokenLifetimes::default()).unwrap();
+        let service = WebRoomService::new(
+            keyring,
+            WebRoomServiceConfig {
+                maximum_guests: 1,
+                ..WebRoomServiceConfig::default()
+            },
+        )
+        .unwrap();
+        service
+            .issue_named_guest_session("First Guest", 1_000)
+            .unwrap();
+        assert!(matches!(
+            service.issue_named_guest_session("Second Guest", 1_001),
+            Err(WebRoomError::RegistryFull)
+        ));
+        service
+            .issue_named_guest_session("Second Guest", 100_000)
+            .unwrap();
     }
 
     #[tokio::test]
