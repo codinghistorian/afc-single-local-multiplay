@@ -1,7 +1,8 @@
 # Hosted web identity and admission security
 
 The browser service uses anonymous guest identities, not device fingerprints
-or itch.io cookies. `POST /v1/guests` creates a random guest identifier and a
+or itch.io cookies. `POST /v2/guests` validates a Unicode-normalized nickname,
+creates a random guest identifier, and assigns a
 separate random 64-bit authority identity. The returned bearer session is
 HMAC-SHA-256 authenticated, expires after 24 hours by default, and contains no
 name, address, or platform identifier.
@@ -33,6 +34,11 @@ Operational requirements:
   wildcard origins and credentials.
 - Keep request limits, room limits, admission timeouts, and transport queues
   bounded.
+- Keep guest bearers in per-tab `sessionStorage` and WASM only; never expose
+  them through DOM state, URLs, analytics, crash reports, or chat payloads.
+- Render nicknames and chat with text nodes, enforce server-side grapheme/byte
+  limits and rate limits, and retain bounded mute/report controls. Room kicks
+  ban that guest identity for the room lifetime.
 - Redact bearer sessions, join tickets, admission frames, room codes, and
   signing keys from access/error logs.
 - Rotate signing keys by installing the old current key as previous, deploying

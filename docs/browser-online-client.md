@@ -21,8 +21,21 @@ mutate simulation state.
   The first call establishes a local epoch. The rational 60 Hz clock executes
   at most `max_fixed_steps_per_service` ticks in one call and retains every
   remaining due tick as backlog; it never drops or stretches simulation ticks.
+  Catch-up ticks share the current real browser timestamp rather than inventing
+  elapsed wall time. An authenticated clock reply whose measured RTT exceeds
+  the estimator's one-second safety bound is discarded and immediately
+  replaced; clock regression, probe mismatch, and identity mismatch still fail
+  closed.
 - Call `project_latest` from the same thread to apply the latest canonical
   snapshot and rollback-aware event sidecars to the rendered Bevy world.
+
+The browser configuration drains at most seven inbound unreliable datagrams per
+pump. That matches the committed-input relay's seven-tick redundancy window: a
+backgrounded or briefly stalled tab cannot coalesce beyond the only window that
+can close its next input gap. More queued traffic remains bounded and is handled
+by later main-thread pumps; short catch-up bursts are backpressure, not an abuse
+strike. The frozen stall fixture advances authority for 400 ms and proves the
+client resumes without entering a repair loop.
 
 The type carries an `Rc` marker and is deliberately neither `Send` nor `Sync`,
 including in native tests. A regressed monotonic clock, incompatible manifest,
@@ -52,3 +65,27 @@ if let Some(terminal) = update.terminal {
 The client is transport-independent. WebTransport and WebSocket adapters must
 preserve the 1,200-byte AFC datagram boundary and bounded queue semantics; they
 must not decode or reinterpret canonical protocol messages.
+
+## Browser application lifecycle
+
+`browser_online_app.rs` owns the single-threaded product flow around this core:
+
+1. Discover `/v2/config`, require the exact API/subprotocol/release identity,
+   and restore a per-tab guest session when possible.
+2. Keep lobby/chat/presence on the authenticated `afc.lobby.v2` control socket.
+   REST mutations are revision-checked and never run from a simulation tick.
+3. After the host freezes a ready roster, request a 30-second one-time ticket.
+   Prefer WebTransport and fall back to WebSocket only when connection setup
+   fails before admission.
+4. Construct one `BrowserOnlineClient` on the browser main thread, sample only
+   that guest's local seat, and project canonical snapshots into Bevy.
+5. On an allowed disconnect, request a reconnect-scoped ticket carrying the
+   latest confirmed tick and replace only the endpoint generation.
+6. Present the authority-confirmed result, acknowledge it, release the projected
+   match, and restore the same room. The room service clears readiness and may
+   then freeze a new manifest for a rematch.
+
+The HTML shell exposes no bearer or join ticket. Its frozen bridge accepts
+typed bounded UI actions and returns a non-secret snapshot for accessibility and
+automated QA. User strings are inserted with `textContent`, and a lobby resync
+preserves the focused text draft rather than replacing partially typed chat.

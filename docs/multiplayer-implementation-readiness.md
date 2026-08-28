@@ -1,8 +1,8 @@
 # Multiplayer Implementation and Release Readiness
 
-- Status: implementation evidence register; not yet a Steam release approval
-- Audit date: 2026-08-12
-- Target: first-release private/friends-only, unranked Steam listen play
+- Status: implementation evidence register; not yet a production release approval
+- Audit date: 2026-08-28
+- Target: browser/itch.io hosted unranked multiplayer
 - Architecture authority: [multiplayer-architecture.md](multiplayer-architecture.md)
 - Product scope: [multiplayer-product-policy.md](multiplayer-product-policy.md)
 
@@ -40,13 +40,14 @@ also says so.
 | Reconnect, abuse isolation and confirmed results | **Implemented + automated** | `reconnect.rs`, `authority_input.rs`, `multiplayer_security.rs`, `network_runtime.rs`, `authority_peer_hub.rs`, `remote_online_client.rs`, `confirmed_progression.rs`, and the native application enforce identity/seat reclaim, neutral-to-bot substitution, bounded repair, ACK-tracked typed disconnects, bans, authority-confirmed idempotent results, and owner-authored between-match epochs. | Tests cover stale generations, revocation, platform bans, spoofing, malformed floods, peer isolation, exact terminal ACK/timeout and queue deferral, Steam endpoint-drain races, all typed client recovery dispositions, result retries, same-identity reconnect, atomic final-frame/Completed publication, Results keepalive without gameplay input, benign post-result close, and both rematch action orderings. The release-candidate workflow reruns the production live matrix plus explicit abuse/auth/reconnect cases in release profile before any platform package can build. Listen results remain explicitly untrusted. |
 | Operations and performance | **Implemented local diagnostics boundary; local matrix complete, external hardware/ingestion pending** | `multiplayer_observability.rs`, `multiplayer_diagnostics.rs`, `replay_archive.rs`, and listen authority status provide bounded privacy-safe counters, audit records, server-tick distributions, async local export, restrictive atomic files, retention, complete replays, and fatal incident bundles. `performance.rs` provides repeatable profiling scenarios and allocation/RSS reporting. | Metric/archive/privacy/retention/authority-call-site fixtures exist. The same-hardware canonical-pose authority and rollback hot-path comparison is recorded in `performance.md`; it is development-reference evidence, not a shipping-hardware approval. The complete local schema-v6 graphical matrix passes on frozen patched profiling binaries: `FourBotStress` timing 3/3 and allocator 3/3, `MapCycle100` timing 3/3 and allocator 3/3 accepted, and `Soak10Minutes` timing 1/1 and allocator 1/1. One otherwise passing Map allocator capture was rejected after an AC-to-battery transition and replaced. Every accepted Map run records exactly 101 preloaded supported assets, 10 warm presents, 100 measured switches, 111 present ACKs, 11 aligned checkpoints, passing RSS gates, and, for allocator runs, passing live-allocation gates. Timing SHA-256 `9caaa991644f367d772e11a4f7964ec71c25f0b51d496828558b1e2aaed6e7fd` and allocator SHA-256 `54d6239ec592bf3139f24cfc120abb23ccfbd7115a22e70bec097d7920b49db6` are checked before/after every run alongside per-run host and AC-power records. Each local result still says `external_gpu_evidence_status=required_not_collected` and `gpu_completion_measured=false`. Minimum-supported-CPU, external GPU, long Steam, sealed-candidate, and remote-ingestion evidence remain release gates. A remote dashboard/upload service is an operational deployment and privacy-policy decision, not an in-process authority dependency. |
 | Dedicated, ranked and trusted operation | **Product-deferred** | `afc-dedicated` is a render-free, untrusted all-bot smoke executable sharing the authority contract. First-release policy rejects hosted dedicated metadata, ranked play and trusted results. | The smoke command proves only local headless deployment. There is no Steam GameServer login, hosted-dedicated SDR listener, relay-ticket coordinator, player admission, ranked queue, trusted reward backend or shipping operator ban provider. These are deliberately outside the first private/friends listen milestone. |
-| Browser distribution | **Implemented for local/offline; online is product-deferred** | `scripts/build_web.sh` creates the complete repository-root `web_dist/` artifact. | Browser-to-Steam networking is an architecture non-goal. A successful web build does not validate native online play. |
+| Browser distribution and hosted online application | **Implemented + external validation pending** | `browser_online_app.rs`, `browser_online_client.rs`, `web_endpoint_adapters.rs`, `web_api.rs`, `web_room.rs`, `web_server.rs`, and `web/index.html` implement named guest sessions, a public lobby and chat, public/private rooms, private codes, host settings/migration/kick, per-member character/readiness, frozen start manifests, WebTransport-preferred/WebSocket-fallback prediction, reconnect, confirmed results, same-room return, and rematch. `afc-web-server` constructs `AuthorityPeerHub`; the bot smoke binary is not promoted. | Rust tests cover bounded identity/room/chat/report/ticket lifecycles, replay rejection, host migration, worker/result return, real WebSocket gameplay, and WebTransport admission. `cross-platform-determinism.yml` requires byte-identical Linux/WASM production reports. Playwright drives two to four isolated real browser clients through UI, gameplay input, result, return, and rematch and retains evidence. Public trusted-TLS WebTransport, itch iframe/fullscreen, cross-region soak, physical controller, Chrome/Safari, and sealed-candidate load evidence remain external gates. Browser-to-Steam networking remains an architecture non-goal. |
 
 ## Open implementation work
 
-No required first-release private/friends listen Rust composition gap is currently
-known. That statement is narrower than release readiness: the final candidate must
-still pass the clean command matrix and all measured/external gates below.
+No required browser/itch.io hosted-play Rust composition gap is currently known.
+That statement is narrower than release readiness: the final candidate must
+still pass the clean command matrix, automated browser lifecycle test, and all
+measured/external gates below.
 
 ## Implemented paths requiring external validation
 
@@ -95,7 +96,6 @@ controlled accounts/hardware, captured logs and an explicit pass record.
 
 The following must remain unavailable and fail closed in the first-release build:
 
-- public lobby discovery;
 - mid-fight joining, spectators and listen-host migration;
 - hosted Steam dedicated servers and GameServer SDR;
 - ranked matchmaking, leaderboards, trusted results and valuable rewards;
