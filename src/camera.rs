@@ -247,6 +247,50 @@ impl Default for GameplayCameraControl {
     }
 }
 
+/// Presentation-only local-player framing selected by an online client.
+///
+/// The fighter ID comes from the immutable match ownership manifest. It never
+/// participates in simulation, prediction, snapshots, or state hashes.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlayerCameraOverride {
+    fighter_id: Option<usize>,
+    zoom_scale: f32,
+}
+
+impl Default for PlayerCameraOverride {
+    fn default() -> Self {
+        Self {
+            fighter_id: None,
+            zoom_scale: 1.0,
+        }
+    }
+}
+
+impl PlayerCameraOverride {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn follow(&mut self, fighter_id: usize, zoom_scale: f32) {
+        self.fighter_id = Some(fighter_id);
+        self.zoom_scale = if zoom_scale.is_finite() && zoom_scale > 0.0 {
+            zoom_scale
+        } else {
+            1.0
+        };
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn fighter_id(self) -> Option<usize> {
+        self.fighter_id
+    }
+
+    fn zoom_scale(self) -> f32 {
+        self.zoom_scale
+    }
+}
+
 #[cfg(any(
     test,
     all(
@@ -441,6 +485,7 @@ pub fn setup_camera(mut commands: Commands, active_arena: Res<ActiveArena>) {
     ));
     commands.insert_resource(single_player_preset);
     commands.insert_resource(GameplayCameraControl::default());
+    commands.insert_resource(PlayerCameraOverride::default());
     let screen_look = ScreenLook::default();
     commands.insert_resource(screen_look);
     commands.insert_resource(ScreenLookTransition::default());
@@ -929,6 +974,7 @@ pub fn follow_camera(
     mut camera_action_effects: ResMut<CameraActionEffects>,
     state: Res<MatchState>,
     control: Res<GameplayCameraControl>,
+    player_camera_override: Res<PlayerCameraOverride>,
     single_player_preset: Res<SinglePlayerCameraPreset>,
     single_player_mode: Res<SinglePlayerCameraMode>,
     user_mode: Res<UserModeState>,
@@ -945,12 +991,14 @@ pub fn follow_camera(
     let user_single_player_target_id = user_mode.single_player_camera_target_id();
     let user_follow_target_id =
         gameplay_camera_user_follow_target_id(user_single_player_target_id, &single_player_mode);
+    let online_follow_target_id = player_camera_override.fighter_id();
+    let player_follow_target_id = online_follow_target_id.or(user_follow_target_id);
     #[cfg(all(
         feature = "dev-hot-reload",
         not(feature = "shipping"),
         not(target_arch = "wasm32")
     ))]
-    let follow_target_id = user_follow_target_id.or_else(|| {
+    let follow_target_id = player_follow_target_id.or_else(|| {
         gameplay_camera_native_dev_follow_target_id(user_mode.active(), &single_player_mode)
     });
     #[cfg(not(all(
@@ -958,15 +1006,18 @@ pub fn follow_camera(
         not(feature = "shipping"),
         not(target_arch = "wasm32")
     )))]
-    let follow_target_id = user_follow_target_id;
+    let follow_target_id = player_follow_target_id;
     let follow_target_present = gameplay_camera_target_present(&samples, follow_target_id);
     let center = gameplay_camera_center_for_samples(&samples, follow_target_id);
     let farthest = gameplay_camera_farthest_for_mode(&samples, center, follow_target_present);
     let mut camera_control = gameplay_camera_control_for_mode(
         &control,
         &single_player_preset,
-        user_single_player_target_id.is_some(),
+        user_single_player_target_id.is_some() || online_follow_target_id.is_some(),
     );
+    if online_follow_target_id.is_some() {
+        camera_control.zoom *= player_camera_override.zoom_scale();
+    }
     camera_control =
         gameplay_camera_control_for_follow_target(camera_control, follow_target_present);
 
@@ -1872,6 +1923,49 @@ mod tests {
             gameplay_camera_control_for_mode(&live_control, &preset, false),
             live_control
         );
+    }
+
+    #[test]
+    fn online_player_camera_override_uses_owned_fighter_and_close_framing() {
+        let live_control = GameplayCameraControl {
+            focus_offset: Vec2::new(4.0, -2.0),
+            yaw: 0.7,
+            zoom: 1.4,
+            height_offset: 2.0,
+        };
+        let close_control = GameplayCameraControl {
+            focus_offset: Vec2::new(0.0, -0.15),
+            yaw: 0.0,
+            zoom: 1.0,
+            height_offset: -3.8,
+        };
+        let preset = SinglePlayerCameraPreset::new(close_control, true);
+        let mut player_camera = PlayerCameraOverride::default();
+
+        player_camera.follow(2, 0.82);
+        let mut selected = gameplay_camera_control_for_mode(
+            &live_control,
+            &preset,
+            player_camera.fighter_id().is_some(),
+        );
+        selected.zoom *= player_camera.zoom_scale();
+
+        assert_eq!(player_camera.fighter_id(), Some(2));
+        assert_eq!(selected.focus_offset, close_control.focus_offset);
+        assert_eq!(selected.height_offset, close_control.height_offset);
+        assert!((selected.zoom - 0.82).abs() < f32::EPSILON);
+
+        player_camera.clear();
+        assert_eq!(player_camera, PlayerCameraOverride::default());
+    }
+
+    #[test]
+    fn online_player_camera_override_rejects_invalid_zoom_scale() {
+        let mut player_camera = PlayerCameraOverride::default();
+        player_camera.follow(1, f32::NAN);
+
+        assert_eq!(player_camera.fighter_id(), Some(1));
+        assert_eq!(player_camera.zoom_scale(), 1.0);
     }
 
     #[test]

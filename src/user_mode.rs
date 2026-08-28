@@ -14,7 +14,9 @@ use crate::arena_defs::{ActiveArena, arena_definitions, arena_lighting_profile};
 use crate::audio_settings::CategorizedAudioPlayback;
 use crate::bot::start_bot_combat_ai;
 use crate::camera::{ScreenLook, ScreenLookTransition, UiCamera, begin_screen_look_transition};
-use crate::characters::{CharacterKind, character_label};
+use crate::characters::{
+    CharacterKind, PLAYER_SELECTABLE_CHARACTERS as USER_MODE_SELECTABLE_CHARACTERS, character_label,
+};
 use crate::combat::HitEffects;
 use crate::combat_sfx::{CombatSfxCue, CombatSfxKind, SfxPreviewRequest};
 use crate::components::{
@@ -94,13 +96,6 @@ const USER_MODE_MENU_STICK_RELEASE_THRESHOLD: f32 = 0.35;
 const USER_MODE_MENU_REPEAT_DELAY: f32 = 0.55;
 const USER_MODE_MENU_REPEAT_INTERVAL: f32 = 0.22;
 const USER_MODE_CHOICE_FONT_SIZE: f32 = 23.8;
-const USER_MODE_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
-    CharacterKind::Cat,
-    CharacterKind::Pig,
-    CharacterKind::Bee,
-    CharacterKind::Penguin,
-    CharacterKind::Chick,
-];
 const USER_MODE_CHARACTER_GRID_COLUMNS: usize = 3;
 const USER_MODE_CHARACTER_GRID_ROWS: usize = 2;
 const USER_MODE_CHARACTER_PLAYER_MARKER_TEXT_OFFSET_Y: f32 = 1.0;

@@ -24,7 +24,7 @@ use web_sys::{
 
 use crate::arena_defs::{ActiveArena, arena_definitions};
 use crate::browser_online_client::{BrowserOnlineClient, BrowserOnlineClientConfig};
-use crate::camera::{GameplayCameraControl, UiCamera};
+use crate::camera::{GameplayCameraControl, PlayerCameraOverride, UiCamera};
 use crate::components::PlayerKeyBindings;
 use crate::game_state::{MatchState, RULE_PRESETS};
 use crate::headless::HeadlessMatchConfig;
@@ -33,7 +33,7 @@ use crate::match_presentation::{
     ConfirmedMatchPresentation, MatchPresentationPolicy, OnlinePanelMode, PresentationMusicTrack,
     PresentationPhase, PresentationResultSfx, PresentedLocalOutcome,
 };
-use crate::network_protocol::{MatchManifest, PeerId, RetryDisposition, SimTick};
+use crate::network_protocol::{MatchManifest, PeerId, RetryDisposition, SeatOwner, SimTick};
 use crate::presentation_projection::release_projection_target;
 use crate::release_identity::current_release_identity;
 use crate::remote_online_client::{
@@ -63,6 +63,7 @@ const CONTROL_RECONNECT_BASE_MS: u64 = 500;
 const GAMEPLAY_RECONNECT_BASE_MS: u64 = 350;
 const MAX_GAMEPLAY_RECONNECT_ATTEMPTS: u8 = 8;
 const RESULTS_PRESENTATION_MS: u64 = 6_000;
+const BROWSER_PLAYER_CAMERA_ZOOM_SCALE: f32 = 0.82;
 const SESSION_STORAGE_KEY: &str = "afc.browser.session.v2";
 const DOM_BRIDGE_KEY: &str = "AFC_LOBBY_BRIDGE";
 
@@ -488,6 +489,7 @@ pub struct BrowserOnlineApplication {
     content_marked: bool,
     scene_requested: bool,
     projection_active: bool,
+    camera_fighter_id: Option<usize>,
     results_visible_since_ms: Option<u64>,
     acknowledged_match_id: Option<String>,
     request_exit: bool,
@@ -520,6 +522,7 @@ impl Default for BrowserOnlineApplication {
             content_marked: false,
             scene_requested: false,
             projection_active: false,
+            camera_fighter_id: None,
             results_visible_since_ms: None,
             acknowledged_match_id: None,
             request_exit: false,
@@ -905,6 +908,15 @@ impl BrowserOnlineApplication {
     ) {
         let setup = payload.match_config.local_setup.clone();
         let arena_index = setup.arena_index;
+        let Some(camera_fighter_id) =
+            browser_owned_fighter_id(&payload.match_config.manifest, payload.peer_id)
+        else {
+            self.fail(
+                "The match did not assign this browser a fighter.".to_owned(),
+                RetryPlan::InitialConnection,
+            );
+            return;
+        };
         let client = match (reconnect, payload.countdown_start_tick) {
             (true, Some(countdown_start_tick)) => BrowserOnlineClient::new_from_reconnect(
                 payload.endpoint,
@@ -936,6 +948,10 @@ impl BrowserOnlineApplication {
                 self.scene_requested = true;
                 self.content_marked = false;
                 self.projection_active = true;
+                world
+                    .resource_mut::<PlayerCameraOverride>()
+                    .follow(camera_fighter_id, BROWSER_PLAYER_CAMERA_ZOOM_SCALE);
+                self.camera_fighter_id = Some(camera_fighter_id);
                 self.retry_plan = None;
                 self.gameplay_reconnect_attempts = 0;
                 self.gameplay_reconnect_due_ms = None;
@@ -1387,6 +1403,7 @@ impl BrowserOnlineApplication {
         }
         self.scene_requested = false;
         self.content_marked = false;
+        self.camera_fighter_id = None;
         self.results_visible_since_ms = None;
         self.gameplay_reconnect_due_ms = None;
         self.gameplay_reconnect_attempts = 0;
@@ -1653,6 +1670,7 @@ struct BrowserDomState<'a> {
     online_guests: u32,
     guest: Option<BrowserDomGuest<'a>>,
     client: Option<BrowserDomClient>,
+    camera_fighter_id: Option<usize>,
     public_rooms: &'a [crate::web_api::PublicRoomSummary],
     global_chat: &'a [crate::web_api::ChatMessageResponse],
     room: Option<&'a RoomResponse>,
@@ -1698,12 +1716,13 @@ impl<'a> BrowserDomState<'a> {
                 .as_ref()
                 .map(BrowserOnlineClient::status)
                 .map(BrowserDomClient::from_status),
+            camera_fighter_id: application.camera_fighter_id,
             public_rooms: lobby.map_or(empty_rooms, |lobby| lobby.public_rooms.as_slice()),
             global_chat: lobby.map_or(empty_chat, |lobby| lobby.global_chat.as_slice()),
             room: application.room.as_ref(),
             arena_names: arena_definitions().iter().map(|arena| arena.name).collect(),
             rule_names: RULE_PRESETS.iter().map(|rules| rules.label).collect(),
-            characters: WebCharacter::ALL
+            characters: WebCharacter::PLAYER_SELECTABLE
                 .iter()
                 .map(|character| character.label())
                 .collect(),
@@ -1752,12 +1771,24 @@ pub(crate) fn drive_browser_online_application(world: &mut World) {
 
 fn release_browser_projection_target(world: &mut World) {
     release_projection_target(world);
+    if let Some(mut camera) = world.get_resource_mut::<PlayerCameraOverride>() {
+        camera.clear();
+    }
     if let Some(mut inputs) = world.get_resource_mut::<LocalTickInputState>() {
         inputs.reset_all_sessions();
     }
     if let Some(mut match_state) = world.get_resource_mut::<MatchState>() {
         match_state.return_to_setup();
     }
+}
+
+fn browser_owned_fighter_id(manifest: &MatchManifest, peer_id: PeerId) -> Option<usize> {
+    manifest
+        .ownership
+        .as_slice()
+        .iter()
+        .find(|assignment| assignment.owner == SeatOwner::Peer(peer_id))
+        .map(|assignment| usize::from(assignment.fighter.get()))
 }
 
 pub(crate) fn offline_local_input_enabled(snapshot: Res<BrowserOnlineUiSnapshot>) -> bool {

@@ -206,6 +206,18 @@ async function setReady(page) {
   await expect(page.locator('[data-qa="ready-button"]')).toHaveText("Not ready");
 }
 
+async function captureEveryClient(pages, testInfo, milestone) {
+  await Promise.all(
+    pages.map((page, index) =>
+      page.screenshot({
+        path: testInfo.outputPath(
+          `${milestone}-client-${index + 1}-of-${clientCount}.png`,
+        ),
+      }),
+    ),
+  );
+}
+
 test(`${clientCount}-client battle and rematch return every guest to the same room`, async ({
   browser,
   baseURL,
@@ -261,7 +273,9 @@ test(`${clientCount}-client battle and rematch return every guest to the same ro
     await Promise.all(
       pages.map((page, index) => enterOnline(page, `QA Fighter ${index + 1}`)),
     );
-    evidence.milestones.push({ name: "lobby", states: await Promise.all(pages.map(snapshot)) });
+    const lobbyStates = await Promise.all(pages.map(snapshot));
+    const assignedGuests = lobbyStates.map((state) => state.guest);
+    evidence.milestones.push({ name: "lobby", states: lobbyStates });
     await Promise.all(
       pages.map((page) =>
         page.waitForFunction(
@@ -314,6 +328,15 @@ test(`${clientCount}-client battle and rematch return every guest to the same ro
     await Promise.all(pages.map((page) => waitForRoomMembers(page, clientCount)));
     evidence.milestones.push({ name: "private_room_joined", states: await Promise.all(pages.map(snapshot)) });
 
+    const expectedPlayerRoster = ["Cat", "Pig", "Bee", "Penguin", "Chick"];
+    await Promise.all(
+      pages.map(async (page) => {
+        await expect(page.locator('[data-qa="character-select"] option')).toHaveText(
+          expectedPlayerRoster,
+        );
+      }),
+    );
+
     await pages.at(-1).locator('[data-qa="room-chat-input"]').fill("room chat is live");
     await pages.at(-1).locator('[data-qa="room-chat-form"]').evaluate((form) => form.requestSubmit());
     await expect(host.locator('[data-qa="room-chat-log"]')).toContainText("room chat is live");
@@ -349,16 +372,21 @@ test(`${clientCount}-client battle and rematch return every guest to the same ro
     const startButton = host.locator('[data-qa="start-match-button"]');
     await expect(startButton).toBeEnabled();
     evidence.milestones.push({ name: "ready", states: await Promise.all(pages.map(snapshot)) });
-    await host.screenshot({ path: testInfo.outputPath(`room-${clientCount}.png`) });
+    await captureEveryClient(pages, testInfo, "room");
     await startButton.click();
 
     await Promise.all(pages.map((page) => waitForScreen(page, "match", 90_000)));
     await Promise.all(pages.map((page) => waitForClientPhase(page, "fighting", 120_000)));
+    const cameraStates = await Promise.all(pages.map(snapshot));
+    expect(cameraStates.map((state) => state.camera_fighter_id)).toEqual(
+      Array.from({ length: clientCount }, (_, index) => index),
+    );
     await reopenOnlineAfterRefresh(guest);
     const restoredGuest = await snapshot(guest);
-    expect(restoredGuest.guest.display_name).toBe("QA Fighter 2");
+    expect(restoredGuest.guest).toEqual(assignedGuests[1]);
+    expect(restoredGuest.camera_fighter_id).toBe(1);
     evidence.milestones.push({ name: "guest_reconnected_after_refresh", state: restoredGuest });
-    await pages[0].screenshot({ path: testInfo.outputPath(`battle-${clientCount}.png`) });
+    await captureEveryClient(pages, testInfo, "battle");
     const { startingTicks, maximumTicks } = await driveBattleToRoom(pages, evidence);
 
     const returnedStates = await Promise.all(pages.map(snapshot));
@@ -371,12 +399,12 @@ test(`${clientCount}-client battle and rematch return every guest to the same ro
       expect(returnedStates[index].room.members).toHaveLength(clientCount);
       expect(returnedStates[index].room.members.every((member) => member.ready === false)).toBe(true);
       expect(returnedStates[index].client).toBeNull();
-      expect(returnedStates[index].guest.display_name).toBe(`QA Fighter ${index + 1}`);
+      expect(returnedStates[index].guest).toEqual(assignedGuests[index]);
     }
 
     expect(startingTicks.every((tick) => tick > 0)).toBe(true);
     expect(maximumTicks.every((tick, index) => tick > startingTicks[index] + 60)).toBe(true);
-    await host.screenshot({ path: testInfo.outputPath(`returned-room-${clientCount}.png`) });
+    await captureEveryClient(pages, testInfo, "returned-room");
 
     const firstEpoch = returnedStates[0].room.match_epoch;
     for (let index = 0; index < pages.length; index += 1) {
@@ -410,7 +438,7 @@ test(`${clientCount}-client battle and rematch return every guest to the same ro
     expect(rematchReturnedStates.every((state) => state.room.match_epoch > firstEpoch)).toBe(true);
     expect(rematchMaximumTicks.every((tick, index) => tick > rematchTicks[index] + 60)).toBe(true);
     expect(evidence.result_ids).toHaveLength(2);
-    await host.screenshot({ path: testInfo.outputPath(`rematch-returned-room-${clientCount}.png`) });
+    await captureEveryClient(pages, testInfo, "rematch-returned-room");
 
     expect(fatalBrowserErrors, fatalBrowserErrors.join("\n")).toEqual([]);
   } finally {

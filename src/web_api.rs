@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::characters::{CharacterKind, PLAYER_SELECTABLE_CHARACTERS};
 use crate::network_protocol::MatchManifest;
 
 pub const WEB_API_VERSION: u16 = 2;
@@ -60,6 +61,8 @@ pub enum WebCharacter {
 }
 
 impl WebCharacter {
+    /// Stable wire variants. Do not remove or renumber variants when the
+    /// player-facing roster changes.
     pub const ALL: [Self; 8] = [
         Self::Cat,
         Self::Pig,
@@ -70,6 +73,48 @@ impl WebCharacter {
         Self::Penguin,
         Self::Chick,
     ];
+
+    /// The browser character picker mirrors the local player-facing roster.
+    /// Indexing the shared constant makes a local roster-size change fail to
+    /// compile here until its web mapping is updated deliberately.
+    pub const PLAYER_SELECTABLE: [Self; PLAYER_SELECTABLE_CHARACTERS.len()] = [
+        Self::from_character_kind(PLAYER_SELECTABLE_CHARACTERS[0]),
+        Self::from_character_kind(PLAYER_SELECTABLE_CHARACTERS[1]),
+        Self::from_character_kind(PLAYER_SELECTABLE_CHARACTERS[2]),
+        Self::from_character_kind(PLAYER_SELECTABLE_CHARACTERS[3]),
+        Self::from_character_kind(PLAYER_SELECTABLE_CHARACTERS[4]),
+    ];
+
+    const fn from_character_kind(character: CharacterKind) -> Self {
+        match character {
+            CharacterKind::Cat => Self::Cat,
+            CharacterKind::Pig => Self::Pig,
+            CharacterKind::Dog => Self::Dog,
+            CharacterKind::Fox => Self::Fox,
+            CharacterKind::Panda => Self::Panda,
+            CharacterKind::Bee => Self::Bee,
+            CharacterKind::Penguin => Self::Penguin,
+            CharacterKind::Chick => Self::Chick,
+        }
+    }
+
+    #[cfg_attr(not(any(test, feature = "web-server")), allow(dead_code))]
+    pub(crate) const fn character_kind(self) -> CharacterKind {
+        match self {
+            Self::Cat => CharacterKind::Cat,
+            Self::Pig => CharacterKind::Pig,
+            Self::Dog => CharacterKind::Dog,
+            Self::Fox => CharacterKind::Fox,
+            Self::Panda => CharacterKind::Panda,
+            Self::Bee => CharacterKind::Bee,
+            Self::Penguin => CharacterKind::Penguin,
+            Self::Chick => CharacterKind::Chick,
+        }
+    }
+
+    pub fn is_player_selectable(self) -> bool {
+        Self::PLAYER_SELECTABLE.contains(&self)
+    }
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -358,6 +403,19 @@ pub struct ApiErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_roster_exactly_matches_local_player_roster() {
+        let browser_roster = WebCharacter::PLAYER_SELECTABLE.map(WebCharacter::character_kind);
+
+        assert_eq!(browser_roster, PLAYER_SELECTABLE_CHARACTERS);
+        assert!(WebCharacter::Cat.is_player_selectable());
+        assert!(WebCharacter::Chick.is_player_selectable());
+        assert!(!WebCharacter::Dog.is_player_selectable());
+        assert!(!WebCharacter::Fox.is_player_selectable());
+        assert!(!WebCharacter::Panda.is_player_selectable());
+        assert_eq!(WebCharacter::ALL.len(), 8, "stable wire variants changed");
+    }
 
     #[test]
     fn request_contract_rejects_unknown_fields() {

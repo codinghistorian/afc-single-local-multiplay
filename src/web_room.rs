@@ -14,7 +14,6 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::arena_defs::arena_definitions;
-use crate::characters::CharacterKind;
 use crate::components::{LocalInputAssignment, ParticipantKind};
 use crate::game_state::{LocalSetup, RULE_PRESETS};
 use crate::headless::HeadlessMatchConfig;
@@ -729,7 +728,8 @@ impl WebRoomService {
             .ok_or(WebRoomError::GuestIdentityConflict)?;
         let joined_order = room.next_joined_order;
         room.next_joined_order = room.next_joined_order.saturating_add(1);
-        let default_character = WebCharacter::ALL[room.members.len() % WebCharacter::ALL.len()];
+        let default_character = WebCharacter::PLAYER_SELECTABLE
+            [room.members.len() % WebCharacter::PLAYER_SELECTABLE.len()];
         room.members.push(WebRoomMember {
             guest_id: claims.guest_id,
             user_id: claims.user_id,
@@ -841,6 +841,9 @@ impl WebRoomService {
         character: WebCharacter,
         now_unix_seconds: u64,
     ) -> Result<WebPrivateRoomView, WebRoomError> {
+        if !character.is_player_selectable() {
+            return Err(WebRoomError::InvalidRoomOptions);
+        }
         let claims = self
             .keyring
             .verify_guest_session(guest_session, now_unix_seconds)?;
@@ -1749,7 +1752,7 @@ impl WebRoomRegistry {
         let mut roster = Vec::with_capacity(room.members.len());
         for (index, member) in room.members.iter().copied().enumerate() {
             setup.slots[index].participant = ParticipantKind::Human;
-            setup.slots[index].character = character_kind(member.character);
+            setup.slots[index].character = member.character.character_kind();
             human_owners[index] = Some(member.peer_id);
             roster.push(AuthenticatedPeer {
                 peer_id: member.peer_id,
@@ -2215,19 +2218,6 @@ fn dangerous_text_character(character: char) -> bool {
         )
 }
 
-fn character_kind(character: WebCharacter) -> CharacterKind {
-    match character {
-        WebCharacter::Cat => CharacterKind::Cat,
-        WebCharacter::Pig => CharacterKind::Pig,
-        WebCharacter::Dog => CharacterKind::Dog,
-        WebCharacter::Fox => CharacterKind::Fox,
-        WebCharacter::Panda => CharacterKind::Panda,
-        WebCharacter::Bee => CharacterKind::Bee,
-        WebCharacter::Penguin => CharacterKind::Penguin,
-        WebCharacter::Chick => CharacterKind::Chick,
-    }
-}
-
 fn result_view(result: ResultIdentifier) -> WebRoomResultView {
     WebRoomResultView {
         match_id: match_id_hex(result.match_id),
@@ -2418,6 +2408,33 @@ mod tests {
         let lobby = service.lobby_snapshot(&guest.issued.token, 20_007).unwrap();
         assert_eq!(lobby.public_rooms.len(), 1);
         assert_eq!(lobby.public_rooms[0].arena_index, 1);
+    }
+
+    #[test]
+    fn server_rejects_character_variants_outside_the_shared_player_roster() {
+        let service = service();
+        let host = service
+            .issue_named_guest_session("Host One", 25_000)
+            .unwrap();
+        let room = service
+            .create_room(&host.issued.token, WebPrivateRoomOptions::default(), 25_001)
+            .unwrap();
+
+        assert_eq!(
+            service.select_character(
+                &host.issued.token,
+                &room.room_code.to_string(),
+                room.revision,
+                WebCharacter::Dog,
+                25_002,
+            ),
+            Err(WebRoomError::InvalidRoomOptions)
+        );
+        let unchanged = service
+            .private_room_status(&host.issued.token, &room.room_code.to_string(), 25_003)
+            .unwrap();
+        assert_eq!(unchanged.revision, room.revision);
+        assert_eq!(unchanged.self_member().character, WebCharacter::Cat);
     }
 
     #[test]

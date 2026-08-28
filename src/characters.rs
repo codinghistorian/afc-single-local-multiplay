@@ -52,6 +52,19 @@ pub const CHARACTER_KINDS: [CharacterKind; 8] = [
     CharacterKind::Chick,
 ];
 
+/// Player-facing roster shared by local and hosted-browser character select.
+///
+/// The remaining character definitions stay addressable for stable content and
+/// protocol IDs, but they are not selectable until their player-facing
+/// presentation is shipped in every product client.
+pub const PLAYER_SELECTABLE_CHARACTERS: [CharacterKind; 5] = [
+    CharacterKind::Cat,
+    CharacterKind::Pig,
+    CharacterKind::Bee,
+    CharacterKind::Penguin,
+    CharacterKind::Chick,
+];
+
 pub const DEFAULT_FIGHTER_CHARACTERS: [CharacterKind; FIGHTER_COUNT] = [
     CharacterKind::Cat,
     CharacterKind::Pig,
