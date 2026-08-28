@@ -960,7 +960,7 @@ fn validate_temporal_state(
     elapsed_ticks: u32,
     total_lifetime: u32,
 ) -> Result<TickTimer, SnapshotCodecError> {
-    if elapsed_ticks > total_lifetime {
+    if !landing_linger_started && elapsed_ticks > total_lifetime {
         return Err(error(
             ERR_TIMER,
             "hitbox elapsed time exceeds its total lifetime",
@@ -988,6 +988,24 @@ fn validate_temporal_state(
             ERR_TIMER,
             "started landing linger has more time than its authored duration",
         ));
+    }
+    if landing_linger_started {
+        let observed_end = elapsed_ticks.checked_add(lifetime_ticks).ok_or(error(
+            ERR_TIMER,
+            "started landing linger temporal state overflows",
+        ))?;
+        let authored_end = total_lifetime
+            .checked_add(landing_linger_ticks)
+            .ok_or(error(
+                ERR_TIMER,
+                "authored landing linger temporal envelope overflows",
+            ))?;
+        if observed_end > authored_end {
+            return Err(error(
+                ERR_TIMER,
+                "started landing linger exceeds its authored temporal envelope",
+            ));
+        }
     }
     Ok(landing_linger)
 }
@@ -1333,6 +1351,38 @@ mod tests {
             restored_hitbox.impact_cue,
             attack_payload_definition(restored_hitbox.payload_id.unwrap()).impact_cue
         );
+    }
+
+    #[test]
+    fn started_landing_linger_round_trips_after_the_path_lifetime() {
+        let stable_id = id(1);
+        let mut hitbox = test_hitbox(AttackPayloadId::JumpSpike);
+        let landing_linger_ticks = 6;
+        hitbox.expires_on_owner_landing = true;
+        hitbox.landing_linger = TickTimer::from_ticks(landing_linger_ticks);
+        hitbox.landing_linger_started = true;
+        hitbox.elapsed = ElapsedTicks::from_ticks(hitbox.total_lifetime + 2);
+        hitbox.lifetime = TickTimer::from_ticks(landing_linger_ticks - 2);
+
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                StableSimEntity::new(stable_id),
+                hitbox,
+                SimPosition::default(),
+            ))
+            .id();
+        let snapshot = LiveHitboxSnapshotCodec
+            .capture(&world, entity, stable_id)
+            .unwrap();
+
+        LiveHitboxSnapshotCodec
+            .validate_restore(&world, &snapshot)
+            .unwrap();
+        let decoded = decode_hitbox(&snapshot).unwrap().hitbox;
+        assert!(decoded.landing_linger_started);
+        assert!(decoded.elapsed.get() > decoded.total_lifetime);
+        assert_eq!(decoded.lifetime.remaining(), landing_linger_ticks - 2);
     }
 
     #[test]
